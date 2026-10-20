@@ -5,9 +5,7 @@ use super::guard::{
     TEARDOWN_WAIT, drain_stderr, payload, read_capped, read_line_capped, reap_owned_child,
 };
 use super::skills::parse_json;
-use super::types::{
-    MAX_TOOL_RESULT_BYTES, ToolCall, hex_digest, parse_mcp_arguments, valid_digest, valid_name,
-};
+use super::types::{ToolCall, hex_digest, parse_mcp_arguments, valid_digest, valid_name};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -189,6 +187,7 @@ pub(super) async fn execute(
     config: &Config,
     root: &Path,
     cache_enabled: bool,
+    result_bytes: usize,
 ) -> Result<String, ToolError> {
     let name = match call {
         ToolCall::McpList { server } | ToolCall::McpCall { server, .. } => server,
@@ -226,9 +225,7 @@ pub(super) async fn execute(
         connection.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
         let tools = connection.catalog(&server.tools).await?;
         if matches!(call, ToolCall::McpList { .. }) {
-            let result = json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}).to_string();
-            if result.len() > MAX_TOOL_RESULT_BYTES { return Err(ToolError::Limit); }
-            return Ok(result);
+            return fit_result(json!({"server":name,"protocol":VERSION,"tools":tools.values().collect::<Vec<_>>()}), result_bytes);
         }
         let ToolCall::McpCall { tool, schema_digest, arguments, .. } = call else { return Err(ToolError::Operation); };
         let definition = tools.get(tool).ok_or(ToolError::Configuration)?;
@@ -253,9 +250,7 @@ pub(super) async fn execute(
         if structured.is_some_and(|value| !value.is_object()) { return Err(ToolError::Operation); }
         if !is_error && let Some(output) = definition.get("outputSchema")
             && !structured.is_some_and(|value| compile_schema(output).is_ok_and(|validator| validator.is_valid(value))) { return Err(ToolError::Operation); }
-        let result = json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}).to_string();
-        if result.len() > MAX_TOOL_RESULT_BYTES { return Err(ToolError::Limit); }
-        Ok(result)
+        fit_result(json!({"server":name,"tool":tool,"schema_digest":definition["sha256"],"is_error":is_error,"content":normalized,"structured_content":structured}), result_bytes)
     }).await.unwrap_or(Err(ToolError::Limit));
     let _ = connection.writer.shutdown().await;
     let _ = connection.child.start_kill();
@@ -266,6 +261,32 @@ pub(super) async fn execute(
         return Err(ToolError::Operation);
     }
     result
+}
+
+fn fit_result(result: Value, budget: usize) -> Result<String, ToolError> {
+    let text = result.to_string();
+    if text.len() <= budget {
+        return Ok(text);
+    }
+    let mut window = super::output::Window::new(budget);
+    window.push(text.as_bytes(), super::output::DRAIN_BYTES)?;
+    let mut preview =
+        json!({"server":result["server"], "content":[], "output_total":window.total()});
+    for key in ["is_error", "tool", "schema_digest", "protocol"] {
+        if let Some(value) = result.get(key) {
+            preview[key] = value.clone();
+        }
+    }
+    super::output::fit_streams(
+        &window,
+        &super::output::Window::default(),
+        budget,
+        |text, _| {
+            let mut preview = preview.clone();
+            preview["content"] = json!([{"type":"text", "text":text}]);
+            Ok(preview.to_string())
+        },
+    )
 }
 
 fn compile_schema(value: &Value) -> Result<jsonschema::Validator, ToolError> {
@@ -325,4 +346,31 @@ fn admit_schema(value: &Value, depth: usize, nodes: &mut usize) -> Result<(), To
         _ => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_output_preview_preserves_is_error_and_fits_the_rendered_budget() {
+        for is_error in [false, true] {
+            let original = json!({"server":"local","tool":"test","is_error":is_error,"content":[{"type":"text","text":format!("HEAD{}TAIL", "\n\"中\\".repeat(20000))}],"structured_content":{"value":"untrusted"}});
+            let text = original.to_string();
+            let result = fit_result(original, 4096).unwrap();
+            assert!(result.len() <= 4096);
+            let value: Value = serde_json::from_str(&result).unwrap();
+            assert_eq!(value["is_error"], is_error);
+            assert_eq!(value["output_total"]["bytes"], text.len());
+            assert_eq!(value["output_total"]["lines"], 1);
+            let preview = value["content"][0]["text"].as_str().unwrap();
+            assert!(preview.starts_with("{\"content\":") && preview.ends_with('}'));
+            assert!(preview.contains(" lines omitted; "));
+            assert!(value.get("structured_content").is_none());
+        }
+        assert_eq!(
+            fit_result(json!({"is_error":false,"content":[]}), 4096).unwrap(),
+            "{\"content\":[],\"is_error\":false}"
+        );
+    }
 }

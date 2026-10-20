@@ -11,6 +11,7 @@ mod fs;
 mod git;
 mod guard;
 mod mcp;
+mod output;
 pub mod permissions;
 mod process;
 mod skills;
@@ -90,9 +91,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, ToolCall, ToolContext, ToolDisposition,
-    ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass,
-    ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
+    FileVersion, GuardReceipt, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext,
+    ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
+    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
+    UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -115,6 +117,8 @@ pub enum ToolError {
     FilesystemDenied,
     #[error("Tool resource limit reached")]
     Limit,
+    #[error("Command output passed the 1 GiB per-stream drain ceiling")]
+    OutputCeiling,
     #[error("Tool file precondition changed")]
     Conflict,
     #[error("Tool operation failed")]

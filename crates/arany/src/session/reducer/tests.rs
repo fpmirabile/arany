@@ -4609,7 +4609,18 @@ mod goal_replay_tests {
             apply(&mut view, tool_started(run, agent, &intent)).unwrap();
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
-            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
+            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
+            for (event, version) in [
+                (started(intent.digest(), &hook_intent), 3),
+                (finished(hook_observation.clone(), deny.clone()), 7),
+            ] {
+                assert_eq!(event.version(), version);
+                let payload = event.payload().unwrap();
+                assert_eq!(
+                    Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
+                    event
+                );
+            }
             assert!(rejected(
                 &view,
                 finished(hook_observation.clone(), deny.clone())
@@ -4928,7 +4939,7 @@ mod goal_replay_tests {
             );
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
-            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "changeset": {"files": []}}).to_string();
+            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
             for forged in [
                 HookResult::Passed,
                 HookResult::Restricted {
@@ -5122,7 +5133,7 @@ mod goal_replay_tests {
             observation.disposition = disposition;
             observation.enforcement_cause = cause;
             observation.output =
-                r#"{"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+                r#"{"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
             apply(
                 &mut view,
                 Event::ToolFinished {
@@ -5321,7 +5332,7 @@ mod goal_replay_tests {
             .unwrap();
             let mut ran = observation_for(host.clone(), b"ok");
             ran.output =
-                r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+                r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
             assert!(rejected(
                 &denied,
                 Event::ToolFinished {
@@ -5631,7 +5642,7 @@ mod goal_replay_tests {
         cached.cache_update = CacheUpdate::Published;
         assert!(rejected(&approved, finish(cached)));
         host_run.output =
-            r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]}}"#.into();
+            r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
         let no_verdict = good.view.clone();
         assert!(rejected(&no_verdict, finish(host_run.clone())));
         let mut refused = good.view.clone();
@@ -6524,7 +6535,7 @@ mod goal_replay_tests {
             assert!(rejected(&view, reserve_child_call(goal, run, actor)));
             let mut observation = observation_for(intent, b"");
             observation.disposition = ToolDisposition::Failed;
-            observation.output = serde_json::json!({"exit_code":2,"stdout":"","stderr":"verify","changeset":{"files":[]}}).to_string();
+            observation.output = serde_json::json!({"exit_code":2,"stdout":"","stderr":"verify","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":6,"lines":1},"changeset":{"files":[]}}).to_string();
             let finished = Event::HookFinished {
                 run_id: run,
                 agent_run_id: actor,
@@ -6562,7 +6573,7 @@ mod goal_replay_tests {
                 let mut stopped = finished.clone();
                 if let Event::HookFinished { outcome, .. } = &mut stopped {
                     outcome.observation.disposition = ToolDisposition::Succeeded;
-                    outcome.observation.output = serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","changeset":{"files":[]}}).to_string();
+                    outcome.observation.output = serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
                     outcome.result = HookResult::Stopped {
                         reason: Some("halt".into()),
                     };

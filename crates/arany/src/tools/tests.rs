@@ -1392,7 +1392,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         enforcement_cause: None,
         intent: command_intent,
         disposition: ToolDisposition::Uncertain,
-        output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]}}"#
+        output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
             .into(),
         attestation: Some(Attestation::Guard(command_guard)),
         cache_update: CacheUpdate::Uncertain,
@@ -1708,7 +1708,15 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             attestation: Some(Attestation::for_site(&intent)),
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: "{}".into(),
+            output: serde_json::to_string(&super::types::CommandResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_total: Default::default(),
+                stderr_total: Default::default(),
+                changeset: Default::default(),
+            })
+            .unwrap(),
             cache_update: CacheUpdate::NotAttempted,
         }
     }

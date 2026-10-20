@@ -1223,6 +1223,42 @@ pub(super) async fn capture(
     Err(error)
 }
 
+pub(super) async fn capture_command(
+    mut child: Child,
+    cap: usize,
+    deadline: Duration,
+) -> Result<
+    (
+        std::process::ExitStatus,
+        super::output::Window,
+        super::output::Window,
+    ),
+    ToolError,
+> {
+    let out = child.stdout.take().ok_or(ToolError::Operation)?;
+    let err = child.stderr.take().ok_or(ToolError::Operation)?;
+    let result = tokio::time::timeout(deadline, async {
+        tokio::try_join!(
+            async {
+                reap_owned_child(&mut child)
+                    .await
+                    .map_err(|_| ToolError::Operation)
+            },
+            super::output::read_window(out, cap),
+            super::output::read_window(err, cap)
+        )
+    })
+    .await;
+    let error = match result {
+        Ok(Ok(value)) => return Ok(value),
+        Ok(Err(error)) => error,
+        Err(_) => ToolError::Limit,
+    };
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(PAYLOAD_KILL_WAIT, reap_owned_child(&mut child)).await;
+    Err(error)
+}
+
 fn task_cap(definition: bool) -> usize {
     TASK_BYTES_CAP + if definition { DEFINITION_TASK_BYTES } else { 0 }
 }
@@ -1552,6 +1588,8 @@ fn send_result(
             exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
+            stdout_total: Default::default(),
+            stderr_total: Default::default(),
             private_capture: crate::session::worker::PrivateCapture::None {},
         })
         .map_err(|_| ToolError::Operation)?;
@@ -1564,6 +1602,8 @@ fn send_result(
             exit_code: None,
             stdout: String::new(),
             stderr: String::new(),
+            stdout_total: Default::default(),
+            stderr_total: Default::default(),
             private_capture: crate::session::worker::PrivateCapture::None {},
         })
         .map_err(|_| ToolError::Operation)?;
@@ -2852,7 +2892,7 @@ mod tests {
             enforcement_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]}}"#
+            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
             cache_update: CacheUpdate::NotAttempted,
@@ -3390,5 +3430,52 @@ mod tests {
             })),
             Err(ToolError::Configuration)
         ));
+    }
+}
+
+#[cfg(test)]
+mod command_output_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn command_capture_drains_large_and_invalid_output_without_changing_exit_status() {
+        for script in [
+            "printf HEAD; printf '%1048568s' ''; printf TAIL; exit 7",
+            "printf '\\377\\n'; printf err >&2",
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .args(["-c", script])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            let (status, out, err) =
+                capture_command(command.spawn().unwrap(), 4096, Duration::from_secs(10))
+                    .await
+                    .unwrap();
+            let output = super::super::process::fit_command(
+                status.code(),
+                &out,
+                &err,
+                Default::default(),
+                4096,
+                super::super::process::Truncation::Allow,
+            )
+            .unwrap();
+            let result: super::super::types::CommandResult = serde_json::from_str(&output).unwrap();
+            assert!(result.valid());
+            if script.ends_with("exit 7") {
+                assert_eq!(result.exit_code, Some(7));
+                assert_eq!(result.stdout_total.bytes, 1048576);
+                assert!(result.stdout.starts_with("HEAD") && result.stdout.ends_with("TAIL"));
+            } else {
+                assert_eq!(result.exit_code, Some(0));
+                assert_eq!(result.stdout, "\u{fffd}\n");
+                assert_eq!(result.stdout_total.bytes, 2);
+                assert_eq!(result.stderr, "err");
+            }
+        }
     }
 }
