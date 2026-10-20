@@ -1028,7 +1028,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     );
                     assert_eq!(
                         observations[0]["output"],
-                        json!({"exit_code":0,"stdout":"native command passed","stderr":"","changeset":{"files":[]}})
+                        json!({"exit_code":0,"stdout":"native command passed","stderr":"","stdout_total":{"bytes":21,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}})
                     );
                 }
                 assert_eq!(context["tools"]["catalog"]["write"], true);

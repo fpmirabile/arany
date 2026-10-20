@@ -117,6 +117,19 @@ impl CommandChangeset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputTotal {
+    pub bytes: u64,
+    pub lines: u64,
+}
+
+impl OutputTotal {
+    pub(crate) fn valid_for(self, text: &str) -> bool {
+        super::output::valid_total(self, text)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandResult {
@@ -124,6 +137,8 @@ pub struct CommandResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_total: OutputTotal,
+    pub stderr_total: OutputTotal,
     pub changeset: CommandChangeset,
 }
 
@@ -142,6 +157,8 @@ pub enum CacheUpdate {
 impl CommandResult {
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
+            && self.stdout_total.valid_for(&self.stdout)
+            && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
     }
 }
@@ -965,6 +982,15 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && (private_command
+                || !matches!(
+                    self.intent.call,
+                    ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                )
+                || !(self.disposition == ToolDisposition::Succeeded
+                    || serde_json::from_str::<Value>(&self.output)
+                        .is_ok_and(|v| v.get("exit_code").is_some()))
+                || serde_json::from_str::<CommandResult>(&self.output).is_ok_and(|r| r.valid()))
             && (!private_command
                 || matches!(
                     self.cache_update,
@@ -1482,7 +1508,15 @@ mod unguarded_vocabulary_tests {
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
-            output: String::new(),
+            output: serde_json::to_string(&CommandResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_total: Default::default(),
+                stderr_total: Default::default(),
+                changeset: Default::default(),
+            })
+            .unwrap(),
             attestation: Some(attestation),
             cache_update: CacheUpdate::NotApplicable,
         };

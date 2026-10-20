@@ -883,3 +883,145 @@ async fn pre_compact_with_a_rerun_offer_blocks_compaction() {
         Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
     )));
 }
+
+#[test]
+fn command_output_truncation_continues_integrates_and_replays_without_execution() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    for case in ["large", "grouped", "invalid-utf8"] {
+        let host = Host::new(None);
+        let config_path = host.state.join("tools.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["write"] = json!(true);
+        private_file(&config_path, &serde_json::to_vec(&config).unwrap());
+        for name in ["a", "b", "c", "d", "e", "f"] {
+            std::fs::write(
+                host.workspace.join("notes").join(name),
+                "line\n".repeat(2400),
+            )
+            .unwrap();
+        }
+        let script = match case {
+            "large" => {
+                "printf HEAD; printf '%1048568s' ''; printf TAIL; printf changed > notes/made"
+            }
+            "grouped" => "cat notes/a notes/b notes/c notes/d notes/e notes/f",
+            "invalid-utf8" => "printf '\\377\\n'",
+            _ => unreachable!(),
+        };
+        let call = guarded(script);
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(call.clone()),
+                    finish("continued after output"),
+                ],
+                Some(ApprovalMode::Request),
+                vec![],
+            )
+            .await;
+        assert_eq!(
+            seen.outcome.run.status,
+            RunStatus::Finished,
+            "{case}: {}",
+            tool_report(
+                seen.outcome
+                    .run
+                    .tools
+                    .first()
+                    .and_then(|t| t.observation.as_ref())
+            )
+        );
+        assert_eq!(seen.unconsumed, 0);
+        let observation = seen.outcome.run.tools[0].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+        let result: Value = serde_json::from_str(&observation.output).unwrap();
+        assert_eq!(result["exit_code"], 0);
+        let stdout = result["stdout"].as_str().unwrap();
+        match case {
+            "large" => {
+                assert_eq!(result["stdout_total"], json!({"bytes":1048576,"lines":1}));
+                assert!(stdout.starts_with("HEAD") && stdout.ends_with("TAIL"));
+                assert_eq!(
+                    std::fs::read(host.workspace.join("notes/made")).unwrap(),
+                    b"changed"
+                );
+                assert_eq!(
+                    seen.outcome.run.tools.len(),
+                    2,
+                    "ordinary changeset integration follows the truncated observation"
+                );
+            }
+            "grouped" => {
+                assert_eq!(result["stdout_total"], json!({"bytes":72000,"lines":14400}));
+                assert!(stdout.starts_with("line\n") && stdout.ends_with("line\n"));
+            }
+            "invalid-utf8" => {
+                assert_eq!(stdout, "\u{fffd}\n");
+                assert_eq!(result["stdout_total"], json!({"bytes":2,"lines":1}));
+            }
+            _ => unreachable!(),
+        }
+        if case != "invalid-utf8" {
+            assert!(stdout.contains(" lines omitted; "));
+        }
+        let next = seen.calls.last().unwrap().input.tools.as_ref().unwrap();
+        assert_eq!(next.observations()[0].output, observation.output);
+        let session = seen.outcome.session_id;
+        let (_, replay) = host.reopen(session).await;
+        assert_eq!(
+            replay.runs[0], seen.outcome.run,
+            "byte-stable closed replay: {case}"
+        );
+    }
+    });
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native 1 GiB output drain ceiling on Linux and macOS"
+)]
+fn runaway_command_output_stops_at_the_drain_ceiling_and_publishes_nothing() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let host = Host::new(None);
+            let call = guarded(
+                "printf must-not-publish > notes/made; while :; do printf '%65536s' ''; done",
+            );
+            let seen = host
+                .run(
+                    &host.workspace,
+                    vec![
+                        arany::test_support::scenario::plan_outcome(plan(&call)),
+                        tool_outcome(call),
+                        finish("limit observed"),
+                    ],
+                    Some(ApprovalMode::Request),
+                    vec![],
+                )
+                .await;
+            let observation = seen.outcome.run.tools[0].observation.as_ref().unwrap();
+            assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+            assert!(
+                observation.output.contains("output_ceiling"),
+                "{}",
+                observation.output
+            );
+            assert!(!host.workspace.join("notes/made").exists());
+            let session = seen.outcome.session_id;
+            let (_, replay) = host.reopen(session).await;
+            assert_eq!(replay.runs[0], seen.outcome.run);
+        });
+}

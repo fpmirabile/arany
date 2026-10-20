@@ -1550,9 +1550,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(16));
+        assert_eq!(payload_version("ToolFinished"), Some(17));
         assert_eq!(
-            Event::decode("ToolFinished", 16, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 17, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1560,7 +1560,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                16,
+                17,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1572,9 +1572,9 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 16, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 17, &invalid, Some(run), Some(agent)).is_err());
         }
-        for previous in [15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1971,9 +1971,16 @@ fn worker_command_protocol_requires_pins_capture_fields_and_exact_versions() {
         exit_code: Some(0),
         stdout: String::new(),
         stderr: String::new(),
+        stdout_total: Default::default(),
+        stderr_total: Default::default(),
         private_capture: PrivateCapture::None {},
     };
-    for field in ["exit_code", "private_capture"] {
+    for field in [
+        "exit_code",
+        "stdout_total",
+        "stderr_total",
+        "private_capture",
+    ] {
         let mut value = serde_json::to_value(&result).unwrap();
         value.as_object_mut().unwrap().remove(field);
         assert!(

@@ -1954,6 +1954,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: "ok".into(),
                     stderr: String::new(),
+                    stdout_total: crate::tools::types::OutputTotal { bytes: 2, lines: 1 },
+                    stderr_total: Default::default(),
                     private_capture: if case == "rejected" {
                         PrivateCapture::Rejected {
                             cause: PrivateCaptureRejection::OutOfLease,
@@ -2063,6 +2065,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: String::new(),
                     stderr: String::new(),
+                    stdout_total: Default::default(),
+                    stderr_total: Default::default(),
                     private_capture: if case == "rejected_modified" {
                         PrivateCapture::Rejected {
                             cause: PrivateCaptureRejection::OutOfLease,

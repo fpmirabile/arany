@@ -92,7 +92,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "exit_code": 0,
             "stdout": "",
             "stderr": "",
-            "changeset": {"files": []}
+            "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
         })
         .to_string(),
         attestation: Some(arany::Attestation::Guard(arany::GuardReceipt {
@@ -306,6 +306,39 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(all.clone()).unwrap().unwrap().runs[0].status,
         RunStatus::Finished
     );
+    for stream in ["stdout", "stderr"] {
+        for fault in ["missing", "bytes", "lines"] {
+            let mut row = all.clone();
+            if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
+                let mut value: serde_json::Value =
+                    serde_json::from_str(&observation.output).unwrap();
+                value[stream] = serde_json::json!("head\ntail\n");
+                let total = format!("{stream}_total");
+                value[&total] = serde_json::json!({"bytes":10,"lines":2});
+                observation.output = value.to_string();
+                assert!(
+                    replay({
+                        let mut valid = all.clone();
+                        valid[TOOL_FINISHED] = row[TOOL_FINISHED].clone();
+                        valid
+                    })
+                    .is_ok()
+                );
+                match fault {
+                    "missing" => {
+                        value.as_object_mut().unwrap().remove(&total);
+                    }
+                    "bytes" => value[&total]["bytes"] = serde_json::json!(9),
+                    "lines" => value[&total]["lines"] = serde_json::json!(1),
+                    _ => unreachable!(),
+                }
+                if let Event::ToolFinished { observation, .. } = &mut row[TOOL_FINISHED] {
+                    observation.output = value.to_string();
+                }
+            }
+            assert!(replay(row).is_err(), "{stream} total {fault}");
+        }
+    }
     let timeout_refusal = || {
         let mut row = prefix.to_vec();
         for event in &mut row {
@@ -353,7 +386,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "exit_code": 0,
             "stdout": "",
             "stderr": "",
-            "changeset": {"files": []}
+            "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
         })
         .to_string();
         observation.attestation = Some(arany::Attestation::Guard(arany::GuardReceipt {
@@ -645,7 +678,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     };
     let command_result = serde_json::json!({
-        "exit_code":7,"stdout":"","stderr":"","changeset":changeset
+        "exit_code":7,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":changeset
     })
     .to_string();
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
@@ -762,7 +795,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
-            "changeset": changeset,
+            "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
         })
         .to_string();
         observation.cache_update = arany::CacheUpdate::NotAttempted;
@@ -778,7 +811,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             "exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
-            "changeset": changeset,
+            "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
         })
         .to_string();
         observation.cache_update = arany::CacheUpdate::Uncertain;
@@ -1038,7 +1071,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 unreachable!()
             };
             observation.intent = intent.clone();
-            observation.output.clear();
             let Some(arany::Attestation::Guard(receipt)) = &mut observation.attestation else {
                 unreachable!()
             };

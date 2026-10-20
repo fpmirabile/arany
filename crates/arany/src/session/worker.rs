@@ -1002,6 +1002,8 @@ pub struct WorkerCommandResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_total: crate::tools::types::OutputTotal,
+    pub stderr_total: crate::tools::types::OutputTotal,
     pub private_capture: PrivateCapture,
 }
 
@@ -1011,8 +1013,10 @@ impl WorkerCommandResult {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        serde_json::to_vec(self)
-            .is_ok_and(|b| b.len() <= crate::tools::types::MAX_TOOL_RESULT_BYTES)
+        self.stdout_total.valid_for(&self.stdout)
+            && self.stderr_total.valid_for(&self.stderr)
+            && serde_json::to_vec(self)
+                .is_ok_and(|b| b.len() <= crate::tools::types::MAX_TOOL_RESULT_BYTES)
             && match &self.private_capture {
                 PrivateCapture::Sealed { data } => {
                     data.valid() && data.purpose == WorkerDataPurpose::Mutation

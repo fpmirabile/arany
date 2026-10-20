@@ -1237,77 +1237,95 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                 .unwrap_or_else(|| tokio::time::Instant::now() + TEARDOWN_WAIT);
             let cleanup = scope.stop_until(Some(std::process::id()), teardown).await;
             capture.finish(cleanup.is_ok());
-            let result = result.and_then(|mut observation| {
-                observation.cache_update = if runtime.worker.is_some() && intent.call.is_process() {
-                    crate::tools::CacheUpdate::Discarded
-                } else if cache.is_some() {
-                    crate::tools::CacheUpdate::NotAttempted
-                } else {
-                    crate::tools::CacheUpdate::NotApplicable
-                };
-                if cleanup.is_ok()
-                    && let Some(before) = &command_before
-                    && let Ok(mut command) =
-                        serde_json::from_str::<CommandResult>(&observation.output)
-                {
-                    let captured = crate::tools::fs::command_changeset(
-                        &path.parent().ok_or(ToolError::Path)?.join("workspace"),
-                        before,
-                    )
-                    .and_then(|changeset| {
-                        command.changeset = changeset;
-                        if !command.valid() {
-                            return Err(ToolError::Limit);
-                        }
-                        serde_json::to_string(&command).map_err(|_| ToolError::Operation)
-                    });
-                    match captured {
-                        Ok(output) => {
-                            observation.output = output;
-                            if !observation.valid() {
-                                observation.disposition = ToolDisposition::Limit;
-                                observation.enforcement_cause = None;
+            let result = result.and_then(
+                |super::WorkerOutput {
+                     mut observation,
+                     windows,
+                 }| {
+                    observation.cache_update =
+                        if runtime.worker.is_some() && intent.call.is_process() {
+                            crate::tools::CacheUpdate::Discarded
+                        } else if cache.is_some() {
+                            crate::tools::CacheUpdate::NotAttempted
+                        } else {
+                            crate::tools::CacheUpdate::NotApplicable
+                        };
+                    if cleanup.is_ok()
+                        && let Some(before) = &command_before
+                        && let Ok(command) =
+                            serde_json::from_str::<CommandResult>(&observation.output)
+                    {
+                        let captured = crate::tools::fs::command_changeset(
+                            &path.parent().ok_or(ToolError::Path)?.join("workspace"),
+                            before,
+                        )
+                        .and_then(|changeset| {
+                            let windows = windows.ok_or(ToolError::Operation)?;
+                            crate::tools::process::fit_command(
+                                command.exit_code,
+                                &windows.stdout,
+                                &windows.stderr,
+                                changeset,
+                                intent.limits.result_bytes as usize,
+                                if runtime.hook_stdin.is_some() {
+                                    crate::tools::process::Truncation::Refuse
+                                } else {
+                                    crate::tools::process::Truncation::Allow
+                                },
+                            )
+                        });
+                        match captured {
+                            Ok(output) => {
+                                observation.output = output;
+                                if !observation.valid() {
+                                    observation.disposition = ToolDisposition::Limit;
+                                    observation.enforcement_cause = None;
+                                    observation.output =
+                                        "Command changeset exceeded its reserved capacity".into();
+                                }
+                            }
+                            Err(error) => {
+                                let (disposition, _, cause) = crate::tools::dispatch::outcome(
+                                    &observation.intent,
+                                    Err(error),
+                                );
+                                observation.disposition = disposition;
+                                observation.enforcement_cause = cause;
                                 observation.output =
-                                    "Command changeset exceeded its reserved capacity".into();
+                                    "Command changeset could not be captured".into();
                             }
                         }
-                        Err(error) => {
-                            let (disposition, _, cause) =
-                                crate::tools::dispatch::outcome(&observation.intent, Err(error));
-                            observation.disposition = disposition;
-                            observation.enforcement_cause = cause;
-                            observation.output = "Command changeset could not be captured".into();
-                        }
                     }
-                }
-                if cleanup.is_ok()
-                    && intent.call.is_process()
-                    && let Some(action) = &runtime.worker
-                {
-                    let before = action.transfer.decode(&action.input)?;
-                    let (image, capture) = if observation.disposition == ToolDisposition::Succeeded
+                    if cleanup.is_ok()
+                        && intent.call.is_process()
+                        && let Some(action) = &runtime.worker
                     {
-                        crate::tools::worker::command_capture(
-                            &before,
-                            &crate::tools::fs::open_directory(
-                                &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
-                            )?,
-                            &action.transfer.grant,
-                        )
-                    } else {
-                        (before, crate::session::worker::PrivateCapture::None {})
-                    };
-                    let mut command: crate::session::worker::WorkerCommandResult =
-                        serde_json::from_str(&observation.output)
-                            .map_err(|_| ToolError::Operation)?;
-                    command.private_capture = capture;
-                    observation.output =
-                        serde_json::to_string(&command).map_err(|_| ToolError::Operation)?;
-                    *action.output.lock().map_err(|_| ToolError::Operation)? =
-                        Some(image.encode()?);
-                }
-                Ok(observation)
-            });
+                        let before = action.transfer.decode(&action.input)?;
+                        let (image, capture) = if observation.disposition
+                            == ToolDisposition::Succeeded
+                        {
+                            crate::tools::worker::command_capture(
+                                &before,
+                                &crate::tools::fs::open_directory(
+                                    &path.parent().ok_or(ToolError::Path)?.join("workspace/tree"),
+                                )?,
+                                &action.transfer.grant,
+                            )
+                        } else {
+                            (before, crate::session::worker::PrivateCapture::None {})
+                        };
+                        let mut command: crate::session::worker::WorkerCommandResult =
+                            serde_json::from_str(&observation.output)
+                                .map_err(|_| ToolError::Operation)?;
+                        command.private_capture = capture;
+                        observation.output =
+                            serde_json::to_string(&command).map_err(|_| ToolError::Operation)?;
+                        *action.output.lock().map_err(|_| ToolError::Operation)? =
+                            Some(image.encode()?);
+                    }
+                    Ok(observation)
+                },
+            );
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
             if let (Some(cache), Some(volumes), Ok(observation)) = (&cache, &storage, &result)

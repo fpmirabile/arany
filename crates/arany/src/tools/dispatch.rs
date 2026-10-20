@@ -20,6 +20,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 site.config,
                 site.root,
                 site.intent.limits.cache_bytes > 0,
+                site.intent.limits.result_bytes as usize,
             )
             .await
         }
@@ -65,6 +66,10 @@ pub(super) fn outcome(
         Ok(_) | Err(ToolError::Limit) => (
             ToolDisposition::Limit,
             "Tool result or resource limit reached".into(),
+        ),
+        Err(ToolError::OutputCeiling) => (
+            ToolDisposition::Limit,
+            "output_ceiling: output passed 1 GiB per stream; stopped".into(),
         ),
         Err(ToolError::Conflict) => (
             ToolDisposition::Conflict,

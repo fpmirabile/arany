@@ -2314,7 +2314,7 @@ int main(void) {
             }
         } else {
             let script = if case == "overflow" {
-                "printf payload-started; i=0; while test $i -lt 32768; do printf x; i=$((i + 1)); done"
+                "printf payload-started; printf '%1048576s' ''"
             } else {
                 "printf must-not-dispatch > src/approval-output.txt"
             };
@@ -2447,7 +2447,7 @@ int main(void) {
         );
         let expected_run_status = match case {
             "cancelled" => RunStatus::Cancelled,
-            "mcp-version" => RunStatus::Finished,
+            "mcp-version" | "overflow" => RunStatus::Finished,
             _ => RunStatus::Failed,
         };
         assert_eq!(
@@ -2457,7 +2457,7 @@ int main(void) {
         );
         assert_eq!(
             outcome.run.assistant_message.is_some(),
-            case == "mcp-version",
+            matches!(case, "mcp-version" | "overflow"),
             "{case} assistant answer"
         );
         assert!(!workspace.join("src/approval-output.txt").exists());
@@ -2472,7 +2472,7 @@ int main(void) {
             replay.goals[0].status,
             match case {
                 "cancelled" => arany::GoalStatus::Interrupted,
-                "mcp-version" => arany::GoalStatus::Completed,
+                "mcp-version" | "overflow" => arany::GoalStatus::Completed,
                 _ => arany::GoalStatus::Failed,
             },
             "closed Goal replay: {case}"
@@ -2487,14 +2487,14 @@ int main(void) {
                 arany::GoalSuccessCriterion::ToolCallSucceeded { call: planned }
                     if **planned == call
             ));
+            let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
+            let result: Value = serde_json::from_str(&observation.output).unwrap();
+            assert_eq!(result["stdout_total"]["bytes"], 1048591);
             assert!(
-                replay.goals[0]
-                    .report
-                    .as_ref()
+                result["stdout"]
+                    .as_str()
                     .unwrap()
-                    .unresolved
-                    .iter()
-                    .any(|item| item.contains("Command shell failed"))
+                    .contains(" lines omitted; ")
             );
         }
         if case == "mcp-version" {
@@ -2542,7 +2542,7 @@ int main(void) {
             observation.disposition,
             match case {
                 "denied" | "cancelled" => ToolDisposition::Denied,
-                "overflow" => ToolDisposition::Limit,
+                "overflow" => ToolDisposition::Succeeded,
                 "mcp-version" => ToolDisposition::Failed,
                 "receipt-loss" => ToolDisposition::Uncertain,
                 _ => unreachable!(),
