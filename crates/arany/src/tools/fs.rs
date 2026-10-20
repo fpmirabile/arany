@@ -66,7 +66,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             (
                 "limit",
-                json!({"type":["integer", "null"], "description":"Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier."}),
+                json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
             ),
         ],
         "search" => vec![path, ("query", string())],
@@ -983,9 +983,11 @@ pub(super) fn read_page(
         }
         let chars = chars - usize::from(last_cr);
         let mut row = format!("{total_lines}\t");
-        row.extend(line.chars().take(chars.min(2000)));
-        if chars > 2000 {
-            row.push_str("… [line truncated to 2000 chars]");
+        row.extend(line.chars().take(chars.min(MAX_READ_LINE_CHARS)));
+        if chars > MAX_READ_LINE_CHARS {
+            row.push_str(&format!(
+                "… [line truncated to {MAX_READ_LINE_CHARS} chars]"
+            ));
         }
         row.push('\n');
         let size: usize = row.chars().map(escaped_len).sum();
@@ -998,7 +1000,7 @@ pub(super) fn read_page(
             text.push_str(&row);
             escaped += size;
             shown += 1;
-            cut |= chars > 2000;
+            cut |= chars > MAX_READ_LINE_CHARS;
         }
         Ok(())
     };
@@ -1037,7 +1039,7 @@ pub(super) fn read_page(
             } else {
                 chars += 1;
                 last_cr = character == '\r';
-                if chars <= 2001 {
+                if chars <= MAX_READ_LINE_CHARS + 1 {
                     line.push(character);
                 }
             }
