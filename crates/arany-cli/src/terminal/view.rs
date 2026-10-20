@@ -591,7 +591,8 @@ pub(super) fn screen_terminal(
     let mut backend = TerminalBackend::new(mode, cursor);
     let screen = backend.size()?;
     if mode == TerminalMode::Classic {
-        backend.set_cursor_position((0, screen.height.saturating_sub(4)))?;
+        // Let inline initialization scroll to reserve rows without moving above shell output.
+        backend.set_cursor_position((0, screen.height.saturating_sub(1)))?;
     }
     let mut terminal = Terminal::with_options(
         backend,

@@ -1225,6 +1225,15 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         },
     );
     assert_eq!(stage, 10);
+    let first_query = output
+        .stderr
+        .windows(4)
+        .position(|part| part == b"\x1b[6n")
+        .expect("Classic startup cursor query");
+    assert!(
+        output.stderr[..first_query].ends_with(b"\x1b[24;1H"),
+        "Classic reserves rows below any existing shell output"
+    );
     super::assert_classic_owned_clear(&output.stderr[from..], 1);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
