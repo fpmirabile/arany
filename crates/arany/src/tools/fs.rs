@@ -334,12 +334,17 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
     .map_err(|_| ToolError::Path)?;
     #[cfg(not(target_os = "macos"))]
     let parent = open_directory(parent)?;
+    // Absolute paths identify pinned resources, not user Tool targets.
     open_file(
         &parent,
         path.file_name()
             .and_then(|name| name.to_str())
             .ok_or(ToolError::Path)?,
     )
+    .map_err(|error| match error {
+        ToolError::NotFound => ToolError::Path,
+        error => error,
+    })
 }
 
 pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
@@ -391,7 +396,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
                     Mode::empty(),
                 )
                 .map_err(|error| match error {
-                    rustix::io::Errno::NOENT | rustix::io::Errno::NOTDIR => ToolError::NotFound,
+                    rustix::io::Errno::NOENT => ToolError::NotFound,
                     _ => ToolError::Path,
                 })?,
             );
@@ -433,7 +438,7 @@ fn not_directory_path(root: &Dir, path: &str) -> ToolError {
                 Ok(_) => return non_directory_error(&file),
                 Err(_) => return ToolError::Path,
             },
-            Err(error) => return error,
+            Err(_) => return ToolError::Path,
         }
     }
     ToolError::Path
@@ -2125,8 +2130,29 @@ mod path_tests {
                     "{path}"
                 );
             }
-            assert!(observation.valid(), "{path}");
+            assert_eq!(observation.valid(), observation.intent.valid(), "{path}");
         }
+        assert!(open_absolute(workspace.join("src/file").to_str().unwrap()).is_ok());
+        assert!(matches!(
+            open_absolute(workspace.join("src/missing").to_str().unwrap()),
+            Err(ToolError::Path)
+        ));
+        let intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Skill {
+                name: "review".into(),
+                resource: None,
+            },
+        );
+        assert_eq!(
+            super::super::dispatch::outcome(&intent, Err(ToolError::NotFound)),
+            (
+                ToolDisposition::Denied,
+                "File path is unavailable or outside the admitted regular-file boundary".into(),
+                None,
+            )
+        );
         #[cfg(target_os = "linux")]
         {
             let host_root = open_directory(Path::new("/")).unwrap();

@@ -257,7 +257,8 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
     } else {
         request.cwd
     };
-    if !open_file(&workspace, cwd)?
+    if !open_file(&workspace, cwd)
+        .map_err(|_| ToolError::Path)?
         .metadata()
         .map_err(|_| ToolError::Path)?
         .is_dir()
@@ -469,9 +470,9 @@ mod tests {
         let outside = fixture.workspace.parent().unwrap().join("outside");
         std::fs::create_dir(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, fixture.workspace.join("link")).unwrap();
-        for cwd in ["link", "missing"] {
+        for cwd in ["link", "link/missing", "missing", "missing/child"] {
             let outcome = fixture.sh("touch made", cwd, 10_000).await;
-            assert_eq!(outcome.disposition, ToolDisposition::Denied);
+            assert_eq!(outcome.disposition, ToolDisposition::Denied, "{cwd}");
             assert!(!outcome.spawned);
         }
         assert!(!outside.join("made").exists());
