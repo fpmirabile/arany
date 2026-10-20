@@ -210,6 +210,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     phase: GoalPhase::Implementation,
                 },
                 Event::MessageAccepted {
+                    skill: None,
                     run_id,
                     text: objective,
                     images: Vec::new(),

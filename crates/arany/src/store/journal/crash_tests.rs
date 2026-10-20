@@ -82,6 +82,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                 },
             },
             Event::MessageAccepted {
+                skill: None,
                 run_id,
                 text: "Synthetic objective".into(),
                 images: Vec::new(),

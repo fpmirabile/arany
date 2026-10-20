@@ -630,6 +630,16 @@ pub(super) fn apply(
                 })
             {
                 super::definition_registry(run)?;
+                if let Some(name) = &run.skill
+                    && !run.tools.get(run.parse_count()).is_some_and(|tool| {
+                        matches!(&tool.intent.call, crate::tools::ToolCall::Skill { name: read_name, resource: None } if read_name == name)
+                            && tool.observation.as_ref().is_some_and(|observation| {
+                                observation.disposition == crate::tools::ToolDisposition::Succeeded && observation.attestation.is_some()
+                            })
+                    })
+                {
+                    return Err(ReplayError::InvalidTransition);
+                }
             }
             current.reserve_goal_provider_call(goal_id, run_id, agent_run_id)?;
             record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
@@ -671,7 +681,7 @@ pub(super) fn apply(
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
                 || run.tools.iter().any(|tool| tool.observation.is_none())
-                || covered_count <= run.parse_count()
+                || covered_count <= run.initial_tool_count()
                 || covered_count > run.tools.len()
                 || !ends_whole_step(run, covered_count)
                 || *covered_tool_count <= run.tool_compaction_covered_count
@@ -727,7 +737,7 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };
-    let covered = run.tools[run.parse_count()..covered_count]
+    let covered = run.tools[run.initial_tool_count()..covered_count]
         .iter()
         .filter(|tool| !is_integration_tool(tool))
         .count();

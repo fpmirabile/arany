@@ -3222,3 +3222,120 @@ async fn attached_shape_write_without_a_plan_dispatches_after_ask_approval() {
     assert_eq!(provider.requests.lock().expect("requests").len(), 2);
     assert!(provider.responses.lock().expect("script").is_empty());
 }
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "native Skill Guard read on Linux and macOS")]
+fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
+    let _gate = process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+    use std::os::unix::fs::PermissionsExt;
+    for mismatch in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let skill_dir = workspace.join(".agents/skills/ask-matt");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        let body = b"---\nname: ask-matt\ndescription: Guide the task\ndisable-model-invocation: true\n---\nPinned untrusted Skill guidance.\n";
+        std::fs::write(skill_dir.join("SKILL.md"), body).unwrap();
+        let state_path = temp.path().join("state");
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let hash = if mismatch {
+            "0".repeat(64)
+        } else {
+            Sha256::digest(body)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        };
+        let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],"skills":[{
+            "name":"ask-matt","description":"Reviewed guidance","directory":skill_dir,"files":{"SKILL.md":hash}
+        }]});
+        let config_path = state_path.join("tools.json");
+        std::fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
+        std::fs::set_permissions(&config_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            }),
+            ProviderOutcome::Answer(Answer {
+                text: "Applied the Skill.".into(),
+            }),
+        ]));
+        let mut input = request(&workspace, "do X");
+        input.skill = Some("ask-matt".into());
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let requests = provider.requests.lock().unwrap().clone();
+        if mismatch {
+            assert_eq!(outcome.run.status, RunStatus::Failed);
+            assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
+            assert!(
+                requests.is_empty(),
+                "digest mismatch must fail before egress"
+            );
+        } else {
+            assert_eq!(
+                outcome.run.status,
+                RunStatus::Finished,
+                "{:?}",
+                outcome.run.failure
+            );
+            assert_eq!(requests.len(), 2);
+            let tools = requests[0].input.tools.as_ref().unwrap();
+            assert_eq!(
+                tools.invoked_skill.as_ref().unwrap().output.as_bytes(),
+                body
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&tools.catalog).unwrap()["skills"],
+                serde_json::json!([])
+            );
+        }
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let events = store.load_session(outcome.session_id).await.unwrap();
+        let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
+        assert_eq!(view.runs[0].skill.as_deref(), Some("ask-matt"));
+        let started = events
+            .iter()
+            .position(|event| matches!(event.event, Event::ToolStarted { .. }))
+            .unwrap();
+        let observed = events
+            .iter()
+            .position(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .unwrap();
+        assert!(started < observed);
+        if let Some(egress) = events
+            .iter()
+            .position(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+        {
+            assert!(!mismatch);
+            assert!(observed < egress);
+        } else {
+            assert!(mismatch);
+        }
+        store.close().await.unwrap();
+    }
+    });
+}

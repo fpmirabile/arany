@@ -2144,6 +2144,108 @@ fn active_time_limit_observation(intent: EffectIntent) -> ToolObservation {
     )
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum SkillInitialization {
+    Ready,
+    Stopped,
+    Failed(crate::session::RunFailure),
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum SkillReadPlan {
+    Skip,
+    Stop,
+    Read(String),
+}
+
+fn skill_read_plan(name: Option<String>, stopping: bool) -> SkillReadPlan {
+    match (name, stopping) {
+        (_, true) => SkillReadPlan::Stop,
+        (None, false) => SkillReadPlan::Skip,
+        (Some(name), false) => SkillReadPlan::Read(name),
+    }
+}
+
+fn skill_read_decision(
+    disposition: ToolDisposition,
+    attested: bool,
+    context_bytes: usize,
+    context_limit: usize,
+) -> SkillInitialization {
+    match disposition {
+        ToolDisposition::Succeeded if attested => {
+            if context_bytes <= context_limit {
+                SkillInitialization::Ready
+            } else {
+                SkillInitialization::Failed(crate::session::RunFailure::ToolContextFull)
+            }
+        }
+        ToolDisposition::Cancelled | ToolDisposition::Uncertain => SkillInitialization::Stopped,
+        ToolDisposition::Succeeded
+        | ToolDisposition::Denied
+        | ToolDisposition::Failed
+        | ToolDisposition::Conflict
+        | ToolDisposition::Limit => {
+            SkillInitialization::Failed(crate::session::RunFailure::ToolStopped)
+        }
+    }
+}
+
+impl RunLoop<'_> {
+    pub(super) async fn initialize_skill(
+        &self,
+        request: &mut ProviderRequest,
+    ) -> Result<SkillInitialization, EngineError> {
+        let name = self
+            .ledger()
+            .view(|view| view.runs.last().and_then(|run| run.skill.clone()))?;
+        let name = match skill_read_plan(
+            name,
+            self.pause_at_boundary() || self.controls.cancellation.is_cancelled(),
+        ) {
+            SkillReadPlan::Skip => return Ok(SkillInitialization::Ready),
+            SkillReadPlan::Stop => return Ok(SkillInitialization::Stopped),
+            SkillReadPlan::Read(name) => name,
+        };
+        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
+        let call = ToolCall::Skill {
+            name,
+            resource: None,
+        };
+        let intent = match self.primary_intent(runtime, call.clone())? {
+            None => return Ok(SkillInitialization::Stopped),
+            Some(intent) => intent,
+        };
+        let grant = Grant::Primary {
+            request,
+            review_allowed: false,
+        };
+        let observation = match self
+            .run_intent(&grant, runtime, intent, &call, false)
+            .await?
+        {
+            None => return Ok(SkillInitialization::Stopped),
+            Some((observation, _)) => observation,
+        };
+        let tools = request
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?;
+        let decision = skill_read_decision(
+            observation.disposition,
+            observation.attestation.is_some(),
+            tools.with_invoked_skill_len(&observation),
+            runtime.context_limit_bytes(),
+        );
+        match decision {
+            SkillInitialization::Ready => tools.invoked_skill = Some(observation),
+            SkillInitialization::Stopped | SkillInitialization::Failed(_) => {}
+        }
+        Ok(decision)
+    }
+}
+
 impl RunLoop<'_> {
     pub(super) async fn initialize_definitions(
         &self,
@@ -2269,6 +2371,66 @@ fn effective_permission_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_read_outcomes_are_closed_before_egress() {
+        for (name, stopping, expected) in [
+            (None, false, SkillReadPlan::Skip),
+            (None, true, SkillReadPlan::Stop),
+            (Some("guide".into()), true, SkillReadPlan::Stop),
+            (
+                Some("guide".into()),
+                false,
+                SkillReadPlan::Read("guide".into()),
+            ),
+        ] {
+            assert_eq!(skill_read_plan(name, stopping), expected);
+        }
+        for (disposition, attested, expected) in [
+            (ToolDisposition::Succeeded, true, SkillInitialization::Ready),
+            (
+                ToolDisposition::Succeeded,
+                false,
+                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
+            ),
+            (
+                ToolDisposition::Denied,
+                false,
+                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
+            ),
+            (
+                ToolDisposition::Failed,
+                false,
+                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
+            ),
+            (
+                ToolDisposition::Conflict,
+                true,
+                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
+            ),
+            (
+                ToolDisposition::Limit,
+                true,
+                SkillInitialization::Failed(crate::session::RunFailure::ToolStopped),
+            ),
+            (
+                ToolDisposition::Cancelled,
+                false,
+                SkillInitialization::Stopped,
+            ),
+            (
+                ToolDisposition::Uncertain,
+                true,
+                SkillInitialization::Stopped,
+            ),
+        ] {
+            assert_eq!(skill_read_decision(disposition, attested, 64, 64), expected);
+        }
+        assert_eq!(
+            skill_read_decision(ToolDisposition::Succeeded, true, 65, 64),
+            SkillInitialization::Failed(crate::session::RunFailure::ToolContextFull)
+        );
+    }
 
     #[test]
     fn agent_definition_modes_never_resolve_parent_asks_and_dont_ask_denies_them() {

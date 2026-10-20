@@ -1334,6 +1334,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         "uncertain"
     );
     let mut run = arany::RunView {
+        skill: None,
         supervisor: Default::default(),
         workers: Default::default(),
         id: intent.run_id,

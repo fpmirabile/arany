@@ -240,6 +240,7 @@ mod tests {
 
     fn run(ordinal: usize) -> RunView {
         RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),

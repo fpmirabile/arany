@@ -509,6 +509,7 @@ fn event_kinds_const_matches_kind() {
             title: "Example".into(),
         },
         arany::Event::MessageAccepted {
+            skill: None,
             run_id,
             text: "Hello".into(),
             images: vec![],

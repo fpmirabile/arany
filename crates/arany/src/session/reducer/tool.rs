@@ -420,6 +420,17 @@ pub(super) fn apply(
                                 observation.disposition == crate::tools::ToolDisposition::Succeeded
                             })
                         })
+                } else if let crate::tools::ToolCall::Skill {
+                    name,
+                    resource: None,
+                } = &intent.call
+                    && primary.provider_calls.is_empty()
+                {
+                    run.skill.as_ref() == Some(name)
+                        && run.agents.len() == 1
+                        && run.tools.len() == run.parse_count()
+                        && super::definition_registry(run).is_ok()
+                        && run.provider_sequences.is_empty()
                 } else if let crate::tools::ToolCall::PrepareWorker { preparation } = &intent.call {
                     super::worker::base_preparation(run, preparation)
                 } else if integration {

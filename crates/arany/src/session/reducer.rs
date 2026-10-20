@@ -249,6 +249,7 @@ impl AgentView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
+    pub skill: Option<String>,
     pub supervisor: crate::supervisor::SupervisorState,
     pub workers: WorkerState,
     pub id: RunId,
@@ -285,6 +286,13 @@ impl RunView {
                 )
             })
             .count()
+    }
+
+    pub(crate) fn initial_tool_count(&self) -> usize {
+        let parsed = self.parse_count();
+        parsed + usize::from(self.tools.get(parsed).is_some_and(|tool| {
+            matches!(&tool.intent.call, crate::tools::ToolCall::Skill { name, resource: None } if self.skill.as_ref() == Some(name))
+        }))
     }
 
     // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
@@ -479,6 +487,7 @@ impl ToolView {
 fn model_tool_count(run: &RunView) -> usize {
     run.tools
         .iter()
+        .skip(run.initial_tool_count())
         .filter(|tool| {
             tool.narrowed_call().is_none()
                 && !is_integration_tool(tool)

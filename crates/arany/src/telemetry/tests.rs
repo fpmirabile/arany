@@ -242,6 +242,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
             )
             .expect("traced Engine");
             let request = RunRequest {
+                skill: None,
                 session_id: None,
                 title: None,
                 objective: "synthetic task".into(),
@@ -395,6 +396,7 @@ fn timed_out_provider_call_exports_closed_error_type() {
         )
         .expect("traced Engine");
         let request = RunRequest {
+            skill: None,
             session_id: None,
             title: None,
             objective: "synthetic task".into(),
@@ -520,6 +522,7 @@ impl Segment {
             phase: crate::session::GoalPhase::Implementation,
         });
         segment.commit(Event::MessageAccepted {
+            skill: None,
             run_id: segment.run_id,
             text: "objective".into(),
             images: Vec::new(),
@@ -1747,6 +1750,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
         .submit(
             providers.clone(),
             RunRequest {
+                skill: None,
                 session_id: None,
                 title: None,
                 objective: "task".into(),

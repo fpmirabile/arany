@@ -626,6 +626,7 @@ fn fixture_with_manifest(
         phase: GoalPhase::Implementation,
     });
     f.push(Event::MessageAccepted {
+        skill: None,
         run_id: run,
         text: "Edit".into(),
         images: Vec::new(),

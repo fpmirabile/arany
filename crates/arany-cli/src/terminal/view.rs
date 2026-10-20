@@ -1340,11 +1340,23 @@ fn draw_composer(
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 16 {
             " Enter keeps "
         } else if menu_height > 0 && composer_area.width >= 40 {
-            " Up/Down · Tab/Enter fills · Esc close "
+            if draft.starts_with('/') {
+                " Tab completes · Enter invokes · Esc close "
+            } else {
+                " Up/Down · Tab/Enter fills · Esc close "
+            }
         } else if menu_height > 0 && composer_area.width >= 20 {
-            " Tab/Enter fills Esc "
+            if draft.starts_with('/') {
+                " Tab fills Enter runs "
+            } else {
+                " Tab/Enter fills Esc "
+            }
         } else if menu_height > 0 {
-            " Tab/Enter Esc "
+            if draft.starts_with('/') {
+                " Enter runs Esc "
+            } else {
+                " Tab/Enter Esc "
+            }
         } else if command && composer_area.width >= 40 {
             " Enter command · Ctrl+O newline "
         } else if command && composer_area.width >= 16 {

@@ -1517,6 +1517,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             phase: arany::GoalPhase::Implementation,
         },
         Event::MessageAccepted {
+            skill: None,
             run_id,
             text: "Use the only Provider call".into(),
             images: Vec::new(),
@@ -5183,6 +5184,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             phase: arany::GoalPhase::Implementation,
         },
         Event::MessageAccepted {
+            skill: None,
             run_id,
             text: "Spend reserved time".into(),
             images: Vec::new(),

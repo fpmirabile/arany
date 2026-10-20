@@ -201,6 +201,7 @@ fn marked_segment(telemetry: &Telemetry) -> Segment {
 
 async fn timed_direct_run(engine: &Engine, observer: &Store, workspace: &Path) -> Duration {
     let request = RunRequest {
+        skill: None,
         session_id: None,
         title: None,
         objective: "synthetic objective".into(),

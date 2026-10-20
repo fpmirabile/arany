@@ -176,6 +176,7 @@ impl From<InputError> for EngineError {
 }
 
 pub struct RunRequest {
+    pub skill: Option<String>,
     pub session_id: Option<SessionId>,
     pub title: Option<String>,
     /// Empty only for an explicit Goal resume, which runs the Goal's pinned objective.
@@ -413,6 +414,7 @@ struct PreparedTurn {
 }
 
 struct RunOpening {
+    skill: Option<String>,
     run_id: RunId,
     agent_run_id: AgentRunId,
     objective: String,
@@ -1059,6 +1061,7 @@ impl Engine {
         .await?;
         while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
+                skill: None,
                 session_id: Some(turn.outcome.session_id),
                 title: None,
                 objective: String::new(),
@@ -1208,6 +1211,7 @@ impl Engine {
                     &ledger,
                     session_id,
                     RunOpening {
+                        skill: request.skill,
                         run_id,
                         agent_run_id,
                         objective: objective.clone(),
@@ -1370,8 +1374,10 @@ impl Engine {
             objective,
             images,
             config,
+            skill,
         } = opening;
         let accepted = Event::MessageAccepted {
+            skill,
             run_id,
             text: objective,
             images,
@@ -1594,6 +1600,10 @@ impl Engine {
             })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "turn admission keeps pinned context and Skill validation together"
+    )]
     fn prepare_turn(
         &self,
         submission: &AdmittedSubmission,
@@ -1629,6 +1639,14 @@ impl Engine {
             && !permissions.matches_identity(runtime.workspace_identity())
         {
             return Err(crate::tools::ToolError::ChangedInput.into());
+        }
+        if request.skill.as_ref().is_some_and(|name| {
+            !crate::tools::types::valid_name(name)
+                || tools
+                    .as_ref()
+                    .is_none_or(|runtime| !runtime.allows_skill(name))
+        }) {
+            return Err(EngineError::InvalidRequest);
         }
         let tool_context = tools
             .as_ref()

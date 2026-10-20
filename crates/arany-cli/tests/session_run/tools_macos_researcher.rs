@@ -262,6 +262,7 @@ done
                     &engine,
                     &provider,
                     RunRequest {
+                        skill: None,
                         session_id: None,
                         title: Some("Native researcher".into()),
                         objective: "Research native facts without mutation".into(),

@@ -3,7 +3,6 @@ use crate::accounts::chatgpt;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission, TerminalInput,
-    parse_submission,
 };
 use arany::{
     CollaborationPolicy, Effort, Engine, EngineError, RunOutcome, RunStatus, SessionDefaults,
@@ -634,6 +633,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             &mut view,
             &mut composer,
             prompt,
+            None,
         )
         .await?
         {
@@ -920,7 +920,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             continue;
                         }
                     }
-                    Ok(Submission::Objective(_)) => {
+                    Ok(Submission::Objective(_) | Submission::Skill { .. }) => {
                         if let Err(message) = active::preflight_idle_run(
                             &admission,
                             &view,
@@ -939,7 +939,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     }
                 }
                 let line = composer.take();
-                let submission = match parse_submission(&line) {
+                let submission = match composer.parse_submission(&line) {
                     Err(crate::terminal::CommandParseError::Empty)
                         if !composer.images().is_empty() =>
                     {
@@ -948,7 +948,19 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     result => result.expect("validated submission"),
                 };
                 match submission {
-                    Submission::Objective(objective) => {
+                    Submission::Objective(_) | Submission::Skill { .. } => {
+                        let (objective, skill) = match submission {
+                            Submission::Objective(objective) => (objective.to_owned(), None),
+                            Submission::Skill { name, task } => (
+                                if task.is_empty() {
+                                    format!("/{name}")
+                                } else {
+                                    task.to_owned()
+                                },
+                                Some(name.to_owned()),
+                            ),
+                            Submission::Command { .. } => unreachable!("task submission"),
+                        };
                         notice = submit_idle_run(
                             &engine,
                             &mut terminal,
@@ -957,7 +969,8 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             &mut session_id,
                             &mut view,
                             GoalStart::Plain,
-                            objective.to_owned(),
+                            objective,
+                            skill,
                         )
                         .await?;
                     }
@@ -981,6 +994,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             &mut view,
                             start,
                             objective,
+                            None,
                         )
                         .await?;
                     }
@@ -1412,16 +1426,27 @@ async fn submit_idle_run(
     view: &mut SessionView,
     start: GoalStart,
     objective: String,
+    skill: Option<String>,
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
     let draft = match start {
-        GoalStart::Plain => objective.clone(),
+        GoalStart::Plain => skill.as_ref().map_or_else(
+            || objective.clone(),
+            |name| {
+                let invocation = format!("/{name}");
+                if objective == invocation {
+                    invocation
+                } else {
+                    format!("{invocation} {objective}")
+                }
+            },
+        ),
         GoalStart::Autonomous => format!("/goal {objective}"),
         GoalStart::Resume | GoalStart::Continue => String::new(),
     };
     match submit_objective(
-        engine, terminal, admission, start, view, composer, objective,
+        engine, terminal, admission, start, view, composer, objective, skill,
     )
     .await
     {

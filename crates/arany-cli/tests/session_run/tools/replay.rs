@@ -148,6 +148,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             phase: arany::GoalPhase::Implementation,
         },
         Event::MessageAccepted {
+            skill: None,
             run_id: run,
             text: "Past work".into(),
             images: Vec::new(),
@@ -1441,6 +1442,7 @@ pub(super) async fn native_command_changeset_corpus(
                         &engine,
                         &provider,
                         RunRequest {
+                            skill: None,
                             session_id: None,
                             title: Some(format!("Changeset {case}")),
                             objective: "Exercise native changeset integration".into(),

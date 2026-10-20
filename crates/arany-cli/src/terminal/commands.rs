@@ -63,6 +63,10 @@ impl InteractiveCommand {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Submission<'a> {
     Objective(&'a str),
+    Skill {
+        name: &'a str,
+        task: &'a str,
+    },
     Command {
         command: InteractiveCommand,
         argument: Option<&'a str>,

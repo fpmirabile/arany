@@ -437,7 +437,13 @@ impl<'a> RunLoop<'a> {
             Err(EngineError::GoalBudgetExhausted) => return self.settle_stopped_primary().await,
             Err(error) => return Err(error),
         }
-        self.drive_primary(&mut root_request).await
+        match self.initialize_skill(&mut root_request).await {
+            Ok(step::SkillInitialization::Ready) => self.drive_primary(&mut root_request).await,
+            Ok(step::SkillInitialization::Stopped) => self.settle_stopped_primary().await,
+            Ok(step::SkillInitialization::Failed(cause)) => self.fail_primary(cause).await,
+            Err(EngineError::GoalBudgetExhausted) => self.settle_stopped_primary().await,
+            Err(error) => Err(error),
+        }
     }
 
     pub(super) fn drive_primary<'b>(

@@ -297,6 +297,7 @@ async fn run_on_engine(
         providers,
         tools,
         RunRequest {
+            skill: None,
             session_id: admission.session_id,
             title: None,
             objective: admission.objective,
@@ -915,6 +916,7 @@ mod tests {
             .submit(
                 AdmittedProviders::single(provider),
                 RunRequest {
+                    skill: None,
                     session_id: None,
                     title: Some("Exhausted".into()),
                     objective: "Use the only Provider call".into(),

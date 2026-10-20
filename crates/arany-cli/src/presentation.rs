@@ -1055,6 +1055,7 @@ mod exec_jsonl_tests {
 
     fn message(run_id: arany::RunId, text: &str) -> Event {
         Event::MessageAccepted {
+            skill: None,
             run_id,
             text: text.into(),
             images: Vec::new(),
@@ -1123,6 +1124,7 @@ mod exec_jsonl_tests {
             ),
         ];
         let run = RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: current_run,
@@ -1359,6 +1361,7 @@ mod tests {
             )
         }
         let run = |fallbacks: Vec<_>| super::RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),
@@ -1890,6 +1893,7 @@ mod unguarded_tests {
     #[test]
     fn answer_headings_count_unguarded_effects() {
         let mut run = arany::RunView {
+            skill: None,
             supervisor: Default::default(),
             workers: Default::default(),
             id: RunId::new(),

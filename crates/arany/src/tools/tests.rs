@@ -24,6 +24,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         child_unguarded: crate::tools::UnguardedGrant::Denied,
         commands: Vec::new(),
         skills: vec![Skill {
+            disable_model_invocation: false,
             name: "review".into(),
             description: "Review guidance".into(),
             directory: "/tmp/skills/review".into(),

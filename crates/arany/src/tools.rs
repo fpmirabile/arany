@@ -670,6 +670,7 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(path), state.path())?;
             fs::reject_overlap(Path::new(path), &account)?;
         }
+        config.refresh_skill_visibility();
         #[cfg(target_os = "macos")]
         let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
             None
@@ -775,8 +776,15 @@ impl ToolRuntime {
         )
     }
 
+    pub(crate) fn allows_skill(&self, name: &str) -> bool {
+        self.config.allows(&ToolCall::Skill {
+            name: name.to_owned(),
+            resource: None,
+        })
+    }
+
     fn skill_rows(&self) -> Vec<serde_json::Value> {
-        self.config.skills.iter().map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
+        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
     fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
@@ -807,6 +815,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            invoked_skill: None,
             stop_bytes: 0,
             catalog,
             history_summary: None,
@@ -912,6 +921,7 @@ impl ToolRuntime {
             return Err(ToolError::Limit);
         }
         Ok(ToolContext {
+            invoked_skill: None,
             stop_bytes: 0,
             catalog,
             history_summary: None,

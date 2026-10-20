@@ -430,6 +430,7 @@ pub(in crate::cli) async fn run_configured(
                                 let worker_engine = engine.clone();
                                 let providers = loaded.providers.clone();
                                 let request = RunRequest {
+                                    skill: None,
                                     session_id: Some(input.thread_id),
                                     title: None,
                                     objective,

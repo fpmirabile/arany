@@ -97,7 +97,7 @@ impl Composer {
 
     pub(super) fn completion_description(&self, row: &str) -> String {
         if let Some(name) = row.strip_prefix("Skill /") {
-            return format!("Insert ${name} into your task");
+            return format!("Invoke /{name}");
         }
         let name = row.strip_prefix("Cmd /").unwrap_or(row);
         (0..super::commands::help_len())
@@ -123,7 +123,7 @@ impl Composer {
             .iter()
             .take(arany::MAX_SKILLS)
             .filter(|name| arany::valid_tool_name(name))
-            .map(|name| format!("${name}"))
+            .cloned()
             .collect();
         self.skills.sort();
         self.skills.dedup();
@@ -191,9 +191,14 @@ impl Composer {
             (
                 names
                     .iter()
-                    .map(|name| match name.strip_prefix('$') {
-                        Some(name) => format!("Skill /{name}"),
-                        None => format!("Cmd /{name}"),
+                    .map(|name| {
+                        if self.skills.contains(&name.to_string())
+                            && !command_completions("/").contains(name)
+                        {
+                            format!("Skill /{name}")
+                        } else {
+                            format!("Cmd /{name}")
+                        }
                     })
                     .collect(),
                 selected,
@@ -239,9 +244,29 @@ impl Composer {
     }
 
     pub fn submission(&self) -> Result<Submission<'_>, CommandParseError> {
-        match parse_submission(&self.text) {
+        self.parse_submission(&self.text)
+    }
+
+    pub fn parse_submission<'a>(&self, text: &'a str) -> Result<Submission<'a>, CommandParseError> {
+        match parse_submission(text) {
             Err(CommandParseError::Empty) if !self.images.is_empty() => {
-                Ok(Submission::Objective(&self.text))
+                Ok(Submission::Objective(text))
+            }
+            Err(error @ CommandParseError::Unknown { .. }) => {
+                let control = text.strip_prefix('/').ok_or(error)?;
+                let (name, task) = control
+                    .split_once(char::is_whitespace)
+                    .unwrap_or((control, ""));
+                if self.skills.iter().any(|skill| skill == name)
+                    && !command_completions("/").contains(&name)
+                {
+                    Ok(Submission::Skill {
+                        name,
+                        task: task.trim(),
+                    })
+                } else {
+                    Err(error)
+                }
             }
             result => result,
         }
@@ -346,12 +371,8 @@ impl Composer {
                 ghost: String::new(),
                 ghost_is_placeholder: false,
                 status: format!(
-                    "Tab/Enter: {} · Up/Down choose · Esc close",
-                    if names[selected].starts_with('$') {
-                        format!("{} (Skill)", names[selected])
-                    } else {
-                        format!("/{}", names[selected])
-                    }
+                    "Tab completes · Enter invokes /{} · Up/Down choose · Esc close",
+                    names[selected]
                 ),
             });
         }
@@ -385,7 +406,10 @@ impl Composer {
             names.extend(
                 self.skills
                     .iter()
-                    .filter(|name| name[1..].starts_with(prefix))
+                    .filter(|name| {
+                        name.starts_with(prefix)
+                            && !command_completions("/").contains(&name.as_str())
+                    })
                     .map(String::as_str),
             );
         }
@@ -485,15 +509,13 @@ impl Composer {
                 }
                 TerminalInput::Tab | TerminalInput::Submit => {
                     let name = names[selected];
-                    let mut completed = if name.starts_with('$') {
-                        format!("{name} ")
-                    } else {
-                        format!("/{name}")
-                    };
-                    if !name.starts_with('$')
-                        && let Some(suffix) = completion_suffix(&completed, &self.choices)
-                    {
-                        completed.push_str(&suffix);
+                    let mut completed = format!("/{name}");
+                    if input == TerminalInput::Tab {
+                        if let Some(suffix) = completion_suffix(&completed, &self.choices) {
+                            completed.push_str(&suffix);
+                        } else if self.skills.iter().any(|skill| skill == name) {
+                            completed.push(' ');
+                        }
                     }
                     if completed.len() > MAX_DRAFT_BYTES {
                         return ComposerEdit::AtCapacity;
@@ -502,7 +524,12 @@ impl Composer {
                     self.cursor = self.text.len();
                     self.vertical_grapheme_column = None;
                     self.completion_index = 0;
-                    return ComposerEdit::Changed;
+                    self.completion_hidden = input == TerminalInput::Submit;
+                    return if input == TerminalInput::Submit {
+                        ComposerEdit::Unchanged
+                    } else {
+                        ComposerEdit::Changed
+                    };
                 }
                 TerminalInput::Escape => {
                     self.completion_hidden = true;
@@ -1044,7 +1071,7 @@ mod tests {
     }
 
     #[test]
-    fn slash_skills_are_distinct_bounded_task_drafts_not_local_commands() {
+    fn slash_skills_are_distinct_bounded_invocations_with_command_precedence() {
         let mut composer = Composer::default();
         composer.insert_paste("/").unwrap();
         let cursor = composer.cursor_byte_offset();
@@ -1096,10 +1123,30 @@ mod tests {
                 composer.completion_rows().unwrap(),
                 (vec!["Skill /review".into()], 0)
             );
-            assert_eq!(composer.apply(accept), ComposerEdit::Changed);
-            assert_eq!(composer.text(), "$review ");
+            assert_eq!(
+                composer.apply(accept),
+                if accept == TerminalInput::Tab {
+                    ComposerEdit::Changed
+                } else {
+                    ComposerEdit::Unchanged
+                }
+            );
+            assert_eq!(
+                composer.text(),
+                if accept == TerminalInput::Tab {
+                    "/review "
+                } else {
+                    "/review"
+                }
+            );
             assert_eq!(composer.cursor_byte_offset(), composer.text().len());
-            assert_eq!(composer.submission(), Ok(Submission::Objective("$review ")));
+            assert_eq!(
+                composer.submission(),
+                Ok(Submission::Skill {
+                    name: "review",
+                    task: ""
+                })
+            );
             assert_eq!(
                 composer.apply(TerminalInput::Submit),
                 ComposerEdit::Unchanged
@@ -1107,13 +1154,10 @@ mod tests {
         }
         composer.clear();
         composer.insert_paste("/he").unwrap();
-        assert_eq!(
-            composer.completion_rows().unwrap().0,
-            ["Cmd /help", "Skill /help"]
-        );
+        assert_eq!(composer.completion_rows().unwrap().0, ["Cmd /help"]);
         composer.apply(TerminalInput::Down);
         composer.apply(TerminalInput::Submit);
-        assert_eq!(composer.text(), "$help ");
+        assert_eq!(composer.text(), "/help");
         composer.clear();
         composer.insert_paste("/help").unwrap();
         assert!(composer.completion_menu().is_none());
@@ -1154,8 +1198,22 @@ mod tests {
                     .completion_menu()
                     .expect("unique choice stays visible");
                 assert_eq!(names[selected], completed.trim().trim_start_matches('/'));
-                assert_eq!(composer.apply(accept), ComposerEdit::Changed);
-                assert_eq!(composer.text(), completed);
+                assert_eq!(
+                    composer.apply(accept),
+                    if accept == TerminalInput::Tab {
+                        ComposerEdit::Changed
+                    } else {
+                        ComposerEdit::Unchanged
+                    }
+                );
+                assert_eq!(
+                    composer.text(),
+                    if accept == TerminalInput::Tab {
+                        completed
+                    } else {
+                        completed.trim()
+                    }
+                );
                 assert!(composer.completion_menu().is_none());
                 assert_eq!(
                     composer.apply(TerminalInput::Submit),
@@ -1179,7 +1237,14 @@ mod tests {
                 assert_eq!(names[selected], expected);
                 assert_eq!(composer.text(), prefix);
                 assert_eq!(composer.cursor_byte_offset(), cursor);
-                assert_eq!(composer.apply(accept), ComposerEdit::Changed);
+                assert_eq!(
+                    composer.apply(accept),
+                    if accept == TerminalInput::Tab {
+                        ComposerEdit::Changed
+                    } else {
+                        ComposerEdit::Unchanged
+                    }
+                );
                 assert_eq!(composer.text(), format!("/{expected}"));
                 assert!(composer.completion_menu().is_none());
                 assert_eq!(
