@@ -2079,6 +2079,9 @@ impl AttachedTerminal {
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
+        if let (Some(old), Some(new)) = (&self.linear, &mut replacement.linear) {
+            new.keep_written_tools(old);
+        }
         replacement.classic_pinned = self.classic_pinned;
         #[cfg(unix)]
         {
