@@ -383,6 +383,7 @@ pub struct AttachedTerminal {
     session_picker_area: Option<Rect>,
     agent_picker_area: Option<Rect>,
     linear: Option<LinearState>,
+    kept_tools: Option<(arany::RunId, usize)>,
     #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
@@ -696,6 +697,7 @@ impl AttachedTerminal {
             session_picker_area: None,
             agent_picker_area: None,
             linear: mode_label.map(LinearState::new),
+            kept_tools: None,
             #[cfg(unix)]
             secret_echo: None,
             agent_panel: None,
@@ -2061,7 +2063,9 @@ impl AttachedTerminal {
         {
             first_error.get_or_insert(error);
         }
-        if self.linear.take().is_some_and(|linear| linear.line_open)
+        let linear = self.linear.take();
+        self.kept_tools = linear.as_ref().and_then(LinearState::written_tools);
+        if linear.is_some_and(|linear| linear.line_open)
             && let Err(error) = writeln!(io::stderr())
         {
             first_error.get_or_insert(error);
@@ -2079,8 +2083,8 @@ impl AttachedTerminal {
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
-        if let (Some(old), Some(new)) = (&self.linear, &mut replacement.linear) {
-            new.keep_written_tools(old);
+        if let Some(new) = &mut replacement.linear {
+            new.keep_written_tools(self.kept_tools);
         }
         replacement.classic_pinned = self.classic_pinned;
         #[cfg(unix)]
