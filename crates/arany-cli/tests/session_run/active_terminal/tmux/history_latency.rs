@@ -43,10 +43,10 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
             .is_some_and(|row| row.starts_with("─ Ask Arany "))
         && rows
             .get(rows.len().saturating_sub(2))
-            .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+O newline"))
+            .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+J newline"))
         && rows.last().is_some_and(|row| {
             row.trim().starts_with("ready · custom:local/model-1")
-                && row.trim_end().ends_with("More history · Ctrl+T history")
+                && row.trim_end().ends_with("More history · arany show")
         })
 }
 
@@ -636,71 +636,8 @@ async fn run_history_fixture() {
     );
     let screen = capture_pane(&server).expect("resumed Classic pane");
     assert!(
-        String::from_utf8_lossy(&screen).contains("More history · Ctrl+T history"),
+        String::from_utf8_lossy(&screen).contains("More history · arany show"),
         "bounded Classic projection advertises full history access"
-    );
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "C-f"])
-            .status
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("Find:"))
-        {
-            break;
-        }
-        assert!(Instant::now() < deadline, "full-history find did not open");
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-l", "-t", "arany-test:0.0", "objective 0000",])
-            .status
-            .success()
-    );
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Enter"])
-            .status
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server)
-            .is_some_and(|screen| String::from_utf8_lossy(&screen).contains("objective 0000"))
-        {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "full-history find missed omitted Run"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        server
-            .run(&["send-keys", "-t", "arany-test:0.0", "Escape"])
-            .status
-            .success()
-    );
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if capture_pane(&server).is_some_and(|screen| resumed_tail_layout(&screen)) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "Classic composer did not return from find"
-        );
-        thread::yield_now();
-    }
-    assert!(
-        product_guard.is_owned_and_running(),
-        "same product process remains live after closing History; {}",
-        wrapper_exit_status(&exit_path)
     );
     let native_history = server.run(&["capture-pane", "-p", "-S", "-", "-t", "arany-test:0.0"]);
     assert!(native_history.status.success(), "native scrollback capture");
@@ -763,16 +700,6 @@ async fn run_history_fixture() {
                     .status
                     .success()
             );
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                if capture_pane(&server).is_some_and(|screen| {
-                    String::from_utf8_lossy(&screen).contains("New text · Ctrl+L live")
-                }) {
-                    break;
-                }
-                assert!(Instant::now() < deadline, "history navigation not visible");
-                thread::yield_now();
-            }
             release_sender.send(()).expect("release primary delegation");
             request_ready
                 .recv_timeout(Duration::from_secs(20))
@@ -781,15 +708,13 @@ async fn run_history_fixture() {
             loop {
                 if capture_pane(&server).is_some_and(|screen| {
                     let text = String::from_utf8_lossy(&screen);
-                    text.contains("New text · Ctrl+L live")
-                        && text.contains("QWERT")
-                        && text.contains("child 1 · active")
+                    text.contains("QWERT") && text.contains("child 1 · active")
                 }) {
                     break;
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "delegation lost draft or history mode"
+                    "delegation lost the Classic draft"
                 );
                 thread::yield_now();
             }

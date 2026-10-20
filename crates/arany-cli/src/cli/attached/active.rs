@@ -663,6 +663,9 @@ pub(super) async fn submit_objective(
                 {
                     break "terminal input cleanup failed".to_owned();
                 }
+                if terminal.ignores_page_key(input) {
+                    continue;
+                }
                 match terminal.handle_transcript_input(input, view) {
                     Ok(true) => {
                         if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {

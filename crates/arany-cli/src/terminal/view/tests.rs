@@ -207,10 +207,10 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
 }
 
 #[test]
-fn narrow_classic_history_cue_keeps_ctrl_t_action_visible() {
+fn narrow_classic_history_cue_keeps_export_action_visible() {
     let width = 20;
     let status = super::super::classic_history_status(width, true, false);
-    assert_eq!(status, "Ctrl+T history");
+    assert_eq!(status, "arany show");
     let model = PresentationModel {
         status_line: "ready · custom:local/model-1".into(),
         activity_lines: Vec::new(),
@@ -672,7 +672,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
         );
         assert!(rows[usize::from(height - 4)].starts_with("─ Ask Arany"));
         assert!(rows[usize::from(height - 3)].starts_with("> "));
-        assert!(rows[usize::from(height - 2)].contains("Ctrl+O"));
+        assert!(rows[usize::from(height - 2)].contains("Ctrl+J"));
         if width >= 40 {
             assert!(rows[usize::from(height - 2)].contains("Enter sends"));
         }
@@ -891,7 +891,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         } else if width >= 40 {
                             "Enter sends"
                         } else {
-                            "Enter · Ctrl+O"
+                            "Enter · Ctrl+J"
                         };
                         assert!(
                             footer.contains(action),
@@ -899,7 +899,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         );
                         assert!(!keeps_draft || !footer.contains("sends"));
                         if width >= 40 || (!command && (width >= 24 || !keeps_draft)) {
-                            assert!(footer.contains("Ctrl+O"));
+                            assert!(footer.contains("Ctrl+J"));
                         }
                         assert_eq!(composer.text(), text);
                         assert_eq!(composer.cursor_byte_offset(), cursor);
@@ -1232,7 +1232,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         assert!(row(3).contains("\\u{202e}"));
         assert!(row(4).contains("last"));
         assert!(row(5).contains("Enter keeps draft"));
-        assert!(row(5).contains("Ctrl+O newline"));
+        assert!(row(5).contains("Ctrl+J newline"));
         assert!(row(6).contains("working · model"));
         assert!(buffer.content().iter().all(|cell| {
             cell.fg == ratatui::style::Color::Reset && cell.bg == ratatui::style::Color::Reset

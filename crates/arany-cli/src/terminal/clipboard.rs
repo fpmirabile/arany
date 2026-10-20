@@ -585,7 +585,6 @@ mod cleanup_tests {
         super::super::AttachedTerminal {
             waiting_tool: None,
             terminal: None,
-            parked_terminal: None,
             mode: super::super::TerminalMode::Classic,
             classic_pinned: false,
             alternate: None,

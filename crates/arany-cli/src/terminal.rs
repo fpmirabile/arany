@@ -62,8 +62,8 @@ pub fn report_error(message: impl std::fmt::Display) {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalMode {
-    Classic,
     #[default]
+    Classic,
     Fullscreen,
 }
 
@@ -203,9 +203,9 @@ fn model_catalog_status(item: &ModelEntry, exact_custom: bool) -> String {
 fn classic_history_status(width: u16, omitted_history: bool, pinned: bool) -> &'static str {
     if omitted_history {
         if width < 32 {
-            "Ctrl+T history"
+            "arany show"
         } else {
-            "More history · Ctrl+T history"
+            "More history · arany show"
         }
     } else if pinned {
         "Classic (--classic) · Ctrl+T details"
@@ -366,7 +366,6 @@ impl Drop for BracketedPaste {
 pub struct AttachedTerminal {
     waiting_tool: Option<uuid::Uuid>,
     terminal: Option<Terminal<TerminalBackend>>,
-    parked_terminal: Option<Terminal<TerminalBackend>>,
     mode: TerminalMode,
     classic_pinned: bool,
     alternate: Option<AlternateScreen>,
@@ -680,7 +679,6 @@ impl AttachedTerminal {
         Ok(Self {
             terminal,
             waiting_tool: None,
-            parked_terminal: None,
             mode,
             classic_pinned: false,
             alternate,
@@ -860,7 +858,7 @@ impl AttachedTerminal {
     }
 
     fn sync_native(&mut self, session: &SessionView) -> Result<(), TerminalError> {
-        if self.mode != TerminalMode::Classic || self.transcript_open {
+        if self.mode != TerminalMode::Classic {
             return Ok(());
         }
         if self.native.session != Some(session.id) {
@@ -946,43 +944,25 @@ impl AttachedTerminal {
                 .write_transcript(&mut io::stderr(), view)
                 .map_err(Into::into);
         }
-        if self.transcript_open {
-            if self.parked_terminal.is_some() {
-                let mut panel = self.terminal.take().expect("detail viewport");
-                panel.backend_mut().clear_owned()?;
-                panel.backend_mut().detach();
-                if let Some(mut alternate) = self.alternate.take() {
-                    alternate.release()?;
-                }
-                self.terminal = self.parked_terminal.take();
-                self.transcript_open = false;
-                self.prepare_frame()?;
-                self.terminal.as_mut().expect("classic viewport").clear()?;
-            }
-            self.transcript_open = false;
-        } else {
-            self.open_transcript_panel()?;
+        if self.mode == TerminalMode::Classic {
+            let mut text = Vec::new();
+            LinearState::new("classic").write_transcript(&mut text, view)?;
+            self.prepare_frame()?;
+            return self.insert_native(
+                history::MessageKind::ToolDetails,
+                std::str::from_utf8(&text).expect("escaped transcript is UTF-8"),
+            );
         }
-        let details = self.transcript_open;
-        self.history_mut().set_details(details);
+        self.transcript_open = !self.transcript_open;
+        self.history.set_details(self.transcript_open);
         Ok(())
     }
 
-    fn open_transcript_panel(&mut self) -> Result<(), TerminalError> {
-        if self.mode == TerminalMode::Classic {
-            self.prepare_frame()?;
-            let terminal = self.terminal.as_mut().expect("classic viewport");
-            terminal.backend_mut().clear_owned()?;
-            let alternate = AlternateScreen::acquire()?;
-            let panel = screen_terminal(
-                TerminalMode::Fullscreen,
-                self.input.as_ref().and_then(TerminalReader::cursor_query),
-            )?;
-            self.parked_terminal = self.terminal.replace(panel);
-            self.alternate = Some(alternate);
-        }
-        self.transcript_open = true;
-        Ok(())
+    #[must_use]
+    pub fn ignores_page_key(&self, input: TerminalInput) -> bool {
+        self.mode == TerminalMode::Classic
+            && !self.is_linear()
+            && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
     }
 
     pub fn handle_transcript_input(
@@ -1000,11 +980,14 @@ impl AttachedTerminal {
             return Ok(true);
         }
         if self.mode == TerminalMode::Classic
-            && !self.transcript_open
-            && matches!(input, TerminalInput::PageUp | TerminalInput::HistoryFind)
+            && !self.is_linear()
+            && input == TerminalInput::HistoryFind
         {
-            self.toggle_transcript(view)?;
-            self.history_mut().handle(input, view);
+            self.prepare_frame()?;
+            self.insert_native(
+                history::MessageKind::Notice,
+                "Use your terminal's find; Ctrl+T writes details to scrollback",
+            )?;
             return Ok(true);
         }
         Ok(false)
@@ -1055,7 +1038,7 @@ impl AttachedTerminal {
 
     pub fn handle_history_input(&mut self, input: TerminalInput, view: &SessionView) -> bool {
         let handled = !self.is_linear()
-            && (self.mode == TerminalMode::Fullscreen || self.transcript_open)
+            && self.mode == TerminalMode::Fullscreen
             && self.history_mut().handle(input, view);
         if handled && input == TerminalInput::HistoryFind {
             self.cancel_clipboard_paste();
@@ -1191,7 +1174,8 @@ impl AttachedTerminal {
             .restore_draft_bytes(draft_bytes)?;
         self.replace_released(resumed);
         if reading_panel {
-            self.open_transcript_panel()?;
+            self.transcript_open = true;
+            self.history.set_details(true);
         }
         Ok(())
     }
@@ -1224,7 +1208,7 @@ impl AttachedTerminal {
 
     fn prepare_frame(&mut self) -> Result<(), TerminalError> {
         let terminal = self.terminal.as_mut().expect("owned terminal");
-        if self.mode == TerminalMode::Classic && !self.transcript_open {
+        if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
             let resized = resize_classic(terminal, offset, || {
                 let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
@@ -1296,7 +1280,6 @@ impl AttachedTerminal {
         self.prepare_frame()?;
         self.sync_native(view)?;
         if self.mode == TerminalMode::Classic
-            && !self.transcript_open
             && let Some(TerminalNotice::History(text)) = notice
         {
             let text = history::bounded_notice_text(text).into_owned();
@@ -1351,13 +1334,12 @@ impl AttachedTerminal {
         if let Some(notice) = notice {
             self.history_mut().record_notice(notice);
         }
-        let history_rows = if self.mode == TerminalMode::Fullscreen || self.transcript_open {
+        let history_rows = if self.mode == TerminalMode::Fullscreen {
             self.history_mut().visible(view)
         } else {
             self.classic_history.live_rows(view)
         };
-        let native_transcript =
-            self.mode == TerminalMode::Classic && !self.transcript_open && !view.runs.is_empty();
+        let native_transcript = self.mode == TerminalMode::Classic && !view.runs.is_empty();
         let history_status = if native_transcript {
             let hint = classic_history_status(
                 area.width,
@@ -1727,7 +1709,7 @@ impl AttachedTerminal {
                 .draw_sessions(items, selected)
                 .map_err(TerminalError::Io);
         }
-        if self.mouse_capture.is_none() {
+        if self.mode == TerminalMode::Fullscreen && self.mouse_capture.is_none() {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
@@ -2000,7 +1982,10 @@ impl AttachedTerminal {
                 .saturating_sub(agent_detail_rows(height, model.choices.len())),
         );
         let scroll = panel.scroll;
-        if !model.choices.is_empty() && self.mouse_capture.is_none() {
+        if self.mode == TerminalMode::Fullscreen
+            && !model.choices.is_empty()
+            && self.mouse_capture.is_none()
+        {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
@@ -2053,9 +2038,6 @@ impl AttachedTerminal {
                 }
             }
             // Ratatui's Drop prints to stderr if cursor restoration fails.
-            terminal.backend_mut().detach();
-        }
-        if let Some(mut terminal) = self.parked_terminal.take() {
             terminal.backend_mut().detach();
         }
         if let Some(mut alternate) = self.alternate.take()

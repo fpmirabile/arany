@@ -1177,3 +1177,185 @@ mod steering;
 #[cfg(target_os = "linux")]
 #[path = "active_terminal/tmux.rs"]
 mod tmux;
+
+#[test]
+fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
+    use super::session_picker::{PtyResponses, pump, tail};
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let id = crate::seed_transcript_session(&state, &workspace);
+    assert!(!state.join("ui-preferences.json").exists());
+    let shell = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$result\"";
+    let mut command = crate::isolation::account_isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .env("TERM", "xterm")
+        .env("SHELL", "/bin/sh")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = PtyResponses::default();
+    let wait = |mut output: &mut dyn Read,
+                mut input: &mut dyn Write,
+                transcript: &mut Vec<u8>,
+                answered: &mut PtyResponses,
+                from: usize,
+                needle: &[u8]| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !transcript[from..]
+            .windows(needle.len())
+            .any(|part| part == needle)
+        {
+            pump(&mut output, &mut input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "Classic PTY: {}",
+                tail(transcript)
+            );
+            thread::yield_now();
+        }
+        pump(&mut output, &mut input, transcript, answered);
+    };
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        b"TTY_BEFORE:",
+    );
+    let text = String::from_utf8_lossy(&transcript);
+    let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
+    let _product = ProductGuard::new(pid, state.clone());
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    // The following transcript gesture is a reader-order barrier for both ignored page keys.
+    let from = transcript.len();
+    input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        b"reached;",
+    );
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        b"\x1b[?25h\x1b[22;3H",
+    );
+    let dump = &transcript[from..];
+    let heading = dump
+        .windows(b"Transcript".len())
+        .position(|part| part == b"Transcript")
+        .unwrap();
+    let prelude = dump[..heading].to_vec();
+    assert_eq!(
+        dump.windows(b"DETAIL_CANARY".len())
+            .filter(|part| *part == b"DETAIL_CANARY")
+            .count(),
+        16
+    );
+    assert!(!dump.windows(5).any(|part| part == b"\x1b]52;"));
+    for gesture in [b"\x0f".as_slice(), b"/transcript\r"] {
+        let from = transcript.len();
+        input.write_all(gesture).unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            b"reached;",
+        );
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            b"\x1b[?25h\x1b[22;3H",
+        );
+        if gesture == b"\x0f" {
+            let dump = &transcript[from..];
+            let heading = dump
+                .windows(b"Transcript".len())
+                .position(|part| part == b"Transcript")
+                .unwrap();
+            assert_eq!(
+                &dump[..heading],
+                prelude,
+                "page keys must produce no output"
+            );
+        }
+    }
+    for (command, needle) in [
+        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..]),
+        (b"/agents\r", b"gents"),
+    ] {
+        let from = transcript.len();
+        input.write_all(command).unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            needle,
+        );
+        input.write_all(b"\x1b").unwrap();
+        wait(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            b"\x1b[?25h\x1b[22;3H",
+        );
+    }
+    input.write_all(b"/exit\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.child().try_wait().unwrap().is_none() {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(Instant::now() < deadline, "Classic exit");
+        thread::yield_now();
+    }
+    assert!(wait_product(child.take()).status.success());
+    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    let text = String::from_utf8_lossy(&transcript);
+    for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
+        assert!(
+            !text.contains(&format!("\x1b[?{mode}h")),
+            "Classic enabled {mode}"
+        );
+    }
+    assert_eq!(
+        transcript_field(&text, "TTY_BEFORE:"),
+        transcript_field(&text, "TTY_AFTER:")
+    );
+}
