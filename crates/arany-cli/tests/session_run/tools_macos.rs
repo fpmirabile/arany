@@ -1366,6 +1366,10 @@ async fn run_offline_build_case(
     let approve = async {
         let mut calls = Vec::new();
         while let Some(approval) = inbox.next().await {
+            assert!(
+                !approval.allow_auto_edits,
+                "commands cannot offer file-edit remembering"
+            );
             let matches = calls.is_empty() && approval.intent.call == call;
             calls.push(approval.intent.call.clone());
             approval.decide(matches);
@@ -2677,6 +2681,188 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
             assert_eq!(ready["profile_digest"], json!(admitted.enforcement_digest));
         } else {
             assert!(output.stdout.is_empty(), "premature Ready: {case}");
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native macOS one-use approval rows and replay"
+)]
+fn native_approval_rows_preserve_one_use_and_request_mode_eligibility() {
+    native_journey("tools::native_approval_rows_helper");
+}
+
+struct ApprovalRowProvider(ToolCall);
+
+#[async_trait::async_trait]
+impl Provider for ApprovalRowProvider {
+    fn identity(&self) -> &arany::ProviderIdentity {
+        static IDENTITY: std::sync::LazyLock<arany::ProviderIdentity> =
+            std::sync::LazyLock::new(|| {
+                arany::ProviderIdentity::new(
+                    "scripted",
+                    "approval-rows",
+                    arany::Provenance::native(),
+                )
+            });
+        &IDENTITY
+    }
+
+    async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let outcome = if !crate::planned(&request) {
+            arany::test_support::scenario::plan_outcome(arany::GoalPlanContract {
+                mission: "Review one native file edit".into(),
+                paths: vec!["src".into()],
+                commands: Vec::new(),
+                resource_class: arany::ToolResourceClass::Default,
+                command_timeout_ms: None,
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: arany::GoalSuccessCriterion::ToolCallSucceeded {
+                    call: Box::new(self.0.clone()),
+                },
+                budget: arany::GoalBudget::default(),
+            })
+        } else if request
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()
+            .is_empty()
+        {
+            crate::tool_outcome(self.0.clone())
+        } else {
+            ProviderOutcome::Answer(Answer {
+                text: "Approved native edit".into(),
+            })
+        };
+        Ok(ProviderResponse {
+            turn: arany::ProviderTurn::scripted(),
+            outcome,
+            response_id: None,
+            usage: arany::Usage::default(),
+            wire_provenance: None,
+        })
+    }
+
+    async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+        Err(ProviderError::InvalidOutcome)
+    }
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native approval rows"]
+async fn native_approval_rows_helper() {
+    let root = std::env::var_os("ARANY_TEST_FILE_JOURNEY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    for (name, settings, allow, eligible) in [
+        ("yes", None, true, true),
+        ("no", None, false, true),
+        (
+            "rule",
+            Some(json!({"permissions":{"ask":["Edit"]}})),
+            false,
+            false,
+        ),
+        ("settings", Some(json!({"permissions":{}})), false, false),
+    ] {
+        let workspace = root.join(format!("approval-{name}"));
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        let state_path = root.join(format!("approval-state-{name}"));
+        let state = StateRoot::admit(&state_path).unwrap();
+        private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
+        if let Some(settings) = settings {
+            private_file(
+                &state_path.join("permissions.json"),
+                &serde_json::to_vec(&settings).unwrap(),
+            );
+        }
+        let call = ToolCall::Write {
+            path: "src/approved.txt".into(),
+            expected_digest: None,
+            content: "native approval\n".into(),
+        };
+        let provider = Arc::new(ApprovalRowProvider(call.clone()));
+        let engine = arany::test_support::engine::open(
+            state,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let answer = async {
+            let approval = inbox.next().await.expect("one native approval");
+            assert_eq!(approval.intent.call, call);
+            assert_eq!(approval.allow_auto_edits, eligible, "{name}");
+            assert!(approval.unguarded.is_none());
+            approval.decide(if allow {
+                arany::ApprovalReply::AllowOnce
+            } else {
+                arany::ApprovalReply::Deny
+            });
+        };
+        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+            tokio::join!(
+                run_with(
+                    &engine,
+                    &provider,
+                    RunRequest {
+                        skill: None,
+                        session_id: None,
+                        title: None,
+                        objective: "Review the proposed native edit".into(),
+                        images: Vec::new(),
+                        workspace: workspace.clone(),
+                        include_paths: Vec::new(),
+                        policy: CollaborationPolicy::Single,
+                        goal: arany::GoalRequest::default(),
+                    },
+                    RunControls {
+                        tools: ToolGrant::Configured,
+                        approvals: Some(approvals.clone()),
+                        ..Default::default()
+                    }
+                ),
+                answer
+            )
+        })
+        .await
+        .expect("bounded native approval");
+        let outcome = outcome.unwrap();
+        engine.close().await.unwrap();
+        assert_eq!(workspace.join("src/approved.txt").exists(), allow, "{name}");
+        assert_eq!(
+            outcome.run.status,
+            if allow {
+                RunStatus::Finished
+            } else {
+                RunStatus::Failed
+            }
+        );
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let events = store.load_session(outcome.session_id).await.unwrap();
+        store.close().await.unwrap();
+        let replay = arany::SessionView::replay(outcome.session_id, &events)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replay.runs[0], outcome.run);
+        if !allow {
+            assert!(
+                replay.runs[0]
+                    .tools
+                    .last()
+                    .unwrap()
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .attestation
+                    .is_none()
+            );
         }
     }
 }

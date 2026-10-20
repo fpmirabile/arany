@@ -67,6 +67,7 @@ pub struct UnguardedPrompt {
 pub struct ToolApproval {
     pub intent: EffectIntent,
     pub unguarded: Option<UnguardedPrompt>,
+    pub allow_auto_edits: bool,
     reply: oneshot::Sender<ApprovalReply>,
 }
 
@@ -118,7 +119,15 @@ impl ToolApprovals {
     }
 
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
-        self.request(intent, None).await != ApprovalReply::Deny
+        self.ask_with_auto_edits(intent, false).await
+    }
+
+    pub(crate) async fn ask_with_auto_edits(
+        &self,
+        intent: &EffectIntent,
+        allow_auto_edits: bool,
+    ) -> bool {
+        self.request(intent, None, allow_auto_edits).await != ApprovalReply::Deny
     }
 
     pub(crate) async fn ask_unguarded(
@@ -126,13 +135,14 @@ impl ToolApprovals {
         intent: &EffectIntent,
         prompt: UnguardedPrompt,
     ) -> ApprovalReply {
-        self.request(intent, Some(prompt)).await
+        self.request(intent, Some(prompt), false).await
     }
 
     async fn request(
         &self,
         intent: &EffectIntent,
         unguarded: Option<UnguardedPrompt>,
+        allow_auto_edits: bool,
     ) -> ApprovalReply {
         let (reply, response) = oneshot::channel();
         if self
@@ -140,6 +150,7 @@ impl ToolApprovals {
             .send(ToolApproval {
                 intent: intent.clone(),
                 unguarded,
+                allow_auto_edits,
                 reply,
             })
             .await

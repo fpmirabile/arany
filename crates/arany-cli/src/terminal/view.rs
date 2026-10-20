@@ -350,6 +350,141 @@ pub(super) fn classic_height(
         .min(screen.height)
 }
 
+pub(super) fn tool_approval_height(
+    lines: &[String],
+    choices: &[crate::presentation::ToolApprovalChoice],
+    width: u16,
+) -> u16 {
+    let width = usize::from(width.saturating_sub(if width >= 40 { 4 } else { 0 }).max(1));
+    let rows = lines
+        .iter()
+        .map(|line| wrap_cells(line, width, 0).len())
+        .sum::<usize>();
+    let chrome =
+        tool_approval_controls(choices, width, 0).len() + 1 + tool_approval_hint_height(width);
+    u16::try_from(rows.saturating_add(chrome))
+        .unwrap_or(u16::MAX)
+        .max(8)
+}
+
+fn tool_approval_hint_height(width: usize) -> usize {
+    wrap_cells("Review the whole action first (PgDn)", width, 0)
+        .len()
+        .max(wrap_cells("1-3 choose · ↑↓ Enter · Esc = No", width, 0).len())
+        .max(wrap_cells("↓ 99999999 more lines · PgDn", width, 0).len())
+}
+
+fn tool_approval_controls(
+    choices: &[crate::presentation::ToolApprovalChoice],
+    width: usize,
+    focus: usize,
+) -> Vec<Line<'static>> {
+    let mut rows = wrap_cells("Do you want to proceed?", width, 0)
+        .into_iter()
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    for (index, choice) in choices.iter().enumerate() {
+        let label = format!(
+            "{} {}. {}",
+            if index == focus { "›" } else { " " },
+            index + 1,
+            choice.label()
+        );
+        rows.extend(wrap_cells(&label, width, 5).into_iter().map(|row| {
+            Line::styled(
+                row,
+                if index == focus {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                },
+            )
+        }));
+    }
+    rows
+}
+
+pub(super) fn draw_tool_approval_frame(
+    frame: &mut Frame,
+    area: Rect,
+    lines: &[String],
+    choices: &[crate::presentation::ToolApprovalChoice],
+    page: usize,
+    focus: usize,
+    review_notice: bool,
+) -> bool {
+    frame.render_widget(Clear, area);
+    let gutter = u16::from(area.width >= 40) * 2;
+    let area = Rect::new(
+        area.x + gutter,
+        area.y,
+        area.width.saturating_sub(gutter * 2),
+        area.height,
+    );
+    let width = usize::from(area.width.max(1));
+    let controls = tool_approval_controls(choices, width, focus);
+    let hint_height = tool_approval_hint_height(width);
+    let chrome = controls.len().saturating_add(1 + hint_height);
+    if area.width < 16 || usize::from(area.height) <= chrome {
+        frame.render_widget(
+            Paragraph::new("Resize to review; Esc denies").wrap(Wrap { trim: false }),
+            area,
+        );
+        return true;
+    }
+    let rows = lines
+        .iter()
+        .flat_map(|line| wrap_cells(line, width, 0))
+        .map(Line::raw)
+        .collect::<Vec<_>>();
+    let body_height = usize::from(area.height) - chrome;
+    let pages = rows.len().div_ceil(body_height).max(1);
+    let page = page.min(pages - 1);
+    let start = page * body_height;
+    let end = rows.len().min(start + body_height);
+    frame.render_widget(
+        Paragraph::new("Tool approval").style(Style::default().add_modifier(Modifier::BOLD)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    frame.render_widget(
+        Paragraph::new(rows[start..end].to_vec()),
+        Rect::new(area.x, area.y + 1, area.width, body_height as u16),
+    );
+    let more = page + 1 < pages;
+    let hint = if review_notice {
+        "Review the whole action first (PgDn)".to_owned()
+    } else if more {
+        format!("↓ {} more lines · PgDn", rows.len() - end)
+    } else {
+        format!("1-{} choose · ↑↓ Enter · Esc = No", choices.len())
+    };
+    let controls_y = area.bottom() - controls.len() as u16;
+    frame.render_widget(
+        Paragraph::new(
+            wrap_cells(&hint, width, 0)
+                .into_iter()
+                .map(Line::raw)
+                .collect::<Vec<_>>(),
+        ),
+        Rect::new(
+            area.x,
+            controls_y - hint_height as u16,
+            area.width,
+            hint_height as u16,
+        ),
+    );
+    frame.render_widget(
+        Paragraph::new(controls),
+        Rect::new(
+            area.x,
+            controls_y,
+            area.width,
+            controls_y.abs_diff(area.bottom()),
+        ),
+    );
+    more
+}
+
 pub(super) fn permission_height(
     lines: &[String],
     width: u16,
@@ -870,36 +1005,15 @@ pub(super) fn draw_frame(
     draw_frame_with_history(frame, model, composer, notice, palette, &[], None);
 }
 
-pub(super) fn draw_frame_with_history(
+pub(super) fn draw_history_rows(
     frame: &mut Frame,
-    model: &PresentationModel,
-    composer: &Composer,
-    notice: Option<&str>,
-    palette: Palette,
+    area: Rect,
     history_rows: &[HistoryRow],
-    history_status: Option<&str>,
+    palette: Palette,
 ) {
-    let area = frame.area();
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
-    let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
-    let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
-        .saturating_add(2)
-        .min(area.height.saturating_sub(1));
-    let menu_height = completion_height(composer, area.height.saturating_sub(1 + composer_height));
-    let menu_y = area.bottom().saturating_sub(1 + menu_height);
-    let composer_y = menu_y.saturating_sub(composer_height);
-    let activity_rows = composer_y
-        .saturating_sub(area.y)
-        .min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
-    let available_history = composer_y.saturating_sub(area.y + activity_rows);
-    let padding = history_top_padding(available_history);
-    let history_top = area.y + padding;
-    let history_height = available_history - padding;
     for (row, line) in history_rows
         .iter()
-        .take(usize::from(history_height))
+        .take(usize::from(area.height))
         .enumerate()
     {
         let style = if line.matched {
@@ -944,9 +1058,44 @@ pub(super) fn draw_frame_with_history(
         };
         frame.render_widget(
             Paragraph::new(Line::from(spans)),
-            Rect::new(area.x, history_top + row as u16, area.width, 1),
+            Rect::new(area.x, area.y + row as u16, area.width, 1),
         );
     }
+}
+
+pub(super) fn draw_frame_with_history(
+    frame: &mut Frame,
+    model: &PresentationModel,
+    composer: &Composer,
+    notice: Option<&str>,
+    palette: Palette,
+    history_rows: &[HistoryRow],
+    history_status: Option<&str>,
+) {
+    let area = frame.area();
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
+    let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(1));
+    let menu_height = completion_height(composer, area.height.saturating_sub(1 + composer_height));
+    let menu_y = area.bottom().saturating_sub(1 + menu_height);
+    let composer_y = menu_y.saturating_sub(composer_height);
+    let activity_rows = composer_y
+        .saturating_sub(area.y)
+        .min(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX));
+    let available_history = composer_y.saturating_sub(area.y + activity_rows);
+    let padding = history_top_padding(available_history);
+    let history_top = area.y + padding;
+    let history_height = available_history - padding;
+    draw_history_rows(
+        frame,
+        Rect::new(area.x, history_top, area.width, history_height),
+        history_rows,
+        palette,
+    );
     if history_rows.is_empty()
         && history_status.is_none()
         && model.empty_chat

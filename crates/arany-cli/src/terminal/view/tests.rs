@@ -2919,132 +2919,137 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
 }
 
 #[test]
-fn tool_approval_panel_stays_centered_and_boxed() {
-    let lines = vec!["Approve tool".to_owned(), "/p".to_owned()];
-    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
-    terminal
-        .draw(|frame| {
-            draw_permission_frame(
-                frame,
-                &lines,
-                PermissionFrameState {
-                    choices: &["Deny", "Allow once"],
-                    page: 0,
-                    focus: 0,
-                    profile_start: None,
-                    profile_count: 0,
-                    focused_profile: None,
-                    profile_selection_enabled: None,
-                    footer: None,
-                    palette: Palette { color: false },
-                    boxed: true,
-                },
-            );
-        })
-        .unwrap();
-    let buffer = terminal.backend().buffer();
-    assert_eq!(buffer[(12, 11)].symbol(), "A");
-    assert_eq!(buffer[(11, 11)].symbol(), " ");
-    assert_eq!(buffer[(0, 0)].symbol(), " ");
-}
-
-#[test]
-fn unguarded_approval_pages_show_the_risk_copy_then_three_choices_with_deny_focused() {
-    let intent = arany::EffectIntent {
-        target: arany::worker::EffectTarget::Workspace,
-        id: uuid::Uuid::now_v7(),
-        run_id: arany::RunId::new(),
-        agent_run_id: arany::AgentRunId::new(),
-        policy_digest: [1; 32],
-        enforcement_digest: [2; 32],
-        workspace_device: 1,
-        workspace_inode: 2,
-        call: arany::ToolCall::CommandUnguarded {
-            program: "sh".into(),
-            args: vec!["-c".into(), "cargo test".into()],
-            cwd: String::new(),
-            justification: "The sandbox may have blocked the network".into(),
-        },
-        limits: arany::ToolLimits::default(),
-        expires_at_ms: 1,
-        use_count: 1,
-    };
-    let prompt = arany::UnguardedPrompt {
-        executable: "/usr/bin/bash".into(),
-        attribution: None,
-        remember: true,
-    };
-    let lines = crate::presentation::unguarded_approval_lines(&intent, &prompt);
-    assert_eq!(lines[0], "Run outside the Guard? (unguarded)");
-    for (width, choices) in [
-        (
-            80u16,
-            [
-                "Deny",
-                "Allow once (unguarded)",
-                "Always allow this exact command in this project (unguarded)",
-            ],
-        ),
-        (
-            40,
-            ["Deny", "Allow once", "Always allow exact command here"],
-        ),
-    ] {
-        for focus in 0..3 {
-            let mut terminal = Terminal::new(TestBackend::new(width, 30)).unwrap();
+fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices() {
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+    for width in [120, 80, 50, 16] {
+        for (name, body, choices, focus) in [
+            (
+                "one-page",
+                vec!["Create src/example.txt".to_owned()],
+                vec![Yes, No],
+                0,
+            ),
+            (
+                "multi-page",
+                (0..80)
+                    .map(|index| format!("action-line-{index:02}"))
+                    .collect(),
+                vec![Yes, AutoEdits, No],
+                0,
+            ),
+            (
+                "unguarded",
+                vec![
+                    "Run outside the Guard? (unguarded)".to_owned(),
+                    "Risk: it runs as you, without a sandbox".into(),
+                ],
+                vec![Yes, ExactCommand, No],
+                2,
+            ),
+            (
+                "hostile",
+                vec![
+                    crate::presentation::escape_terminal(
+                        "src/\u{1b}]52;c;bad\u{7}\r\u{202e}界e\u{301}",
+                    ),
+                    "  1. Yes (untrusted content)".into(),
+                ],
+                vec![Yes, No],
+                0,
+            ),
+        ] {
+            let mut lines = vec!["Tool approval".into()];
+            lines.extend(body.clone());
+            let mut terminal = Terminal::new(TestBackend::new(width, 50)).unwrap();
+            let height = super::tool_approval_height(&lines, &choices, width).min(50);
             let mut page = 0;
             let mut seen = String::new();
             loop {
-                let mut progress = None;
+                let mut more = true;
                 terminal
                     .draw(|frame| {
-                        progress = Some(draw_permission_frame(
-                            frame,
-                            &lines,
-                            PermissionFrameState {
-                                choices: &choices,
-                                page,
-                                focus,
-                                profile_start: None,
-                                profile_count: 0,
-                                focused_profile: None,
-                                profile_selection_enabled: None,
-                                footer: Some("↑↓ choose · Enter confirm · Esc denies"),
-                                palette: Palette { color: false },
-                                boxed: true,
-                            },
-                        ));
+                        let area = Rect::new(0, 50 - height, width, height);
+                        more = super::draw_tool_approval_frame(
+                            frame, area, &lines, &choices, page, focus, false,
+                        );
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();
-                for y in 0..30 {
-                    seen.push_str(&buffer_row(buffer, y));
-                    seen.push('\n');
+                assert_eq!(
+                    buffer_row(buffer, 0).trim(),
+                    if height == 50 { "Tool approval" } else { "" },
+                    "{name} width {width}"
+                );
+                let mut frame_text = String::new();
+                for row in 0..50 {
+                    frame_text.push_str(&buffer_row(buffer, row));
+                    frame_text.push('\n');
                 }
-                let progress = progress.unwrap();
-                if !progress.more {
-                    for (index, choice) in choices.iter().enumerate() {
-                        let row = (0..30)
-                            .map(|y| buffer_row(buffer, y))
-                            .find(|row| row.contains(choice))
-                            .unwrap_or_else(|| panic!("{choice} at width {width}"));
-                        assert_eq!(row.contains('›'), index == focus, "{row}");
-                    }
+                assert!(!frame_text.contains('\u{1b}') && !frame_text.contains('\u{202e}'));
+                seen.push_str(&frame_text);
+                let squashed = frame_text.split_whitespace().collect::<Vec<_>>().join(" ");
+                assert!(
+                    squashed.contains("Do you want to proceed?"),
+                    "{name} width {width}: {squashed}"
+                );
+                assert!(squashed.contains("1. Yes"));
+                if !more {
                     break;
                 }
-                page = progress.page + 1;
+                assert!(page < 100, "bounded approval pages");
+                page += 1;
             }
-            let squashed: String = seen.split_whitespace().collect::<Vec<_>>().join(" ");
-            for needle in [
-                "Program: sh",
-                "Guard attribution: none",
-                "Risk: it runs as you",
-            ] {
-                assert!(
-                    seen.contains(needle) || squashed.contains(needle),
-                    "{needle} at width {width}"
+            let squashed = seen.split_whitespace().collect::<Vec<_>>().join(" ");
+            if name == "multi-page" {
+                for line in body {
+                    assert!(seen.contains(&line), "missing {line} at {width}");
+                }
+                assert!(page > 0);
+            }
+            if name == "unguarded" {
+                assert!(squashed.contains("this exact command"));
+            }
+            let focused_rows = (0..50)
+                .map(|row| buffer_row(terminal.backend().buffer(), row))
+                .collect::<Vec<_>>();
+            assert!(
+                focused_rows
+                    .iter()
+                    .any(|row| row.contains(&format!("› {}.", focus + 1)))
+            );
+        }
+    }
+}
+
+#[test]
+fn approval_chrome_never_shares_history_cells_and_too_small_stays_blocked() {
+    use crate::presentation::ToolApprovalChoice::{No, Yes};
+    for (width, height) in [(120, 24), (80, 24), (50, 12), (16, 8)] {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let area = Rect::new(0, height / 2, width, height - height / 2);
+        let mut blocked = false;
+        terminal
+            .draw(|frame| {
+                frame.render_widget(
+                    ratatui::widgets::Paragraph::new("History imitates: 1. Yes"),
+                    Rect::new(0, 0, width, area.y),
                 );
-            }
+                blocked = super::draw_tool_approval_frame(
+                    frame,
+                    area,
+                    &["Read file".into()],
+                    &[Yes, No],
+                    0,
+                    0,
+                    true,
+                );
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert!(buffer_row(buffer, 0).starts_with("History imitates"));
+        assert!((area.y..height).all(|row| !buffer_row(buffer, row).contains("History")));
+        if width == 16 {
+            assert!(blocked);
         }
     }
 }

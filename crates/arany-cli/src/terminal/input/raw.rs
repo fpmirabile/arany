@@ -26,7 +26,7 @@ const OUTBOX_RETRY: Duration = Duration::from_millis(2);
 const PASTE_END: &[u8; 6] = b"\x1b[201~";
 
 pub(super) fn start(
-    sender: mpsc::Sender<io::Result<ReaderEvent>>,
+    sender: mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
     cursor: CursorQuery,
 ) -> io::Result<JoinHandle<()>> {
@@ -39,7 +39,7 @@ pub(super) fn start(
         .name("arany-terminal-input".into())
         .spawn(move || {
             if let Err(error) = read(&mut poll, &mut input, &sender, &shutdown, &cursor) {
-                let _ = sender.blocking_send(Err(error));
+                let _ = sender.blocking_send((Instant::now(), Err(error)));
             }
             cursor.close();
         })
@@ -47,22 +47,22 @@ pub(super) fn start(
 
 // A cursor reply must not wait behind a full event queue while the owner waits for that reply.
 struct Outbox<'a> {
-    sender: &'a mpsc::Sender<io::Result<ReaderEvent>>,
-    backlog: VecDeque<ReaderEvent>,
+    sender: &'a mpsc::Sender<super::Observed<ReaderEvent>>,
+    backlog: VecDeque<(Instant, ReaderEvent)>,
 }
 
 impl Outbox<'_> {
-    fn push(&mut self, event: ReaderEvent) -> bool {
-        self.backlog.push_back(event);
+    fn push(&mut self, event: ReaderEvent, observed: Instant) -> bool {
+        self.backlog.push_back((observed, event));
         self.flush()
     }
 
     fn flush(&mut self) -> bool {
-        while let Some(event) = self.backlog.pop_front() {
-            match self.sender.try_send(Ok(event)) {
+        while let Some((observed, event)) = self.backlog.pop_front() {
+            match self.sender.try_send((observed, Ok(event))) {
                 Ok(()) => {}
-                Err(TrySendError::Full(Ok(event))) => {
-                    self.backlog.push_front(event);
+                Err(TrySendError::Full((observed, Ok(event)))) => {
+                    self.backlog.push_front((observed, event));
                     break;
                 }
                 Err(_) => return false,
@@ -75,7 +75,7 @@ impl Outbox<'_> {
 fn read(
     poll: &mut Poll,
     input: &mut File,
-    sender: &mpsc::Sender<io::Result<ReaderEvent>>,
+    sender: &mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: &AtomicBool,
     cursor: &CursorQuery,
 ) -> io::Result<()> {
@@ -98,7 +98,7 @@ fn read(
         }
         let now = Instant::now();
         if let Some(event) = decoder.expire(now)?
-            && !outbox.push(event)
+            && !outbox.push(event, now)
         {
             return Ok(());
         }
@@ -106,7 +106,7 @@ fn read(
         if resized != geometry {
             geometry = resized;
             if let Some((width, height)) = resized
-                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)))
+                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)), now)
             {
                 return Ok(());
             }
@@ -122,6 +122,7 @@ fn read(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
+        let observed = Instant::now();
         match input.read(&mut bytes) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -130,7 +131,7 @@ fn read(
                 ));
             }
             Ok(len) => {
-                let now = Instant::now();
+                let now = observed;
                 for &byte in &bytes[..len] {
                     if shutdown.load(Ordering::Acquire) {
                         return Ok(());
@@ -138,17 +139,14 @@ fn read(
                     if let Some(event) = decoder.feed(byte, now) {
                         if let ReaderEvent::CursorPosition(column, row) = event {
                             cursor.respond(column, row);
-                        } else if !outbox.push(event) {
+                        } else if !outbox.push(event, now) {
                             return Ok(());
                         }
                     }
                 }
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
         poll.registry()

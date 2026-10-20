@@ -95,6 +95,7 @@ enum Resolver<'a> {
 enum AskSite {
     Primary {
         unguarded_prompt: Option<UnguardedPrompt>,
+        allow_auto_edits: bool,
     },
     Delegated {
         deadline: Instant,
@@ -1082,6 +1083,9 @@ impl RunLoop<'_> {
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
         let unguarded = intent.call.is_unguarded();
+        let allow_auto_edits = permission.decision == Decision::Allow
+            && self.terminal_mode() == Some(ApprovalMode::Request)
+            && intent.call.facts().mutates;
         let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
         let timeout_limit = self.ledger().command_timeout_limit(&intent.call)?;
         let hooks = match config {
@@ -1172,6 +1176,7 @@ impl RunLoop<'_> {
                         *review_allowed && self.ledger().admits(Action::Review),
                         intent,
                         permission,
+                        allow_auto_edits && hooks.restriction != Some(Decision::Ask),
                     ))
                     .await?
                 }
@@ -1234,6 +1239,7 @@ impl RunLoop<'_> {
         review_allowed: bool,
         intent: EffectIntent,
         permission: Permission,
+        allow_auto_edits: bool,
     ) -> Result<(Verdict, PermissionSource), EngineError> {
         let mut source = if permission.decision == Decision::Ask {
             PermissionSource::UnavailableApproval
@@ -1293,6 +1299,7 @@ impl RunLoop<'_> {
                     chain,
                     AskSite::Primary {
                         unguarded_prompt: unguarded_prompt.clone(),
+                        allow_auto_edits,
                     },
                 )
                 .await?;
@@ -1413,6 +1420,7 @@ impl RunLoop<'_> {
         approvals: &crate::tools::ToolApprovals,
         intent: &EffectIntent,
         prompt: Option<UnguardedPrompt>,
+        allow_auto_edits: bool,
     ) -> (ApprovalReply, bool) {
         let mut cancellation = self.controls.cancellation.clone();
         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
@@ -1422,7 +1430,7 @@ impl RunLoop<'_> {
             result = tokio::time::timeout(Duration::from_millis(expires), async {
                 match prompt.clone() {
                     Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => ApprovalReply::from(approvals.ask(intent).await),
+                    None => ApprovalReply::from(approvals.ask_with_auto_edits(intent, allow_auto_edits).await),
                 }
             }) => result.unwrap_or(ApprovalReply::Deny),
         };
@@ -1872,7 +1880,10 @@ impl RunLoop<'_> {
                             && !self.controls.cancellation.is_cancelled();
                         resolution.source = source;
                     }
-                    AskSite::Primary { unguarded_prompt } => {
+                    AskSite::Primary {
+                        unguarded_prompt,
+                        allow_auto_edits,
+                    } => {
                         if !resolution.active_time_exhausted
                             && !self.pause_at_boundary()
                             && let Some(approvals) = self.controls.approvals
@@ -1885,6 +1896,7 @@ impl RunLoop<'_> {
                                             approvals,
                                             intent,
                                             unguarded_prompt.clone(),
+                                            *allow_auto_edits,
                                         )
                                         .await;
                                     resolution.source = PermissionSource::Human;

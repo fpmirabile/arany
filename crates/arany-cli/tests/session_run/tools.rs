@@ -2792,6 +2792,10 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             }
             let action = inbox.next().await.expect("one exact pending intent");
             assert_eq!(action.intent.call, call);
+            assert_eq!(
+                action.allow_auto_edits,
+                mode == ApprovalMode::Request && !command
+            );
             match decision {
                 "allow" => action.decide(true),
                 "deny" => action.decide(false),
@@ -3261,3 +3265,6 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         .count();
     assert_eq!((started, finished), (4, 4));
 }
+
+#[path = "tools/inline_approval.rs"]
+mod inline_approval;

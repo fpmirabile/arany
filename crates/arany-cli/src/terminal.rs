@@ -544,88 +544,74 @@ impl AttachedTerminal {
         })?;
         Ok((progress.more, progress.page))
     }
+    pub fn discard_approval_typeahead(&mut self) -> Result<(), TerminalError> {
+        #[cfg(unix)]
+        if self.is_linear() {
+            tcflush(io::stdin(), QueueSelector::IFlush).map_err(io::Error::from)?;
+        }
+        self.input
+            .as_mut()
+            .expect("active terminal input")
+            .discard_typeahead();
+        Ok(())
+    }
+
     pub fn draw_tool_approval(
         &mut self,
         approval: &arany::ToolApproval,
+        session: &SessionView,
         page: usize,
         choice: usize,
+        review_notice: bool,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
         let lines = match &approval.unguarded {
             Some(prompt) => crate::presentation::unguarded_approval_lines(&approval.intent, prompt),
             None => crate::presentation::tool_approval_lines(&approval.intent),
         };
+        let choices = crate::presentation::tool_approval_choices(approval);
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_tool_approval(
-                    approval.intent.id,
-                    &lines,
-                    approval
-                        .unguarded
-                        .as_ref()
-                        .is_some_and(|prompt| prompt.remember),
-                )
+                .draw_tool_approval(approval.intent.id, &lines, &choices)
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
+        let screen = self.terminal.as_mut().expect("owned terminal").size()?;
+        let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
+        self.prepare_frame_height(height)?;
         let palette = self.palette();
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let history = &mut self.history;
         let mut more = true;
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
-        let height = view::permission_height(&lines, width, true, None);
-        self.draw_frame(height, |frame| {
-            if frame.area().width >= 16 && frame.area().height >= 8 {
-                let width = frame.area().width;
-                let choices: &[&str] = match (
-                    approval.unguarded.as_ref().map(|prompt| prompt.remember),
-                    width,
-                ) {
-                    (None, _) => &["Deny", "Allow once"],
-                    (Some(false), _) => &["Deny", "Allow once (unguarded)"],
-                    (Some(true), 68..) => &[
-                        "Deny",
-                        "Allow once (unguarded)",
-                        "Always allow this exact command in this project (unguarded)",
-                    ],
-                    (Some(true), 40..) => {
-                        &["Deny", "Allow once", "Always allow exact command here"]
-                    }
-                    (Some(true), _) => &["Deny", "Allow once", "Always allow"],
-                };
-                more = view::draw_permission_frame(
-                    frame,
-                    &lines,
-                    view::PermissionFrameState {
-                        choices,
-                        page,
-                        focus: choice,
-                        profile_start: None,
-                        profile_count: 0,
-                        focused_profile: None,
-                        profile_selection_enabled: None,
-                        footer: Some(if width < 24 {
-                            "↑↓ Enter Esc"
-                        } else if width < 50 {
-                            "↑↓ Enter · Esc denies"
-                        } else {
-                            "↑↓ choose · Enter confirm · Esc denies"
-                        }),
-                        palette,
-                        boxed: true,
-                    },
-                )
-                .more;
-            } else {
-                frame.render_widget(
-                    ratatui::widgets::Paragraph::new("Resize to review; Esc denies"),
-                    frame.area(),
+        terminal.draw(|frame| {
+            let area = bottom_area(frame.area(), height);
+            if self.mode == TerminalMode::Fullscreen {
+                let history_area = Rect::new(
+                    frame.area().x,
+                    frame.area().y,
+                    frame.area().width,
+                    area.y.saturating_sub(frame.area().y),
                 );
+                // History has a disjoint rectangle and cannot overwrite approval chrome.
+                history.sync(
+                    session,
+                    usize::from(history_area.width),
+                    usize::from(history_area.height),
+                );
+                view::draw_history_rows(frame, history_area, &history.visible(session), palette);
             }
+            more = view::draw_tool_approval_frame(
+                frame,
+                area,
+                &lines,
+                &choices,
+                page,
+                choice,
+                review_notice,
+            );
         })?;
+        let area = terminal.get_frame().area();
+        terminal.backend_mut().set_area(area);
         Ok(more)
     }
     pub fn acquire_with_mode(

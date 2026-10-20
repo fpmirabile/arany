@@ -1,0 +1,319 @@
+use arany::{RunStatus, StateRoot, Store, ToolDisposition};
+use serde_json::{Value, json};
+use std::{
+    io::Write,
+    net::TcpListener,
+    process::{Command, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::{Duration, Instant},
+};
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "native Linux inline approval PTY and Guard")]
+fn numbered_tool_approval_dispatches_only_after_review_and_an_explicit_choice() {
+    if !crate::isolation::enter_native_account_isolated_test() {
+        return;
+    }
+    for case in [
+        "yes",
+        "escape",
+        "early-digit",
+        "typeahead",
+        "linear-yes",
+        "linear-no",
+        "cancel",
+        "unguarded",
+    ] {
+        run_case(case);
+    }
+}
+
+fn run_case(case: &'static str) {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let tls = crate::tls_fixture::build(root);
+    let workspace = root.join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = root.join("state");
+    StateRoot::admit(&state).unwrap();
+    crate::seed_fullscreen(&state);
+    crate::private_file(&state.join("permissions.json"), br#"{"permissions":{}}"#);
+    crate::private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
+        "version":1,"workspace_paths":["."],"write":true,
+        "commands":[{"name":"bash","executable":"/usr/bin/bash","sha256":crate::hash(&std::fs::read("/usr/bin/bash").unwrap()),"interpreter":true,"inputs":[]}],
+        "skills":[],"mcp":[]
+    })).unwrap());
+    let port = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut server = crate::loopback::ChildGuard::new(
+        Command::new("/usr/bin/openssl")
+            .args(["s_server", "-quiet", "-accept"])
+            .arg(format!("127.0.0.1:{port}"))
+            .arg("-cert")
+            .arg(&tls.cert)
+            .arg("-key")
+            .arg(&tls.key)
+            .env_clear()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        assert!(Instant::now() < deadline, "TLS startup");
+        thread::yield_now();
+    }
+    let mut peer_out = server.child().stdout.take().unwrap();
+    let flags = rustix::fs::fcntl_getfl(&peer_out).unwrap();
+    rustix::fs::fcntl_setfl(&peer_out, flags | rustix::fs::OFlags::NONBLOCK).unwrap();
+    let mut peer_in = server.child().stdin.take().unwrap();
+    let mut product = Command::new("/usr/bin/script");
+    product.env_clear().env("PATH", "/usr/bin:/bin").env("SHELL", "/bin/sh")
+        .env("TERM", if case.starts_with("linear") { "dumb" } else { "xterm" })
+        .env("LD_PRELOAD", &tls.shim).env("ARANY_TEST_TLS_PORT", port.to_string())
+        .env("SSL_CERT_FILE", &tls.ca).env("OPENAI_API_KEY", "synthetic-native-key")
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", "stty rows 24 cols 80; exec \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --tools approval", "/dev/null"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = crate::loopback::ChildGuard::new(product.spawn().unwrap());
+    let input = Arc::new(Mutex::new(child.child().stdin.take().unwrap()));
+    let peer_input = input.clone();
+    let peer = thread::spawn(move || {
+        while let Some(request) = crate::active_terminal::tool_group::tls_request(&mut peer_out) {
+            let end = request
+                .windows(4)
+                .position(|part| part == b"\r\n\r\n")
+                .unwrap()
+                + 4;
+            let body: Value = serde_json::from_slice(&request[end..]).unwrap();
+            let step = crate::semantic::tool_results(&body).len();
+            if case == "typeahead" && step == 0 {
+                peer_input.lock().unwrap().write_all(b"\r").unwrap();
+            }
+            let command = if case == "unguarded" {
+                "exit 42".to_owned()
+            } else if case == "early-digit" {
+                format!("printf approval-dispatched;#{}", "padding ".repeat(600))
+            } else {
+                "printf approval-dispatched".into()
+            };
+            let (name, arguments) = if case == "unguarded" && step == 1 {
+                (
+                    "arany_command_unguarded",
+                    json!({"program":"bash","args":["-c",command],"cwd":"","justification":"Run this exact failed command on the host"}),
+                )
+            } else {
+                (
+                    "arany_command",
+                    json!({"program":"bash","args":["-c",command],"cwd":""}),
+                )
+            };
+            let output = if step >= if case == "unguarded" { 2 } else { 1 } {
+                arany::semantic::responses_output(&json!("APPROVAL_FINAL"))
+            } else {
+                json!([{"type":"function_call","id":format!("fc_{step}"),"call_id":format!("call_{step}"),"status":"completed","name":name,"arguments":arguments.to_string()}])
+            };
+            let response = json!({"id":format!("resp_{step}"),"status":"completed","model":"gpt-5.4","output":output,"usage":{"input_tokens":12,"output_tokens":8}});
+            let (kind, response) = if body["stream"] == true {
+                (
+                    "text/event-stream",
+                    crate::loopback::responses_stream(response),
+                )
+            } else {
+                ("application/json", response.to_string())
+            };
+            if write!(peer_in, "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()).and_then(|()| peer_in.flush()).is_err() { break; }
+        }
+    });
+    let pipe: std::os::fd::OwnedFd = child.child().stdout.take().unwrap().into();
+    let mut driver = Driver {
+        wrapper_pid: child.child().id(),
+        ..Default::default()
+    };
+    let output = crate::process::capture_terminal(
+        child.child(),
+        std::fs::File::from(pipe),
+        Duration::from_secs(60),
+        256 * 1024,
+        |bytes| driver.advance(case, bytes, &input, &state, &workspace),
+    );
+    drop(server);
+    peer.join().unwrap();
+    assert!(output.status.success(), "{case}: attached exit");
+    assert!(driver.answered, "{case}: approval frame missing");
+    assert_replay(&state, &workspace, case);
+}
+
+#[derive(Default)]
+struct Driver {
+    wrapper_pid: u32,
+    product: Option<crate::active_terminal::ProductGuard>,
+    declined: bool,
+    answered: bool,
+    early: bool,
+    closed: bool,
+    pages: usize,
+    last_frame: String,
+}
+
+impl Driver {
+    fn advance(
+        &mut self,
+        case: &str,
+        bytes: &[u8],
+        input: &Arc<Mutex<std::process::ChildStdin>>,
+        state: &std::path::Path,
+        workspace: &std::path::Path,
+    ) {
+        if self.product.is_none()
+            && let Some(pid) = crate::active_terminal::try_product_child_of_executable(
+                self.wrapper_pid,
+                std::path::Path::new(env!("CARGO_BIN_EXE_arany")),
+            )
+        {
+            self.product = Some(crate::active_terminal::ProductGuard::new(
+                pid,
+                state.to_path_buf(),
+            ));
+        }
+        let mut input = input.lock().unwrap();
+        crate::process::decline_workspace_consent(&mut *input, bytes, &mut self.declined);
+        let text = String::from_utf8_lossy(bytes);
+        let frame = if case.starts_with("linear") {
+            text.to_string()
+        } else {
+            crate::session_picker::screen_rows(bytes, 80, 24).join("\n")
+        };
+        if frame != self.last_frame && frame.contains("Do you want to proceed?") && !self.answered {
+            self.last_frame = frame.clone();
+            if case == "unguarded" && !frame.contains("Run outside the Guard?") && !self.early {
+                if frame.contains("more lines") {
+                    input.write_all(b"\x1b[6~").unwrap();
+                } else {
+                    input.write_all(b"1").unwrap();
+                    self.early = true;
+                }
+                return;
+            }
+            if frame.contains("more lines") || frame.contains("Review the whole action first") {
+                if case == "early-digit" && !self.early {
+                    input.write_all(b"1").unwrap();
+                    self.early = true;
+                    return;
+                }
+                if case == "early-digit" && frame.contains("Review the whole action first") {
+                    assert_pending(state, workspace);
+                }
+                self.pages += 1;
+                assert!(self.pages < 100);
+                input.write_all(b"\x1b[6~").unwrap();
+                return;
+            }
+            if case == "unguarded" {
+                assert!(frame.contains("› 3. No"), "unguarded opens with No focused");
+            }
+            let answer: &[u8] = match case {
+                "escape" | "typeahead" => b"\x1b",
+                "early-digit" | "yes" => b"1",
+                "linear-yes" => b"1\r",
+                "linear-no" => b"no\r",
+                "cancel" => b"\x03",
+                "unguarded" => b"2",
+                _ => unreachable!(),
+            };
+            input.write_all(answer).unwrap();
+            self.answered = true;
+        }
+        if self.answered
+            && !self.closed
+            && (text.contains("APPROVAL_FINAL")
+                || text.contains("Action denied or approval expired")
+                || text.contains("Run cancelled"))
+        {
+            input.write_all(b"\x04").unwrap();
+            self.closed = true;
+        }
+    }
+}
+
+fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &str) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let sessions = arany::list_sessions(
+            StateRoot::open_existing(state).unwrap(),
+            workspace.to_path_buf(),
+        )
+        .await
+        .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let events = store.load_session(sessions[0].id).await.unwrap();
+        let view = arany::SessionView::replay(sessions[0].id, &events)
+            .unwrap()
+            .unwrap();
+        let run = &view.runs[0];
+        let denied = matches!(case, "escape" | "typeahead" | "linear-no");
+        assert_eq!(
+            run.status,
+            if case == "cancel" {
+                RunStatus::Cancelled
+            } else if denied {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            },
+            "{case}"
+        );
+        let observation = run.tools.last().unwrap().observation.as_ref().unwrap();
+        if denied || case == "cancel" {
+            assert!(observation.attestation.is_none(), "{case}: no dispatch");
+        } else if case == "unguarded" {
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Unguarded(_))
+            ));
+            assert!(state.join("unguarded-commands.json").exists());
+        } else {
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Guard(_))
+            ));
+        }
+        store.close().await.unwrap();
+    });
+}
+
+fn assert_pending(state: &std::path::Path, workspace: &std::path::Path) {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let sessions = arany::list_sessions(
+            StateRoot::open_existing(state).unwrap(),
+            workspace.to_path_buf(),
+        )
+        .await
+        .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(state).unwrap()).unwrap();
+        let view = store.load_open_view(sessions[0].id).await.unwrap().unwrap();
+        let tool = view.runs[0].tools.last().unwrap();
+        assert!(
+            tool.permission_verdict.is_none() && tool.observation.is_none(),
+            "an early digit must not record a verdict or dispatch"
+        );
+        store.close().await.unwrap();
+    });
+}
