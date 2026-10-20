@@ -40,9 +40,10 @@ const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
             CREATE TABLE native_provider_evidence (
                 fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
                 checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
+                expires_at_ms INTEGER NOT NULL,
+                context_window_tokens INTEGER
             ) STRICT;
-            PRAGMA user_version=4;
+            PRAGMA user_version=5;
             COMMIT;";
 
 pub(super) struct HotSession {
@@ -165,7 +166,7 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
         && connection.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
             row.get::<_, i64>(0)
         })? == 0;
-    if version != 4 && !fresh {
+    if version != 5 && !fresh {
         return Err(StoreError::InvalidHistory);
     }
     if read_only {

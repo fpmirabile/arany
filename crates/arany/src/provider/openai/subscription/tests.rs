@@ -27,6 +27,11 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
         provenance.clone(),
     )
     .expect("admitted synthetic account");
+    assert_eq!(provider.context_window_tokens(), None);
+    let provider = provider.with_context_window(Some(2_000_001));
+    assert_eq!(provider.context_window_tokens(), None);
+    let provider = provider.with_context_window(Some(272_000));
+    assert_eq!(provider.context_window_tokens(), Some(272_000));
     assert_eq!(provider.identity().profile, "chatgpt");
     assert_eq!(provider.identity().model, "model-a");
     assert_eq!(provider.identity().effort, Some(Effort::High));
@@ -70,7 +75,12 @@ fn request() -> ProviderRequest {
 }
 
 fn body_for(request: &ProviderRequest, effort: Effort) -> Result<Vec<u8>, ProviderError> {
-    subscription_body(request, &render::conversation(request)?, effort)
+    subscription_body(
+        request,
+        &render::conversation(request)?,
+        effort,
+        crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+    )
 }
 
 fn scope_for(request: &ProviderRequest) -> wire::RunScope<'_> {

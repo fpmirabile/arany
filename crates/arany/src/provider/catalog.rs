@@ -46,6 +46,8 @@ impl ModelEntry {
 #[derive(Deserialize)]
 struct CatalogRow {
     id: String,
+    // Anthropic Models API metadata; any other numeric value is absent.
+    max_input_tokens: Option<serde_json::Number>,
 }
 
 #[derive(Deserialize)]
@@ -112,6 +114,18 @@ pub async fn list_native_models_with_credentials(
     profile: &str,
     credentials: &NativeApiCredentials,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
+    Ok(native_models_with_windows(profile, credentials)
+        .await?
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+/// Pairs each listed model with its admitted input window; only Anthropic reports one.
+pub(super) async fn native_models_with_windows(
+    profile: &str,
+    credentials: &NativeApiCredentials,
+) -> Result<Vec<(ModelEntry, Option<u32>)>, ProviderError> {
     let endpoint = match profile {
         "openai" => OPENAI_MODELS,
         "anthropic" => ANTHROPIC_MODELS,
@@ -131,7 +145,7 @@ async fn list_at(
     profile: &str,
     endpoint: Url,
     credentials: &NativeApiCredentials,
-) -> Result<Vec<ModelEntry>, ProviderError> {
+) -> Result<Vec<(ModelEntry, Option<u32>)>, ProviderError> {
     credentials.require_profile(profile)?;
     let key = credentials.api_key();
     let mut entries = Vec::new();
@@ -224,11 +238,16 @@ async fn list_at(
             if !valid_model_id(&row.id) || row.id.contains(key) || !seen.insert(row.id.clone()) {
                 return Err(ProviderError::InvalidOutcome);
             }
-            entries.push(ModelEntry::native(profile, row.id));
+            let window = row
+                .max_input_tokens
+                .filter(|_| profile == "anthropic")
+                .and_then(|tokens| tokens.as_u64())
+                .and_then(super::admitted_context_window);
+            entries.push((ModelEntry::native(profile, row.id), window));
         }
         match next {
             None => {
-                entries.sort_by(|left, right| left.id.cmp(&right.id));
+                entries.sort_by(|left, right| left.0.id.cmp(&right.0.id));
                 return Ok(entries);
             }
             Some(next) => cursor = Some(next),
@@ -310,7 +329,15 @@ mod tests {
         profile: &str,
         replies: &[(&str, Option<&str>)],
     ) -> (Result<Vec<ModelEntry>, ProviderError>, Vec<String>) {
-        fixture_with_header(profile, replies, "Content-Type: application/json\r\n", None).await
+        let (result, requests) =
+            windowed_fixture(profile, replies, "Content-Type: application/json\r\n", None).await;
+        (strip_windows(result), requests)
+    }
+
+    fn strip_windows(
+        result: Result<Vec<(ModelEntry, Option<u32>)>, ProviderError>,
+    ) -> Result<Vec<ModelEntry>, ProviderError> {
+        result.map(|rows| rows.into_iter().map(|(entry, _)| entry).collect())
     }
 
     async fn fixture_with_header(
@@ -319,6 +346,20 @@ mod tests {
         content_type_header: &str,
         workspace: Option<&str>,
     ) -> (Result<Vec<ModelEntry>, ProviderError>, Vec<String>) {
+        let (result, requests) =
+            windowed_fixture(profile, replies, content_type_header, workspace).await;
+        (strip_windows(result), requests)
+    }
+
+    async fn windowed_fixture(
+        profile: &str,
+        replies: &[(&str, Option<&str>)],
+        content_type_header: &str,
+        workspace: Option<&str>,
+    ) -> (
+        Result<Vec<(ModelEntry, Option<u32>)>, ProviderError>,
+        Vec<String>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback catalog");
@@ -468,6 +509,62 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("anthropic-version: 2023-06-01\r\n")
         );
+    }
+
+    #[tokio::test]
+    async fn only_anthropic_reports_an_admitted_input_window() {
+        let (anthropic, _) = windowed_fixture(
+            "anthropic",
+            &[(
+                r#"{"data":[{"id":"a-present","max_input_tokens":200000},{"id":"b-absent"},{"id":"c-null","max_input_tokens":null},{"id":"d-small","max_input_tokens":32767},{"id":"e-floor","max_input_tokens":32768},{"id":"f-ceiling","max_input_tokens":2000000},{"id":"g-large","max_input_tokens":2000001},{"id":"h-negative","max_input_tokens":-1},{"id":"i-fraction","max_input_tokens":1.5e5}],"has_more":false}"#,
+                None,
+            )],
+            "Content-Type: application/json\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(
+            anthropic
+                .expect("Anthropic models")
+                .into_iter()
+                .map(|(entry, window)| (entry.id, window))
+                .collect::<Vec<_>>(),
+            [
+                ("a-present", Some(200_000)),
+                ("b-absent", None),
+                ("c-null", None),
+                ("d-small", None),
+                ("e-floor", Some(32_768)),
+                ("f-ceiling", Some(2_000_000)),
+                ("g-large", None),
+                ("h-negative", None),
+                ("i-fraction", None),
+            ]
+            .map(|(id, window)| (id.to_owned(), window))
+        );
+        let (openai, _) = windowed_fixture(
+            "openai",
+            &[(
+                r#"{"data":[{"id":"gpt-5.4","max_input_tokens":200000}]}"#,
+                None,
+            )],
+            "Content-Type: application/json\r\n",
+            None,
+        )
+        .await;
+        assert_eq!(openai.expect("OpenAI models")[0].1, None);
+        assert!(matches!(
+            fixture(
+                "anthropic",
+                &[(
+                    r#"{"data":[{"id":"x","max_input_tokens":"200000"}],"has_more":false}"#,
+                    None
+                )]
+            )
+            .await
+            .0,
+            Err(ProviderError::InvalidOutcome)
+        ));
     }
 
     #[tokio::test]

@@ -425,6 +425,7 @@ mod tests {
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Team {
                     max_active_children: 8,
                 },

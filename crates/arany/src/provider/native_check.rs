@@ -1,8 +1,8 @@
 use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
     MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PromptRole, Provider,
-    ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
-    list_native_models_with_credentials, valid_saved_api_account_id, validate_native_api_key,
+    ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::native_models_with_windows,
+    catalog::valid_model_id, valid_saved_api_account_id, validate_native_api_key,
 };
 use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v31";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v32";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -88,13 +88,14 @@ pub async fn check_native_model_with_credentials(
             .clear_native_evidence(fingerprint)
             .await
             .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
-        tokio::time::timeout(TOTAL_DEADLINE, async move {
-            let catalog = list_native_models_with_credentials(profile, &credentials)
+        let context_window_tokens = tokio::time::timeout(TOTAL_DEADLINE, async move {
+            let catalog = native_models_with_windows(profile, &credentials)
                 .await
                 .map_err(|_| NativeCheckError::CatalogUnavailable)?;
-            if !catalog.iter().any(|entry| entry.id == model) {
-                return Err(NativeCheckError::ModelUnavailable);
-            }
+            let (_, window) = catalog
+                .into_iter()
+                .find(|(entry, _)| entry.id == model)
+                .ok_or(NativeCheckError::ModelUnavailable)?;
             match profile {
                 "openai" => {
                     let provider = OpenAiProvider::for_conformance(
@@ -113,6 +114,7 @@ pub async fn check_native_model_with_credentials(
                 }
                 _ => Err(NativeCheckError::InvalidSelection),
             }
+            .map(|()| window)
         })
         .await
         .map_err(|_| NativeCheckError::ConformanceFailed)??;
@@ -128,6 +130,7 @@ pub async fn check_native_model_with_credentials(
             expires_at_ms: checked_at_ms
                 .checked_add(EVIDENCE_AGE_MS)
                 .ok_or(NativeCheckError::EvidenceUnavailable)?,
+            context_window_tokens,
         };
         store
             .record_native_evidence(record.clone())
@@ -156,7 +159,7 @@ pub(super) async fn verify_for_run(
     effort: Effort,
     key: &str,
     account_id: Option<Uuid>,
-) -> Result<(), ProviderError> {
+) -> Result<Option<u32>, ProviderError> {
     let credentials = NativeApiCredentials::new(profile, key.to_owned(), None)?;
     verify_credentials_for_run(root, profile, model, effort, &credentials, account_id).await
 }
@@ -168,7 +171,7 @@ pub(super) async fn verify_credentials_for_run(
     effort: Effort,
     credentials: &NativeApiCredentials,
     account_id: Option<Uuid>,
-) -> Result<(), ProviderError> {
+) -> Result<Option<u32>, ProviderError> {
     let fingerprint = fingerprint_credentials(profile, model, effort, credentials, account_id)
         .map_err(|error| {
             if matches!(error, NativeCheckError::InvalidSelection) {
@@ -184,8 +187,28 @@ pub(super) async fn verify_credentials_for_run(
         .map_err(|_| ProviderError::Unavailable)?
         .ok_or(ProviderError::Rejected);
     let closed = store.close().await;
-    result?;
-    closed.map_err(|_| ProviderError::Unavailable)
+    let record = result?;
+    closed.map_err(|_| ProviderError::Unavailable)?;
+    Ok(record.context_window_tokens)
+}
+
+// A Run needs no check; current evidence for the exact selection only contributes its catalog window.
+pub(super) async fn checked_window(
+    root: StateRoot,
+    model: &str,
+    effort: Effort,
+    key: &str,
+    account_id: Option<Uuid>,
+    workspace_id: Option<&str>,
+) -> Option<u32> {
+    let fingerprint =
+        fingerprint_with_workspace("anthropic", model, effort, key, account_id, workspace_id)
+            .ok()?;
+    let store = Store::open_read_only(root).ok()?;
+    let record = store.load_native_evidence(fingerprint).await;
+    let closed = store.close().await;
+    closed.ok()?;
+    record.ok()??.context_window_tokens
 }
 
 async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
@@ -369,6 +392,7 @@ mod tests {
                     .unwrap(),
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
+                context_window_tokens: None,
             })
             .await
             .expect("synthetic evidence");
@@ -431,6 +455,7 @@ mod tests {
                 .unwrap(),
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
+                context_window_tokens: None,
             })
             .await
             .expect("saved-account evidence");
@@ -475,6 +500,7 @@ mod tests {
                 .unwrap(),
                 checked_at_ms,
                 expires_at_ms: checked_at_ms + 60_000,
+                context_window_tokens: Some(200_000),
             })
             .await
             .expect("workspace-bound evidence");
@@ -489,6 +515,24 @@ mod tests {
         .await
         .expect("same workspace evidence");
         assert_eq!(selected.identity().limits.concurrency, 1);
+        assert_eq!(selected.context_window_tokens(), Some(200_000));
+        assert_eq!(provider.context_window_tokens(), None);
+        for (effort, window) in [(Effort::High, Some(200_000)), (Effort::Low, None)] {
+            let unchecked = AnthropicProvider::from_credentials_with_effort(
+                "example-model".into(),
+                Some(effort),
+                credentials(),
+                None,
+            )
+            .unwrap()
+            .with_checked_window(open())
+            .await;
+            assert_eq!(
+                unchecked.context_window_tokens(),
+                window,
+                "only the exact checked selection supplies a window"
+            );
+        }
         for workspace in [None, Some("wrkspc_Two")] {
             let credentials =
                 NativeApiCredentials::new("anthropic", key.into(), workspace.map(str::to_owned))

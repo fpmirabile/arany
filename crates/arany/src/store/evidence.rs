@@ -164,15 +164,17 @@ fn record_native(
         return Err(StoreError::StorageFull);
     }
     transaction.execute(
-        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms, context_window_tokens)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(fingerprint) DO UPDATE SET
              checked_at_ms = excluded.checked_at_ms,
-             expires_at_ms = excluded.expires_at_ms",
+             expires_at_ms = excluded.expires_at_ms,
+             context_window_tokens = excluded.context_window_tokens",
         params![
             record.fingerprint.as_slice(),
             record.checked_at_ms,
-            record.expires_at_ms
+            record.expires_at_ms,
+            record.context_window_tokens
         ],
     )?;
     transaction.commit()?;
@@ -183,21 +185,24 @@ fn load_native(
     connection: &Connection,
     fingerprint: &[u8; 32],
 ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-    let raw: Option<(i64, i64)> = connection
+    let raw: Option<(i64, i64, Option<i64>)> = connection
         .query_row(
-            "SELECT checked_at_ms, expires_at_ms
+            "SELECT checked_at_ms, expires_at_ms, context_window_tokens
              FROM native_provider_evidence WHERE fingerprint = ?1",
             [fingerprint.as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((checked_at_ms, expires_at_ms)) = raw else {
+    let Some((checked_at_ms, expires_at_ms, window)) = raw else {
         return Ok(None);
     };
     let record = NativeEvidenceRecord {
         fingerprint: *fingerprint,
         checked_at_ms,
         expires_at_ms,
+        context_window_tokens: window
+            .map(|tokens| u32::try_from(tokens).map_err(|_| StoreError::InvalidHistory))
+            .transpose()?,
     };
     validate_native(&record)?;
     let now = now_ms()?;
@@ -209,6 +214,9 @@ fn load_native(
 
 fn validate_native(record: &NativeEvidenceRecord) -> Result<(), StoreError> {
     if record.checked_at_ms < 0
+        || record.context_window_tokens.is_some_and(|tokens| {
+            crate::provider::admitted_context_window(u64::from(tokens)).is_none()
+        })
         || record.expires_at_ms <= record.checked_at_ms
         || record.expires_at_ms - record.checked_at_ms > MAX_EVIDENCE_AGE_MS
     {
@@ -262,6 +270,7 @@ mod tests {
             fingerprint: [1; 32],
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
+            context_window_tokens: Some(200_000),
         };
         store
             .record_native_evidence(record.clone())
@@ -311,15 +320,23 @@ mod tests {
             fingerprint: [3; 32],
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
+            context_window_tokens: None,
         };
-        let invalid = NativeEvidenceRecord {
-            expires_at_ms: now + MAX_EVIDENCE_AGE_MS + 1,
-            ..record.clone()
-        };
-        assert!(matches!(
-            store.record_native_evidence(invalid).await,
-            Err(StoreError::InvalidHistory)
-        ));
+        for invalid in [
+            NativeEvidenceRecord {
+                expires_at_ms: now + MAX_EVIDENCE_AGE_MS + 1,
+                ..record.clone()
+            },
+            NativeEvidenceRecord {
+                context_window_tokens: Some(32_767),
+                ..record.clone()
+            },
+        ] {
+            assert!(matches!(
+                store.record_native_evidence(invalid).await,
+                Err(StoreError::InvalidHistory)
+            ));
+        }
         store
             .record_native_evidence(record.clone())
             .await
@@ -346,22 +363,30 @@ mod tests {
         );
         store.close().await.expect("close read-only Store");
 
-        let connection = Connection::open(path.join("events.sqlite3")).expect("database");
-        connection
-            .execute(
-                "UPDATE native_provider_evidence SET expires_at_ms = ?1 WHERE fingerprint = ?2",
-                params![now + MAX_EVIDENCE_AGE_MS + 1, record.fingerprint.as_slice()],
-            )
-            .expect("corrupt derived evidence");
-        drop(connection);
+        for (column, value) in [
+            ("expires_at_ms", now + MAX_EVIDENCE_AGE_MS + 1),
+            ("context_window_tokens", 2_000_001),
+            ("context_window_tokens", -1),
+        ] {
+            let connection = Connection::open(path.join("events.sqlite3")).expect("database");
+            connection
+                .execute(
+                    &format!(
+                        "UPDATE native_provider_evidence SET expires_at_ms = ?1, {column} = ?2 WHERE fingerprint = ?3"
+                    ),
+                    params![now + 60_000, value, record.fingerprint.as_slice()],
+                )
+                .expect("corrupt derived evidence");
+            drop(connection);
 
-        let store = Store::open_read_only(StateRoot::open_existing(&path).expect("state root"))
-            .expect("read-only Store");
-        assert!(matches!(
-            store.load_native_evidence(record.fingerprint).await,
-            Err(StoreError::InvalidHistory)
-        ));
-        store.close().await.expect("close read-only Store");
+            let store = Store::open_read_only(StateRoot::open_existing(&path).expect("state root"))
+                .expect("read-only Store");
+            assert!(matches!(
+                store.load_native_evidence(record.fingerprint).await,
+                Err(StoreError::InvalidHistory)
+            ));
+            store.close().await.expect("close read-only Store");
+        }
     }
 
     #[tokio::test]
@@ -378,6 +403,7 @@ mod tests {
                     fingerprint,
                     checked_at_ms: now,
                     expires_at_ms: now + 60_000,
+                    context_window_tokens: None,
                 })
                 .await
                 .expect("bounded evidence row");
@@ -386,6 +412,7 @@ mod tests {
             fingerprint: [9; 32],
             checked_at_ms: now,
             expires_at_ms: now + 60_000,
+            context_window_tokens: None,
         };
         assert!(matches!(
             store.record_native_evidence(extra.clone()).await,

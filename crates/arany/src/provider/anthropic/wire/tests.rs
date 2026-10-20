@@ -166,7 +166,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             .unwrap()
             .contains("goal_context_facts")
     );
-    assert!(encode_request(&body).is_ok());
+    assert!(encode_request(&body, crate::provider::MAX_PROVIDER_REQUEST_BYTES).is_ok());
     assert_eq!(body.to_string().matches("\"cache_control\":").count(), 3);
     let marker = json!({"type": "ephemeral"});
     assert_eq!(
@@ -636,7 +636,29 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
         )
         .is_err()
     );
-    assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
+    let overhead = r#"{"oversize":""}"#.len();
+    for (window, ceiling) in [
+        (None, 512 * 1024),
+        (Some(32_768), 88_473 + 256 * 1024),
+        (Some(272_000), 734_400 + 256 * 1024),
+        (Some(2_000_000), 1280 * 1024),
+    ] {
+        assert_eq!(crate::provider::request_ceiling(window), ceiling);
+        assert!(
+            encode_request(
+                &json!({"oversize": "x".repeat(ceiling - overhead)}),
+                ceiling
+            )
+            .is_ok()
+        );
+        assert!(
+            encode_request(
+                &json!({"oversize": "x".repeat(ceiling + 1 - overhead)}),
+                ceiling
+            )
+            .is_err()
+        );
+    }
 }
 
 #[test]
@@ -718,7 +740,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
     for absent in ["metadata", "container"] {
         assert!(rendered.get(absent).is_none(), "{absent}");
     }
-    assert!(encode_request(&rendered).is_ok());
+    assert!(encode_request(&rendered, crate::provider::MAX_PROVIDER_REQUEST_BYTES).is_ok());
     for (collaboration, planning) in [
         (CollaborationPolicy::Single, vec![]),
         (
@@ -803,7 +825,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
             content[at],
             json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": image.base64()}})
         );
-        assert!(encode_request(&multimodal).is_ok());
+        assert!(encode_request(&multimodal, crate::provider::MAX_PROVIDER_REQUEST_BYTES).is_ok());
     }
     for (model, effort) in [
         ("claude-fable-5-1", Effort::High),
@@ -1495,7 +1517,8 @@ fn compaction_envelope_and_bound_fit_the_request_ceiling() {
     let (_, body) = compaction_bound_request("claude-opus-4-5", |request| {
         compaction_body(request, crate::provider::Effort::High)
     });
-    let bytes = encode_request(&body).expect("a compaction request at the bound is sent");
+    let bytes = encode_request(&body, crate::provider::MAX_PROVIDER_REQUEST_BYTES)
+        .expect("a compaction request at the bound is sent");
     assert!(bytes.len() <= crate::provider::MAX_PROVIDER_REQUEST_BYTES);
 }
 

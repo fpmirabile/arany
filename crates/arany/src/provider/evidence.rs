@@ -14,6 +14,7 @@ pub(crate) struct NativeEvidenceRecord {
     pub fingerprint: [u8; 32],
     pub checked_at_ms: i64,
     pub expires_at_ms: i64,
+    pub context_window_tokens: Option<u32>,
 }
 
 pub(crate) enum EvidenceOp {

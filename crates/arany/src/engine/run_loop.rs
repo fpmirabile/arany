@@ -122,6 +122,7 @@ pub(super) struct RunLoop<'a> {
         std::collections::BTreeMap<String, crate::tools::definitions::AgentDefinition>,
     >,
     active_time_floor: std::sync::atomic::AtomicBool,
+    window_pressure_handled: std::sync::atomic::AtomicU64,
 }
 
 pub(super) struct LoopControls<'a> {
@@ -164,6 +165,7 @@ impl<'a> RunLoop<'a> {
             handover: Default::default(),
             definitions: std::sync::OnceLock::new(),
             active_time_floor: std::sync::atomic::AtomicBool::new(false),
+            window_pressure_handled: std::sync::atomic::AtomicU64::new(0),
             journal,
             session_id: identity.session_id,
             run_id: identity.run_id,

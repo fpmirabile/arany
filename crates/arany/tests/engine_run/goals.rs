@@ -1545,6 +1545,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
@@ -5300,6 +5301,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
@@ -6559,6 +6561,103 @@ async fn long_run_clears_before_reserving_and_reopens_the_crash_boundary_without
         records[covered as usize..]
             .iter()
             .all(|record| record.to_string().contains(&"x".repeat(99)))
+    );
+}
+
+async fn window_run(
+    window: Option<u32>,
+    input_tokens: u32,
+) -> (Vec<arany::EventEnvelope>, arany::SessionView) {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), &format!("{}\n", "x".repeat(99)).repeat(150));
+    let state_path = temp.path().join("state");
+    let script = (0..8)
+        .map(|_| crate::tool_outcome(facts_read()))
+        .chain([finish_with("Inspected eight pages")])
+        .collect();
+    let mut provider = ScriptedProvider::new(script).with_input_tokens_at(7, input_tokens);
+    if let Some(window) = window {
+        provider = provider.with_context_window(window);
+    }
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut input = request(&workspace, "Inspect eight pages");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("windowed Run");
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.compact_requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+    replayed(&state_path, result.session_id).await
+}
+
+#[tokio::test]
+async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_before_the_next_call() {
+    let pinned = |view: &arany::SessionView| {
+        let config = view.runs[0].config.clone().expect("pinned config");
+        (
+            config.context_window_tokens,
+            config.context_usage.expect("usage").budget_bytes,
+            config.tool_policy.expect("Tool receipt").max_context_bytes,
+        )
+    };
+    let clearings = |events: &[arany::EventEnvelope]| {
+        events
+            .iter()
+            .enumerate()
+            .filter_map(|(index, event)| match event.event {
+                Event::ToolResultsCleared {
+                    covered_tool_count, ..
+                } => Some((index, covered_tool_count)),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let (default_events, default_view) = window_run(None, 244_800).await;
+    let (pressure_events, pressure_view) = window_run(Some(272_000), 244_800).await;
+    let (calm_events, calm_view) = window_run(Some(272_000), 244_799).await;
+
+    let (window, default_budget, default_tools) = pinned(&default_view);
+    assert_eq!(
+        window, None,
+        "a route without catalog metadata keeps the defaults"
+    );
+    let (window, budget, tools) = pinned(&pressure_view);
+    assert_eq!(window, Some(272_000));
+    // 0.9 x 272,000 tokens x 3 bytes replaces the 376 KiB content ceiling.
+    assert_eq!(budget - default_budget, 734_400 - 376 * 1024);
+    assert_eq!(tools - default_tools, 734_400 - 376 * 1024);
+    assert_eq!(pinned(&calm_view), (Some(272_000), budget, tools));
+
+    assert!(clearings(&default_events).is_empty());
+    assert!(
+        clearings(&calm_events).is_empty(),
+        "89.99% does not trigger"
+    );
+    let [(index, covered)] = clearings(&pressure_events)[..] else {
+        panic!("one clearing after the 90% report");
+    };
+    assert_eq!(covered, 5, "the three newest results stay");
+    assert!(matches!(
+        pressure_events[index + 1].event,
+        Event::GoalProviderCallReserved { .. }
+    ));
+    assert_eq!(
+        pressure_events[index + 1..]
+            .iter()
+            .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+            .count(),
+        1,
+        "clearing precedes the call after the report"
     );
 }
 

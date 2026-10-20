@@ -80,7 +80,7 @@ impl Event {
                 ..
             } => {
                 if *covered_tool_count == 0
-                    || *cleared_bytes as usize > crate::session::MAX_CONTEXT_CONTENT_BYTES
+                    || *cleared_bytes as usize > crate::session::MAX_WINDOW_CONTENT_BYTES
                 {
                     return Err(ReplayError::InvalidPayload);
                 }

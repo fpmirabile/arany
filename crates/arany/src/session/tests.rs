@@ -79,6 +79,7 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
             CollaborationPolicy::Single,
             0,
             0,
+            None,
         )
         .ok()
         .expect("bounded history");

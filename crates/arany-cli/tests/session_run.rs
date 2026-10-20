@@ -936,7 +936,7 @@ fn unsupported_journal_versions_reject_without_changing_existing_data() {
         .enable_all()
         .build()
         .unwrap();
-    for version in [0, 1, 2, 3, 5] {
+    for version in [0, 1, 2, 3, 4, 6] {
         let temp = tempfile::tempdir().expect("private test root");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
@@ -1861,6 +1861,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             saved_api_account_id: None,
             chatgpt_provenance: None,
             output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+            context_window_tokens: None,
             policy: CollaborationPolicy::Single,
             output_token_cap: 4096,
             provider_concurrency: 1,
@@ -2463,6 +2464,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,

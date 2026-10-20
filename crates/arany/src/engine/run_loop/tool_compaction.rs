@@ -47,13 +47,19 @@ enum ContextDecision {
     Summarize,
 }
 
+fn window_pressure(input_tokens: u32, context_window_tokens: u32) -> bool {
+    u64::from(input_tokens) * 10 >= u64::from(context_window_tokens) * 9
+}
+
 fn context_decision(
     context: &crate::tools::ToolContext,
     limit: usize,
     reserve: usize,
+    window_pressure: bool,
 ) -> ContextDecision {
     let len = context.rendered_len();
-    if len.saturating_mul(3) < limit.saturating_mul(2)
+    if !window_pressure
+        && len.saturating_mul(3) < limit.saturating_mul(2)
         && matches!(context_capacity(len, limit, reserve), ContextCapacity::Fits)
     {
         return ContextDecision::Ready;
@@ -217,7 +223,13 @@ impl RunLoop<'_> {
             .tools
             .as_ref()
             .ok_or(EngineError::InvalidRequest)?;
-        match context_decision(context, context_limit, reserve) {
+        let pressure = self.unhandled_window_pressure()?;
+        let decision = context_decision(context, context_limit, reserve, pressure.is_some());
+        if let Some(sequence) = pressure {
+            self.window_pressure_handled
+                .store(sequence, std::sync::atomic::Ordering::Relaxed);
+        }
+        match decision {
             ContextDecision::Ready => return Ok(()),
             ContextDecision::Summarize => {}
             ContextDecision::Clear {
@@ -333,6 +345,26 @@ impl RunLoop<'_> {
             return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(())
+    }
+
+    // The latest primary call's reported input at 90% of the pinned window maintains context once.
+    fn unhandled_window_pressure(&self) -> Result<Option<u64>, EngineError> {
+        let handled = self
+            .window_pressure_handled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.ledger().view(|view| {
+            let run = view.runs.iter().find(|run| run.id == self.run_id)?;
+            let window = run.config.as_ref()?.context_window_tokens?;
+            let input = run
+                .agents
+                .iter()
+                .find(|agent| agent.id == self.primary_id)?
+                .provider_calls
+                .last()?
+                .input_tokens?;
+            let sequence = *run.provider_sequences.get(&self.primary_id)?;
+            (sequence != handled && window_pressure(input, window)).then_some(sequence)
+        })
     }
 
     async fn select_compaction_window(
@@ -627,12 +659,23 @@ mod tests {
             }
         }
 
-        for (sizes, limit, reserve, expected) in [
-            (vec![1, 1, 1, 1], usize::MAX, 0, "ready"),
-            (vec![1, 1, 1, 1], usize::MAX, usize::MAX, "clear"),
-            (vec![1, 1, 1, 1], 1, 0, "clear"),
-            (vec![2, 2], 1, 0, "summarize"),
-            (vec![1, 1, 1], 1, 0, "summarize"),
+        for (input, window, pressure) in [
+            (244_800, 272_000, true),
+            (244_799, 272_000, false),
+            (u32::MAX, 2_000_000, true),
+            (0, 32_768, false),
+        ] {
+            assert_eq!(window_pressure(input, window), pressure);
+        }
+
+        for (sizes, limit, reserve, pressure, expected) in [
+            (vec![1, 1, 1, 1], usize::MAX, 0, false, "ready"),
+            (vec![1, 1, 1, 1], usize::MAX, 0, true, "clear"),
+            (vec![1, 1, 1], usize::MAX, 0, true, "summarize"),
+            (vec![1, 1, 1, 1], usize::MAX, usize::MAX, false, "clear"),
+            (vec![1, 1, 1, 1], 1, 0, false, "clear"),
+            (vec![2, 2], 1, 0, false, "summarize"),
+            (vec![1, 1, 1], 1, 0, false, "summarize"),
         ] {
             let mut context = tool_context(serde_json::json!({}));
             for size in sizes {
@@ -659,7 +702,7 @@ mod tests {
                         .collect(),
                 });
             }
-            match context_decision(&context, limit, reserve) {
+            match context_decision(&context, limit, reserve, pressure) {
                 ContextDecision::Ready => assert_eq!(expected, "ready"),
                 ContextDecision::Summarize => assert_eq!(expected, "summarize"),
                 ContextDecision::Clear {
@@ -675,7 +718,7 @@ mod tests {
                     }
                     assert_eq!(before - context.rendered_len(), bytes);
                     assert!(matches!(
-                        context_decision(&context, 1, 0),
+                        context_decision(&context, 1, 0, false),
                         ContextDecision::Summarize
                     ));
                 }

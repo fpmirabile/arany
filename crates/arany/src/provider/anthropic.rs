@@ -21,6 +21,7 @@ pub struct AnthropicProvider {
     effort: Effort,
     key: String,
     workspace_id: Option<String>,
+    context_window_tokens: Option<u32>,
 }
 
 impl AnthropicProvider {
@@ -129,7 +130,7 @@ impl AnthropicProvider {
         credentials: NativeApiCredentials,
         saved_api_account_id: Option<Uuid>,
     ) -> Result<Self, ProviderError> {
-        super::native_check::verify_credentials_for_run(
+        let context_window_tokens = super::native_check::verify_credentials_for_run(
             root,
             "anthropic",
             &model,
@@ -143,6 +144,7 @@ impl AnthropicProvider {
             saved_api_account_id,
         };
         provider.identity.limits.concurrency = 1;
+        provider.context_window_tokens = context_window_tokens;
         Ok(provider)
     }
 
@@ -156,6 +158,21 @@ impl AnthropicProvider {
         }
         let credentials = NativeApiCredentials::from_env("anthropic")?;
         Self::from_checked_credentials_with_effort(root, model, effort, credentials, None).await
+    }
+
+    /// Adopts the input window that current check evidence for this exact selection recorded.
+    /// Missing, stale or unreadable evidence leaves the default bounds; it never refuses the Run.
+    pub async fn with_checked_window(mut self, root: crate::store::StateRoot) -> Self {
+        self.context_window_tokens = super::native_check::checked_window(
+            root,
+            &self.identity.model,
+            self.effort,
+            &self.key,
+            self.identity.saved_api_account_id(),
+            self.workspace_id.as_deref(),
+        )
+        .await;
+        self
     }
 
     fn with_resolved_effort(
@@ -190,11 +207,16 @@ impl AnthropicProvider {
             effort,
             key: credentials.key,
             workspace_id: credentials.anthropic_workspace_id,
+            context_window_tokens: None,
         })
     }
 
-    fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
-        let body = wire::encode_request(&request)?;
+    fn request(
+        &self,
+        request: Value,
+        max_bytes: usize,
+    ) -> Result<reqwest::RequestBuilder, ProviderError> {
+        let body = wire::encode_request(&request, max_bytes)?;
         let request = self
             .client
             .post(ENDPOINT)
@@ -209,9 +231,9 @@ impl AnthropicProvider {
         })
     }
 
-    async fn send(&self, request: Value) -> Result<Vec<u8>, ProviderError> {
+    async fn send(&self, request: Value, max_bytes: usize) -> Result<Vec<u8>, ProviderError> {
         let mut response = self
-            .request(request)?
+            .request(request, max_bytes)?
             .send()
             .await
             .map_err(|error| super::send_failure(&error))?;
@@ -272,6 +294,10 @@ impl Provider for AnthropicProvider {
         &self.identity
     }
 
+    fn context_window_tokens(&self) -> Option<u32> {
+        self.context_window_tokens
+    }
+
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         super::image::validate_images(&request)?;
@@ -282,7 +308,9 @@ impl Provider for AnthropicProvider {
         }
         let conversation = render::conversation(&request)?;
         let body = wire::run_body(&request, &conversation, self.effort)?;
-        let response = self.send(body).await?;
+        let response = self
+            .send(body, super::request_ceiling(self.context_window_tokens))
+            .await?;
         self.decode_run(&response, &request, &conversation)
     }
 
@@ -302,7 +330,7 @@ impl Provider for AnthropicProvider {
         let mut body = wire::run_body(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
         let mut response = self
-            .request(body)?
+            .request(body, super::request_ceiling(self.context_window_tokens))?
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
             .await
@@ -334,7 +362,10 @@ impl Provider for AnthropicProvider {
             return Err(ProviderError::Rejected);
         }
         let response = self
-            .send(wire::compaction_body(&request, self.effort))
+            .send(
+                wire::compaction_body(&request, self.effort),
+                super::MAX_PROVIDER_REQUEST_BYTES,
+            )
             .await?;
         self.decode_compaction(&response, request.max_output_tokens)
     }
@@ -378,7 +409,10 @@ mod tests {
         );
         assert!(
             !provider
-                .request(serde_json::json!({}))
+                .request(
+                    serde_json::json!({}),
+                    super::super::MAX_PROVIDER_REQUEST_BYTES
+                )
                 .unwrap()
                 .build()
                 .unwrap()
@@ -398,7 +432,10 @@ mod tests {
         )
         .unwrap();
         let request = scoped
-            .request(serde_json::json!({}))
+            .request(
+                serde_json::json!({}),
+                super::super::MAX_PROVIDER_REQUEST_BYTES,
+            )
             .unwrap()
             .build()
             .unwrap();

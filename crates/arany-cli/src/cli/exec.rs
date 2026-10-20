@@ -1278,7 +1278,7 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             let version = match line["kind"].as_str() {
-                Some("RunStarted") => 16,
+                Some("RunStarted") => 17,
                 Some("AgentSpawned") => 11,
                 Some("AgentFinished") => 10,
                 Some("ProviderCallRecorded") => 13,
