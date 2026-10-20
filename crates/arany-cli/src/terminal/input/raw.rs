@@ -56,7 +56,7 @@ pub(super) fn start(
             );
             cursor.close();
             if let Err(error) = result {
-                let _ = sender.blocking_send((Instant::now(), Err(error)));
+                let _ = sender.blocking_send((0, Err(error)));
             }
         })?;
     Ok((thread, admission))
@@ -65,11 +65,11 @@ pub(super) fn start(
 // A cursor reply must not wait behind a full event queue while the owner waits for that reply.
 struct Outbox<'a> {
     sender: &'a mpsc::Sender<super::Observed<ReaderEvent>>,
-    backlog: VecDeque<(Instant, ReaderEvent)>,
+    backlog: VecDeque<(u64, ReaderEvent)>,
 }
 
 impl Outbox<'_> {
-    fn push(&mut self, event: ReaderEvent, observed: Instant) -> io::Result<bool> {
+    fn push(&mut self, event: ReaderEvent, observed: u64) -> io::Result<bool> {
         if self.backlog.len() == MAX_BACKLOG && !self.flush() {
             return Ok(false);
         }
@@ -101,15 +101,16 @@ fn read(
     outbox: &mut Outbox<'_>,
     shutdown: &AtomicBool,
     cursor: &CursorQuery,
-    requests: &mut mpsc::Receiver<tokio::sync::oneshot::Sender<Instant>>,
+    requests: &mut mpsc::Receiver<tokio::sync::oneshot::Sender<u64>>,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; READ_BUFFER_BYTES];
     let mut decoder = Decoder::default();
     let mut geometry = crossterm::terminal::size().ok();
+    let mut epoch = 0;
     while !shutdown.load(Ordering::Acquire) {
-        admit_input(input, requests, || decoder = Decoder::default())?;
+        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
         if !outbox.flush() {
             return Ok(());
         }
@@ -119,7 +120,7 @@ fn read(
         }
         let now = Instant::now();
         if let Some(event) = decoder.expire(now)?
-            && !outbox.push(event, now)?
+            && !outbox.push(event, epoch)?
         {
             return Ok(());
         }
@@ -127,7 +128,7 @@ fn read(
         if resized != geometry {
             geometry = resized;
             if let Some((width, height)) = resized
-                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)), now)?
+                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)), epoch)?
             {
                 return Ok(());
             }
@@ -143,7 +144,7 @@ fn read(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
-        admit_input(input, requests, || decoder = Decoder::default())?;
+        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
         match input.read(&mut bytes) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -152,7 +153,6 @@ fn read(
                 ));
             }
             Ok(len) => {
-                // Observed after the read, so no byte predates its arrival.
                 let now = Instant::now();
                 for &byte in &bytes[..len] {
                     if shutdown.load(Ordering::Acquire) {
@@ -161,7 +161,7 @@ fn read(
                     if let Some(event) = decoder.feed(byte, now) {
                         if let ReaderEvent::CursorPosition(column, row) = event {
                             cursor.respond(column, row);
-                        } else if !outbox.push(event, now)? {
+                        } else if !outbox.push(event, epoch)? {
                             return Ok(());
                         }
                     }
@@ -613,19 +613,45 @@ mod tests {
     use rustix::fs::OFlags;
     use std::{io::Write, os::fd::OwnedFd, os::unix::net::UnixStream};
 
+    async fn next_input(reader: &mut TerminalReader) -> TerminalInput {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = reader.recv().await.unwrap();
+                if !matches!(event, TerminalInput::LineRejected | TerminalInput::Resize) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready() {
+            assert!(Instant::now() < deadline, "reader progress deadline");
+            std::thread::yield_now();
+        }
+    }
+
     #[tokio::test]
-    async fn approval_barrier_flushes_unread_os_bytes_with_a_full_event_queue() {
+    async fn approval_admission_discards_pre_barrier_records_and_delivers_later_bytes() {
         for linear in [false, true] {
             let (mut master, mut input) = arany::test_support::process::cloexec_pty(None);
+            let probe = input.try_clone().unwrap();
             let flags = rustix::fs::fcntl_getfl(&input).unwrap();
             rustix::fs::fcntl_setfl(&input, flags | OFlags::NONBLOCK).unwrap();
             let mut settings = rustix::termios::tcgetattr(&input).unwrap();
-            if !linear {
+            if linear {
+                // Canonical echo shows when the line discipline holds a partial line.
+                let flags = rustix::fs::fcntl_getfl(&master).unwrap();
+                rustix::fs::fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+            } else {
                 settings.make_raw();
+                settings
+                    .local_modes
+                    .remove(rustix::termios::LocalModes::ECHO);
             }
-            settings
-                .local_modes
-                .remove(rustix::termios::LocalModes::ECHO);
             rustix::termios::tcsetattr(&input, rustix::termios::OptionalActions::Now, &settings)
                 .unwrap();
             let mut poll = Poll::new().unwrap();
@@ -637,12 +663,11 @@ mod tests {
             let (start, ready) = std::sync::mpsc::sync_channel(1);
             let shutdown = Arc::new(AtomicBool::new(false));
             let should_stop = shutdown.clone();
-            let old = Instant::now();
             let mut reader = if linear {
                 let (sender, receiver) = mpsc::channel(4);
                 for _ in 0..4 {
                     sender
-                        .try_send((old, Ok(LineEvent::Submitted(b"1".to_vec()))))
+                        .try_send((0, Ok(LineEvent::Submitted(b"1".to_vec()))))
                         .unwrap();
                 }
                 assert_eq!(sender.capacity(), 0);
@@ -658,7 +683,7 @@ mod tests {
                     thread: Some(thread),
                     pending: VecDeque::from([TerminalInput::Character('1'), TerminalInput::Submit]),
                     draft_bytes: 1,
-                    discard_before: None,
+                    epoch: 0,
                     admission,
                 })
             } else {
@@ -666,7 +691,7 @@ mod tests {
                 for _ in 0..INPUT_QUEUE_CAPACITY {
                     sender
                         .try_send((
-                            old,
+                            0,
                             Ok(ReaderEvent::Event(Event::Key(KeyEvent::new(
                                 KeyCode::Enter,
                                 KeyModifiers::NONE,
@@ -700,7 +725,7 @@ mod tests {
                     thread: Some(thread),
                     paste: None,
                     cursor,
-                    discard_before: None,
+                    epoch: 0,
                     admission,
                 })
             };
@@ -708,39 +733,54 @@ mod tests {
                 start.send(()).unwrap();
             });
             admitted.unwrap();
-            reader.discard_until(Instant::now());
             master
                 .write_all(if linear { b"no\n" } else { b"n" })
                 .unwrap();
-            let first = tokio::time::timeout(Duration::from_secs(2), async {
-                loop {
-                    let event = reader.recv().await.unwrap();
-                    if !matches!(event, TerminalInput::LineRejected | TerminalInput::Resize) {
-                        break event;
-                    }
-                }
-            })
-            .await
-            .unwrap();
             assert_eq!(
-                first,
+                next_input(&mut reader).await,
                 TerminalInput::Character('n'),
-                "linear={linear}: pre-frame bytes cannot choose or submit"
+                "linear={linear}: unread OS bytes and queued events cannot act after admission"
             );
             if linear {
-                assert_eq!(reader.recv().await.unwrap(), TerminalInput::Character('o'));
-                assert_eq!(reader.recv().await.unwrap(), TerminalInput::Submit);
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('o'));
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Submit);
+                master.write_all(b"yes").unwrap();
+                let mut echoed = Vec::new();
+                wait_until(|| {
+                    let mut chunk = [0; 256];
+                    if let Ok(count) = master.read(&mut chunk) {
+                        echoed.extend_from_slice(&chunk[..count]);
+                    }
+                    echoed.ends_with(b"yes")
+                });
+            } else {
+                // A read prefix of a kitty Enter must not complete after admission.
+                master.write_all(b"x\x1b[13").unwrap();
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('x'));
+                wait_until(|| rustix::io::ioctl_fionread(&probe).unwrap() == 0);
             }
+            reader.discard_typeahead().await.unwrap();
             master
-                .write_all(if linear { b"1\n" } else { b"1\r" })
+                .write_all(if linear { b"no\n" } else { b"u1\r" })
                 .unwrap();
-            for expected in [TerminalInput::Character('1'), TerminalInput::Submit] {
+            let expected: &[TerminalInput] = if linear {
+                &[
+                    TerminalInput::Character('n'),
+                    TerminalInput::Character('o'),
+                    TerminalInput::Submit,
+                ]
+            } else {
+                &[
+                    TerminalInput::Character('u'),
+                    TerminalInput::Character('1'),
+                    TerminalInput::Submit,
+                ]
+            };
+            for expected in expected {
                 assert_eq!(
-                    tokio::time::timeout(Duration::from_secs(2), reader.recv())
-                        .await
-                        .unwrap()
-                        .unwrap(),
-                    expected
+                    next_input(&mut reader).await,
+                    *expected,
+                    "linear={linear}: partial records before admission are discarded and later bytes delivered"
                 );
             }
             reader.stop();
@@ -760,7 +800,7 @@ mod tests {
         let (_admission, mut requests) = InputAdmission::new(&poll).unwrap();
         let (sender, mut receiver) = mpsc::channel(super::super::INPUT_QUEUE_CAPACITY);
         let event = || key(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press).unwrap();
-        let observed = Instant::now();
+        let observed = 0;
         for _ in 0..super::super::INPUT_QUEUE_CAPACITY {
             assert!(sender.try_send((observed, Ok(event()))).is_ok());
         }

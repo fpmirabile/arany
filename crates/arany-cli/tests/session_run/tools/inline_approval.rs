@@ -100,6 +100,12 @@ fn run_case(case: &'static str) {
             let step = crate::semantic::tool_results(&body).len();
             if case == "typeahead" && step == 0 {
                 peer_input.lock().unwrap().write_all(b"\r").unwrap();
+                // The relay must take the Enter before the approval exists, so admission sees it.
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while rustix::io::ioctl_fionread(&*peer_input.lock().unwrap()).unwrap() > 0 {
+                    assert!(Instant::now() < deadline, "typeahead relay");
+                    thread::yield_now();
+                }
             }
             let command = if case == "unguarded-pages" {
                 format!("exit 42;#{}", "padding ".repeat(40))
@@ -259,7 +265,14 @@ impl Driver {
             )
             .join("\n")
         };
-        if frame != self.last_frame && frame.contains("Do you want to proceed?") && !self.answered {
+        // Choices act only once armed; linear prints its prompt only then.
+        let armed = case.starts_with("linear")
+            || (1..=3).any(|choice| frame.contains(&format!("› {choice}. ")));
+        if frame != self.last_frame
+            && armed
+            && frame.contains("Do you want to proceed?")
+            && !self.answered
+        {
             self.last_frame = frame.clone();
             if case.starts_with("unguarded")
                 && !frame.contains("Run outside the Guard?")

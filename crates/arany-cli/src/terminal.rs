@@ -552,19 +552,12 @@ impl AttachedTerminal {
             .await
     }
 
-    pub fn discard_input_before_now(&mut self) {
-        self.input
-            .as_mut()
-            .expect("active terminal input")
-            .discard_until(std::time::Instant::now());
-    }
-
     pub fn draw_tool_approval(
         &mut self,
         approval: &arany::ToolApproval,
         session: &SessionView,
         page: usize,
-        choice: usize,
+        choice: Option<usize>,
         review_notice: bool,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
@@ -575,7 +568,7 @@ impl AttachedTerminal {
         let choices = crate::presentation::tool_approval_choices(approval);
         if let Some(linear) = &mut self.linear {
             linear
-                .draw_tool_approval(approval.intent.id, &lines, &choices)
+                .draw_tool_approval(approval.intent.id, &lines, &choices, choice.is_some())
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }

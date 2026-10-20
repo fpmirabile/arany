@@ -390,7 +390,7 @@ pub(super) async fn submit_objective(
     let mut approval_page = 0usize;
     let mut approval_choice = 0usize;
     let mut approval_answer = Composer::default();
-    let mut approval_first_frame = false;
+    let mut approval_unarmed = false;
     let mut approval_review_notice = false;
     let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
     let execution_settings = super::controls::restore_settings(admission).await?;
@@ -447,28 +447,25 @@ pub(super) async fn submit_objective(
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let shutdown_reason = loop {
-        // Flush before drawing: a key pressed after the frame appears must reach the dialog.
-        let first_frame = std::mem::take(&mut approval_first_frame);
-        if first_frame {
-            terminal
-                .discard_approval_typeahead()
-                .await
-                .map_err(|error| error.to_string())?;
-        }
         let approval_more = match &pending {
             Some(approval) => terminal
                 .draw_tool_approval(
                     approval,
                     view,
                     approval_page,
-                    approval_choice,
+                    (!approval_unarmed).then_some(approval_choice),
                     approval_review_notice,
                 )
                 .map_err(|error| error.to_string())?,
             None => false,
         };
-        if first_frame {
-            terminal.discard_input_before_now();
+        // Only bytes the reader reads after this barrier reach the armed redraw.
+        if std::mem::take(&mut approval_unarmed) {
+            terminal
+                .discard_approval_typeahead()
+                .await
+                .map_err(|error| error.to_string())?;
+            continue;
         }
         let (result, mut events) = handle
             .as_mut()
@@ -479,7 +476,7 @@ pub(super) async fn submit_objective(
                 pending = approval;
                 approval_page = 0;
                 approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
-                approval_first_frame = pending.is_some();
+                approval_unarmed = pending.is_some();
                 approval_review_notice = false;
                 approval_answer.clear();
             }

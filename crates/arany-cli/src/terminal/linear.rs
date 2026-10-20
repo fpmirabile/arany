@@ -21,6 +21,7 @@ pub(super) struct LinearState {
     pub(super) last_model_page: Option<(usize, super::ModelCatalogState)>,
     last_setup: Option<(u8, String, String)>,
     last_approval: Option<uuid::Uuid>,
+    unarmed_approval: Option<uuid::Uuid>,
     permission_mode: Option<arany::ApprovalMode>,
     pub(super) line_open: bool,
     pub(super) newline_pending: bool,
@@ -32,8 +33,9 @@ impl LinearState {
         id: uuid::Uuid,
         lines: &[String],
         choices: &[crate::presentation::ToolApprovalChoice],
+        armed: bool,
     ) -> io::Result<()> {
-        self.write_tool_approval(&mut io::stderr(), id, lines, choices)
+        self.write_tool_approval(&mut io::stderr(), id, lines, choices, armed)
     }
 
     fn write_tool_approval(
@@ -42,6 +44,7 @@ impl LinearState {
         id: uuid::Uuid,
         lines: &[String],
         choices: &[crate::presentation::ToolApprovalChoice],
+        armed: bool,
     ) -> io::Result<()> {
         let mut lines = lines.to_vec();
         lines.push("Do you want to proceed?".into());
@@ -51,6 +54,24 @@ impl LinearState {
                 .enumerate()
                 .map(|(index, choice)| format!("{}. {}", index + 1, choice.label())),
         );
+        if self.unarmed_approval == Some(id) {
+            lines.clear();
+        }
+        if !armed {
+            if self.unarmed_approval == Some(id) || self.last_approval == Some(id) {
+                return Ok(());
+            }
+            if self.newline_pending || self.line_open {
+                writeln!(writer)?;
+            }
+            for line in &lines {
+                writeln!(writer, "{line}")?;
+            }
+            self.newline_pending = false;
+            self.line_open = false;
+            self.unarmed_approval = Some(id);
+            return writer.flush();
+        }
         self.write_permission_prompt(
             writer,
             id,
@@ -103,6 +124,7 @@ impl LinearState {
             last_model_page: None,
             last_setup: None,
             last_approval: None,
+            unarmed_approval: None,
             permission_mode: None,
             line_open: false,
             newline_pending: false,
@@ -651,14 +673,20 @@ mod tests {
                     id,
                     &["Tool approval".into(), "Read src/file".into()],
                     &choices,
+                    false,
                 )
+                .unwrap();
+            let unarmed = String::from_utf8(output.clone()).unwrap();
+            assert!(unarmed.ends_with("No\n") && !unarmed.contains("Select"));
+            state
+                .write_tool_approval(&mut output, id, &[], &choices, true)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output.clone()).unwrap(),
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
             state
-                .write_tool_approval(&mut output, id, &[], &choices)
+                .write_tool_approval(&mut output, id, &[], &choices, true)
                 .unwrap();
             assert_eq!(
                 String::from_utf8(output).unwrap(),

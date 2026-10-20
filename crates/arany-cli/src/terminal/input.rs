@@ -24,13 +24,14 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 #[cfg(unix)]
 use tokio::sync::oneshot;
 
-type Observed<T> = (Instant, io::Result<T>);
+// The reader's admission epoch when it read the bytes behind this result.
+type Observed<T> = (u64, io::Result<T>);
 
 const INPUT_QUEUE_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -144,29 +145,18 @@ impl TerminalReader {
             "terminal input admission unavailable",
         )));
         #[cfg(unix)]
-        let cutoff = match self {
-            Self::Keys(reader) => &reader.admission,
-            Self::Lines(reader) => &reader.admission,
-        }
-        .barrier()
-        .await?;
-        #[cfg(unix)]
-        self.discard_until(cutoff);
-        #[cfg(unix)]
         match self {
-            Self::Keys(reader) => reader.paste = None,
-            Self::Lines(reader) => reader.reset_draft(),
+            Self::Keys(reader) => {
+                reader.epoch = reader.admission.barrier().await?;
+                reader.paste = None;
+            }
+            Self::Lines(reader) => {
+                reader.epoch = reader.admission.barrier().await?;
+                reader.reset_draft();
+            }
         }
         #[cfg(unix)]
         Ok(())
-    }
-
-    pub(super) fn discard_until(&mut self, cutoff: Instant) {
-        match self {
-            Self::Keys(reader) => reader.discard_before = Some(cutoff),
-            #[cfg(unix)]
-            Self::Lines(reader) => reader.discard_before = Some(cutoff),
-        }
     }
 
     pub(super) fn reset_draft(&mut self) {
@@ -226,7 +216,7 @@ pub(super) struct LineReader {
     thread: Option<JoinHandle<()>>,
     pending: VecDeque<TerminalInput>,
     draft_bytes: usize,
-    discard_before: Option<Instant>,
+    epoch: u64,
     #[cfg(unix)]
     admission: InputAdmission,
 }
@@ -273,7 +263,7 @@ impl LineReader {
                 if let Err(error) =
                     read_lines(&mut poll, &mut input, &sender, &should_stop, &mut requests)
                 {
-                    let _ = sender.blocking_send((Instant::now(), Err(error)));
+                    let _ = sender.blocking_send((0, Err(error)));
                 }
             })?;
         Ok(Self {
@@ -282,7 +272,7 @@ impl LineReader {
             thread: Some(thread),
             pending: VecDeque::new(),
             draft_bytes: 0,
-            discard_before: None,
+            epoch: 0,
             admission,
         })
     }
@@ -297,9 +287,7 @@ impl LineReader {
             .await
             .ok_or(TerminalError::InputClosed)?;
         let event = event.map_err(TerminalError::Io)?;
-        if self.discard_before.is_some_and(|cutoff| observed <= cutoff)
-            && !matches!(event, LineEvent::EndOfInput)
-        {
+        if observed < self.epoch && !matches!(event, LineEvent::EndOfInput) {
             return Ok(TerminalInput::LineRejected);
         }
         match event {
@@ -359,19 +347,19 @@ impl Drop for LineReader {
 
 #[cfg(unix)]
 pub(super) struct InputAdmission {
-    sender: mpsc::Sender<oneshot::Sender<Instant>>,
+    sender: mpsc::Sender<oneshot::Sender<u64>>,
     wake: mio::Waker,
 }
 
 #[cfg(unix)]
 impl InputAdmission {
-    fn new(poll: &Poll) -> io::Result<(Self, mpsc::Receiver<oneshot::Sender<Instant>>)> {
+    fn new(poll: &Poll) -> io::Result<(Self, mpsc::Receiver<oneshot::Sender<u64>>)> {
         let (sender, requests) = mpsc::channel(1);
         let wake = mio::Waker::new(poll.registry(), Token(1))?;
         Ok((Self { sender, wake }, requests))
     }
 
-    async fn barrier(&self) -> Result<Instant, TerminalError> {
+    async fn barrier(&self) -> Result<u64, TerminalError> {
         let (reply, acknowledged) = oneshot::channel();
         tokio::time::timeout(Duration::from_secs(1), async {
             self.sender
@@ -394,7 +382,8 @@ impl InputAdmission {
 #[cfg(unix)]
 fn admit_input(
     input: &File,
-    requests: &mut mpsc::Receiver<oneshot::Sender<Instant>>,
+    requests: &mut mpsc::Receiver<oneshot::Sender<u64>>,
+    epoch: &mut u64,
     reset: impl FnOnce(),
 ) -> io::Result<()> {
     let Ok(reply) = requests.try_recv() else {
@@ -402,7 +391,8 @@ fn admit_input(
     };
     reset();
     rustix::termios::tcflush(input, rustix::termios::QueueSelector::IFlush)?;
-    let _ = reply.send(Instant::now());
+    *epoch += 1;
+    let _ = reply.send(*epoch);
     Ok(())
 }
 
@@ -412,14 +402,15 @@ fn read_lines(
     input: &mut File,
     sender: &mpsc::Sender<Observed<LineEvent>>,
     shutdown: &AtomicBool,
-    requests: &mut mpsc::Receiver<oneshot::Sender<Instant>>,
+    requests: &mut mpsc::Receiver<oneshot::Sender<u64>>,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; 8194];
     let mut pending = None;
+    let mut epoch = 0;
     while !shutdown.load(Ordering::Acquire) {
-        admit_input(input, requests, || pending = None)?;
+        admit_input(input, requests, &mut epoch, || pending = None)?;
         if let Some(event) = pending.take() {
             match sender.try_send(event) {
                 Ok(()) => {}
@@ -437,7 +428,7 @@ fn read_lines(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
-        admit_input(input, requests, || pending = None)?;
+        admit_input(input, requests, &mut epoch, || pending = None)?;
         let event = match input.read(&mut bytes) {
             Ok(0) => LineEvent::EndOfInput,
             Ok(len) => decode_line(&bytes[..len]),
@@ -451,8 +442,7 @@ fn read_lines(
         };
         poll.registry()
             .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-        // Observed after the read, so no byte predates its arrival.
-        pending = Some((Instant::now(), Ok(event)));
+        pending = Some((epoch, Ok(event)));
     }
     Ok(())
 }
@@ -570,7 +560,7 @@ pub(super) struct InputReader {
     thread: Option<JoinHandle<()>>,
     paste: Option<Result<String, &'static str>>,
     cursor: CursorQuery,
-    discard_before: Option<Instant>,
+    epoch: u64,
     #[cfg(unix)]
     admission: InputAdmission,
 }
@@ -592,17 +582,14 @@ impl InputReader {
                         Ok(false) => continue,
                         Ok(true) => {
                             if sender
-                                .blocking_send((
-                                    Instant::now(),
-                                    event::read().map(ReaderEvent::Event),
-                                ))
+                                .blocking_send((0, event::read().map(ReaderEvent::Event)))
                                 .is_err()
                             {
                                 break;
                             }
                         }
                         Err(error) => {
-                            let _ = sender.blocking_send((Instant::now(), Err(error)));
+                            let _ = sender.blocking_send((0, Err(error)));
                             break;
                         }
                     }
@@ -614,7 +601,7 @@ impl InputReader {
             thread: Some(thread),
             paste: None,
             cursor,
-            discard_before: None,
+            epoch: 0,
             #[cfg(unix)]
             admission,
         })
@@ -638,7 +625,7 @@ impl InputReader {
                 .await
                 .ok_or(TerminalError::InputClosed)?;
             let event = event.map_err(TerminalError::Io)?;
-            let stale = self.discard_before.is_some_and(|cutoff| observed <= cutoff);
+            let stale = observed < self.epoch;
             match event {
                 ReaderEvent::Event(event) => {
                     if let Some(input) = map_input(event) {
@@ -768,14 +755,14 @@ mod tests {
     #[tokio::test]
     async fn approval_typeahead_discards_old_enter_and_digits_but_preserves_cancellation() {
         let (sender, receiver) = mpsc::channel(8);
-        let old = Instant::now() - Duration::from_secs(1);
+        let old = 0;
         let mut reader = TerminalReader::Keys(InputReader {
             receiver,
             shutdown: Arc::new(AtomicBool::new(false)),
             thread: None,
             paste: None,
             cursor: CursorQuery::default(),
-            discard_before: Some(Instant::now()),
+            epoch: 1,
             admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         });
         for code in [KeyCode::Enter, KeyCode::Char('1')] {
@@ -802,7 +789,7 @@ mod tests {
             .unwrap();
         sender
             .send((
-                Instant::now(),
+                1,
                 Ok(ReaderEvent::Event(Event::Key(KeyEvent::new(
                     KeyCode::Char('1'),
                     KeyModifiers::NONE,
@@ -821,7 +808,7 @@ mod tests {
                 thread: None,
                 pending: VecDeque::new(),
                 draft_bytes: 0,
-                discard_before: Some(Instant::now()),
+                epoch: 1,
                 admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
             });
             sender
@@ -829,7 +816,7 @@ mod tests {
                 .await
                 .unwrap();
             sender
-                .send((Instant::now(), Ok(LineEvent::Submitted(b"no".to_vec()))))
+                .send((1, Ok(LineEvent::Submitted(b"no".to_vec()))))
                 .await
                 .unwrap();
             assert_eq!(reader.recv().await.unwrap(), TerminalInput::LineRejected);
@@ -872,7 +859,7 @@ mod tests {
             thread: None,
             pending: VecDeque::new(),
             draft_bytes: 0,
-            discard_before: None,
+            epoch: 0,
             admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         };
         for expected in [3000, 6000] {

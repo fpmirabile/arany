@@ -2970,7 +2970,13 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                     .draw(|frame| {
                         let area = Rect::new(0, 50 - height, width, height);
                         more = super::draw_tool_approval_frame(
-                            frame, area, &lines, &choices, page, focus, false,
+                            frame,
+                            area,
+                            &lines,
+                            &choices,
+                            page,
+                            Some(focus),
+                            false,
                         );
                     })
                     .unwrap();
@@ -3017,6 +3023,19 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                     .iter()
                     .any(|row| row.contains(&format!("› {}.", focus + 1)))
             );
+            terminal
+                .draw(|frame| {
+                    let area = Rect::new(0, 50 - height, width, height);
+                    super::draw_tool_approval_frame(frame, area, &lines, &choices, 0, None, false);
+                })
+                .unwrap();
+            let unarmed = (0..50)
+                .map(|row| buffer_row(terminal.backend().buffer(), row))
+                .collect::<String>();
+            assert!(
+                unarmed.contains("1. Yes") && !unarmed.contains('›'),
+                "{name} width {width}: unarmed choices show no focus"
+            );
         }
     }
 }
@@ -3040,7 +3059,7 @@ fn approval_chrome_never_shares_history_cells_and_too_small_stays_blocked() {
                     &["Read file".into()],
                     &[Yes, No],
                     0,
-                    0,
+                    Some(0),
                     true,
                 );
             })

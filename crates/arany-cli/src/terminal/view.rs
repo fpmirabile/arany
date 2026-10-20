@@ -361,7 +361,7 @@ pub(super) fn tool_approval_height(
         .map(|line| wrap_cells(line, width, 0).len())
         .sum::<usize>();
     let chrome =
-        tool_approval_controls(choices, width, 0).len() + 1 + tool_approval_hint_height(width);
+        tool_approval_controls(choices, width, None).len() + 1 + tool_approval_hint_height(width);
     u16::try_from(rows.saturating_add(chrome))
         .unwrap_or(u16::MAX)
         .max(8)
@@ -377,29 +377,30 @@ fn tool_approval_hint_height(width: usize) -> usize {
 fn tool_approval_controls(
     choices: &[crate::presentation::ToolApprovalChoice],
     width: usize,
-    focus: usize,
+    focus: Option<usize>,
 ) -> Vec<Line<'static>> {
     let mut rows = wrap_cells("Do you want to proceed?", width, 0)
         .into_iter()
         .map(Line::raw)
         .collect::<Vec<_>>();
     for (index, choice) in choices.iter().enumerate() {
+        let focused = focus == Some(index);
         let label = format!(
             "{} {}. {}",
-            if index == focus { "›" } else { " " },
+            if focused { "›" } else { " " },
             index + 1,
             choice.label()
         );
-        rows.extend(wrap_cells(&label, width, 5).into_iter().map(|row| {
-            Line::styled(
-                row,
-                if index == focus {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                },
-            )
-        }));
+        let style = match focus {
+            None => Style::default().add_modifier(Modifier::DIM),
+            Some(_) if focused => Style::default().add_modifier(Modifier::REVERSED),
+            Some(_) => Style::default(),
+        };
+        rows.extend(
+            wrap_cells(&label, width, 5)
+                .into_iter()
+                .map(|row| Line::styled(row, style)),
+        );
     }
     rows
 }
@@ -410,7 +411,7 @@ pub(super) fn draw_tool_approval_frame(
     lines: &[String],
     choices: &[crate::presentation::ToolApprovalChoice],
     page: usize,
-    focus: usize,
+    focus: Option<usize>,
     review_notice: bool,
 ) -> bool {
     frame.render_widget(Clear, area);
