@@ -2711,7 +2711,7 @@ async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
             .all(|envelope| !matches!(envelope.event, arany::Event::RunFinished { .. })),
         "an Uncertain stop journals no terminal Event"
     );
-    assert_ne!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
     let tool = &view.runs[0].tools[0];
     assert_eq!(
         tool.observation.as_ref().unwrap().disposition,

@@ -1,7 +1,7 @@
 use super::stop::{PrimaryEnd, RunFacts, StepEnd, StopCause};
 use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite, RunLoop,
-    call_record, decide_primary_call, primary_admitted, valid_answer,
+    call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
 };
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
@@ -777,15 +777,15 @@ impl RunLoop<'_> {
                 let site = PrimarySite::Wave {
                     queue_stopped: abort_reason.is_some() || queue.budget_stopped,
                 };
+                let record_admitted = primary_admitted(site, &result, validity, &facts);
                 let mut record = call_record(
                     AgentPhase::RootSynthesis,
                     &result,
-                    primary_admitted(site, &result, validity, &facts),
+                    record_admitted,
                     None,
                     None,
                 );
-                let decision = decide_primary_call(site, result, validity, &facts);
-                if matches!(decision, PrimaryDecision::Defer) {
+                if wave_deferred(&result, record_admitted, &facts) {
                     record.failure_reason = deferral.map(|(reason, _)| reason);
                 }
                 self.append(Event::ProviderCallRecorded {
@@ -794,7 +794,8 @@ impl RunLoop<'_> {
                     record,
                 })
                 .await?;
-                match decision {
+                let facts = RunFacts::observe(self)?;
+                match decide_primary_call(site, result, validity, &facts) {
                     PrimaryDecision::ToolStep(requests, turn) => {
                         let process = requests.iter().any(|r| r.call.is_process());
                         if process {

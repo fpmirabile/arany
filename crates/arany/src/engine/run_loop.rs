@@ -404,14 +404,15 @@ impl<'a> RunLoop<'a> {
                     .err()
                     .and_then(|cause| proposal_refusal(&first, cause)),
             );
-            let decision = decide_primary_call(PrimarySite::Loop, first, validity, &facts);
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
                 agent_run_id: self.primary_id,
                 record,
             })
             .await?;
-            match decision {
+            // A cancellation or active-time expiry while the record commits still stops this call.
+            let facts = RunFacts::observe(self)?;
+            match decide_primary_call(PrimarySite::Loop, first, validity, &facts) {
                 PrimaryDecision::Plan(plan, turn) => {
                     match self.record_plan_step(root_request, *plan, turn).await {
                         Ok(()) => {}
@@ -1341,6 +1342,14 @@ fn primary_admitted(
         }
 }
 
+// A wave response the workers must settle before; the record carries its deferral reason.
+fn wave_deferred(result: &CallResult, admitted: bool, facts: &RunFacts) -> bool {
+    matches!(result, CallResult::Response(_))
+        && !admitted
+        && facts.tokens_within_limit
+        && !facts.cancel_requested
+}
+
 fn decide_primary_call(
     site: PrimarySite,
     result: CallResult,
@@ -1379,15 +1388,15 @@ fn decide_primary_call(
                 }
             }
         }
+        PrimarySite::Wave { .. } if wave_deferred(&result, admitted, facts) => {
+            PrimaryDecision::Defer
+        }
         PrimarySite::Wave { .. } => match result {
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Tools(requests),
                 turn,
                 ..
             }) if admitted => PrimaryDecision::ToolStep(requests, turn),
-            CallResult::Response(_) if facts.tokens_within_limit && !facts.cancel_requested => {
-                PrimaryDecision::Defer
-            }
             CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
                 PrimaryDecision::Stop(if facts.cancel_requested {
                     StopCause::Cancelled
