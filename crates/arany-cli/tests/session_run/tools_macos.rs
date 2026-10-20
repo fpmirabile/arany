@@ -1433,10 +1433,19 @@ fn assert_guarded_build_observation(observation: &arany::ToolObservation) {
 
 fn assert_provider_journal(requests: &Arc<Mutex<Vec<ProviderRequest>>>, call: &ToolCall) {
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    let first = requests[0].input.tools.as_ref().unwrap().observations();
-    assert!(first.is_empty());
-    let second = requests[1].input.tools.as_ref().unwrap().observations();
+    assert_eq!(requests.len(), 3);
+    for before_dispatch in &requests[..2] {
+        assert!(
+            before_dispatch
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations()
+                .is_empty()
+        );
+    }
+    let second = requests[2].input.tools.as_ref().unwrap().observations();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].intent.call, *call);
     assert_eq!(second[0].disposition, ToolDisposition::Succeeded);
@@ -1657,7 +1666,7 @@ async fn native_runtime_mount_journey_helper() {
         crate::safe_run_diagnostics(&refused.run)
     );
     assert_eq!(refused.run.tools.len(), 1);
-    assert_eq!(refused_requests.lock().unwrap().len(), 2);
+    assert_eq!(refused_requests.lock().unwrap().len(), 3);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
     assert!(refused_observation.attestation.is_none());
@@ -1670,18 +1679,20 @@ async fn native_runtime_mount_journey_helper() {
             .output
             .contains("runtime mount topology")
     );
+    for before_dispatch in 0..2 {
+        assert_eq!(
+            refused_requests.lock().unwrap()[before_dispatch]
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations()
+                .len(),
+            0
+        );
+    }
     assert_eq!(
-        refused_requests.lock().unwrap()[0]
-            .input
-            .tools
-            .as_ref()
-            .unwrap()
-            .observations()
-            .len(),
-        0
-    );
-    assert_eq!(
-        refused_requests.lock().unwrap()[1]
+        refused_requests.lock().unwrap()[2]
             .input
             .tools
             .as_ref()
@@ -2432,7 +2443,7 @@ int main(void) {
         }
         assert_eq!(
             requests.lock().unwrap().len(),
-            if attested { 2 } else { 1 },
+            usize::from(case != "mcp-version") + if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
         let expected_run_status = match case {
