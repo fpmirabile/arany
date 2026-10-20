@@ -849,10 +849,11 @@ impl RunLoop<'_> {
                 )
             }
         };
+        let mut sealed_data = false;
         let tail = if worker {
-            let action = Action::Worker {
-                chunks: self.worker_call_chunks(intent.agent_run_id, &intent.call)?,
-            };
+            let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
+            sealed_data = chunks > 0;
+            let action = Action::Worker { chunks };
             tail.max(
                 action
                     .max_events_for_admitted(&self.routing.providers)
@@ -862,17 +863,23 @@ impl RunLoop<'_> {
         } else {
             tail
         };
-        self.journal
-            .admit(self.session_id, tail, observations)
-            .await
-            .map_err(|error| match error {
-                crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
-                    if worker =>
-                {
-                    EngineError::Tool(crate::tools::ToolError::Limit)
-                }
-                error => error.into(),
-            })?;
+        let admitted = if sealed_data {
+            self.journal
+                .admit_sealed_data(self.session_id, tail, observations)
+                .await
+        } else {
+            self.journal
+                .admit(self.session_id, tail, observations)
+                .await
+        };
+        admitted.map_err(|error| match error {
+            crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
+                if worker =>
+            {
+                EngineError::Tool(crate::tools::ToolError::Limit)
+            }
+            error => error.into(),
+        })?;
         Ok(true)
     }
 

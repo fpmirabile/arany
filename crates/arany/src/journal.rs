@@ -144,6 +144,17 @@ impl Journal {
             .await
     }
 
+    pub(crate) async fn admit_sealed_data(
+        &self,
+        session_id: SessionId,
+        event_slots: usize,
+        tool_observations: usize,
+    ) -> Result<(), StoreError> {
+        self.store
+            .admit_sealed_data(session_id, event_slots, tool_observations)
+            .await
+    }
+
     pub(crate) async fn admit_run_start(
         &self,
         session_id: SessionId,
