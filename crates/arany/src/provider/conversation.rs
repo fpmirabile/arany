@@ -44,6 +44,8 @@ pub struct RunInput {
     pub steering_notes: Vec<String>,
     pub stop_hook_feedback: Vec<StopHookFeedback>,
     pub goal_budget: Option<GoalBudget>,
+    /// Engine-pinned ceilings that the `arany_plan` schema states; never sent as a budget block.
+    pub pinned_budget: GoalBudget,
     pub goal_plan_contract: Option<GoalPlanContract>,
     /// Facts of the first call, or of a call whose steps were all compacted away.
     pub goal_context_facts: Option<GoalContextFacts>,
@@ -77,6 +79,7 @@ impl RunInput {
             steering_notes: Vec::new(),
             stop_hook_feedback: Vec::new(),
             goal_budget: None,
+            pinned_budget: GoalBudget::default(),
             goal_plan_contract: None,
             goal_context_facts: None,
             workspace_guidance: None,

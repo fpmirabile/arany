@@ -385,7 +385,9 @@ fn input_items(conversation: &Conversation) -> Result<Vec<Value>, ProviderError>
                 let replay = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
                 unanswered = replay
                     .iter()
-                    .filter(|item| item["type"] == "function_call")
+                    .filter(|item| {
+                        item["type"] == "function_call" && item["name"] == "arany_delegate"
+                    })
                     .filter_map(|item| item["call_id"].as_str().map(str::to_owned))
                     .collect();
                 items.extend(replay);

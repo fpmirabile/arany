@@ -23,7 +23,9 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         crate::tools::parse_json(tools.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
             .unwrap_or_else(|_| json!(tools.catalog))
     });
-    let tools = catalog.as_ref().map(|catalog| specs(catalog, input.role));
+    let tools = catalog
+        .as_ref()
+        .map(|catalog| specs(catalog, input.role, &input.pinned_budget));
     let mut messages: Vec<Message> = input.history.iter().map(history_message).collect();
     let delegate_step = input
         .tools

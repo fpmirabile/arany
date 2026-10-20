@@ -3932,6 +3932,7 @@ async fn display_limits_preserve_a_maximal_answer_and_record_omitted_commentary(
             answer: answer.clone(),
             commentary,
             commentary_limited: false,
+            tentative: false,
         },
         completion: Some(ProviderOutcome::Answer(Answer {
             text: answer.clone(),
@@ -5222,6 +5223,88 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
 }
 
 #[tokio::test]
+async fn streamed_text_before_a_call_is_journaled_as_commentary_and_the_run_continues() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let text = format!("STREAMED_BEFORE_CALL:{}", "x".repeat(3 * 1024));
+    let mut provider = ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "A".into(),
+                profile: None,
+            }],
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "child result".into(),
+        }),
+        ProviderOutcome::Answer(Answer { text: text.clone() }),
+    ]);
+    provider.preview = Some(arany::PreviewText {
+        answer: text.clone(),
+        tentative: true,
+        ..Default::default()
+    });
+    let provider = Arc::new(provider);
+    let engine =
+        engine_support::open(StateRoot::admit(&state).unwrap(), EngineConfig::default()).unwrap();
+    let mut objective = request(&workspace, "question");
+    objective.include_paths.clear();
+    objective.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let outcome = run_with(
+        &engine,
+        &provider,
+        objective,
+        RunControls {
+            hints: Some(RunHints::with_previews()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(outcome.session_id).await.unwrap();
+    SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    let chunks: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.event {
+            Event::AssistantDisplayRecorded { chunk, .. } => Some(chunk),
+            _ => None,
+        })
+        .collect();
+    let call = chunks
+        .iter()
+        .map(|chunk| chunk.call_index)
+        .min()
+        .expect("display chunks");
+    assert!(
+        !chunks
+            .iter()
+            .any(|chunk| chunk.call_index == call
+                && chunk.category == arany::DisplayCategory::Answer)
+    );
+    assert_eq!(
+        chunks
+            .iter()
+            .filter(|chunk| chunk.call_index == call
+                && chunk.category == arany::DisplayCategory::Commentary)
+            .map(|chunk| chunk.text.as_str())
+            .collect::<String>(),
+        text
+    );
+    store.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -5233,6 +5316,7 @@ async fn attached_previews_checkpoint_cancel_reopen_and_stay_out_of_context() {
             answer: text.clone(),
             commentary: vec!["PUBLIC_COMMENTARY_CANARY".into()],
             commentary_limited: false,
+            tentative: false,
         },
         completion: None,
     };

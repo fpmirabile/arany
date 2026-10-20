@@ -2741,6 +2741,7 @@ async fn run_hints_carry_only_display_text_for_the_committed_run() {
             answer: "x".repeat(2300),
             commentary: Vec::new(),
             commentary_limited: false,
+            tentative: false,
         },
         completion: None,
     });
@@ -5234,6 +5235,7 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
             answer: answer.clone(),
             commentary: vec!["commentary".into()],
             commentary_limited: false,
+            tentative: false,
         },
         completion: Some(ProviderOutcome::Answer(Answer { text: answer })),
     };

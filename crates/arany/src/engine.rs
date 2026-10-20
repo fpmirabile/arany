@@ -1962,6 +1962,7 @@ fn root_request(
             assignment_profiles: input.assignment_profiles,
             images: input.images,
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
+            pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
             workspace_guidance: input
                 .inputs

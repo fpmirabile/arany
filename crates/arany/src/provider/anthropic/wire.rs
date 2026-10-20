@@ -74,6 +74,7 @@ impl<'a> MessageStream<'a> {
                 .preview
                 .publish(crate::provider::PreviewText {
                     answer: visible.to_owned(),
+                    tentative: true,
                     ..Default::default()
                 })
                 .is_err(),
@@ -510,7 +511,7 @@ fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
                 let items = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
                 unanswered = items
                     .iter()
-                    .filter(|item| item["type"] == "tool_use")
+                    .filter(|item| item["type"] == "tool_use" && item["name"] == "arany_delegate")
                     .filter_map(|item| item["id"].as_str().map(str::to_owned))
                     .collect();
                 Ok(json!({"role": "assistant", "content": items}))

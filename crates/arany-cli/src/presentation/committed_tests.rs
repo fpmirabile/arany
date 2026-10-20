@@ -198,6 +198,7 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
             answer: format!("INCOMPLETE_CANARY:{}", "x".repeat(2300)),
             commentary: vec!["PUBLIC_COMMENTARY_CANARY".into()],
             commentary_limited: false,
+            tentative: false,
         },
         completion: None,
     });

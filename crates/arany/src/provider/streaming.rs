@@ -9,6 +9,8 @@ pub struct PreviewText {
     pub answer: String,
     pub commentary: Vec<String>,
     pub commentary_limited: bool,
+    /// The answer text may still become commentary, so it is not journaled before completion.
+    pub tentative: bool,
 }
 
 #[derive(Clone)]
@@ -249,6 +251,7 @@ struct LiveAnswer {
     decoder: TextDecoder,
     visible: String,
     failed: bool,
+    tentative: bool,
 }
 
 impl<'a> ResponsesPreview<'a> {
@@ -307,6 +310,7 @@ impl<'a> ResponsesPreview<'a> {
                         decoder: TextDecoder::new(),
                         visible: String::new(),
                         failed: false,
+                        tentative: item["phase"] != "final_answer",
                     });
                 }
             }
@@ -336,6 +340,7 @@ impl<'a> ResponsesPreview<'a> {
                             live.visible = visible.to_owned();
                             let streamed = PreviewText {
                                 answer: live.visible.clone(),
+                                tentative: live.tentative,
                                 ..Default::default()
                             };
                             live.failed = self.publisher.publish(streamed).is_err();

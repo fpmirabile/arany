@@ -552,7 +552,8 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
         && let Some(agents) = catalog["agents"].as_array()
     {
         let calls = crate::tools::catalog::catalog_call_schemas(&catalog);
-        let contract = crate::tools::catalog::plan_schema(&calls);
+        let contract =
+            crate::tools::catalog::plan_schema(&calls, &crate::session::GoalBudget::default());
         let criterion = contract["properties"]["success_criterion"].clone();
         let items =
             &mut schema["properties"]["outcome"]["anyOf"][0]["properties"]["children"]["items"];

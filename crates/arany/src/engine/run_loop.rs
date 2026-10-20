@@ -97,6 +97,7 @@ impl DisplayCheckpoint {
             answer: text.answer.clone(),
             commentary,
             commentary_limited: limited,
+            tentative: text.tentative,
         }
     }
 }
@@ -842,7 +843,13 @@ impl<'a> RunLoop<'a> {
                 }
             }
         };
-        let text = checkpoint.filter(&receiver.borrow());
+        let mut shown = (**receiver.borrow()).clone();
+        if matches!(&result, CallResult::Response(response) if !matches!(response.outcome, ProviderOutcome::Answer(_)))
+            && !shown.answer.is_empty()
+        {
+            shown.commentary.push(std::mem::take(&mut shown.answer));
+        }
+        let text = checkpoint.filter(&shown);
         let result = match result {
             CallResult::Response(response)
                 if !text.answer.is_empty()
@@ -895,7 +902,8 @@ impl<'a> RunLoop<'a> {
             } else {
                 &mut state.commentary_offsets[item]
             };
-            while body.len().saturating_sub(*offset) >= MAX_DISPLAY_CHUNK_BYTES
+            while (category != DisplayCategory::Answer || !text.tentative)
+                && body.len().saturating_sub(*offset) >= MAX_DISPLAY_CHUNK_BYTES
                 || (tail || category == DisplayCategory::Commentary) && *offset < body.len()
             {
                 if category == DisplayCategory::Commentary
