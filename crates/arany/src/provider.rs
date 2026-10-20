@@ -246,6 +246,27 @@ pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
 }
 
 pub(crate) const MAX_PROVIDER_REQUEST_BYTES: usize = 512 * 1024;
+pub(crate) const MAX_WINDOW_REQUEST_BYTES: usize = 1280 * 1024;
+const WINDOW_REQUEST_HEADROOM_BYTES: usize = 256 * 1024;
+pub const MIN_CONTEXT_WINDOW_TOKENS: u32 = 32_768;
+pub const MAX_CONTEXT_WINDOW_TOKENS: u32 = 2_000_000;
+
+/// Admits a context window reported by an authenticated catalog; out-of-range values are absent.
+#[must_use]
+pub fn admitted_context_window(tokens: u64) -> Option<u32> {
+    u32::try_from(tokens)
+        .ok()
+        .filter(|tokens| (MIN_CONTEXT_WINDOW_TOKENS..=MAX_CONTEXT_WINDOW_TOKENS).contains(tokens))
+}
+
+pub(crate) fn request_ceiling(context_window_tokens: Option<u32>) -> usize {
+    match context_window_tokens {
+        None => MAX_PROVIDER_REQUEST_BYTES,
+        Some(_) => (crate::session::content_ceiling(context_window_tokens)
+            + WINDOW_REQUEST_HEADROOM_BYTES)
+            .min(MAX_WINDOW_REQUEST_BYTES),
+    }
+}
 // JSON-string embedding escapes quotes and backslashes again, doubling their request bytes.
 pub(crate) const COMPACTION_INPUT_EXPANSION: usize = 2;
 pub(crate) const COMPACTION_REQUEST_ENVELOPE_BYTES: usize = 8 * 1024;
@@ -1148,6 +1169,11 @@ impl CustomProfileProvenance {
 pub trait Provider: Send + Sync {
     fn identity(&self) -> &ProviderIdentity;
 
+    /// The input window from this route's authenticated catalog evidence; `None` keeps the default bounds.
+    fn context_window_tokens(&self) -> Option<u32> {
+        None
+    }
+
     /// Returns one complete semantic outcome or an error, never an accepted partial result.
     /// The Engine independently validates its phase, bounds and durable transition.
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError>;
@@ -1176,6 +1202,9 @@ pub trait Provider: Send + Sync {
 impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
     fn identity(&self) -> &ProviderIdentity {
         (**self).identity()
+    }
+    fn context_window_tokens(&self) -> Option<u32> {
+        (**self).context_window_tokens()
     }
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke(request).await

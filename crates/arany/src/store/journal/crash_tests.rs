@@ -102,6 +102,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                     saved_api_account_id: None,
                     chatgpt_provenance: None,
                     output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+                    context_window_tokens: None,
                     policy: CollaborationPolicy::Single,
                     output_token_cap: 4096,
                     provider_concurrency: 1,

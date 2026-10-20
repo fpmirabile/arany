@@ -1545,6 +1545,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
@@ -5300,6 +5301,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 saved_api_account_id: None,
                 chatgpt_provenance: None,
                 output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                context_window_tokens: None,
                 policy: CollaborationPolicy::Single,
                 output_token_cap: 4096,
                 provider_concurrency: 1,
@@ -6560,6 +6562,287 @@ async fn long_run_clears_before_reserving_and_reopens_the_crash_boundary_without
             .iter()
             .all(|record| record.to_string().contains(&"x".repeat(99)))
     );
+}
+
+struct WindowRun {
+    _temp: tempfile::TempDir,
+    workspace: std::path::PathBuf,
+    result: arany::RunOutcome,
+    events: Vec<arany::EventEnvelope>,
+    view: arany::SessionView,
+    compactions: usize,
+}
+
+async fn window_run(window: Option<u32>, reads: usize, reports: &[(usize, u32)]) -> WindowRun {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), &format!("{}\n", "x".repeat(99)).repeat(150));
+    let state_path = temp.path().join("state");
+    let script = (0..reads)
+        .map(|_| crate::tool_outcome(facts_read()))
+        .chain([finish_with("Inspected the pages")])
+        .collect();
+    let mut provider =
+        ScriptedProvider::new(script).with_compactions(vec![Err(ProviderError::Unavailable)]);
+    for &(index, tokens) in reports {
+        provider = provider.with_input_tokens_at(index, tokens);
+    }
+    if let Some(window) = window {
+        provider = provider
+            .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+            .with_context_window(window);
+    }
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut input = request(&workspace, "Inspect the pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_runs: 2,
+        ..Default::default()
+    });
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("windowed Run");
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert_eq!(provider.requests.lock().unwrap().len(), reads + 1);
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state_path, result.session_id).await;
+    WindowRun {
+        _temp: temp,
+        workspace,
+        result,
+        events,
+        view,
+        compactions: provider.compact_requests.lock().unwrap().len(),
+    }
+}
+
+fn window_pin(view: &arany::SessionView, run: usize) -> (Option<u32>, u32, Option<u32>) {
+    let config = view.runs[run].config.clone().expect("pinned config");
+    (
+        config.context_window_tokens,
+        config.context_usage.expect("usage").budget_bytes,
+        config.tool_policy.map(|policy| policy.max_context_bytes),
+    )
+}
+
+fn clearings(events: &[arany::EventEnvelope]) -> Vec<(usize, u32)> {
+    events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event.event {
+            Event::ToolResultsCleared {
+                covered_tool_count, ..
+            } => Some((index, covered_tool_count)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_before_the_next_call() {
+    let default = window_run(None, 8, &[(7, 244_800)]).await;
+    let pressure = window_run(Some(272_000), 8, &[(7, 244_800)]).await;
+    let calm = window_run(Some(272_000), 8, &[(7, 244_799)]).await;
+
+    let (window, default_budget, default_tools) = window_pin(&default.view, 0);
+    assert_eq!(
+        window, None,
+        "a route without catalog metadata keeps the defaults"
+    );
+    let (window, budget, tools) = window_pin(&pressure.view, 0);
+    assert_eq!(window, Some(272_000));
+    // 0.9 x 272,000 tokens x 3 bytes replaces the 376 KiB content ceiling.
+    assert_eq!(budget - default_budget, 734_400 - 376 * 1024);
+    assert_eq!(
+        tools.unwrap() - default_tools.unwrap(),
+        734_400 - 376 * 1024
+    );
+    assert_eq!(window_pin(&calm.view, 0), (Some(272_000), budget, tools));
+
+    assert!(clearings(&default.events).is_empty());
+    assert!(
+        clearings(&calm.events).is_empty(),
+        "89.99% does not trigger"
+    );
+    for run in [&default, &pressure, &calm] {
+        assert_eq!(run.compactions, 0);
+    }
+    let [(index, covered)] = clearings(&pressure.events)[..] else {
+        panic!("one clearing after the 90% report");
+    };
+    assert_eq!(covered, 5, "the three newest results stay");
+    assert!(matches!(
+        pressure.events[index + 1].event,
+        Event::GoalProviderCallReserved { .. }
+    ));
+    assert_eq!(
+        pressure.events[index + 1..]
+            .iter()
+            .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+            .count(),
+        1,
+        "clearing precedes the call after the report"
+    );
+
+    // An interruption after the clearing boundary resumes with identical, still-windowed requests.
+    let mut resumed = Vec::new();
+    for copy in ["first", "second"] {
+        let temp = tempfile::tempdir().expect("crash root");
+        let crash_path = temp.path().join(copy);
+        let store = Store::open(StateRoot::admit(&crash_path).unwrap()).unwrap();
+        for event in &pressure.events[..=index] {
+            store
+                .append(pressure.result.session_id, event.event.clone())
+                .await
+                .unwrap();
+        }
+        store.close().await.unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![finish_with("Checked the saved facts")])
+                .with_chatgpt_account(
+                    pressure.view.runs[0]
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .chatgpt_provenance
+                        .as_ref()
+                        .unwrap()
+                        .account_id,
+                    [7; 32],
+                )
+                .with_context_window(272_000),
+        );
+        let engine = facts_engine(StateRoot::open_existing(&crash_path).unwrap(), &crash_path);
+        let mut input = request(&pressure.workspace, "Continue the inspection");
+        input.session_id = Some(pressure.result.session_id);
+        input.title = None;
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::resume(pressure.result.goal_id, true);
+        run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("fresh Run after the clearing boundary");
+        engine.close().await.unwrap();
+        let (_, view) = replayed(&crash_path, pressure.result.session_id).await;
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.runs[0].tool_results_cleared_count, covered);
+        assert_eq!(window_pin(&view, 1).0, Some(272_000));
+        assert_eq!(window_pin(&view, 1).1, budget);
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        let history = &requests[0].input.history;
+        let records: serde_json::Value =
+            serde_json::from_str(&history.last().unwrap().assistant).unwrap();
+        assert_eq!(
+            records["tool_records"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|record| record["cleared"] == true)
+                .count(),
+            covered as usize
+        );
+        resumed.push(history.clone());
+    }
+    assert_eq!(resumed[0], resumed[1], "the resumed request is byte-stable");
+}
+
+#[tokio::test]
+async fn each_pressured_report_maintains_context_once() {
+    let repeated = window_run(Some(272_000), 9, &[(7, 244_800), (8, 244_800)]).await;
+    let clearings = clearings(&repeated.events);
+    assert_eq!(
+        clearings
+            .iter()
+            .map(|(_, covered)| *covered)
+            .collect::<Vec<_>>(),
+        [5, 6],
+        "the second report clears the newly old result"
+    );
+    // The second clearing frees less than one result budget, so one charged summary follows, then the Run ends.
+    assert_eq!(repeated.compactions, 1);
+    assert_eq!(
+        repeated
+            .events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalContextCompacted { .. }))
+            .count(),
+        1
+    );
+    let last_maintenance = clearings[1].0;
+    assert_eq!(
+        repeated.events[last_maintenance..]
+            .iter()
+            .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+            .count(),
+        1,
+        "no further maintenance after the final call"
+    );
+}
+
+#[tokio::test]
+async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
+    let mut pins = Vec::new();
+    for fallback in [Some(200_000), None] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts\n");
+        let state_path = temp.path().join("state");
+        let account = Uuid::now_v7();
+        let primary = Arc::new(
+            ScriptedProvider::new(vec![finish_with("Answered")])
+                .with_chatgpt_account(account, [7; 32])
+                .with_context_window(272_000),
+        );
+        let mut backup = ScriptedProvider::new(Vec::new())
+            .with_chatgpt_account(account, [8; 32])
+            .with_profile("chatgpt", "fallback-model");
+        if let Some(window) = fallback {
+            backup = backup.with_context_window(window);
+        }
+        let backup = Arc::new(backup);
+        let bindings = arany::AdmittedProviders::from_roles(arany::Providers::all(vec![
+            primary.clone() as Arc<dyn arany::Provider>,
+            backup.clone() as Arc<dyn arany::Provider>,
+        ]));
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let mut input = request(&workspace, "Answer directly");
+        input.include_paths.clear();
+        let outcome =
+            super::engine_support::run_routed(&engine, bindings, input, RunControls::default())
+                .await
+                .expect("routed Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert!(backup.requests.lock().unwrap().is_empty());
+        engine.close().await.expect("shutdown");
+        let (_, view) = replayed(&state_path, outcome.session_id).await;
+        pins.push(window_pin(&view, 0));
+    }
+    assert_eq!(pins[0].0, Some(200_000), "the smallest window in the chain");
+    assert_eq!(
+        pins[1].0, None,
+        "a fallback without metadata keeps the defaults"
+    );
+    // 0.9 x 200,000 tokens x 3 bytes against the 376 KiB default.
+    assert_eq!(pins[0].1 - pins[1].1, 540_000 - 376 * 1024);
 }
 
 #[tokio::test]

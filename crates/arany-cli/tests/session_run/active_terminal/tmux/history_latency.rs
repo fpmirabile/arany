@@ -230,6 +230,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         saved_api_account_id: None,
                         chatgpt_provenance: None,
                         output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                        context_window_tokens: None,
                         policy: CollaborationPolicy::Single,
                         output_token_cap: 4096,
                         provider_concurrency: 1,

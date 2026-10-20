@@ -21,8 +21,8 @@ use uuid::{Uuid, Variant, Version};
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-v27";
-const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v29";
+const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-v28";
+const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v30";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
 
@@ -120,6 +120,9 @@ struct ModelCheck {
     fingerprint: [u8; 32],
     checked_at_sec: u64,
     expires_at_sec: u64,
+    // Optional in the current format: absent or null means no window.
+    #[serde(default)]
+    context_window_tokens: Option<u32>,
 }
 
 impl ModelCheck {
@@ -127,6 +130,9 @@ impl ModelCheck {
         self.account_id.get_version() == Some(Version::SortRand)
             && self.checked_at_sec != 0
             && self.checked_at_sec.checked_add(MODEL_CHECK_AGE_SECONDS) == Some(self.expires_at_sec)
+            && self
+                .context_window_tokens
+                .is_none_or(|tokens| arany::admitted_context_window(u64::from(tokens)).is_some())
     }
 }
 
@@ -439,6 +445,7 @@ pub(super) async fn record_model_check(
     selected: SelectedAccount,
     model: String,
     effort: Effort,
+    context_window_tokens: Option<u32>,
 ) -> Result<(), AuthorizationError> {
     tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
@@ -447,7 +454,15 @@ pub(super) async fn record_model_check(
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthorizationError::EvidenceUnavailable)?
             .as_secs();
-        record_model_check_at(&state, &workspace, &selected, &model, effort, now)
+        record_model_check_at(
+            &state,
+            &workspace,
+            &selected,
+            &model,
+            effort,
+            context_window_tokens,
+            now,
+        )
     })
     .await
     .map_err(|_| AuthorizationError::Unavailable)?
@@ -459,6 +474,7 @@ fn record_model_check_at(
     selected: &SelectedAccount,
     model: &str,
     effort: Effort,
+    context_window_tokens: Option<u32>,
     now: u64,
 ) -> Result<(), AuthorizationError> {
     let fingerprint = model_check_fingerprint(selected, model, effort)?;
@@ -480,6 +496,7 @@ fn record_model_check_at(
                 fingerprint,
                 checked_at_sec: now,
                 expires_at_sec,
+                context_window_tokens,
             });
             index.write(state)?;
             let saved = AccountIndex::read(state)?;
@@ -506,31 +523,47 @@ fn model_check_valid(
     })
 }
 
+pub(super) struct AdmittedModel {
+    pub(super) selected: SelectedAccount,
+    pub(super) fingerprint: [u8; 32],
+    pub(super) context_window_tokens: Option<u32>,
+}
+
 pub(super) async fn admitted_selected_for_run(
     workspace: PathBuf,
     expected_account_id: Option<Uuid>,
     model: String,
     effort: Effort,
-) -> Result<(SelectedAccount, [u8; 32]), AuthorizationError> {
+) -> Result<AdmittedModel, AuthorizationError> {
     let selected = selected_for_use(workspace.clone(), expected_account_id).await?;
     let admitted = selected.clone();
-    let fingerprint = tokio::task::spawn_blocking(move || {
+    let (fingerprint, context_window_tokens) = tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
-        admitted_model_at(&state, &workspace, &admitted, &model, effort)
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| AuthorizationError::EvidenceUnavailable)?
+            .as_secs();
+        admitted_model_at(&state, &workspace, &admitted, &model, effort, now)
     })
     .await
     .map_err(|_| AuthorizationError::Unavailable)??;
-    Ok((selected, fingerprint))
+    Ok(AdmittedModel {
+        selected,
+        fingerprint,
+        context_window_tokens,
+    })
 }
 
+// Only a current check of this exact account, model and effort supplies its catalog window.
 fn admitted_model_at(
     state: &StateRoot,
     workspace: &Path,
     selected: &SelectedAccount,
     model: &str,
     effort: Effort,
-) -> Result<[u8; 32], AuthorizationError> {
+    now: u64,
+) -> Result<([u8; 32], Option<u32>), AuthorizationError> {
     let fingerprint = account_fingerprint(
         selected,
         model,
@@ -538,11 +571,21 @@ fn admitted_model_at(
         ACCOUNT_ADMISSION_VERSION,
         "no-preflight-inference;strict-stream-outcomes;local-output-bound",
     )?;
+    let check_fingerprint = model_check_fingerprint(selected, model, effort)?;
     state
         .with_account_replacement_lock(workspace, || {
             let index = AccountIndex::read(state)?;
             verify_selected_snapshot(&index, selected)?;
-            Ok(fingerprint)
+            let window = model_check_valid(&index, selected.id, check_fingerprint, now)
+                .then(|| {
+                    index
+                        .model_checks
+                        .iter()
+                        .find(|check| check.fingerprint == check_fingerprint)
+                        .and_then(|check| check.context_window_tokens)
+                })
+                .flatten();
+            Ok((fingerprint, window))
         })
         .map_err(|_| AuthorizationError::Unavailable)?
 }

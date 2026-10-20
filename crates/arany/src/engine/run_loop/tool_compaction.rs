@@ -47,13 +47,33 @@ enum ContextDecision {
     Summarize,
 }
 
+fn window_pressure(input_tokens: u32, context_window_tokens: u32) -> bool {
+    u64::from(input_tokens) * 10 >= u64::from(context_window_tokens) * 9
+}
+
+// Tool reviews also record under the primary; only its own planning or synthesis call measures the context.
+// Returns the 1-based position of the latest such record when it reports 90% of the window.
+fn pressured_report(
+    calls: impl Iterator<Item = (crate::provider::AgentPhase, Option<u32>)>,
+    context_window_tokens: u32,
+) -> Option<u64> {
+    use crate::provider::AgentPhase;
+    let (index, (_, input)) = calls
+        .enumerate()
+        .filter(|(_, (phase, _))| matches!(phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis))
+        .last()?;
+    window_pressure(input?, context_window_tokens).then_some(index as u64 + 1)
+}
+
 fn context_decision(
     context: &crate::tools::ToolContext,
     limit: usize,
     reserve: usize,
+    window_pressure: bool,
 ) -> ContextDecision {
     let len = context.rendered_len();
-    if len.saturating_mul(3) < limit.saturating_mul(2)
+    if !window_pressure
+        && len.saturating_mul(3) < limit.saturating_mul(2)
         && matches!(context_capacity(len, limit, reserve), ContextCapacity::Fits)
     {
         return ContextDecision::Ready;
@@ -217,7 +237,13 @@ impl RunLoop<'_> {
             .tools
             .as_ref()
             .ok_or(EngineError::InvalidRequest)?;
-        match context_decision(context, context_limit, reserve) {
+        let pressure = self.unhandled_window_pressure()?;
+        let decision = context_decision(context, context_limit, reserve, pressure.is_some());
+        if let Some(sequence) = pressure {
+            self.window_pressure_handled
+                .store(sequence, std::sync::atomic::Ordering::Relaxed);
+        }
+        match decision {
             ContextDecision::Ready => return Ok(()),
             ContextDecision::Summarize => {}
             ContextDecision::Clear {
@@ -333,6 +359,27 @@ impl RunLoop<'_> {
             return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(())
+    }
+
+    // Each pressured primary report maintains context once, however often maintenance runs before the next call.
+    fn unhandled_window_pressure(&self) -> Result<Option<u64>, EngineError> {
+        let handled = self
+            .window_pressure_handled
+            .load(std::sync::atomic::Ordering::Relaxed);
+        self.ledger().view(|view| {
+            let run = view.runs.iter().find(|run| run.id == self.run_id)?;
+            let window = run.config.as_ref()?.context_window_tokens?;
+            let calls = &run
+                .agents
+                .iter()
+                .find(|agent| agent.id == self.primary_id)?
+                .provider_calls;
+            pressured_report(
+                calls.iter().map(|call| (call.phase, call.input_tokens)),
+                window,
+            )
+            .filter(|report| *report != handled)
+        })
     }
 
     async fn select_compaction_window(
@@ -627,12 +674,47 @@ mod tests {
             }
         }
 
-        for (sizes, limit, reserve, expected) in [
-            (vec![1, 1, 1, 1], usize::MAX, 0, "ready"),
-            (vec![1, 1, 1, 1], usize::MAX, usize::MAX, "clear"),
-            (vec![1, 1, 1, 1], 1, 0, "clear"),
-            (vec![2, 2], 1, 0, "summarize"),
-            (vec![1, 1, 1], 1, 0, "summarize"),
+        for (input, window, pressure) in [
+            (244_800, 272_000, true),
+            (244_799, 272_000, false),
+            (u32::MAX, 2_000_000, true),
+            (0, 32_768, false),
+        ] {
+            assert_eq!(window_pressure(input, window), pressure);
+        }
+
+        use crate::provider::AgentPhase::{RootPlan, RootSynthesis, ToolReview};
+        for (calls, report) in [
+            (
+                vec![(RootPlan, Some(244_800)), (ToolReview, Some(10))],
+                Some(1),
+            ),
+            (
+                vec![(RootPlan, Some(10)), (ToolReview, Some(272_000))],
+                None,
+            ),
+            (
+                vec![
+                    (RootPlan, Some(244_800)),
+                    (ToolReview, None),
+                    (RootSynthesis, Some(244_800)),
+                ],
+                Some(3),
+            ),
+            (vec![(RootPlan, Some(244_800)), (RootPlan, None)], None),
+            (vec![(ToolReview, Some(272_000))], None),
+        ] {
+            assert_eq!(pressured_report(calls.into_iter(), 272_000), report);
+        }
+
+        for (sizes, limit, reserve, pressure, expected) in [
+            (vec![1, 1, 1, 1], usize::MAX, 0, false, "ready"),
+            (vec![1, 1, 1, 1], usize::MAX, 0, true, "clear"),
+            (vec![1, 1, 1], usize::MAX, 0, true, "summarize"),
+            (vec![1, 1, 1, 1], usize::MAX, usize::MAX, false, "clear"),
+            (vec![1, 1, 1, 1], 1, 0, false, "clear"),
+            (vec![2, 2], 1, 0, false, "summarize"),
+            (vec![1, 1, 1], 1, 0, false, "summarize"),
         ] {
             let mut context = tool_context(serde_json::json!({}));
             for size in sizes {
@@ -659,7 +741,7 @@ mod tests {
                         .collect(),
                 });
             }
-            match context_decision(&context, limit, reserve) {
+            match context_decision(&context, limit, reserve, pressure) {
                 ContextDecision::Ready => assert_eq!(expected, "ready"),
                 ContextDecision::Summarize => assert_eq!(expected, "summarize"),
                 ContextDecision::Clear {
@@ -675,7 +757,7 @@ mod tests {
                     }
                     assert_eq!(before - context.rendered_len(), bytes);
                     assert!(matches!(
-                        context_decision(&context, 1, 0),
+                        context_decision(&context, 1, 0, false),
                         ContextDecision::Summarize
                     ));
                 }

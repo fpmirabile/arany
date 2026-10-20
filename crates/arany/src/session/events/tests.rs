@@ -659,6 +659,7 @@ mod account_default_tests {
             saved_api_account_id: Some(Uuid::now_v7()),
             chatgpt_provenance: None,
             output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+            context_window_tokens: None,
             policy: CollaborationPolicy::Single,
             output_token_cap: 4096,
             provider_concurrency: 1,
@@ -683,7 +684,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -765,7 +766,13 @@ mod account_default_tests {
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(16));
+        let mut missing_window = serde_json::to_value(ordinary).unwrap();
+        missing_window
+            .as_object_mut()
+            .unwrap()
+            .remove("context_window_tokens");
+        assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
+        assert_eq!(payload_version("RunStarted"), Some(17));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(13));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -835,6 +842,61 @@ mod account_default_tests {
         assert!(config.validate().is_err());
         config.provider_concurrency = 1;
         assert!(config.validate().is_ok());
+        for (provider, window, budget, valid) in [
+            ("chatgpt-like", None, 376 * 1024, true),
+            ("chatgpt-like", None, 376 * 1024 + 1, false),
+            ("chatgpt", Some(272_000), 734_400, true),
+            ("chatgpt", Some(272_000), 734_401, false),
+            ("chatgpt", Some(2_000_000), 1024 * 1024, true),
+            ("chatgpt", Some(2_000_001), 64 * 1024, false),
+            ("chatgpt", Some(32_767), 64 * 1024, false),
+            ("chatgpt-like", Some(272_000), 64 * 1024, false),
+            ("openai", Some(272_000), 64 * 1024, false),
+            ("anthropic", Some(272_000), 64 * 1024, false),
+        ] {
+            let mut pinned = if provider == "chatgpt" {
+                config.clone()
+            } else {
+                ordinary.clone()
+            };
+            pinned.provider = provider.into();
+            pinned.context_window_tokens = window;
+            pinned.context_usage = Some(ContextUsage {
+                used_bytes: 0,
+                budget_bytes: budget,
+                compactable_bytes: 0,
+                tool_history_bytes: 0,
+            });
+            assert_eq!(
+                pinned.validate().is_ok(),
+                valid,
+                "{provider} {window:?} {budget}"
+            );
+        }
+        let mut fallback = config.identity().unwrap();
+        fallback.model = "fallback-model".into();
+        let mut custom = ordinary.identity().unwrap();
+        custom.profile = "custom:fallback".into();
+        custom.provenance =
+            crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
+                endpoint: "https://example.invalid/v1".into(),
+                evidence_digest: [1; 32],
+                capability_evidence_version: 2,
+            });
+        for (fallback, window_valid) in [
+            (fallback, true),
+            (ordinary.identity().unwrap(), false),
+            (custom, false),
+        ] {
+            let mut pinned = config.clone();
+            pinned.providers = Some(crate::provider::Providers::all(vec![
+                config.identity().unwrap(),
+                fallback,
+            ]));
+            assert!(pinned.validate().is_ok(), "no window: {pinned:?}");
+            pinned.context_window_tokens = Some(272_000);
+            assert_eq!(pinned.validate().is_ok(), window_valid, "{pinned:?}");
+        }
         let encoded = serde_json::to_value(&config).unwrap();
         assert_eq!(encoded["output_token_bound"], "local_acceptance_only");
         assert_eq!(encoded["chatgpt_provenance"]["evidence_fingerprint"][0], 7);
@@ -1749,6 +1811,7 @@ mod payload_version_tests {
             saved_api_account_id: None,
             chatgpt_provenance: None,
             output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+            context_window_tokens: None,
             policy: CollaborationPolicy::Single,
             output_token_cap: 4096,
             provider_concurrency: 1,
@@ -1797,7 +1860,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 16,
+                Event::RunStarted { .. } => 17,
                 Event::ToolStarted { .. } => 13,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
@@ -2118,7 +2181,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(16));
+    assert_eq!(payload_version("RunStarted"), Some(17));
 }
 
 #[test]

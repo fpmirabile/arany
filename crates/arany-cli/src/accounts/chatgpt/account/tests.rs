@@ -48,6 +48,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
             &selected,
             "model-one",
             Effort::Medium,
+            None,
             1_799_999_000,
         )
         .unwrap();
@@ -100,6 +101,7 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
                 &selected,
                 "model-one",
                 Effort::Medium,
+                1_799_999_000,
             ),
             Err(AuthorizationError::NoSelectedAccount)
         ));
@@ -334,6 +336,7 @@ fn terminal_refresh_error_clears_private_token_and_keeps_registration() {
         &selected,
         "model-one",
         Effort::Medium,
+        None,
         1_799_999_000,
     )
     .unwrap();
@@ -407,6 +410,7 @@ fn terminal_refresh_keyring_cleanup_blocks_use_before_delete_result() {
             fingerprint: [7; 32],
             checked_at_sec: 1_799_999_000,
             expires_at_sec: 1_799_999_000 + MODEL_CHECK_AGE_SECONDS,
+            context_window_tokens: None,
         }],
     }
     .write(&state)
@@ -675,6 +679,7 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
         fingerprint: [7; 32],
         checked_at_sec: 1_800_000_000,
         expires_at_sec: 1_800_000_000 + MODEL_CHECK_AGE_SECONDS,
+        context_window_tokens: None,
     });
     index.write(&state).unwrap();
 
@@ -764,8 +769,16 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
     })
     .unwrap();
     let now = 1_799_999_000;
-    let admitted = admitted_model_at(&state, &workspace, &selected, "model-one", Effort::High)
-        .expect("consented account needs no synthetic check");
+    let (admitted, window) = admitted_model_at(
+        &state,
+        &workspace,
+        &selected,
+        "model-one",
+        Effort::High,
+        now,
+    )
+    .expect("consented account needs no synthetic check");
+    assert_eq!(window, None);
     assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
     let baseline = AccountIndex::read(&state).unwrap();
     for (field, expected) in [
@@ -784,13 +797,27 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         let blocked: AccountIndex = serde_json::from_value(blocked).unwrap();
         blocked.write(&state).unwrap();
         assert_eq!(
-            admitted_model_at(&state, &workspace, &selected, "model-one", Effort::High),
+            admitted_model_at(
+                &state,
+                &workspace,
+                &selected,
+                "model-one",
+                Effort::High,
+                now
+            ),
             Err(expected)
         );
     }
     baseline.write(&state).unwrap();
     assert!(matches!(
-        admitted_model_at(&state, &workspace, &selected, "bad model", Effort::High),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            "bad model",
+            Effort::High,
+            now
+        ),
         Err(AuthorizationError::InvalidSelection)
     ));
     record_model_check_at(
@@ -799,6 +826,7 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         &selected,
         "model-one",
         Effort::High,
+        Some(272_000),
         now,
     )
     .unwrap();
@@ -806,13 +834,45 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
     let fingerprint = model_check_fingerprint(&selected, "model-one", Effort::High).unwrap();
     assert_ne!(admitted, fingerprint);
     assert!(model_check_valid(&index, id, fingerprint, now));
+    for (model, effort, at, window) in [
+        ("model-one", Effort::High, now, Some(272_000)),
+        ("model-one", Effort::High, now - 1, None),
+        (
+            "model-one",
+            Effort::High,
+            now + MODEL_CHECK_AGE_SECONDS,
+            None,
+        ),
+        ("model-two", Effort::High, now, None),
+        ("model-one", Effort::Low, now, None),
+    ] {
+        assert_eq!(
+            admitted_model_at(&state, &workspace, &selected, model, effort, at)
+                .map(|(_, window)| window),
+            Ok(window),
+            "only the current exact check supplies its catalog window"
+        );
+    }
+    let mut out_of_range = serde_json::to_value(&index).unwrap();
+    out_of_range["model_checks"][0]["context_window_tokens"] = 2_000_001.into();
+    assert!(AccountIndex::decode(&serde_json::to_vec(&out_of_range).unwrap()).is_err());
     assert_eq!(
-        admitted_model_at(&state, &workspace, &selected, "model-one", Effort::High,).unwrap(),
-        admitted
+        admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            "model-one",
+            Effort::High,
+            now
+        )
+        .unwrap(),
+        (admitted, Some(272_000))
     );
     for (model, effort) in [("model-two", Effort::High), ("model-one", Effort::Low)] {
-        let other = admitted_model_at(&state, &workspace, &selected, model, effort).unwrap();
+        let (other, window) =
+            admitted_model_at(&state, &workspace, &selected, model, effort, now).unwrap();
         assert_ne!(admitted, other);
+        assert_eq!(window, None);
     }
     assert!(!model_check_valid(&index, id, fingerprint, now - 1));
     assert!(!model_check_valid(
@@ -845,8 +905,8 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         1_799_999_900
     ));
     assert_eq!(
-        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High,).unwrap(),
-        admitted
+        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High, now).unwrap(),
+        (admitted, Some(272_000))
     );
 
     let mut altered = renewed.clone();
@@ -858,17 +918,26 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         fingerprint
     );
     assert!(matches!(
-        admitted_model_at(&state, &workspace, &altered, "model-one", Effort::High),
+        admitted_model_at(&state, &workspace, &altered, "model-one", Effort::High, now),
         Err(AuthorizationError::InvalidIdentity)
     ));
 
     clear_model_check_at(&state, &workspace, &renewed, "model-one", Effort::High).unwrap();
     assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
     assert_eq!(
-        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High).unwrap(),
-        admitted
+        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High, now).unwrap(),
+        (admitted, None)
     );
-    record_model_check_at(&state, &workspace, &renewed, "model-one", Effort::High, now).unwrap();
+    record_model_check_at(
+        &state,
+        &workspace,
+        &renewed,
+        "model-one",
+        Effort::High,
+        None,
+        now,
+    )
+    .unwrap();
     assert_eq!(
         save_private_file_at(
             &state,
@@ -905,13 +974,21 @@ fn replaced_or_stale_account_cannot_publish_model_evidence() {
             &selected,
             "model-one",
             Effort::High,
+            None,
             1_799_000_000,
         ),
         Err(AuthorizationError::InvalidIdentity)
     ));
     assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
     assert!(matches!(
-        admitted_model_at(&state, &workspace, &selected, "model-one", Effort::High,),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            "model-one",
+            Effort::High,
+            1_799_000_000
+        ),
         Err(AuthorizationError::InvalidIdentity)
     ));
 
@@ -922,7 +999,14 @@ fn replaced_or_stale_account_cannot_publish_model_evidence() {
         Err(AuthorizationError::ConsentRequired)
     ));
     assert!(matches!(
-        admitted_model_at(&state, &workspace, &stale, "model-one", Effort::High,),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &stale,
+            "model-one",
+            Effort::High,
+            1_799_000_000
+        ),
         Err(AuthorizationError::ConsentRequired)
     ));
 }
@@ -954,6 +1038,7 @@ fn model_check_record_limit_fails_without_replacing_account() {
             fingerprint: [byte as u8; 32],
             checked_at_sec: now,
             expires_at_sec: now + MODEL_CHECK_AGE_SECONDS,
+            context_window_tokens: None,
         });
     }
     index.write(&state).unwrap();
@@ -970,6 +1055,7 @@ fn model_check_record_limit_fails_without_replacing_account() {
             &selected,
             "new-model",
             Effort::High,
+            None,
             now,
         ),
         Err(AuthorizationError::EvidenceUnavailable)
@@ -1411,6 +1497,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
         &selected,
         "model-one",
         Effort::Medium,
+        None,
         1_799_999_000,
     )
     .unwrap();
@@ -1459,6 +1546,7 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
             &selected,
             "model-one",
             Effort::Medium,
+            1_799_999_000,
         ),
         Err(AuthorizationError::PermissionMissing)
     ));

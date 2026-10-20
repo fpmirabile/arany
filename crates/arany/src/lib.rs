@@ -55,7 +55,7 @@ pub use provider::{
     ProviderFallback, ProviderIdentity, ProviderImage, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
     ProviderWireProvenance, Providers, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot,
-    RunInput, ToolUseId, UnansweredStatus, Usage, check_custom_profile,
+    RunInput, ToolUseId, UnansweredStatus, Usage, admitted_context_window, check_custom_profile,
     check_native_model_from_env, check_native_model_with_api_key,
     check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
