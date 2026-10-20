@@ -239,7 +239,7 @@ fn receive_stage(receiver: &mpsc::Receiver<&'static str>, expected: &str) {
     assert_eq!(
         receiver
             .recv_timeout(Duration::from_secs(10))
-            .expect("attached output stage"),
+            .unwrap_or_else(|error| panic!("attached output stage {expected}: {error}")),
         expected
     );
 }
@@ -354,6 +354,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         let mut declined = false;
         let mut bytes = Vec::new();
         let mut first_reported = false;
+        let mut maintenance_start = None;
         let mut compaction_reported = false;
         let mut manual_reported = false;
         let mut admission_reported = false;
@@ -404,20 +405,36 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                     .expect("resume second output");
             }
             if !first_reported
-                && bytes
-                    .windows(b"Status: finished".len())
-                    .any(|part| part == b"Status: finished")
+                // The receipt is emitted before terminal input is reacquired.
+                && crate::process::pty_text_matches(&bytes, b"Status: finished\r\n")
+                    .next()
+                    .is_some_and(|receipt| {
+                        crate::process::pty_text_matches(&bytes[receipt.end..], b"Input:\r\n")
+                            .next()
+                            .is_some()
+                    })
             {
                 sender.send("first receipt").expect("stage receiver");
                 first_reported = true;
             }
+            // Keep large answer bodies out of repeated maintenance-notice scans.
+            let warning = b"Notice: Context threshold reached; attempting automatic compaction";
+            let Some(start) = maintenance_start.or_else(|| {
+                bytes
+                    .windows(warning.len())
+                    .position(|part| part == warning)
+            }) else {
+                continue;
+            };
+            maintenance_start = Some(start);
+            let maintenance = &bytes[start..];
             let compaction_marker = match case {
                 CompactionCase::Success => b"Notice: Compaction saved; 20 input / 10 output tokens; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
                 CompactionCase::ProviderFailure => b"Notice: Error: Compaction failed: Provider unavailable; usage unavailable; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
                 CompactionCase::Interrupted => b"Notice: Automatic compaction unavailable: Compaction interrupted; check Session history; history retained; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
             };
             if !compaction_reported
-                && crate::process::pty_text_matches(&bytes, compaction_marker)
+                && crate::process::pty_text_matches(maintenance, compaction_marker)
                     .next()
                     .is_some()
             {
@@ -427,7 +444,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             let mismatch = b"Notice: Error: Automatic compaction unavailable: saved account requires a native Provider; history retained\r\nInput:\r\n";
             if matches!(case, CompactionCase::Success)
                 && !source_mismatch_reported
-                && crate::process::pty_text_matches(&bytes, mismatch)
+                && crate::process::pty_text_matches(maintenance, mismatch)
                     .next()
                     .is_some()
             {
@@ -437,7 +454,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             let continuation =
                 b"Notice: Draft: 9 characters; Enter retains until compaction ends\r\n";
             if !continuation_reported
-                && crate::process::pty_text_matches(&bytes, continuation)
+                && crate::process::pty_text_matches(maintenance, continuation)
                     .next()
                     .is_some()
             {
@@ -446,7 +463,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             }
             let rejected = b"Notice: Error: invalid or overlong terminal line; draft unchanged\r\n";
             if !rejection_reported
-                && crate::process::pty_text_matches(&bytes, rejected)
+                && crate::process::pty_text_matches(maintenance, rejected)
                     .next()
                     .is_some()
             {
@@ -454,14 +471,14 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 rejection_reported = true;
             }
             let retention = b"Notice: Draft retained; press Enter after compaction to submit\r\n";
-            let observed = crate::process::pty_text_matches(&bytes, retention).count();
+            let observed = crate::process::pty_text_matches(maintenance, retention).count();
             if observed > retention_count {
                 assert_eq!(observed, retention_count + 1);
                 sender.send("draft retained").expect("stage receiver");
                 retention_count = observed;
             }
             let cleared = b"^C\r\nInput:\r\n";
-            let observed = crate::process::pty_text_matches(&bytes, cleared).count();
+            let observed = crate::process::pty_text_matches(maintenance, cleared).count();
             if observed > clear_count {
                 assert_eq!(observed, clear_count + 1);
                 sender.send("draft cleared").expect("stage receiver");
@@ -470,7 +487,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             let manual_marker = b"Notice: Error: Compaction failed: Provider rejected; usage unavailable; Draft retained: 6 characters; Enter submits\r\nInput:\r\n";
             if matches!(case, CompactionCase::ProviderFailure)
                 && !manual_reported
-                && crate::process::pty_text_matches(&bytes, manual_marker)
+                && crate::process::pty_text_matches(maintenance, manual_marker)
                     .next()
                     .is_some()
             {
@@ -483,7 +500,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 b"Notice: Error: custom Provider profile file is unsafe\r\nInput:\r\n";
             if matches!(case, CompactionCase::ProviderFailure)
                 && !admission_reported
-                && crate::process::pty_text_matches(&bytes, admission_marker)
+                && crate::process::pty_text_matches(maintenance, admission_marker)
                     .next()
                     .is_some()
             {
