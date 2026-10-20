@@ -312,8 +312,10 @@ pub struct RunControls {
 pub struct RunResult {
     pub run: RunOutcome,
     /// Why the submission's Goal stopped at its latest Run, as `SessionView::run_stop` projects
-    /// the reopened history; a later Run with no terminal receipt reports `Uncertain`.
+    /// the reopened history. A Run that could not settle is returned without a terminal status.
     pub stopped: Option<crate::session::RunStop>,
+    /// The failure that ended an autonomous loop after `run` committed; it has no journaled fact.
+    pub continuation_error: Option<EngineError>,
 }
 
 pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<RunResult, EngineError>> + Send + 'a>>;
@@ -1065,6 +1067,7 @@ impl Engine {
             &mut leases,
         ))
         .await?;
+        let mut continuation_error = None;
         while turn.continues() && !cancellation.is_cancelled() {
             let next = RunRequest {
                 skill: None,
@@ -1088,20 +1091,29 @@ impl Engine {
             ))
             .await
             {
-                Ok(turn) => turn,
+                Ok(next) if next.outcome.run.status.is_outcome() => next,
+                // The earlier Finished Run keeps the answer; the projection below names the unsettled Run's stop.
+                Ok(_) => break,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
                 Err(EngineError::CancelledBeforeStart) => break,
-                // The earlier Finished Run stays committed; the projection below names where the Goal stopped.
+                // The earlier Finished Run stays committed; the caller gets it with the failure.
                 Err(error) => {
                     crate::diagnostics::engine_failure(&error);
+                    continuation_error = Some(error);
                     break;
                 }
             };
         }
-        let stopped = self.run_stop(&turn.outcome).await?;
+        let (latest, stopped) = self.run_stop(&turn.outcome).await?;
+        let mut run = turn.outcome;
+        // An unsettled Run is returned as history reopens it.
+        if latest.id == run.run.id {
+            run.run = latest;
+        }
         Ok(RunResult {
-            run: turn.outcome,
+            run,
             stopped,
+            continuation_error,
         })
     }
 
@@ -1109,7 +1121,7 @@ impl Engine {
     async fn run_stop(
         &self,
         outcome: &RunOutcome,
-    ) -> Result<Option<crate::session::RunStop>, EngineError> {
+    ) -> Result<(RunView, Option<crate::session::RunStop>), EngineError> {
         let view = self
             .journal
             .store()
@@ -1125,7 +1137,7 @@ impl Engine {
             .rev()
             .find(|run| goal.run_ids.contains(&run.id))
             .ok_or(EngineError::InvalidHistory)?;
-        Ok(view.run_stop(latest))
+        Ok((latest.clone(), view.run_stop(latest)))
     }
 
     #[expect(
@@ -1860,7 +1872,8 @@ impl Engine {
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
-        if !run.status.is_outcome() {
+        // Only an unsettled primary leaves its Run open here; the Goal stays open as after a crash.
+        if !run.status.is_outcome() && run.status != crate::session::RunStatus::Active {
             return Err(EngineError::InvalidHistory);
         }
         Ok(RunTurn {

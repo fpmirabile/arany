@@ -38,6 +38,8 @@ pub(super) enum RunFailure {
     ToolsUnavailable,
     #[error(transparent)]
     Engine(arany::EngineError),
+    #[error("{0}")]
+    Unsettled(&'static str),
 }
 
 pub(super) async fn preflight_selected(
@@ -161,11 +163,29 @@ pub(super) fn finish_run(
     result: Result<RunResult, arany::EngineError>,
     pause_requested: bool,
 ) -> Result<RunOutcome, RunAttemptError> {
-    let RunResult { run, stopped } = result.map_err(classify_run_error)?;
-    match crate::cli::exec::stop_after_answer(run.run.status, stopped, pause_requested) {
+    let RunResult {
+        run,
+        stopped,
+        continuation_error,
+    } = result.map_err(classify_run_error)?;
+    // A Run that could not settle has no committed outcome to show, only its projected stop.
+    if !run.run.status.is_outcome() {
+        return Err(RunAttemptError::Failed(RunFailure::Unsettled(
+            stopped.map_or(
+                "Run did not reach a terminal state",
+                crate::cli::exec::stop_text,
+            ),
+        )));
+    }
+    match crate::cli::exec::stop_after_answer(
+        run.run.status,
+        stopped,
+        continuation_error.as_ref(),
+        pause_requested,
+    ) {
         Some(reason) => Err(RunAttemptError::Stopped {
             outcome: Box::new(run),
-            reason: reason.to_owned(),
+            reason,
         }),
         None => Ok(run),
     }

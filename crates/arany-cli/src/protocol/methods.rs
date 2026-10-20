@@ -588,7 +588,7 @@ pub struct GoalSummary {
     pub stopped: Option<GoalStop>,
 }
 
-#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
 #[serde(
     tag = "reason",
     rename_all = "camelCase",
@@ -603,6 +603,11 @@ pub enum GoalStop {
     Cancelled,
     StoppedByHook,
     Uncertain,
+    Interrupted,
+    /// The next autonomous Run was refused after this one committed; `turn.error` has the message.
+    NotAdmitted {
+        refusal: super::rpc::Reason,
+    },
     Failed {
         #[schemars(schema_with = "run_failure_schema")]
         failure: arany::RunFailure,

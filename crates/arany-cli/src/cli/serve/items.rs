@@ -184,6 +184,7 @@ fn stop_reason(stop: RunStop) -> Option<TurnStopReason> {
         | RunStop::Cancelled
         | RunStop::StoppedByHook
         | RunStop::Uncertain
+        | RunStop::Interrupted
         | RunStop::Failed(_) => None,
     }
 }
@@ -202,6 +203,7 @@ fn goal_stop(stop: RunStop) -> GoalStop {
         RunStop::Cancelled => GoalStop::Cancelled,
         RunStop::StoppedByHook => GoalStop::StoppedByHook,
         RunStop::Uncertain => GoalStop::Uncertain,
+        RunStop::Interrupted => GoalStop::Interrupted,
         RunStop::Failed(failure) => GoalStop::Failed { failure },
     }
 }
@@ -409,6 +411,7 @@ mod tests {
                 None,
             ),
             (RunStop::Uncertain, json!({"reason":"uncertain"}), None),
+            (RunStop::Interrupted, json!({"reason":"interrupted"}), None),
             (
                 RunStop::Failed(RunFailure::CriterionUnmet),
                 json!({"reason":"failed","failure":"criterion_unmet"}),

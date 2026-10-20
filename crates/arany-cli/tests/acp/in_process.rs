@@ -1766,6 +1766,16 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             "effectUncertain",
         ),
         (
+            json!({"reason":"interrupted"}),
+            "interrupted",
+            "turnInterrupted",
+        ),
+        (
+            json!({"reason":"notAdmitted","refusal":"workspaceUnavailable"}),
+            "completed",
+            "turnFailed",
+        ),
+        (
             json!({"reason":"failed","failure":"tool_stopped"}),
             "failed",
             "turnFailed",
@@ -1893,7 +1903,10 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             assert_eq!(entry["status"], final_status);
         }
         let result = adapter.next().await;
-        if matches!(expected, "turnFailed" | "stoppedByHook" | "effectUncertain") {
+        if matches!(
+            expected,
+            "turnFailed" | "stoppedByHook" | "effectUncertain" | "turnInterrupted"
+        ) {
             assert_eq!(result["error"]["code"], -32603, "{stopped}");
             assert_eq!(result["error"]["data"]["reason"], expected, "{stopped}");
         } else {

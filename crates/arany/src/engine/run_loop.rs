@@ -987,10 +987,9 @@ impl<'a> RunLoop<'a> {
     // The only primary terminal writer: AgentFinished, MessageCommitted for an answer, RunFinished.
     async fn settle_primary(&self, end: PrimaryEnd) -> Result<(), EngineError> {
         let (agent, run, failure, answer) = match stop::settle(end, &RunFacts::observe(self)?) {
-            // Neither journals a terminal Event, so the reopened Run projects `RunStop::Uncertain`.
-            Settlement::Unknown | Settlement::Unsettleable => {
-                return Err(crate::tools::ToolError::Uncertain.into());
-            }
+            Settlement::Unknown => return Err(crate::tools::ToolError::Uncertain.into()),
+            // No terminal Event: the submission reports the stop its reopened Run projects.
+            Settlement::Unsettleable => return Ok(()),
             Settlement::Finish(answer) => (
                 AgentDisposition::Finished,
                 RunDisposition::Finished,

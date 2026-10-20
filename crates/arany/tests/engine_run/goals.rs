@@ -3329,11 +3329,12 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
         )
         .expect("idle Engine")
         .await;
-    let (committed, reason) = match result {
+    let (committed, reason, error) = match result {
         Ok(RunResult {
             run,
             stopped: Some(reason),
-        }) => (run, reason),
+            continuation_error: Some(error),
+        }) => (run, reason, error),
         Err(error) => panic!("the committed Run must be returned with its stop reason: {error}"),
         Ok(_) => panic!("a failed continuation admission must stop the loop"),
     };
@@ -3346,7 +3347,11 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
     assert_eq!(
         reason,
         arany::RunStop::Paused,
-        "an admission failure is not a budget stop"
+        "history keeps the Goal open; it records no admission failure"
+    );
+    assert!(
+        !matches!(error, EngineError::GoalBudgetExhausted),
+        "the caller gets the actionable admission failure: {error}"
     );
     engine.close().await.expect("engine shutdown");
 

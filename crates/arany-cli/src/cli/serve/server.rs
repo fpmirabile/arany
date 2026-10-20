@@ -167,14 +167,14 @@ pub(in crate::cli) async fn run_configured(
                 Input(Option<ClientMessage>),
                 Event(Option<Tapped>),
                 Committed(Option<Tapped>),
-                Done(Result<(), EngineError>),
+                Done(Result<Option<Refused>, EngineError>),
             }
             let next = if let Some(turn) = active.as_mut() {
                 tokio::select! { biased;
                     input = inbound.recv(), if !shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
                     event = committed.next() => Next::Committed(event),
-                    result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(|_| ())),
+                    result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(Refused::from_result)),
                 }
             } else {
                 if shutdown {
@@ -606,13 +606,21 @@ pub(in crate::cli) async fn run_configured(
                     } else {
                         None
                     };
+                    let (result, refused) = match result {
+                        Ok(refused) => (Ok(()), refused),
+                        Err(error) => (Err(error), None),
+                    };
+                    let ending = Completion::Final {
+                        settled: result.is_ok(),
+                        refused,
+                    };
                     if result.is_err()
                         && let Some(id) = turn.pending_start.take()
                     {
                         let error = result.expect_err("failed Run");
                         send(&outbound, Fault::engine(error).message(Some(id))).await?;
                     }
-                    complete(turn, &state, &outbound, &opt_out, true).await?;
+                    complete(turn, &state, &outbound, &opt_out, &ending).await?;
                     if let Some(id) = turn.pending_close.take() {
                         history.unsubscribe(turn.thread_id);
                         threads.map.remove(&turn.thread_id);
@@ -668,7 +676,7 @@ async fn observe(
         }
         if turn.state.pending_completion && matches!(envelope.event, Event::MessageAccepted { .. })
         {
-            complete(turn, state, outbound, opt_out, false).await?;
+            complete(turn, state, outbound, opt_out, &Completion::Progress).await?;
         }
         if let Event::MessageAccepted { run_id, .. } = envelope.event
             && turn.state.goal_id.is_none()
@@ -711,13 +719,43 @@ async fn observe(
     Ok(())
 }
 
+// The next autonomous Run's refusal after a committed Run; no Event records it.
+pub(super) struct Refused {
+    run: arany::RunId,
+    reason: Reason,
+    message: String,
+}
+
+impl Refused {
+    fn from_result(result: arany::RunResult) -> Option<Self> {
+        result.continuation_error.map(|error| Self {
+            run: result.run.run.id,
+            reason: Reason::from(&error),
+            message: error.to_string(),
+        })
+    }
+}
+
+enum Completion {
+    Progress,
+    // `settled`: the submission returned, so a final Run without a terminal receipt is reported once.
+    Final {
+        settled: bool,
+        refused: Option<Refused>,
+    },
+}
+
 async fn complete(
     turn: &mut ActiveTurn,
     state: &std::path::Path,
     outbound: &mpsc::Sender<Message>,
     opt_out: &[String],
-    finalizing: bool,
+    completion: &Completion,
 ) -> Result<(), String> {
+    let (finalizing, settled, refused) = match completion {
+        Completion::Progress => (false, false, None),
+        Completion::Final { settled, refused } => (true, *settled, refused.as_ref()),
+    };
     let view = threads::load_view(state, turn.thread_id)
         .await
         .map_err(|e| e.message)?;
@@ -751,7 +789,10 @@ async fn complete(
         if !finalizing && Some(run.id) != turn.state.run_id {
             continue;
         }
-        let Some(finished) = run.finished_sequence else {
+        // A settled submission's last Run may have no terminal receipt; its acceptance dedupes it.
+        let unfinished = (settled && run.status == arany::RunStatus::Interrupted)
+            .then_some(run.accepted_sequence);
+        let Some(finished) = run.finished_sequence.or(unfinished) else {
             continue;
         };
         if finished <= turn.state.completed_sequence
@@ -768,6 +809,16 @@ async fn complete(
             .find(|goal| goal.run_ids.contains(&run.id))
             .ok_or("Run has no Goal")?;
         let mut summary = items::turn_summary(&view, run, goal, false);
+        if let Some(refused) = refused.filter(|refused| refused.run == run.id)
+            && let Some(goal) = &mut summary.goal
+        {
+            goal.stopped = Some(GoalStop::NotAdmitted {
+                refusal: refused.reason.clone(),
+            });
+            summary.error = Some(TurnError {
+                message: refused.message.clone(),
+            });
+        }
         if !finalizing {
             summary.stop_reason = None;
             summary.goal = Some(GoalSummary {
@@ -952,9 +1003,18 @@ mod tests {
             },
         };
         let (outbound, mut output) = mpsc::channel(super::super::OUTBOUND_CAPACITY);
-        complete(&mut turn, &state, &outbound, &[], true)
-            .await
-            .unwrap();
+        complete(
+            &mut turn,
+            &state,
+            &outbound,
+            &[],
+            &Completion::Final {
+                settled: true,
+                refused: None,
+            },
+        )
+        .await
+        .unwrap();
         let response = serde_json::to_value(output.recv().await.unwrap()).unwrap();
         assert_eq!(response["id"], 3);
         assert_eq!(response["result"]["turn"]["id"], json!(result.run.run.id));
@@ -964,6 +1024,116 @@ mod tests {
         assert_eq!(completed["params"]["turn"]["id"], json!(result.run.run.id));
         assert!(output.try_recv().is_err());
         assert!(turn.pending_start.is_none());
+        worker.await.unwrap();
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_settled_final_run_without_a_terminal_receipt_completes_once_with_its_stop() {
+        let _deadline = super::super::tests::deadline();
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let source = temp.path().join("source");
+        let engine = Engine::open(
+            arany::StateRoot::admit(&source).unwrap(),
+            arany::EngineConfig::default(),
+        )
+        .unwrap();
+        let finish = arany::ProviderOutcome::Answer(arany::Answer {
+            text: "Hello".into(),
+        });
+        let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![
+            finish.clone(),
+            finish,
+        ])));
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        for text in ["Hi", "Again"] {
+            let mut input = request(&workspace, text);
+            input.session_id = Some(session);
+            input.title = None;
+            input.include_paths.clear();
+            engine
+                .submit(providers.clone(), input, RunControls::default())
+                .unwrap()
+                .result
+                .await
+                .unwrap();
+        }
+        engine.close().await.unwrap();
+        let store = arany::Store::open_read_only(arany::StateRoot::open_existing(&source).unwrap())
+            .unwrap();
+        let events = store.load_session(session).await.unwrap();
+        store.close().await.unwrap();
+        // A crash right after the second Run is accepted: no terminal receipt and no effect.
+        let accepted = events
+            .iter()
+            .rposition(|e| matches!(e.event, Event::MessageAccepted { .. }))
+            .unwrap();
+        let state = temp.path().join("state");
+        let store = arany::Store::open(arany::StateRoot::admit(&state).unwrap()).unwrap();
+        for envelope in &events[..=accepted] {
+            store.append(session, envelope.event.clone()).await.unwrap();
+        }
+        store.close().await.unwrap();
+        let engine = Engine::open(
+            arany::StateRoot::open_existing(&state).unwrap(),
+            arany::EngineConfig::default(),
+        )
+        .unwrap();
+        let worker = tokio::spawn(async {});
+        let mut turn = ActiveTurn {
+            thread_id: session,
+            result: worker.abort_handle(),
+            events: engine.subscribe(),
+            cancel: RunCancellation::new(),
+            approvals: super::super::approvals::Approvals::empty_for_test(),
+            approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
+            steering: RunSteering::new(),
+            pending_start: None,
+            result_done: true,
+            pending_close: None,
+            state: TurnState {
+                first_sequence: Some(events[accepted].sequence),
+                ..Default::default()
+            },
+        };
+        let (outbound, mut output) = mpsc::channel(super::super::OUTBOUND_CAPACITY);
+        let unsettled = Completion::Final {
+            settled: false,
+            refused: None,
+        };
+        complete(&mut turn, &state, &outbound, &[], &unsettled)
+            .await
+            .unwrap();
+        assert!(
+            output.try_recv().is_err(),
+            "an Engine error keeps the fatal recovery path"
+        );
+        let settled = Completion::Final {
+            settled: true,
+            refused: None,
+        };
+        complete(&mut turn, &state, &outbound, &[], &settled)
+            .await
+            .unwrap();
+        let completed = serde_json::to_value(output.recv().await.unwrap()).unwrap();
+        assert_eq!(completed["method"], "turn/completed");
+        assert_eq!(completed["params"]["turn"]["status"], "interrupted");
+        assert_eq!(
+            completed["params"]["turn"]["goal"]["stopped"],
+            json!({"reason":"interrupted"})
+        );
+        complete(&mut turn, &state, &outbound, &[], &settled)
+            .await
+            .unwrap();
+        assert!(
+            output.try_recv().is_err(),
+            "the stopped turn completes once"
+        );
         worker.await.unwrap();
         engine.close().await.unwrap();
     }

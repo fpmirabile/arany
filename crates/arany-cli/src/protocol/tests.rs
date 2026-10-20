@@ -224,6 +224,16 @@ fn every_conformance_message_validates_against_the_schema() {
         (json!({"reason": "cancelled"}), true),
         (json!({"reason": "stoppedByHook"}), true),
         (json!({"reason": "uncertain"}), true),
+        (json!({"reason": "interrupted"}), true),
+        (
+            json!({"reason": "notAdmitted", "refusal": "workspaceUnavailable"}),
+            true,
+        ),
+        (json!({"reason": "notAdmitted"}), false),
+        (
+            json!({"reason": "notAdmitted", "refusal": "Workspace input is unavailable"}),
+            false,
+        ),
         (
             json!({"reason": "failed", "failure": "provider_call"}),
             true,

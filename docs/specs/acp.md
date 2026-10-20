@@ -258,7 +258,7 @@ The prompt result maps serve's closed `goal.stopped` projection:
 |---|---|
 | Run finished, Goal completed and no `goal.stopped` | `stopReason:"end_turn"` |
 | Client cancellation or process stop, or `goal.stopped` `paused` or `cancelled` | `stopReason:"cancelled"`, including a teardown error after cancellation; `_meta["arany.uncertainEffects"]` reports observed uncertain Tools when nonzero |
-| Failed Run (`goal.stopped` `failed` or absent), uncertain effect (an observed uncertain Tool or `goal.stopped` `uncertain`) or hook stop (`stoppedByHook`) | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"` or `"stoppedByHook"` |
+| Failed Run (`goal.stopped` `failed`, `notAdmitted` or absent), uncertain effect (an observed uncertain Tool or `goal.stopped` `uncertain`), interruption without a terminal receipt (`interrupted`) or hook stop (`stoppedByHook`) | `-32603` with compiled recovery guidance and `data.reason:"turnFailed"`, `"effectUncertain"`, `"turnInterrupted"` or `"stoppedByHook"` |
 | Budget stop (`goal.stopped` `goalExhausted`) | `limit:"tokens"` maps to `max_tokens`; `calls`, `runs` and `activeTime` map to `max_turn_requests`. Cancellation keeps `cancelled` and observed uncertain effects keep the failure path. An admission failure without a committed turn stays an RPC error. |
 
 Failure is never `end_turn`; `refusal` is unused because journal context is

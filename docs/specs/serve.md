@@ -174,7 +174,7 @@ honored.
 | `turn/started` | `MessageAccepted`; `{threadId,turn:{id,goalId,status:"inProgress",items:[]}}`. Each subsequent Run of an autonomous Goal has a new turn ID and the same Goal ID. |
 | `item/started` | `MessageAccepted` or `ToolStarted`; `{threadId,turnId,item,startedAtMs}`. |
 | `item/completed` | `MessageAccepted`, `MessageCommitted` or `ToolFinished`; `{threadId,turnId,item,completedAtMs}`. User items start and complete together; final answer items complete without a started notification. |
-| `turn/completed` | `RunFinished` plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
+| `turn/completed` | `RunFinished`, or the end of a settled submission whose last Run has no terminal receipt, plus reduced Goal state; `{threadId,turn:{id,goalId,status,stopReason?,items:[],error?,goal:{status,stopped?}}}`. Status is `completed`, `interrupted` or `failed`. An autonomous submission can complete several turns before its final receipt. |
 | `events/committed` | After a thread's final subscription page, `{threadId,event:EventLine}` for each later tapped Event in commit order. Events at or before the page head are suppressed. |
 | `events/resync` | A tap `Resync {missed}`; `{threadId,missed,lastSequence}`. Raw subscriptions receive one notice per subscribed thread with its last delivered sequence and are then disabled until `events/subscribe` is called again, so a later notice never reports a cursor beyond the first gap. The turn projection also emits `events/resync` for its active thread with its own `lastSequence`, so a subscriber can see two notices; `missed` counts the process-wide tap loss and may include other threads. Recover by paging `events/subscribe` from `lastSequence`, or reconstruct items with `thread/resume`. Live delivery is best effort: a lost append acknowledgment or a fork committed inside Store can leave a gap without Resync; paging supplies completeness. |
 
@@ -190,10 +190,19 @@ without stopping its Goal. Otherwise it is one of:
   `activeTime` within the 5 s Store-action margin, else `runs`.
 - `paused`: the Goal waits at this latest Finished or Cancelled Run for an
   explicit resume.
-- `cancelled`, `stoppedByHook`, or `uncertain` for a Run with no terminal
-  receipt.
+- `cancelled` or `stoppedByHook`.
+- For a Run with no terminal receipt: `uncertain` only when it committed a Tool
+  or hook without a journaled outcome or with an uncertain one; otherwise
+  `goalExhausted` when its counts prove the budget spent, else `interrupted`.
 - `{reason:"failed",failure}` with the journal's snake_case `RunFailure`. A
   failure on the last permitted call is not budget exhaustion.
+
+When an autonomous submission's next Run is refused after a committed Run, the
+final live completion of that Run carries `{reason:"notAdmitted",refusal}` with
+the closed Engine `Reason` and the compiled message in `turn.error`; no Event
+records the refusal, so its history projects `paused`. A settled submission
+whose last Run has no terminal receipt also completes that Run once, with
+status `interrupted`; an Engine error keeps the fatal recovery path below.
 
 `turn.stopReason` is derived from it: `tokenBudgetExhausted` for the `tokens`
 limit and `actionBudgetExhausted` for the others. Intermediate autonomous turns

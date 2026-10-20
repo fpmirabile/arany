@@ -1334,7 +1334,7 @@ fn prompt_outcome(
     if uncertain_observed {
         return Err("effectUncertain");
     }
-    match turn.goal.as_ref().and_then(|goal| goal.stopped) {
+    match turn.goal.as_ref().and_then(|goal| goal.stopped.as_ref()) {
         None if turn.status == TurnStatus::Completed
             && turn
                 .goal
@@ -1343,7 +1343,7 @@ fn prompt_outcome(
         {
             Ok("end_turn")
         }
-        None | Some(GoalStop::Failed { .. }) => Err("turnFailed"),
+        None | Some(GoalStop::Failed { .. } | GoalStop::NotAdmitted { .. }) => Err("turnFailed"),
         Some(GoalStop::GoalExhausted {
             limit: GoalLimit::Tokens,
         }) => Ok("max_tokens"),
@@ -1353,6 +1353,7 @@ fn prompt_outcome(
         Some(GoalStop::Paused | GoalStop::Cancelled) => Ok("cancelled"),
         Some(GoalStop::StoppedByHook) => Err("stoppedByHook"),
         Some(GoalStop::Uncertain) => Err("effectUncertain"),
+        Some(GoalStop::Interrupted) => Err("turnInterrupted"),
     }
 }
 

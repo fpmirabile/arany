@@ -550,6 +550,37 @@
         {
           "additionalProperties": false,
           "properties": {
+            "reason": {
+              "const": "interrupted",
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "description": "The next autonomous Run was refused after this one committed; `turn.error` has the message.",
+          "properties": {
+            "reason": {
+              "const": "notAdmitted",
+              "type": "string"
+            },
+            "refusal": {
+              "$ref": "#/$defs/Reason"
+            }
+          },
+          "required": [
+            "reason",
+            "refusal"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "failure": {
               "enum": [
                 "provider_call",
