@@ -45,7 +45,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             "exit_code": 0,
             "stdout": "",
             "stderr": "",
-            "changeset": {"files": []}
+            "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
         })
         .to_string(),
         cache_update: CacheUpdate::Failed,
@@ -72,8 +72,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             workspace_inode: 2,
             call: ToolCall::Read {
                 path: format!("src/{index}-{}", "x".repeat(480)),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             limits: ToolLimits::default(),
             expires_at_ms: 1,
@@ -412,8 +412,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         workspace_inode: 2,
         call: ToolCall::Read {
             path: "src/report-failure".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
         limits: ToolLimits::default(),
         expires_at_ms: 1,
@@ -506,8 +506,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 workspace_inode: 2,
                 call: ToolCall::Read {
                     path: format!("src/{run_index}-{failure_index}"),
-                    offset: 0,
-                    limit: 4096,
+                    offset: None,
+                    limit: None,
                 },
                 limits: ToolLimits::default(),
                 expires_at_ms: 1,
@@ -638,8 +638,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
 fn read_evidence_names_the_site_that_attested_it() {
     let call = ToolCall::Read {
         path: "src/lib.rs".into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     };
     assert_eq!(
         goal_report_evidence(
@@ -688,7 +688,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         attestation: Some(Attestation::for_site(&intent)),
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
-        output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "changeset": {"files": []}}).to_string(),
+        output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
         cache_update: CacheUpdate::NotApplicable,
     };
     assert_eq!(
@@ -881,7 +881,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
             attestation: Some(Attestation::for_site(&intent)),
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
-            output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "changeset": {"files": []}}).to_string(),
+            output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
             cache_update: CacheUpdate::NotApplicable,
         }),
         intent,

@@ -95,7 +95,7 @@ pub(crate) static ALL: [OperationFacts; 17] = [
         "read",
         Family::File,
         1,
-        "Read a Workspace file and obtain its whole-file SHA-256. Page from next_offset when truncated. Read further pages yourself when needed.",
+        "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
     ),
     read_row(
         "search",
@@ -126,7 +126,7 @@ pub(crate) static ALL: [OperationFacts; 17] = [
             "command",
             Family::Process,
             11,
-            "Run an admitted command in an offline project snapshot. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
+            "Run an admitted command in an offline project snapshot. Large output keeps a head and tail with byte and line totals; narrow it with grep, sed -n or tail. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
         )
     },
     OperationFacts {
@@ -255,8 +255,8 @@ pub(crate) fn git_operations() -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
-pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
+pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal UTF-8 content in a file or directory)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
 
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
@@ -470,8 +470,8 @@ mod tests {
             ToolCall::List { path: path() },
             ToolCall::Read {
                 path: path(),
-                offset: 0,
-                limit: 1,
+                offset: None,
+                limit: Some(1),
             },
             ToolCall::Search {
                 path: path(),

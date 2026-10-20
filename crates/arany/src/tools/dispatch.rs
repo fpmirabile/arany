@@ -20,6 +20,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
                 site.config,
                 site.root,
                 site.intent.limits.cache_bytes > 0,
+                site.intent.limits.result_bytes as usize,
             )
             .await
         }
@@ -66,11 +67,36 @@ pub(super) fn outcome(
             ToolDisposition::Limit,
             "Tool result or resource limit reached".into(),
         ),
+        Err(ToolError::OutputCeiling) => (
+            ToolDisposition::Limit,
+            "output_ceiling: output passed 1 GiB per stream; stopped".into(),
+        ),
         Err(ToolError::Conflict) => (
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),
         ),
-        Err(ToolError::Path | ToolError::FilesystemDenied) => (
+        Err(ToolError::NotFound)
+            if matches!(
+                intent.call,
+                ToolCall::Read { .. }
+                    | ToolCall::List { .. }
+                    | ToolCall::Search { .. }
+                    | ToolCall::Write { .. }
+                    | ToolCall::Edit { .. }
+                    | ToolCall::Mkdir { .. }
+            ) =>
+        {
+            (
+                ToolDisposition::Failed,
+                if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Mkdir { .. }) {
+                    "Parent directory not found; create it with Mkdir first"
+                } else {
+                    "File or directory not found; List the parent directory to check the path"
+                }
+                .into(),
+            )
+        }
+        Err(ToolError::Path | ToolError::FilesystemDenied | ToolError::NotFound) => (
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
         ),

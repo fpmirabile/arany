@@ -49,8 +49,8 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
     std::fs::set_permissions(permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
     let read = arany::ToolCall::Read {
         path: format!("{}/data", canaries[1]),
-        offset: 0,
-        limit: 1024,
+        offset: None,
+        limit: Some(1024),
     };
     let mut outcomes: Vec<_> = (0..4).map(|_| tool_outcome(read.clone())).collect();
     outcomes.push(tool_outcome(arany::ToolCall::Command {

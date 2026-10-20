@@ -1105,7 +1105,7 @@ fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String
             let Some(Entry::File { content, .. }) = image.entries.get(path) else {
                 return Err(ToolError::Path);
             };
-            fs::read_page(content, *offset, *limit, result_bytes)
+            fs::read_page(content.as_ref(), *offset, *limit, result_bytes)
         }
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let mut rows = Vec::new();
@@ -1632,15 +1632,15 @@ mod tests {
                 actor,
                 ToolCall::Read {
                     path: "owned/a".into(),
-                    offset: 0,
-                    limit: 65536,
+                    offset: None,
+                    limit: None,
                 },
             );
             let observed = actor.read(read);
             assert!(observed.valid());
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&observed.output).unwrap()["text"],
-                expected
+                format!("1\t{expected}\n")
             );
         }
         let edit = intent(
@@ -1954,6 +1954,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: "ok".into(),
                     stderr: String::new(),
+                    stdout_total: crate::tools::types::OutputTotal { bytes: 2, lines: 1 },
+                    stderr_total: Default::default(),
                     private_capture: if case == "rejected" {
                         PrivateCapture::Rejected {
                             cause: PrivateCaptureRejection::OutOfLease,
@@ -2063,6 +2065,8 @@ mod tests {
                     exit_code: Some(0),
                     stdout: String::new(),
                     stderr: String::new(),
+                    stdout_total: Default::default(),
+                    stderr_total: Default::default(),
                     private_capture: if case == "rejected_modified" {
                         PrivateCapture::Rejected {
                             cause: PrivateCaptureRejection::OutOfLease,

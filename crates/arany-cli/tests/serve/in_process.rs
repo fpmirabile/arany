@@ -1408,8 +1408,8 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         (
             ToolCall::Read {
                 path: "file".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             "toolCall",
         ),
@@ -1568,8 +1568,8 @@ async fn approval_scenario(case: ApprovalCase) {
     let fill_output = outbound.clone();
     let read = arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
         path: "facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     });
     let finish = arany::ProviderOutcome::Answer(arany::Answer {
         text: "Finished".into(),
@@ -1942,8 +1942,8 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
         ScriptedProvider::new(vec![
             arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
                 path: "facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             }),
             arany::ProviderOutcome::Answer(arany::Answer {
                 text: "Fact".into(),

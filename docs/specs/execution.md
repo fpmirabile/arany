@@ -82,7 +82,7 @@ Every EditOnly AgentRun uses the same `execute_step` and `before_dispatch` as th
 
 Before producing data, admission narrows the assignment's finite allowance to remaining serialized Store/Event headroom. Each later call, private Tool, capture and integration reserves its complete bounded action plus terminal tail. A known capacity refusal stops before dispatch; a failed append or acknowledgment stops advancement. The action bound is `N + 12 + (4*A + 6) + switches`, conservatively reserving all eight possible outstanding assignments (`A=8`), admitted chunk count `N`, and the configured review, child and primary switch slots. A whole candidate that cannot fit is refused, never split or partially published.
 
-An invalid worker outcome records InvalidOutcome; a Tool request on its final inference turn records TurnLimit, while an ordinary private Tool failure records ToolFailed. An editor's answer that passes the in-view gate runs the same guarded SubagentStop lifecycle as a researcher before capture; blocked feedback may consume only remaining admitted turns. Private failure, denied approval, unavailable approval channel or a positively contained lost private receipt ends that actor, records its typed disposition and cleanup, discards unpublished work and releases the lease. The primary receives the local failure and may report the task's unresolved criterion. Goal budget, cancellation or pause is committed as WorkerStopObserved before further team decisions; no subsequent effect or handover eligibility is admitted. Conflict or a denied integration records a whole-batch prepublication refusal and discard/release; the primary then synthesizes with an honest local worker-failure report (nothing was published), and the lease counts as settled without verification, as in replay. An unknown Workspace publication records Uncertain and stops the entire Run, without release, retry or successful completion. Successful primary answer requires fresh passing worker verification as well as the Goal criterion.
+An invalid worker outcome records InvalidOutcome; a Tool request on its final inference turn records TurnLimit, while an ordinary private Tool failure records ToolFailed. A private command result that fails validation also records InvalidOutcome. A private Tool step stopped by cancellation, pause or another actor's hook stop ends the editor `cancelled` with cause `cancelled`. A private Tool step stopped by active time or the Goal budget records `budget`. An editor's answer that passes the in-view gate runs the same guarded SubagentStop lifecycle as a researcher before capture; blocked feedback may consume only remaining admitted turns. Private failure, denied approval, unavailable approval channel or a positively contained lost private receipt ends that actor, records its typed disposition and cleanup, discards unpublished work and releases the lease. The primary receives the local failure and may report the task's unresolved criterion. Goal budget, cancellation or pause is committed as WorkerStopObserved before further team decisions; no subsequent effect or handover eligibility is admitted. Conflict or a denied integration records a whole-batch prepublication refusal and discard/release; the primary then synthesizes with an honest local worker-failure report (nothing was published), and the lease counts as settled without verification, as in replay. An unknown Workspace publication records Uncertain and stops the entire Run, without release, retry or successful completion. Successful primary answer requires fresh passing worker verification as well as the Goal criterion.
 
 `RunStarted.config.worker_policy` is required nullable data. A non-null pin declares admitted parent read/write roots, the closed file/research/command Tool subset, Skill/server names, sorted parent `commands` (0–8 unique names, at most 64 bytes each), permission restriction, concurrency (1–8), turns (1–17), model Tools (0–16) and finite serialized data allowance (at most 48 MiB). Runtime pins the effective concurrency described above, 17 turns, 16 Tools and a 48 MiB maximum data allowance; policy total-attempt limits are unchanged. These are authenticated admission facts, never authority supplied by a definition, model, receipt or replay.
 
@@ -159,8 +159,8 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 16 |
-| `ToolFinished` | 16 |
-| `ToolStarted` | 12 |
+| `ToolFinished` | 18 |
+| `ToolStarted` | 13 |
 | `AgentSpawned` | 11 |
 | `AgentFinished` | 10 |
 | `ProviderCallRecorded` | 12 |
@@ -171,7 +171,7 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `WorkerHandoverRecorded` | 2 |
 | `HookStarted` | 3 |
-| `HookFinished` | 6 |
+| `HookFinished` | 7 |
 | All other supported Event kinds | 6 |
 
 The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.

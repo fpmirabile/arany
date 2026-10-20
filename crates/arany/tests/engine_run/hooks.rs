@@ -102,7 +102,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                     contract_version: 1, intent_digest: Sha256::digest(serde_json::to_vec(&intent).unwrap()).into(), enforcement_digest: intent.enforcement_digest, limits: intent.limits.clone(),
                 })),
                 intent, disposition: arany::ToolDisposition::Succeeded,
-                output: serde_json::json!({"exit_code":0,"stdout":serde_json::json!({"continue":false,"stopReason":reason}).to_string(),"stderr":"","changeset":{"files":[]}}).to_string(),
+                output: serde_json::json!({"exit_code":0,"stdout":serde_json::json!({"continue":false,"stopReason":reason}).to_string(),"stderr":"","stdout_total":{"bytes":serde_json::json!({"continue":false,"stopReason":reason}).to_string().len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
                 cache_update: arany::CacheUpdate::NotApplicable, enforcement_cause: None,
             },
         },
@@ -167,6 +167,31 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
             assert!(!format!("{:?}", requests[0]).contains(reason));
         }
         engine.close().await.unwrap();
+        let database = state.join("events.sqlite3");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        let version: i64 = connection
+            .query_row(
+                "SELECT event_version FROM events WHERE kind='HookFinished'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 7);
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE events SET event_version=6 WHERE kind='HookFinished'",
+                    []
+                )
+                .unwrap(),
+            1
+        );
+        drop(connection);
+        let before = std::fs::read(&database).unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        assert!(store.load_view(result.session_id).await.is_err());
+        store.close().await.unwrap();
+        assert_eq!(std::fs::read(&database).unwrap(), before);
     }
 }
 
@@ -203,8 +228,8 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
             }),
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             }),
             arany::test_support::goals::finish_with("child report"),
             arany::test_support::goals::finish_with("answer"),

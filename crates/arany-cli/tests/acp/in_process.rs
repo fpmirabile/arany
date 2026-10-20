@@ -808,8 +808,8 @@ async fn load_replays_tool_results_and_interrupted_intents_without_execution() {
         ScriptedProvider::new(vec![
             arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
                 path: "facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             }),
             arany::ProviderOutcome::Answer(arany::Answer {
                 text: "Fact".into(),
@@ -1944,8 +1944,8 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             } else {
                 tool_outcome(arany::ToolCall::Read {
                     path: "facts.txt".into(),
-                    offset: 0,
-                    limit: 32,
+                    offset: None,
+                    limit: Some(32),
                 })
             }])
             .with_profile("openai", "gpt-5.4")
@@ -2014,8 +2014,8 @@ async fn load_and_resume_translate_pinned_schema_without_private_state() {
     let mut adapter = Adapter::new().await;
     let intent = adapter.intent(arany::ToolCall::Read {
         path: "facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     });
     let params = json!({"sessionId":adapter.session,"cwd":"/var/workspace","mcpServers":[]});
     let schema = schema();
@@ -2172,8 +2172,8 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
     let intent = adapter.intent(arany::ToolCall::Read {
         path: "notes/\u{001b}[2J\nfile".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     });
     adapter.item(&intent, None).await;
     let started = adapter.next().await;
@@ -2382,8 +2382,8 @@ async fn permission_cancel_and_server_withdrawal_ignore_late_answers_without_pri
 
         let intent = adapter.intent(arany::ToolCall::Read {
             path: "file".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         });
         adapter.permission(&intent, 1).await;
         let permission = adapter.next().await;
@@ -2739,8 +2739,8 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
     } else {
         arany::ToolCall::Read {
             path: "facts.txt".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         }
     };
     let second = arany::ToolCall::Write {

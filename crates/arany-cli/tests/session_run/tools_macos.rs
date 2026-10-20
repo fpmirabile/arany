@@ -605,8 +605,8 @@ async fn native_file_journey_helper() {
     let calls = vec![
         ToolCall::Read {
             path: "src/main.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
         ToolCall::Edit {
             path: "src/main.txt".into(),
@@ -671,8 +671,8 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Read {
             path: "src/linked.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
     ];
     let requests = Arc::new(Mutex::new(Vec::new()));
@@ -2318,7 +2318,7 @@ int main(void) {
             }
         } else {
             let script = if case == "overflow" {
-                "printf payload-started; i=0; while test $i -lt 32768; do printf x; i=$((i + 1)); done"
+                "printf payload-started; printf '%1048576s' ''"
             } else {
                 "printf must-not-dispatch > src/approval-output.txt"
             };
@@ -2493,7 +2493,7 @@ int main(void) {
         );
         let expected_run_status = match case {
             "cancelled" => RunStatus::Cancelled,
-            "mcp-version" => RunStatus::Finished,
+            "mcp-version" | "overflow" => RunStatus::Finished,
             "receipt-loss" => RunStatus::Interrupted,
             _ => RunStatus::Failed,
         };
@@ -2505,7 +2505,7 @@ int main(void) {
         );
         assert_eq!(
             run.assistant_message.is_some(),
-            case == "mcp-version",
+            matches!(case, "mcp-version" | "overflow"),
             "{case} assistant answer"
         );
         assert!(!workspace.join("src/approval-output.txt").exists());
@@ -2513,7 +2513,7 @@ int main(void) {
             replay.goals[0].status,
             match case {
                 "cancelled" | "receipt-loss" => arany::GoalStatus::Interrupted,
-                "mcp-version" => arany::GoalStatus::Completed,
+                "mcp-version" | "overflow" => arany::GoalStatus::Completed,
                 _ => arany::GoalStatus::Failed,
             },
             "closed Goal replay: {case}"
@@ -2528,14 +2528,14 @@ int main(void) {
                 arany::GoalSuccessCriterion::ToolCallSucceeded { call: planned }
                     if **planned == call
             ));
+            let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
+            let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+            assert_eq!(result["stdout_total"]["bytes"], 1048591);
             assert!(
-                replay.goals[0]
-                    .report
-                    .as_ref()
+                result["stdout"]
+                    .as_str()
                     .unwrap()
-                    .unresolved
-                    .iter()
-                    .any(|item| item.contains("Command shell failed"))
+                    .contains(" lines omitted; ")
             );
         }
         if case == "mcp-version" {
@@ -2574,7 +2574,7 @@ int main(void) {
             observation.disposition,
             match case {
                 "denied" | "cancelled" => ToolDisposition::Denied,
-                "overflow" => ToolDisposition::Limit,
+                "overflow" => ToolDisposition::Succeeded,
                 "mcp-version" => ToolDisposition::Failed,
                 "receipt-loss" => ToolDisposition::Uncertain,
                 _ => unreachable!(),

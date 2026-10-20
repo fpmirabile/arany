@@ -84,18 +84,24 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Page from next_offset when truncated. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
-            "type": "integer"
+            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "offset": {
-            "description": "Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset.",
-            "type": "integer"
+            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "path": {
             "type": "string"
@@ -335,7 +341,7 @@
             "type": "string"
           },
           "old": {
-            "description": "Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new.",
+            "description": "Non-empty exact literal text occurring once in the current file, excluding Read line-number prefixes. To append, select a unique ending and include that ending plus the appended text in new.",
             "type": "string"
           },
           "path": {
@@ -354,7 +360,7 @@
       "type": "function"
     },
     {
-      "description": "Run an admitted command in an offline project snapshot. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
+      "description": "Run an admitted command in an offline project snapshot. Large output keeps a head and tail with byte and line totals; narrow it with grep, sed -n or tail. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
       "name": "arany_command",
       "parameters": {
         "additionalProperties": false,
@@ -663,7 +669,7 @@
                             "type": "string"
                           },
                           "old": {
-                            "description": "Non-empty exact literal text occurring once in the current file. To append, select a unique ending and include that ending plus the appended text in new.",
+                            "description": "Non-empty exact literal text occurring once in the current file, excluding Read line-number prefixes. To append, select a unique ending and include that ending plus the appended text in new.",
                             "type": "string"
                           },
                           "operation": {
@@ -894,18 +900,24 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Page from next_offset when truncated. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
-            "type": "integer"
+            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "offset": {
-            "description": "Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset.",
-            "type": "integer"
+            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "path": {
             "type": "string"
@@ -1147,18 +1159,24 @@
       "type": "function"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Page from next_offset when truncated. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
       "name": "arany_read",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of UTF-8 bytes to read: integer 1 through 65536 inclusive. Use 65536 for a normal page; never request the whole file with a larger limit.",
-            "type": "integer"
+            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "offset": {
-            "description": "Zero-based byte offset, 0 through 4294967295. Start at 0; page using the returned next offset.",
-            "type": "integer"
+            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "type": [
+              "integer",
+              "null"
+            ]
           },
           "path": {
             "type": "string"

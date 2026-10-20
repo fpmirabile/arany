@@ -6,8 +6,8 @@ use super::{
 use crate::engine::routing::CallScope;
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
-    AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderOutcome, ProviderRequest,
-    ProviderResponse, ProviderTurn, RunInput,
+    AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderFailureReason,
+    ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn, RunInput,
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, Event,
@@ -55,7 +55,7 @@ struct Spawned {
 }
 
 struct Drained {
-    abort_reason: Option<AbortReason>,
+    abort: Option<WaveStop>,
     pending: VecDeque<usize>,
 }
 
@@ -69,9 +69,10 @@ struct ChildQueue {
     tool_allowance: usize,
     primary_step: Option<(Vec<ToolRequest>, ProviderTurn)>,
     primary_pending: bool,
-    deferred_at: Option<usize>,
-    refusal: Option<&'static str>,
-    budget_stopped: bool,
+    // A deferred wave primary proposal waits until more agents settle than the count.
+    deferred: Option<(RepromptReason, usize)>,
+    // Once set, the wave starts no call, spawn or primary turn; it ends as a budget stop.
+    stop: Option<StopCause>,
     capacity_error: Option<EngineError>,
 }
 
@@ -80,14 +81,369 @@ struct ActiveChild {
     request: ProviderRequest,
 }
 
-enum AbortReason {
-    PlanAdmission,
-    ToolContextFull,
-    Failed(StopCause),
-    Hook,
-    Budget,
-    Cancelled,
-    Paused,
+// A boundary stop lets in-flight work settle on its own terms; an abort tears the wave down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WaveStop {
+    Boundary(StopCause),
+    Abort(StopCause),
+}
+
+impl WaveStop {
+    const BUDGET: Self = Self::Boundary(StopCause::Budget);
+
+    const fn cause(self) -> StopCause {
+        match self {
+            Self::Boundary(cause) | Self::Abort(cause) => cause,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RepromptReason {
+    AnswerDeferred,
+    DelegateRefused,
+    ToolRefused,
+    CriterionNotMetInView,
+}
+
+impl RepromptReason {
+    // Why a wave primary response waits for its workers.
+    fn deferral(result: &CallResult) -> Option<Self> {
+        let CallResult::Response(response) = result else {
+            return None;
+        };
+        Some(match response.outcome {
+            ProviderOutcome::Answer(_) => Self::AnswerDeferred,
+            ProviderOutcome::Delegate(_) => Self::DelegateRefused,
+            ProviderOutcome::Plan(_) | ProviderOutcome::Tools(_) | ProviderOutcome::Review(_) => {
+                Self::ToolRefused
+            }
+        })
+    }
+
+    const fn failure_reason(self) -> ProviderFailureReason {
+        match self {
+            Self::AnswerDeferred => ProviderFailureReason::WorkerAnswerDeferred,
+            Self::DelegateRefused => ProviderFailureReason::WorkerDelegateRefused,
+            Self::ToolRefused => ProviderFailureReason::WorkerToolRefused,
+            Self::CriterionNotMetInView => ProviderFailureReason::CriterionNotMetInView,
+        }
+    }
+
+    const fn text(self) -> &'static str {
+        match self {
+            Self::AnswerDeferred => {
+                "Answer deferred: workers are still active; answer again after they settle."
+            }
+            Self::DelegateRefused => "Delegate refused: workers are still active.",
+            Self::ToolRefused => {
+                "Tool request refused: it was malformed or edits inside a live worker lease."
+            }
+            Self::CriterionNotMetInView => {
+                "Answer refused: criterion_not_met_in_view. Obtain current passing private evidence before answering; at most three continuations are allowed."
+            }
+        }
+    }
+}
+
+// Hook state of the Run, read once per decision.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct HookFacts {
+    pub(super) uncertain: bool,
+    // A settled hook journaled `stopped`.
+    pub(super) stop_requested: bool,
+    pub(super) settled: bool,
+}
+
+impl HookFacts {
+    fn stop(self) -> Option<WaveStop> {
+        if self.uncertain {
+            Some(WaveStop::Abort(StopCause::Uncertain))
+        } else if self.stop_requested {
+            Some(WaveStop::Boundary(StopCause::HookStop))
+        } else if !self.settled {
+            Some(WaveStop::Abort(StopCause::ToolStopped))
+        } else {
+            None
+        }
+    }
+}
+
+// Observations read once after a child's call record or SubagentStop run commits.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ChildFacts {
+    pub(super) has_tools: bool,
+    pub(super) turns_left: bool,
+    pub(super) tool_calls_left: bool,
+    pub(super) before_deadline: bool,
+    pub(super) cancelled: bool,
+    pub(super) paused: bool,
+    pub(super) tokens_open: bool,
+    pub(super) calls_left: bool,
+    pub(super) hook: HookFacts,
+    // A settled hook stop requested by this child.
+    pub(super) actor_hook_stop: bool,
+}
+
+// The in-view criterion gate of an editor's call.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct GateFacts {
+    // An otherwise valid answer failed the gate.
+    pub(super) unmet: bool,
+    pub(super) worker_stopped: bool,
+    pub(super) stop_room: bool,
+    pub(super) continuations_left: bool,
+}
+
+#[must_use]
+#[derive(Debug)]
+pub(super) enum ChildDecision {
+    ToolStep(Vec<ToolRequest>, ProviderTurn),
+    // `stop_hook`: the shell runs SubagentStop, then `decide_child_stop`.
+    Finish {
+        answer: Answer,
+        turn: ProviderTurn,
+        stop_hook: bool,
+    },
+    Reprompt(RepromptReason, ProviderTurn),
+    End(ChildEnd),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildEnd {
+    // An editor ends before handover capture; the cause applies when no stronger fact does.
+    Editor(WorkerCause),
+    // A researcher ends while its call reservation is held.
+    Researcher(AgentDisposition),
+    // A researcher's Tool request is released unrun; `budget` once the Goal budget refused it.
+    Skipped {
+        disposition: AgentDisposition,
+        budget: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum StopHookRun {
+    Passed,
+    Blocked,
+    // The hook was cut off by active time (`budget`) or context room.
+    CutOff { budget: bool },
+    Uncertain,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum ChildStop {
+    Proceed,
+    Reprompt,
+    // `stops_wave`: the wave stops for budget unless it is already stopping.
+    End {
+        disposition: AgentDisposition,
+        cause: WorkerCause,
+        stops_wave: bool,
+    },
+}
+
+pub(super) fn decide_child_call(
+    result: CallResult,
+    valid: bool,
+    gate: Option<GateFacts>,
+    abort: Option<WaveStop>,
+    facts: &ChildFacts,
+) -> ChildDecision {
+    let Some(gate) = gate else {
+        return decide_researcher_call(result, valid, abort, facts);
+    };
+    let open = abort.is_none();
+    if gate.unmet {
+        return match result {
+            CallResult::Response(ProviderResponse { turn, .. })
+                if open
+                    && !gate.worker_stopped
+                    && facts.turns_left
+                    && facts.tool_calls_left
+                    && gate.stop_room
+                    && facts.before_deadline
+                    && facts.tokens_open
+                    && facts.calls_left
+                    && gate.continuations_left =>
+            {
+                ChildDecision::Reprompt(RepromptReason::CriterionNotMetInView, turn)
+            }
+            CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
+                ChildDecision::End(ChildEnd::Editor(WorkerCause::CriterionUnverified))
+            }
+        };
+    }
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Answer(answer),
+            turn,
+            ..
+        }) if valid && open => ChildDecision::Finish {
+            answer,
+            turn,
+            stop_hook: true,
+        },
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Tools(requests),
+            turn,
+            ..
+        }) if valid && open && !gate.worker_stopped => ChildDecision::ToolStep(requests, turn),
+        other => ChildDecision::End(ChildEnd::Editor(editor_failure(
+            &other,
+            valid,
+            facts.turns_left,
+        ))),
+    }
+}
+
+fn editor_failure(result: &CallResult, valid: bool, turns_left: bool) -> WorkerCause {
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Tools(_),
+            ..
+        }) if !turns_left => WorkerCause::TurnLimit,
+        CallResult::Response(_) if !valid => WorkerCause::InvalidOutcome,
+        CallResult::Failed(CallFailure::InvalidResponse(_) | CallFailure::OutputLimit) => {
+            WorkerCause::InvalidOutcome
+        }
+        CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
+            WorkerCause::ToolFailed
+        }
+    }
+}
+
+fn decide_researcher_call(
+    result: CallResult,
+    valid: bool,
+    abort: Option<WaveStop>,
+    facts: &ChildFacts,
+) -> ChildDecision {
+    if abort == Some(WaveStop::Boundary(StopCause::HookStop)) || facts.hook.stop().is_some() {
+        return ChildDecision::End(ChildEnd::Researcher(AgentDisposition::Cancelled));
+    }
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Answer(answer),
+            turn,
+            ..
+        }) if valid => ChildDecision::Finish {
+            answer,
+            turn,
+            stop_hook: facts.has_tools && !facts.cancelled && abort.is_none(),
+        },
+        // An exhausted Goal budget stops the child before its Tool starts, like a pause.
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Tools(requests),
+            turn,
+            ..
+        }) if valid => {
+            let budget = !facts.tokens_open || !facts.calls_left;
+            if facts.cancelled || facts.paused || abort.is_some() || budget {
+                ChildDecision::End(ChildEnd::Skipped {
+                    disposition: researcher_end(facts.actor_hook_stop, true),
+                    budget,
+                })
+            } else {
+                ChildDecision::ToolStep(requests, turn)
+            }
+        }
+        CallResult::Cancelled => {
+            ChildDecision::End(ChildEnd::Researcher(AgentDisposition::Cancelled))
+        }
+        CallResult::Response(_) | CallResult::Failed(_) => {
+            ChildDecision::End(ChildEnd::Researcher(AgentDisposition::Failed))
+        }
+    }
+}
+
+// A researcher that ends without an answer.
+fn researcher_end(actor_hook_stop: bool, interrupted: bool) -> AgentDisposition {
+    if actor_hook_stop {
+        AgentDisposition::StoppedByHook
+    } else if interrupted {
+        AgentDisposition::Cancelled
+    } else {
+        AgentDisposition::Failed
+    }
+}
+
+pub(super) fn decide_child_stop(
+    run: StopHookRun,
+    abort: Option<WaveStop>,
+    facts: &ChildFacts,
+) -> ChildStop {
+    match run {
+        StopHookRun::Passed if facts.actor_hook_stop => ChildStop::End {
+            disposition: AgentDisposition::StoppedByHook,
+            cause: WorkerCause::StoppedByHook,
+            stops_wave: false,
+        },
+        StopHookRun::Passed => ChildStop::Proceed,
+        // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
+        StopHookRun::CutOff { budget } => ChildStop::End {
+            disposition: if facts.cancelled {
+                AgentDisposition::Cancelled
+            } else {
+                AgentDisposition::Failed
+            },
+            cause: if budget {
+                WorkerCause::Budget
+            } else {
+                WorkerCause::ToolFailed
+            },
+            stops_wave: !facts.hook.settled && abort.is_none(),
+        },
+        StopHookRun::Uncertain => ChildStop::End {
+            disposition: AgentDisposition::Failed,
+            cause: WorkerCause::ToolFailed,
+            stops_wave: false,
+        },
+        StopHookRun::Blocked => {
+            let room = facts.before_deadline && facts.tokens_open && facts.calls_left;
+            if facts.turns_left && room {
+                ChildStop::Reprompt
+            } else {
+                ChildStop::End {
+                    disposition: AgentDisposition::Failed,
+                    cause: if room {
+                        WorkerCause::TurnLimit
+                    } else {
+                        WorkerCause::Budget
+                    },
+                    stops_wave: false,
+                }
+            }
+        }
+    }
+}
+
+// What stops the wave after a child's call settles, when nothing stopped it yet.
+fn wave_stop_after(
+    queue_stopped: bool,
+    cancelled: bool,
+    paused: bool,
+    end: Option<AgentDisposition>,
+    hook: HookFacts,
+) -> Option<WaveStop> {
+    if queue_stopped {
+        Some(WaveStop::BUDGET)
+    } else if cancelled {
+        Some(WaveStop::Abort(StopCause::Cancelled))
+    } else if paused {
+        Some(WaveStop::Boundary(StopCause::Paused))
+    } else if end == Some(AgentDisposition::StoppedByHook) {
+        Some(WaveStop::Boundary(StopCause::HookStop))
+    } else if let Some(stop) = hook.stop() {
+        Some(stop)
+    } else if end == Some(AgentDisposition::Failed) {
+        Some(WaveStop::Abort(StopCause::ToolStopped))
+    } else if end == Some(AgentDisposition::Cancelled) {
+        Some(WaveStop::Abort(StopCause::Cancelled))
+    } else {
+        None
+    }
 }
 
 impl ChildQueue {
@@ -102,9 +458,8 @@ impl ChildQueue {
             tool_allowance: 0,
             primary_step: None,
             primary_pending: false,
-            deferred_at: None,
-            refusal: None,
-            budget_stopped: false,
+            deferred: None,
+            stop: None,
             capacity_error: None,
         }
     }
@@ -326,29 +681,29 @@ impl RunLoop<'_> {
         deadline: Instant,
     ) -> Result<bool, EngineError> {
         let Drained {
-            mut abort_reason,
+            abort: mut stop,
             pending,
         } = drained;
         if let Some(segment) = active_segment.take() {
             self.settle_active_segment(segment)?;
         }
-        if matches!(abort_reason, Some(AbortReason::Paused)) {
+        if stop == Some(WaveStop::Boundary(StopCause::Paused)) {
             self.pause_at_boundary();
         }
 
         if self.controls.cancellation.is_cancelled() {
-            abort_reason = Some(AbortReason::Cancelled);
+            stop = Some(WaveStop::Abort(StopCause::Cancelled));
         }
-        if abort_reason.is_none() && self.ledger().active_time_exhausted() {
-            abort_reason = Some(AbortReason::Budget);
+        if stop.is_none() && self.ledger().active_time_exhausted() {
+            stop = Some(WaveStop::BUDGET);
         }
-        if abort_reason.is_none() && self.worker_stopped()? {
-            abort_reason = Some(AbortReason::Budget);
+        if stop.is_none() && self.worker_stopped()? {
+            stop = Some(WaveStop::BUDGET);
         }
-        if abort_reason.is_none() && !pending.is_empty() {
-            abort_reason = Some(AbortReason::Failed(StopCause::ToolStopped));
+        if stop.is_none() && !pending.is_empty() {
+            stop = Some(WaveStop::Abort(StopCause::ToolStopped));
         }
-        if let Some(reason) = abort_reason {
+        if let Some(stop) = stop {
             if children.iter().any(|c| c.editor) {
                 self.observe_worker_stop().await?;
             }
@@ -359,8 +714,9 @@ impl RunLoop<'_> {
                             &mut children[index],
                             None,
                             deadline,
-                            !matches!(reason, AbortReason::Budget),
-                            crate::worker::WorkerCause::ToolFailed,
+                            stop != WaveStop::BUDGET,
+                            WorkerCause::ToolFailed,
+                            None,
                         )
                         .await?;
                     self.settle_worker_handover(root_request, &children[index], completed)
@@ -375,16 +731,10 @@ impl RunLoop<'_> {
                     .await?;
                 }
             }
-            let end = match reason {
-                AbortReason::Failed(cause) => PrimaryEnd::Stopped(cause),
-                AbortReason::PlanAdmission => PrimaryEnd::Failed(super::RunFailure::PlanAdmission),
-                AbortReason::ToolContextFull => PrimaryEnd::Stopped(StopCause::ContextFull),
-                AbortReason::Hook => PrimaryEnd::Stopped(StopCause::HookStop),
-                AbortReason::Budget => PrimaryEnd::Stopped(StopCause::Budget),
-                AbortReason::Cancelled => PrimaryEnd::Stopped(StopCause::Cancelled),
-                AbortReason::Paused => PrimaryEnd::Stopped(StopCause::Paused),
-            };
-            return self.settle_primary(end).await.map(|()| false);
+            return self
+                .settle_primary(PrimaryEnd::Stopped(stop.cause()))
+                .await
+                .map(|()| false);
         }
         if let Some((requests, turn)) = primary_step {
             let Some(request) = self.begin_tool_step(requests).await? else {
@@ -571,7 +921,7 @@ impl RunLoop<'_> {
             {
                 Ok(segment) => Some(segment),
                 Err(EngineError::GoalBudgetExhausted) => {
-                    queue.budget_stopped = true;
+                    queue.stop.get_or_insert(StopCause::ActiveTime);
                     None
                 }
                 Err(error) => return Err(error),
@@ -658,16 +1008,15 @@ impl RunLoop<'_> {
         {
             return Err(queue.abort_with(error).await);
         }
-        let mut abort_reason = self.unstarted_abort(queue);
+        let mut abort = self.unstarted_stop(queue);
         let mut drain_deadline = None;
 
         while !queue.active.is_empty() {
-            if queue.budget_stopped && abort_reason.is_none() {
-                abort_reason = Some(AbortReason::Budget);
+            if queue.stop.is_some() && abort.is_none() {
+                abort = Some(WaveStop::BUDGET);
             }
-            // A pause lets in-flight child calls finish and be recorded; every other abort drains them.
-            if abort_reason.is_some()
-                && !matches!(abort_reason, Some(AbortReason::Paused))
+            // A pause lets in-flight child calls finish and be recorded; every other stop drains them.
+            if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
                 && drain_deadline.is_none()
             {
                 queue.calls.abort_all();
@@ -685,7 +1034,7 @@ impl RunLoop<'_> {
                 return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
             };
             if result.eligible
-                && abort_reason.is_none()
+                && abort.is_none()
                 && !self.controls.cancellation.is_cancelled()
                 && !self.pause_requested()
                 && Instant::now() < deadline
@@ -753,29 +1102,11 @@ impl RunLoop<'_> {
             let result = result.result;
             self.settle_result(&result)?;
             if index.is_none() {
-                let deferral = match &result {
-                    CallResult::Response(response) => Some(match response.outcome {
-                        ProviderOutcome::Answer(_) => (
-                            crate::provider::ProviderFailureReason::WorkerAnswerDeferred,
-                            "Answer deferred: workers are still active; answer again after they settle.",
-                        ),
-                        ProviderOutcome::Delegate(_) => (
-                            crate::provider::ProviderFailureReason::WorkerDelegateRefused,
-                            "Delegate refused: workers are still active.",
-                        ),
-                        ProviderOutcome::Plan(_)
-                        | ProviderOutcome::Tools(_)
-                        | ProviderOutcome::Review(_) => (
-                            crate::provider::ProviderFailureReason::WorkerToolRefused,
-                            "Tool request refused: it was malformed or edits inside a live worker lease.",
-                        ),
-                    }),
-                    CallResult::Failed(_) | CallResult::Cancelled => None,
-                };
+                let deferral = RepromptReason::deferral(&result);
                 let validity = self.wave_validity(&result)?;
                 let facts = RunFacts::observe(self)?;
                 let site = PrimarySite::Wave {
-                    queue_stopped: abort_reason.is_some() || queue.budget_stopped,
+                    queue_stopped: abort.is_some() || queue.stop.is_some(),
                 };
                 let record_admitted = primary_admitted(site, &result, validity, &facts);
                 let mut record = call_record(
@@ -786,7 +1117,7 @@ impl RunLoop<'_> {
                     None,
                 );
                 if wave_deferred(&result, record_admitted, &facts) {
-                    record.failure_reason = deferral.map(|(reason, _)| reason);
+                    record.failure_reason = deferral.map(RepromptReason::failure_reason);
                 }
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
@@ -804,79 +1135,57 @@ impl RunLoop<'_> {
                             if let Some(segment) = segments.take() {
                                 self.settle_active_segment(segment)?;
                             }
-                            let request = match self.begin_tool_step(requests).await {
-                                Ok(Some(request)) => Some(request),
-                                Ok(None) => {
-                                    abort_reason = Some(AbortReason::PlanAdmission);
-                                    None
-                                }
-                                Err(
-                                    EngineError::GoalBudgetExhausted
-                                    | EngineError::Tool(crate::tools::ToolError::Limit),
-                                ) => {
-                                    queue.budget_stopped = true;
-                                    self.observe_worker_stop().await?;
-                                    None
-                                }
-                                Err(error) => return Err(error),
-                            };
-                            let end = if let Some(request) = request {
-                                match Box::pin(self.execute_step(
-                                    Grant::Primary {
-                                        request: root_request,
-                                        review_allowed: false,
-                                    },
-                                    request,
-                                    turn,
-                                ))
-                                .await
+                            // Wave validity admits exactly one request.
+                            let request = self
+                                .begin_tool_step(requests)
+                                .await?
+                                .ok_or(EngineError::CoordinatorFailed)?;
+                            let end = match Box::pin(self.execute_step(
+                                Grant::Primary {
+                                    request: root_request,
+                                    review_allowed: false,
+                                },
+                                request,
+                                turn,
+                            ))
+                            .await?
+                            {
+                                StepEnd::Continue => StepEnd::Continue,
+                                StepEnd::Stopped(StopCause::ActiveTime)
+                                    if self
+                                        .active_time_floor
+                                        .load(std::sync::atomic::Ordering::Relaxed) =>
                                 {
-                                    Ok(StepEnd::Continue) => StepEnd::Continue,
-                                    Ok(StepEnd::Stopped(StopCause::ActiveTime))
-                                        if self
-                                            .active_time_floor
-                                            .load(std::sync::atomic::Ordering::Relaxed) =>
-                                    {
-                                        StepEnd::Stopped(StopCause::ActiveTime)
-                                    }
-                                    Ok(StepEnd::Stopped(
-                                        StopCause::ActiveTime | StopCause::Capacity,
-                                    )) => {
-                                        queue.budget_stopped = true;
-                                        self.observe_worker_stop().await?;
-                                        StepEnd::Continue
-                                    }
-                                    Ok(StepEnd::Stopped(StopCause::ContextFull)) => {
-                                        abort_reason = Some(AbortReason::ToolContextFull);
-                                        StepEnd::Stopped(StopCause::ContextFull)
-                                    }
-                                    Ok(
-                                        end @ StepEnd::Stopped(
-                                            StopCause::Uncertain
-                                            | StopCause::Cancelled
-                                            | StopCause::HookStop
-                                            | StopCause::Paused
-                                            | StopCause::Budget
-                                            | StopCause::DelegationDeadline
-                                            | StopCause::Refused(_)
-                                            | StopCause::ToolStopped
-                                            | StopCause::InvalidCommandResult,
-                                        ),
-                                    ) => end,
-                                    Err(error) => return Err(error),
+                                    StepEnd::Stopped(StopCause::ActiveTime)
                                 }
-                            } else if queue.budget_stopped {
-                                StepEnd::Continue
-                            } else {
-                                StepEnd::Stopped(StopCause::ToolStopped)
+                                StepEnd::Stopped(
+                                    cause @ (StopCause::ActiveTime | StopCause::Capacity),
+                                ) => {
+                                    queue.stop.get_or_insert(cause);
+                                    self.observe_worker_stop().await?;
+                                    StepEnd::Continue
+                                }
+                                end @ StepEnd::Stopped(
+                                    StopCause::Uncertain
+                                    | StopCause::Cancelled
+                                    | StopCause::HookStop
+                                    | StopCause::Paused
+                                    | StopCause::Budget
+                                    | StopCause::ContextFull
+                                    | StopCause::DelegationDeadline
+                                    | StopCause::Refused(_)
+                                    | StopCause::ToolStopped
+                                    | StopCause::InvalidCommandResult,
+                                ) => end,
                             };
                             if let StepEnd::Stopped(cause) = end {
-                                abort_reason = self
-                                    .hook_abort()?
-                                    .or(abort_reason)
-                                    .or(Some(AbortReason::Failed(cause)));
+                                abort = self
+                                    .hook_facts()?
+                                    .stop()
+                                    .or(abort)
+                                    .or(Some(WaveStop::Abort(cause)));
                             }
-                            if !queue.budget_stopped {
+                            if queue.stop.is_none() {
                                 self.verify_workers().await?;
                             }
                             *segments = match self.reserve_active_segment(
@@ -884,7 +1193,7 @@ impl RunLoop<'_> {
                             ) {
                                 Ok(segment) => Some(segment),
                                 Err(EngineError::GoalBudgetExhausted) => {
-                                    queue.budget_stopped = true;
+                                    queue.stop.get_or_insert(StopCause::ActiveTime);
                                     None
                                 }
                                 Err(error) => return Err(error),
@@ -893,26 +1202,11 @@ impl RunLoop<'_> {
                         }
                     }
                     PrimaryDecision::Defer => {
-                        queue.refusal = deferral.map(|(_, text)| text);
-                        queue.deferred_at = Some(self.settled_agents()?);
+                        let settled = self.settled_agents()?;
+                        queue.deferred = deferral.map(|reason| (reason, settled));
                         queue.primary_pending = false;
                     }
-                    PrimaryDecision::Stop(StopCause::Cancelled) => {
-                        abort_reason = Some(AbortReason::Cancelled);
-                    }
-                    PrimaryDecision::Stop(
-                        cause @ (StopCause::Uncertain
-                        | StopCause::HookStop
-                        | StopCause::Paused
-                        | StopCause::ActiveTime
-                        | StopCause::Budget
-                        | StopCause::Capacity
-                        | StopCause::ContextFull
-                        | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
-                        | StopCause::ToolStopped
-                        | StopCause::InvalidCommandResult),
-                    ) => abort_reason = Some(AbortReason::Failed(cause)),
+                    PrimaryDecision::Stop(cause) => abort = Some(WaveStop::Abort(cause)),
                     PrimaryDecision::Plan(..)
                     | PrimaryDecision::Finish(..)
                     | PrimaryDecision::Delegate(..)
@@ -921,7 +1215,7 @@ impl RunLoop<'_> {
                         return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
                     }
                 }
-                if abort_reason.is_some() {
+                if abort.is_some() {
                     queue.calls.abort_all();
                     drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
                 } else {
@@ -962,7 +1256,7 @@ impl RunLoop<'_> {
                 );
                 if gate_failed {
                     record.failure_reason =
-                        Some(crate::provider::ProviderFailureReason::CriterionNotMetInView);
+                        Some(RepromptReason::CriterionNotMetInView.failure_reason());
                 }
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
@@ -971,178 +1265,152 @@ impl RunLoop<'_> {
                 })
                 .await?;
                 self.ledger().child_call_finished()?;
-                if gate_failed
-                    && abort_reason.is_none()
-                    && !self.observe_worker_stop().await?
-                    && children[index].turns_remaining > 0
-                    && children[index].tool_calls_remaining > 0
-                    && self
+                let tools = valid_response
+                    && matches!(
+                        &result,
+                        CallResult::Response(ProviderResponse {
+                            outcome: ProviderOutcome::Tools(_),
+                            ..
+                        })
+                    );
+                // The worker-stop boundary commits before a continuation or private Tool.
+                let worker_stopped =
+                    abort.is_none() && (gate_failed || tools) && self.observe_worker_stop().await?;
+                let child = &children[index];
+                let gate = GateFacts {
+                    unmet: gate_failed,
+                    worker_stopped,
+                    stop_room: self
                         .controls
                         .tools
-                        .zip(children[index].tools.as_ref())
+                        .zip(child.tools.as_ref())
                         .zip(match &result {
                             CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
-                            _ => None,
+                            CallResult::Failed(_) | CallResult::Cancelled => None,
                         })
                         .is_some_and(|((runtime, tools), turn)| {
                             tools.has_stop_room(turn, runtime.context_limit_bytes())
-                        })
-                    && Instant::now() < deadline
-                    && self.ledger().can_start_provider_call()
-                    && self.ledger().remaining_calls() != Some(0)
-                    && self.ledger().view(|v| {
-                        v.runs
-                            .last()
-                            .expect("active Run")
-                            .agents
-                            .iter()
-                            .find(|a| a.id == children[index].agent_run_id)
-                            .and_then(|a| a.assignment.as_ref())
-                            .is_some_and(|w| w.gate_continuations < 3)
-                    })?
-                {
-                    if let CallResult::Response(ProviderResponse { turn, .. }) = &result {
-                        let child = &mut children[index];
-                        let text = "Answer refused: criterion_not_met_in_view. Obtain current passing private evidence before answering; at most three continuations are allowed.".to_owned();
-                        if let Some(tools) = child.tools.as_mut() {
-                            tools.add_stop_feedback(turn, &text);
-                        }
-                        child
-                            .stop_hook_feedback
-                            .push(crate::provider::StopHookFeedback {
-                                after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
-                                turn: turn.clone(),
-                                text,
-                                facts: None,
-                                steering_notes: Vec::new(),
-                            });
-                    }
-                    queue.pending.push_back(index);
-                    self.fill_slots(queue, children, root_request, segments, deadline)
-                        .await?;
-                    continue;
-                }
-                let mut failure = match &result {
-                    _ if gate_failed => WorkerCause::CriterionUnverified,
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(_),
-                        ..
-                    }) if children[index].turns_remaining == 0 => {
-                        crate::worker::WorkerCause::TurnLimit
-                    }
-                    CallResult::Response(_) if !valid_response => {
-                        crate::worker::WorkerCause::InvalidOutcome
-                    }
-                    CallResult::Failed(
-                        CallFailure::InvalidResponse(_) | CallFailure::OutputLimit,
-                    ) => crate::worker::WorkerCause::InvalidOutcome,
-                    _ => crate::worker::WorkerCause::ToolFailed,
-                };
-                let answer = match result {
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Answer(f),
-                        turn,
-                        ..
-                    }) if valid_response && !gate_failed && abort_reason.is_none() => {
-                        match self
-                            .subagent_stop(
-                                &mut children[index],
-                                &f,
-                                turn,
-                                &mut abort_reason,
-                                deadline,
-                            )
-                            .await?
-                        {
-                            ChildStop::Proceed => Some(f),
-                            ChildStop::Reprompt => {
-                                queue.pending.push_back(index);
-                                self.fill_slots(queue, children, root_request, segments, deadline)
-                                    .await?;
-                                continue;
-                            }
-                            ChildStop::End(_, cause) => {
-                                failure = cause;
-                                None
-                            }
-                        }
-                    }
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(mut requests),
-                        turn,
-                        ..
-                    }) if valid_response
-                        && abort_reason.is_none()
-                        && !self.observe_worker_stop().await? =>
-                    {
-                        let child = &mut children[index];
-                        let continues = match Box::pin(self.execute_step(
-                            Grant::Researcher { child, deadline },
-                            requests.pop().ok_or(EngineError::CoordinatorFailed)?,
-                            turn,
-                        ))
-                        .await
-                        {
-                            Ok(StepEnd::Continue) => true,
-                            Ok(StepEnd::Stopped(
-                                StopCause::Uncertain
-                                | StopCause::Cancelled
-                                | StopCause::HookStop
-                                | StopCause::Paused
-                                | StopCause::Budget
-                                | StopCause::Capacity
-                                | StopCause::ContextFull
-                                | StopCause::DelegationDeadline
-                                | StopCause::Refused(_)
-                                | StopCause::ToolStopped
-                                | StopCause::InvalidCommandResult,
-                            )) => false,
-                            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
-                                queue.budget_stopped = true;
-                                self.observe_worker_stop().await?;
-                                false
-                            }
-                            Err(error) => return Err(error),
-                        };
-                        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-                        let can_continue = self.ledger().view(|v| {
+                        }),
+                    continuations_left: gate_failed
+                        && self.ledger().view(|v| {
                             v.runs
                                 .last()
-                                .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
-                                .and_then(|a| a.tools.last())
-                                .is_some_and(|t| {
-                                    t.observation.is_some() && !crate::session::private_failure(t)
-                                })
-                        })?;
-                        if continues && can_continue {
-                            queue.pending.push_back(index);
-                            if let Err(error) = self
-                                .fill_slots(queue, children, root_request, segments, deadline)
-                                .await
-                            {
-                                return Err(queue.abort_with(error).await);
+                                .expect("active Run")
+                                .agents
+                                .iter()
+                                .find(|a| a.id == child.agent_run_id)
+                                .and_then(|a| a.assignment.as_ref())
+                                .is_some_and(|w| w.gate_continuations < 3)
+                        })?,
+                };
+                let facts = self.child_facts(child, deadline)?;
+                let mut step_stop = None;
+                let (answer, failure) =
+                    match decide_child_call(result, valid_response, Some(gate), abort, &facts) {
+                        ChildDecision::Reprompt(reason, turn) => {
+                            let child = &mut children[index];
+                            let text = reason.text().to_owned();
+                            if let Some(tools) = child.tools.as_mut() {
+                                tools.add_stop_feedback(&turn, &text);
                             }
+                            child
+                                .stop_hook_feedback
+                                .push(crate::provider::StopHookFeedback {
+                                    after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
+                                    turn,
+                                    text,
+                                    facts: None,
+                                    steering_notes: Vec::new(),
+                                });
+                            queue.pending.push_back(index);
+                            self.fill_slots(queue, children, root_request, segments, deadline)
+                                .await?;
                             continue;
                         }
-                        None
-                    }
-                    _ => None,
-                };
+                        ChildDecision::Finish { answer, turn, .. } => {
+                            match self
+                                .subagent_stop(
+                                    &mut children[index],
+                                    &answer,
+                                    turn,
+                                    &mut abort,
+                                    deadline,
+                                )
+                                .await?
+                            {
+                                ChildStop::Proceed => (Some(answer), WorkerCause::ToolFailed),
+                                ChildStop::Reprompt => {
+                                    queue.pending.push_back(index);
+                                    self.fill_slots(
+                                        queue,
+                                        children,
+                                        root_request,
+                                        segments,
+                                        deadline,
+                                    )
+                                    .await?;
+                                    continue;
+                                }
+                                ChildStop::End { cause, .. } => (None, cause),
+                            }
+                        }
+                        ChildDecision::ToolStep(mut requests, turn) => {
+                            let child = &mut children[index];
+                            step_stop = match Box::pin(self.execute_step(
+                                Grant::Researcher { child, deadline },
+                                requests.pop().ok_or(EngineError::CoordinatorFailed)?,
+                                turn,
+                            ))
+                            .await
+                            {
+                                Ok(StepEnd::Continue) => None,
+                                Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
+                                    queue.stop.get_or_insert(StopCause::ActiveTime);
+                                    self.observe_worker_stop().await?;
+                                    Some(StopCause::ActiveTime)
+                                }
+                                Ok(StepEnd::Stopped(cause)) => Some(cause),
+                                Err(error) => return Err(error),
+                            };
+                            child.tool_calls_remaining =
+                                child.tool_calls_remaining.saturating_sub(1);
+                            let can_continue = self.ledger().view(|v| {
+                                v.runs
+                                    .last()
+                                    .and_then(|r| {
+                                        r.agents.iter().find(|a| a.id == child.agent_run_id)
+                                    })
+                                    .and_then(|a| a.tools.last())
+                                    .is_some_and(|t| {
+                                        t.observation.is_some()
+                                            && !crate::session::private_failure(t)
+                                    })
+                            })?;
+                            if step_stop.is_none() && can_continue {
+                                queue.pending.push_back(index);
+                                if let Err(error) = self
+                                    .fill_slots(queue, children, root_request, segments, deadline)
+                                    .await
+                                {
+                                    return Err(queue.abort_with(error).await);
+                                }
+                                continue;
+                            }
+                            (None, WorkerCause::ToolFailed)
+                        }
+                        ChildDecision::End(ChildEnd::Editor(cause)) => (None, cause),
+                        ChildDecision::End(ChildEnd::Researcher(_) | ChildEnd::Skipped { .. }) => {
+                            return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
+                        }
+                    };
                 let completed = self
                     .complete_worker(
                         &mut children[index],
                         answer,
                         deadline,
-                        matches!(
-                            abort_reason,
-                            Some(
-                                AbortReason::Failed(_)
-                                    | AbortReason::PlanAdmission
-                                    | AbortReason::ToolContextFull
-                                    | AbortReason::Cancelled
-                            )
-                        ),
+                        matches!(abort, Some(WaveStop::Abort(_))),
                         failure,
+                        step_stop,
                     )
                     .await?;
                 if let Some(s) = segments.take() {
@@ -1155,7 +1423,7 @@ impl RunLoop<'_> {
                 {
                     Ok(segment) => Some(segment),
                     Err(EngineError::GoalBudgetExhausted) => {
-                        queue.budget_stopped = true;
+                        queue.stop.get_or_insert(StopCause::ActiveTime);
                         None
                     }
                     Err(error) => return Err(error),
@@ -1173,7 +1441,7 @@ impl RunLoop<'_> {
                         &mut children[index],
                         result,
                         valid_response,
-                        &mut abort_reason,
+                        &mut abort,
                         deadline,
                     )
                     .await
@@ -1186,37 +1454,27 @@ impl RunLoop<'_> {
                     Err(error) => return Err(queue.abort_with(error).await),
                 }
             };
-            if abort_reason.is_none() {
-                abort_reason = if queue.budget_stopped {
-                    Some(AbortReason::Budget)
-                } else if self.controls.cancellation.is_cancelled() {
-                    Some(AbortReason::Cancelled)
-                } else if self.pause_requested() {
-                    Some(AbortReason::Paused)
-                } else if step_disposition == Some(AgentDisposition::StoppedByHook) {
-                    Some(AbortReason::Hook)
-                } else if let Some(reason) = self.hook_abort()? {
-                    Some(reason)
-                } else if step_disposition == Some(AgentDisposition::Failed) {
-                    Some(AbortReason::Failed(StopCause::ToolStopped))
-                } else if step_disposition == Some(AgentDisposition::Cancelled) {
-                    Some(AbortReason::Cancelled)
-                } else {
-                    None
-                };
+            if abort.is_none() {
+                abort = wave_stop_after(
+                    queue.stop.is_some(),
+                    self.controls.cancellation.is_cancelled(),
+                    self.pause_requested(),
+                    step_disposition,
+                    self.hook_facts()?,
+                );
             }
-            if abort_reason.is_none() {
+            if abort.is_none() {
                 if let Err(error) = self
                     .fill_slots(queue, children, root_request, segments, deadline)
                     .await
                 {
                     return Err(queue.abort_with(error).await);
                 }
-                abort_reason = self.unstarted_abort(queue);
+                abort = self.unstarted_stop(queue);
             }
         }
         Ok(Drained {
-            abort_reason,
+            abort,
             pending: std::mem::take(&mut queue.pending),
         })
     }
@@ -1226,7 +1484,7 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         result: CallResult,
         valid_response: bool,
-        abort_reason: &mut Option<AbortReason>,
+        abort: &mut Option<WaveStop>,
         deadline: Instant,
     ) -> Result<Option<AgentDisposition>, EngineError> {
         let agent_run_id = child.agent_run_id;
@@ -1236,28 +1494,21 @@ impl RunLoop<'_> {
             record: call_record(AgentPhase::ChildWork, &result, valid_response, None, None),
         })
         .await?;
-        if matches!(abort_reason, Some(AbortReason::Hook)) || self.hook_abort()?.is_some() {
-            self.finish_child(agent_run_id, AgentDisposition::Cancelled, None, true)
-                .await?;
-            return Ok(Some(AgentDisposition::Cancelled));
-        }
-        let disposition = match result {
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Answer(answer),
+        let facts = self.child_facts(child, deadline)?;
+        let disposition = match decide_child_call(result, valid_response, None, *abort, &facts) {
+            ChildDecision::Finish {
+                answer,
                 turn,
-                ..
-            }) if valid_response => {
-                if child.tools.is_some()
-                    && !self.controls.cancellation.is_cancelled()
-                    && abort_reason.is_none()
-                {
+                stop_hook,
+            } => {
+                if stop_hook {
                     match self
-                        .subagent_stop(child, &answer, turn, abort_reason, deadline)
+                        .subagent_stop(child, &answer, turn, abort, deadline)
                         .await?
                     {
                         ChildStop::Proceed => {}
                         ChildStop::Reprompt => return Ok(None),
-                        ChildStop::End(disposition, _) => return Ok(Some(disposition)),
+                        ChildStop::End { disposition, .. } => return Ok(Some(disposition)),
                     }
                 }
                 self.finish_child(
@@ -1269,37 +1520,20 @@ impl RunLoop<'_> {
                 .await?;
                 AgentDisposition::Finished
             }
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Tools(mut requests),
-                turn,
-                ..
-            }) if valid_response => {
+            ChildDecision::ToolStep(mut requests, turn) => {
                 self.ledger().child_call_finished()?;
-                // An exhausted Goal budget stops the child before its Tool starts, like a pause.
-                let budget_spent = !self.ledger().can_start_provider_call()
-                    || self.ledger().remaining_calls() == Some(0);
-                if budget_spent && abort_reason.is_none() {
-                    *abort_reason = Some(AbortReason::Budget);
-                }
-                let skipped = self.controls.cancellation.is_cancelled()
-                    || self.pause_requested()
-                    || abort_reason.is_some();
-                let continues = if skipped {
-                    StepEnd::Stopped(StopCause::Cancelled)
-                } else {
-                    let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
-                    // Boxed: the Tool future is large and would overflow the caller's stack.
-                    Box::pin(self.execute_step(
-                        Grant::Researcher {
-                            child: &mut *child,
-                            deadline,
-                        },
-                        request,
-                        turn,
-                    ))
-                    .await?
-                };
-                match continues {
+                let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
+                // Boxed: the Tool future is large and would overflow the caller's stack.
+                let end = Box::pin(self.execute_step(
+                    Grant::Researcher {
+                        child: &mut *child,
+                        deadline,
+                    },
+                    request,
+                    turn,
+                ))
+                .await?;
+                match end {
                     StepEnd::Continue => {
                         child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
                         return Ok(None);
@@ -1321,29 +1555,33 @@ impl RunLoop<'_> {
                         | StopCause::InvalidCommandResult,
                     ) => {}
                 }
-                let disposition = if self.actor_hook_requested_stop(agent_run_id)? {
-                    AgentDisposition::StoppedByHook
-                } else if skipped
-                    || self.controls.cancellation.is_cancelled()
-                    || self.hook_requested_stop()?
-                {
-                    AgentDisposition::Cancelled
-                } else {
-                    AgentDisposition::Failed
-                };
+                let disposition = researcher_end(
+                    self.actor_hook_requested_stop(agent_run_id)?,
+                    self.controls.cancellation.is_cancelled() || self.hook_requested_stop()?,
+                );
                 self.finish_child(agent_run_id, disposition, None, false)
                     .await?;
                 disposition
             }
-            other => {
-                let disposition = if matches!(other, CallResult::Cancelled) {
-                    AgentDisposition::Cancelled
-                } else {
-                    AgentDisposition::Failed
-                };
+            ChildDecision::End(ChildEnd::Skipped {
+                disposition,
+                budget,
+            }) => {
+                self.ledger().child_call_finished()?;
+                if budget {
+                    abort.get_or_insert(WaveStop::BUDGET);
+                }
+                self.finish_child(agent_run_id, disposition, None, false)
+                    .await?;
+                disposition
+            }
+            ChildDecision::End(ChildEnd::Researcher(disposition)) => {
                 self.finish_child(agent_run_id, disposition, None, true)
                     .await?;
                 disposition
+            }
+            ChildDecision::Reprompt(..) | ChildDecision::End(ChildEnd::Editor(_)) => {
+                return Err(EngineError::CoordinatorFailed);
             }
         };
         Ok(Some(disposition))
@@ -1354,10 +1592,10 @@ impl RunLoop<'_> {
         child: &'a mut ChildWork,
         answer: &'a Answer,
         turn: ProviderTurn,
-        abort_reason: &'a mut Option<AbortReason>,
+        abort: &'a mut Option<WaveStop>,
         deadline: Instant,
     ) -> super::step::BoxedStep<'a, ChildStop> {
-        Box::pin(self.subagent_stop_inner(child, answer, turn, abort_reason, deadline))
+        Box::pin(self.subagent_stop_inner(child, answer, turn, abort, deadline))
     }
 
     async fn subagent_stop_inner(
@@ -1365,91 +1603,46 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         answer: &Answer,
         turn: ProviderTurn,
-        abort_reason: &mut Option<AbortReason>,
+        abort: &mut Option<WaveStop>,
         deadline: Instant,
     ) -> Result<ChildStop, EngineError> {
-        let agent_run_id = child.agent_run_id;
-        let stop = self
+        let run = match self
             .run_subagent_stop(child, &answer.text, turn, deadline)
-            .await;
-        match stop {
-            Ok(Some(())) => {}
-            Ok(None) => {
-                if self.actor_hook_requested_stop(agent_run_id)? {
-                    if !child.editor {
-                        self.finish_child(
-                            agent_run_id,
-                            AgentDisposition::StoppedByHook,
-                            None,
-                            true,
-                        )
-                        .await?;
-                    }
-                    return Ok(ChildStop::End(
-                        AgentDisposition::StoppedByHook,
-                        WorkerCause::StoppedByHook,
-                    ));
-                }
-                return Ok(ChildStop::Proceed);
-            }
-            // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
-            Err(error @ (EngineError::GoalBudgetExhausted | EngineError::ContextTooLarge)) => {
-                let settled = self.ledger().view(|view| {
-                    view.runs
-                        .iter()
-                        .find(|run| run.id == self.run_id)
-                        .is_some_and(crate::session::RunView::hooks_settled)
-                })?;
-                if !settled && abort_reason.is_none() {
-                    *abort_reason = Some(AbortReason::Budget);
-                }
-                let disposition = if self.controls.cancellation.is_cancelled() {
-                    AgentDisposition::Cancelled
-                } else {
-                    AgentDisposition::Failed
-                };
-                if !child.editor {
-                    self.finish_child(agent_run_id, disposition, None, true)
-                        .await?;
-                }
-                let cause = if matches!(error, EngineError::GoalBudgetExhausted) {
-                    WorkerCause::Budget
-                } else {
-                    WorkerCause::ToolFailed
-                };
-                return Ok(ChildStop::End(disposition, cause));
-            }
+            .await
+        {
+            Ok(Some(())) => StopHookRun::Blocked,
+            Ok(None) => StopHookRun::Passed,
+            Err(EngineError::GoalBudgetExhausted) => StopHookRun::CutOff { budget: true },
+            Err(EngineError::ContextTooLarge) => StopHookRun::CutOff { budget: false },
             Err(EngineError::Tool(crate::tools::ToolError::Uncertain)) if child.editor => {
-                return Ok(ChildStop::End(
-                    AgentDisposition::Failed,
-                    WorkerCause::ToolFailed,
-                ));
+                StopHookRun::Uncertain
             }
             Err(error) => return Err(error),
         };
-        if !child.editor {
+        if run == StopHookRun::Blocked && !child.editor {
             self.ledger().child_call_finished()?;
         }
-        if child.turns_remaining > 0
-            && tokio::time::Instant::now() < deadline
-            && self.ledger().can_start_provider_call()
-            && self.ledger().remaining_calls() != Some(0)
+        let decision = decide_child_stop(run, *abort, &self.child_facts(child, deadline)?);
+        if let ChildStop::End {
+            disposition,
+            stops_wave,
+            ..
+        } = decision
         {
-            return Ok(ChildStop::Reprompt);
-        }
-        if !child.editor {
-            self.finish_child(agent_run_id, AgentDisposition::Failed, None, false)
+            if stops_wave {
+                abort.get_or_insert(WaveStop::BUDGET);
+            }
+            if !child.editor {
+                self.finish_child(
+                    child.agent_run_id,
+                    disposition,
+                    None,
+                    run != StopHookRun::Blocked,
+                )
                 .await?;
+            }
         }
-        let cause = if tokio::time::Instant::now() >= deadline
-            || !self.ledger().can_start_provider_call()
-            || self.ledger().remaining_calls() == Some(0)
-        {
-            WorkerCause::Budget
-        } else {
-            WorkerCause::TurnLimit
-        };
-        Ok(ChildStop::End(AgentDisposition::Failed, cause))
+        Ok(decision)
     }
 
     pub(super) async fn run_subagent_stop(
@@ -1495,19 +1688,31 @@ impl RunLoop<'_> {
         Ok(Some(()))
     }
 
-    fn hook_abort(&self) -> Result<Option<AbortReason>, EngineError> {
-        if self.uncertain_hook()? {
-            return Ok(Some(AbortReason::Failed(StopCause::ToolStopped)));
-        }
-        if self.hook_requested_stop()? {
-            return Ok(Some(AbortReason::Hook));
-        }
-        let settled = self.ledger().view(|view| {
-            view.runs
-                .last()
-                .is_some_and(crate::session::RunView::hooks_settled)
-        })?;
-        Ok((!settled).then_some(AbortReason::Failed(StopCause::ToolStopped)))
+    fn hook_facts(&self) -> Result<HookFacts, EngineError> {
+        Ok(HookFacts {
+            uncertain: self.uncertain_hook()?,
+            stop_requested: self.hook_requested_stop()?,
+            settled: self.ledger().view(|view| {
+                view.runs
+                    .last()
+                    .is_some_and(crate::session::RunView::hooks_settled)
+            })?,
+        })
+    }
+
+    fn child_facts(&self, child: &ChildWork, deadline: Instant) -> Result<ChildFacts, EngineError> {
+        Ok(ChildFacts {
+            has_tools: child.tools.is_some(),
+            turns_left: child.turns_remaining > 0,
+            tool_calls_left: child.tool_calls_remaining > 0,
+            before_deadline: Instant::now() < deadline,
+            cancelled: self.controls.cancellation.is_cancelled(),
+            paused: self.pause_requested(),
+            tokens_open: self.ledger().can_start_provider_call(),
+            calls_left: self.ledger().remaining_calls() != Some(0),
+            hook: self.hook_facts()?,
+            actor_hook_stop: self.actor_hook_requested_stop(child.agent_run_id)?,
+        })
     }
 
     pub(super) async fn begin_synthesis(
@@ -1642,17 +1847,17 @@ impl RunLoop<'_> {
     }
 
     // Honor pause before reporting an exhausted queued-child call budget.
-    fn unstarted_abort(&self, queue: &ChildQueue) -> Option<AbortReason> {
+    fn unstarted_stop(&self, queue: &ChildQueue) -> Option<WaveStop> {
         if self.pause_requested() {
-            Some(AbortReason::Paused)
-        } else if queue.budget_stopped {
-            Some(AbortReason::Budget)
+            Some(WaveStop::Boundary(StopCause::Paused))
+        } else if queue.stop.is_some() {
+            Some(WaveStop::BUDGET)
         } else if queue.pending.is_empty() && queue.unspawned.is_empty() {
             None
         } else if !self.ledger().can_start_provider_call()
             || self.ledger().remaining_calls() == Some(0)
         {
-            Some(AbortReason::Budget)
+            Some(WaveStop::BUDGET)
         } else {
             None
         }
@@ -1682,7 +1887,7 @@ impl RunLoop<'_> {
             && !self.pause_requested()
             && self.ledger().can_start_provider_call()
             && self.ledger().remaining_calls() != Some(0)
-            && !queue.budget_stopped
+            && queue.stop.is_none()
             && !self.worker_stopped()?
         {
             if queue.pending.is_empty()
@@ -1692,7 +1897,7 @@ impl RunLoop<'_> {
             {
                 continue;
             }
-            if queue.budget_stopped {
+            if queue.stop.is_some() {
                 break;
             }
             let index = if let Some(index) = queue.pending.pop_front() {
@@ -1704,7 +1909,7 @@ impl RunLoop<'_> {
                 let Some(child) = (match next {
                     Ok(child) => child,
                     Err(EngineError::GoalBudgetExhausted) => {
-                        queue.budget_stopped = true;
+                        queue.stop.get_or_insert(StopCause::ActiveTime);
                         break;
                     }
                     Err(error) => return Err(error),
@@ -1902,25 +2107,24 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
         deadline: Instant,
     ) -> Result<bool, EngineError> {
-        if queue
-            .deferred_at
-            .is_some_and(|at| self.settled_agents().is_ok_and(|n| n > at))
-        {
-            queue.deferred_at = None;
-        }
+        // Settled agents only grow, so a deferral ends once more agents settle than it saw.
+        let deferred = match queue.deferred {
+            Some((_, at)) => self.settled_agents()? <= at,
+            None => false,
+        };
         if !queue.primary_pending
-            && queue.deferred_at.is_none()
-            && !queue.budget_stopped
+            && !deferred
+            && queue.stop.is_none()
             && self.controls.tools.is_some()
             && self.coordination_ready()?
         {
             self.refresh_team_context(root_request)?;
-            if let (Some(note), Some(tools)) =
-                (queue.refusal.take(), root_request.input.tools.as_mut())
+            if let (Some((reason, _)), Some(tools)) =
+                (queue.deferred.take(), root_request.input.tools.as_mut())
             {
                 let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog)
                     .map_err(|_| EngineError::InvalidRequest)?;
-                catalog["last_answer_refused"] = serde_json::json!(note);
+                catalog["last_answer_refused"] = serde_json::json!(reason.text());
                 tools.catalog = catalog.to_string();
             }
             root_request.phase = AgentPhase::RootSynthesis;
@@ -1975,7 +2179,7 @@ impl RunLoop<'_> {
                 ),
             ) => {
                 self.record_capacity_stop().await?;
-                queue.budget_stopped = true;
+                queue.stop.get_or_insert(StopCause::Capacity);
                 queue.capacity_error = Some(error);
                 Ok(false)
             }
@@ -2022,12 +2226,6 @@ impl RunLoop<'_> {
     }
 }
 
-pub(super) enum ChildStop {
-    Proceed,
-    Reprompt,
-    End(AgentDisposition, WorkerCause),
-}
-
 fn classify_join(
     joined: Result<(Id, crate::engine::routing::AttemptResult), JoinError>,
 ) -> (Id, crate::engine::routing::AttemptResult) {
@@ -2067,8 +2265,8 @@ fn restrict_catalog(
         ToolCall::List { path: ".".into() },
         ToolCall::Read {
             path: "file".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         },
         ToolCall::Search {
             path: ".".into(),
@@ -2154,5 +2352,602 @@ mod delegation_bound_tests {
             MAX_DELEGATION_DEADLINE
         );
         assert_eq!(MAX_DELEGATION_DEADLINE, Duration::from_secs(20 * 60));
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    enum Kind {
+        ToolStep,
+        Finish { stop_hook: bool },
+        Reprompt(RepromptReason),
+        End(ChildEnd),
+    }
+
+    // (call, valid, gate (editors only), wave abort, facts, decision)
+    type Row = (
+        CallResult,
+        bool,
+        Option<GateFacts>,
+        Option<WaveStop>,
+        ChildFacts,
+        Kind,
+    );
+
+    fn kind(decision: &ChildDecision) -> Kind {
+        match decision {
+            ChildDecision::ToolStep(..) => Kind::ToolStep,
+            ChildDecision::Finish { stop_hook, .. } => Kind::Finish {
+                stop_hook: *stop_hook,
+            },
+            ChildDecision::Reprompt(reason, _) => Kind::Reprompt(*reason),
+            ChildDecision::End(end) => Kind::End(*end),
+        }
+    }
+
+    fn response(outcome: ProviderOutcome) -> CallResult {
+        CallResult::Response(ProviderResponse {
+            outcome,
+            turn: ProviderTurn::new("test", "[{}]", "absent-secret", 4096).expect("minimal turn"),
+            response_id: None,
+            usage: crate::provider::Usage::default(),
+            wire_provenance: None,
+        })
+    }
+
+    fn answer() -> CallResult {
+        response(ProviderOutcome::Answer(Answer {
+            text: "done".into(),
+        }))
+    }
+
+    fn tools() -> CallResult {
+        response(ProviderOutcome::Tools(vec![ToolRequest {
+            id: crate::provider::ToolUseId::new("call").expect("id"),
+            call: ToolCall::List { path: ".".into() },
+        }]))
+    }
+
+    fn timeout() -> CallResult {
+        CallResult::Failed(CallFailure::Timeout)
+    }
+
+    const OPEN: ChildFacts = ChildFacts {
+        has_tools: true,
+        turns_left: true,
+        tool_calls_left: true,
+        before_deadline: true,
+        cancelled: false,
+        paused: false,
+        tokens_open: true,
+        calls_left: true,
+        hook: HookFacts {
+            uncertain: false,
+            stop_requested: false,
+            settled: true,
+        },
+        actor_hook_stop: false,
+    };
+
+    const GATE: GateFacts = GateFacts {
+        unmet: false,
+        worker_stopped: false,
+        stop_room: true,
+        continuations_left: true,
+    };
+
+    fn with(change: fn(&mut ChildFacts)) -> ChildFacts {
+        let mut facts = OPEN;
+        change(&mut facts);
+        facts
+    }
+
+    fn gate(change: fn(&mut GateFacts)) -> GateFacts {
+        let mut gate = GATE;
+        gate.unmet = true;
+        change(&mut gate);
+        gate
+    }
+
+    #[test]
+    fn child_calls_decide_by_kind_outcome_and_facts() {
+        use AgentDisposition::{Cancelled, Failed, StoppedByHook};
+        let editor = |cause| Kind::End(ChildEnd::Editor(cause));
+        let researcher = |disposition| Kind::End(ChildEnd::Researcher(disposition));
+        let skipped = |disposition, budget| {
+            Kind::End(ChildEnd::Skipped {
+                disposition,
+                budget,
+            })
+        };
+        let unverified = editor(WorkerCause::CriterionUnverified);
+        let reprompt = Kind::Reprompt(RepromptReason::CriterionNotMetInView);
+        let torn = Some(WaveStop::Abort(StopCause::ToolStopped));
+        let hook_stop = Some(WaveStop::Boundary(StopCause::HookStop));
+        let invalid = || response(ProviderOutcome::Answer(Answer { text: " ".into() }));
+        let rows: Vec<Row> = vec![
+            (
+                answer(),
+                true,
+                Some(GATE),
+                None,
+                OPEN,
+                Kind::Finish { stop_hook: true },
+            ),
+            (
+                answer(),
+                true,
+                Some(GATE),
+                torn,
+                OPEN,
+                editor(WorkerCause::ToolFailed),
+            ),
+            (answer(), true, Some(gate(|_| {})), None, OPEN, reprompt),
+            (
+                answer(),
+                true,
+                Some(gate(|g| g.worker_stopped = true)),
+                None,
+                OPEN,
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|g| g.stop_room = false)),
+                None,
+                OPEN,
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|g| g.continuations_left = false)),
+                None,
+                OPEN,
+                unverified,
+            ),
+            (answer(), true, Some(gate(|_| {})), torn, OPEN, unverified),
+            (
+                answer(),
+                true,
+                Some(gate(|_| {})),
+                None,
+                with(|f| f.turns_left = false),
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|_| {})),
+                None,
+                with(|f| f.tool_calls_left = false),
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|_| {})),
+                None,
+                with(|f| f.before_deadline = false),
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|_| {})),
+                None,
+                with(|f| f.tokens_open = false),
+                unverified,
+            ),
+            (
+                answer(),
+                true,
+                Some(gate(|_| {})),
+                None,
+                with(|f| f.calls_left = false),
+                unverified,
+            ),
+            (tools(), true, Some(GATE), None, OPEN, Kind::ToolStep),
+            (
+                tools(),
+                true,
+                Some(GateFacts {
+                    worker_stopped: true,
+                    ..GATE
+                }),
+                None,
+                OPEN,
+                editor(WorkerCause::ToolFailed),
+            ),
+            (
+                tools(),
+                true,
+                Some(GATE),
+                hook_stop,
+                OPEN,
+                editor(WorkerCause::ToolFailed),
+            ),
+            (
+                tools(),
+                false,
+                Some(GATE),
+                None,
+                with(|f| f.turns_left = false),
+                editor(WorkerCause::TurnLimit),
+            ),
+            (
+                tools(),
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::InvalidOutcome),
+            ),
+            (
+                invalid(),
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::InvalidOutcome),
+            ),
+            (
+                CallResult::Failed(CallFailure::OutputLimit),
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::InvalidOutcome),
+            ),
+            (
+                CallResult::Failed(CallFailure::InvalidResponse(None)),
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::InvalidOutcome),
+            ),
+            (
+                timeout(),
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::ToolFailed),
+            ),
+            (
+                CallResult::Cancelled,
+                false,
+                Some(GATE),
+                None,
+                OPEN,
+                editor(WorkerCause::ToolFailed),
+            ),
+            (
+                answer(),
+                true,
+                None,
+                None,
+                OPEN,
+                Kind::Finish { stop_hook: true },
+            ),
+            (
+                answer(),
+                true,
+                None,
+                None,
+                with(|f| f.has_tools = false),
+                Kind::Finish { stop_hook: false },
+            ),
+            (
+                answer(),
+                true,
+                None,
+                None,
+                with(|f| f.cancelled = true),
+                Kind::Finish { stop_hook: false },
+            ),
+            (
+                answer(),
+                true,
+                None,
+                Some(WaveStop::BUDGET),
+                OPEN,
+                Kind::Finish { stop_hook: false },
+            ),
+            (answer(), true, None, hook_stop, OPEN, researcher(Cancelled)),
+            (
+                answer(),
+                true,
+                None,
+                None,
+                with(|f| f.hook.uncertain = true),
+                researcher(Cancelled),
+            ),
+            (
+                answer(),
+                true,
+                None,
+                None,
+                with(|f| f.hook.stop_requested = true),
+                researcher(Cancelled),
+            ),
+            (
+                tools(),
+                true,
+                None,
+                None,
+                with(|f| f.hook.settled = false),
+                researcher(Cancelled),
+            ),
+            (tools(), true, None, None, OPEN, Kind::ToolStep),
+            (
+                tools(),
+                true,
+                None,
+                None,
+                with(|f| f.calls_left = false),
+                skipped(Cancelled, true),
+            ),
+            (
+                tools(),
+                true,
+                None,
+                None,
+                with(|f| f.tokens_open = false),
+                skipped(Cancelled, true),
+            ),
+            (
+                tools(),
+                true,
+                None,
+                None,
+                with(|f| f.paused = true),
+                skipped(Cancelled, false),
+            ),
+            (tools(), true, None, torn, OPEN, skipped(Cancelled, false)),
+            (
+                tools(),
+                true,
+                None,
+                None,
+                with(|f| {
+                    f.cancelled = true;
+                    f.actor_hook_stop = true;
+                }),
+                skipped(StoppedByHook, false),
+            ),
+            (invalid(), false, None, None, OPEN, researcher(Failed)),
+            (timeout(), false, None, None, OPEN, researcher(Failed)),
+            (
+                CallResult::Cancelled,
+                false,
+                None,
+                None,
+                OPEN,
+                researcher(Cancelled),
+            ),
+        ];
+        for (index, (result, valid, gate, abort, facts, expected)) in rows.into_iter().enumerate() {
+            assert_eq!(
+                kind(&decide_child_call(result, valid, gate, abort, &facts)),
+                expected,
+                "row {index}: {gate:?} {abort:?} {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn subagent_stop_runs_decide_the_child_end() {
+        use AgentDisposition::{Cancelled, Failed, StoppedByHook};
+        let end = |disposition, cause, stops_wave| ChildStop::End {
+            disposition,
+            cause,
+            stops_wave,
+        };
+        let unsettled = with(|f| f.hook.settled = false);
+        let budget = StopHookRun::CutOff { budget: true };
+        let rows = [
+            (StopHookRun::Passed, None, OPEN, ChildStop::Proceed),
+            (
+                StopHookRun::Passed,
+                None,
+                with(|f| f.actor_hook_stop = true),
+                end(StoppedByHook, WorkerCause::StoppedByHook, false),
+            ),
+            (budget, None, OPEN, end(Failed, WorkerCause::Budget, false)),
+            (
+                budget,
+                None,
+                unsettled,
+                end(Failed, WorkerCause::Budget, true),
+            ),
+            (
+                budget,
+                Some(WaveStop::BUDGET),
+                unsettled,
+                end(Failed, WorkerCause::Budget, false),
+            ),
+            (
+                StopHookRun::CutOff { budget: false },
+                None,
+                with(|f| f.cancelled = true),
+                end(Cancelled, WorkerCause::ToolFailed, false),
+            ),
+            (
+                StopHookRun::Uncertain,
+                None,
+                OPEN,
+                end(Failed, WorkerCause::ToolFailed, false),
+            ),
+            (StopHookRun::Blocked, None, OPEN, ChildStop::Reprompt),
+            (
+                StopHookRun::Blocked,
+                None,
+                with(|f| f.turns_left = false),
+                end(Failed, WorkerCause::TurnLimit, false),
+            ),
+            (
+                StopHookRun::Blocked,
+                None,
+                with(|f| f.before_deadline = false),
+                end(Failed, WorkerCause::Budget, false),
+            ),
+            (
+                StopHookRun::Blocked,
+                None,
+                with(|f| f.tokens_open = false),
+                end(Failed, WorkerCause::Budget, false),
+            ),
+            (
+                StopHookRun::Blocked,
+                None,
+                with(|f| {
+                    f.turns_left = false;
+                    f.calls_left = false;
+                }),
+                end(Failed, WorkerCause::Budget, false),
+            ),
+        ];
+        for (index, (run, abort, facts, expected)) in rows.into_iter().enumerate() {
+            assert_eq!(
+                decide_child_stop(run, abort, &facts),
+                expected,
+                "row {index}: {run:?} {abort:?} {facts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wave_stops_after_a_child_by_one_order() {
+        use AgentDisposition::{Cancelled, Failed, Finished, StoppedByHook};
+        let settled = OPEN.hook;
+        let uncertain = HookFacts {
+            uncertain: true,
+            ..settled
+        };
+        let requested = HookFacts {
+            stop_requested: true,
+            ..settled
+        };
+        let unsettled = HookFacts {
+            settled: false,
+            ..settled
+        };
+        let abort = |cause| Some(WaveStop::Abort(cause));
+        let boundary = |cause| Some(WaveStop::Boundary(cause));
+        // (queue stopped, cancelled, paused, child end, hook state, wave stop)
+        let rows = [
+            (
+                true,
+                true,
+                true,
+                Some(Failed),
+                uncertain,
+                Some(WaveStop::BUDGET),
+            ),
+            (
+                false,
+                true,
+                true,
+                Some(StoppedByHook),
+                uncertain,
+                abort(StopCause::Cancelled),
+            ),
+            (
+                false,
+                false,
+                true,
+                Some(StoppedByHook),
+                uncertain,
+                boundary(StopCause::Paused),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(StoppedByHook),
+                uncertain,
+                boundary(StopCause::HookStop),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(Failed),
+                uncertain,
+                abort(StopCause::Uncertain),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(Failed),
+                requested,
+                boundary(StopCause::HookStop),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(Failed),
+                unsettled,
+                abort(StopCause::ToolStopped),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(Failed),
+                settled,
+                abort(StopCause::ToolStopped),
+            ),
+            (
+                false,
+                false,
+                false,
+                Some(Cancelled),
+                settled,
+                abort(StopCause::Cancelled),
+            ),
+            (false, false, false, Some(Finished), settled, None),
+            (false, false, false, None, settled, None),
+            (
+                false,
+                false,
+                false,
+                None,
+                unsettled,
+                abort(StopCause::ToolStopped),
+            ),
+        ];
+        for (index, (queue_stopped, cancelled, paused, end, hook, expected)) in
+            rows.into_iter().enumerate()
+        {
+            assert_eq!(
+                wave_stop_after(queue_stopped, cancelled, paused, end, hook),
+                expected,
+                "row {index}"
+            );
+        }
+        for (result, reason) in [
+            (answer(), Some(RepromptReason::AnswerDeferred)),
+            (
+                response(ProviderOutcome::Delegate(crate::provider::Delegate {
+                    agent: None,
+                    children: Vec::new(),
+                })),
+                Some(RepromptReason::DelegateRefused),
+            ),
+            (tools(), Some(RepromptReason::ToolRefused)),
+            (timeout(), None),
+            (CallResult::Cancelled, None),
+        ] {
+            assert_eq!(RepromptReason::deferral(&result), reason);
+        }
     }
 }

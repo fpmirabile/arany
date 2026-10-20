@@ -2,9 +2,10 @@ use super::ToolError;
 use super::cancel::Cancellation;
 use super::config::Program;
 use super::fs::{identity, open_directory, open_file};
-use super::guard::{read_capped, reap_owned_child, runtime_path};
+use super::guard::{reap_owned_child, runtime_path};
+use super::output::{Window, read_window};
 use super::toolchains::RuntimeGrant;
-use super::types::{CommandChangeset, CommandResult, ToolDisposition};
+use super::types::{CommandChangeset, ToolDisposition};
 use crate::session::WorkspaceIdentity;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
@@ -64,7 +65,7 @@ impl Outcome {
 }
 
 enum Ended {
-    Done(std::process::ExitStatus, Vec<u8>, Vec<u8>),
+    Done(std::process::ExitStatus, Window, Window, usize),
     Timeout,
     Cancelled,
     Failed(ToolError),
@@ -144,6 +145,11 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             "Unguarded run cancelled; host effects may have occurred",
             stopped,
         ),
+        Ended::Failed(ToolError::OutputCeiling) => Outcome::started(
+            ToolDisposition::Limit,
+            "output_ceiling: output passed 1 GiB; stopped; host effects may have occurred",
+            stopped,
+        ),
         Ended::Timeout | Ended::Failed(ToolError::Limit) => Outcome::started(
             ToolDisposition::Limit,
             "Tool result or resource limit reached; host effects may have occurred",
@@ -154,16 +160,16 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
             "Unguarded run failed; host effects may have occurred; no automatic retry",
             stopped,
         ),
-        Ended::Done(status, stdout, stderr) => {
-            let result = CommandResult {
-                exit_code: status.code(),
-                stdout: String::from_utf8_lossy(&stdout).into_owned(),
-                stderr: String::from_utf8_lossy(&stderr).into_owned(),
-                changeset: CommandChangeset::default(),
-            };
-            let output = serde_json::to_string(&result)
-                .ok()
-                .filter(|_| result.valid());
+        Ended::Done(status, stdout, stderr, budget) => {
+            let output = super::process::fit_command(
+                status.code(),
+                &stdout,
+                &stderr,
+                CommandChangeset::default(),
+                budget,
+                super::process::Truncation::Allow,
+            )
+            .ok();
             let Some(output) = output else {
                 return Outcome::started(
                     ToolDisposition::Limit,
@@ -171,7 +177,7 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
                     stopped,
                 );
             };
-            let disposition = if result.exit_code == Some(0) {
+            let disposition = if status.code() == Some(0) {
                 ToolDisposition::Succeeded
             } else {
                 ToolDisposition::Failed
@@ -182,7 +188,7 @@ fn finish(ended: Ended, stopped: bool) -> Outcome {
                 spawned: true,
                 descendants_stopped: stopped,
                 pid: 0,
-                exit_code: result.exit_code,
+                exit_code: status.code(),
             }
         }
     }
@@ -204,15 +210,15 @@ async fn wait(
                     .await
                     .map_err(|_| ToolError::Operation)
             },
-            read_capped(out, cap),
-            read_capped(err, cap)
+            read_window(out, cap),
+            read_window(err, cap)
         )
     });
     tokio::select! {
         biased;
         () = cancellation.cancelled() => Ended::Cancelled,
         joined = work => match joined {
-            Ok(Ok((status, stdout, stderr))) => Ended::Done(status, stdout, stderr),
+            Ok(Ok((status, stdout, stderr))) => Ended::Done(status, stdout, stderr, cap),
             Ok(Err(error)) => Ended::Failed(error),
             Err(_) => Ended::Timeout,
         },
@@ -251,7 +257,8 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
     } else {
         request.cwd
     };
-    if !open_file(&workspace, cwd)?
+    if !open_file(&workspace, cwd)
+        .map_err(|_| ToolError::Path)?
         .metadata()
         .map_err(|_| ToolError::Path)?
         .is_dir()
@@ -283,10 +290,7 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    Ok((
-        command,
-        (request.result_bytes as usize / 2).saturating_sub(128),
-    ))
+    Ok((command, request.result_bytes as usize))
 }
 
 #[cfg(test)]
@@ -347,7 +351,8 @@ mod tests {
     }
 
     fn stdout(outcome: &Outcome) -> String {
-        let result: CommandResult = serde_json::from_str(&outcome.output).unwrap();
+        let result: super::super::types::CommandResult =
+            serde_json::from_str(&outcome.output).unwrap();
         result.stdout
     }
 
@@ -430,16 +435,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unguarded_run_caps_output_and_records_limit() {
+    async fn unguarded_run_truncates_output_and_preserves_exit_status() {
         let fixture = fixture();
         let outcome = fixture
             .sh(
-                "while :; do echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; done",
+                "printf HEAD; printf '%1048568s' ''; printf TAIL",
                 "",
                 10_000,
             )
             .await;
-        assert_eq!(outcome.disposition, ToolDisposition::Limit);
+        assert_eq!(outcome.disposition, ToolDisposition::Succeeded);
+        let result: super::super::types::CommandResult =
+            serde_json::from_str(&outcome.output).unwrap();
+        assert_eq!(result.stdout_total.bytes, 1048576);
+        assert!(result.stdout.starts_with("HEAD") && result.stdout.ends_with("TAIL"));
+        assert!(result.stdout.contains(" lines omitted; "));
+        assert!(result.valid());
         assert!(outcome.spawned && outcome.descendants_stopped);
     }
 
@@ -459,9 +470,9 @@ mod tests {
         let outside = fixture.workspace.parent().unwrap().join("outside");
         std::fs::create_dir(&outside).unwrap();
         std::os::unix::fs::symlink(&outside, fixture.workspace.join("link")).unwrap();
-        for cwd in ["link", "missing"] {
+        for cwd in ["link", "link/missing", "missing", "missing/child"] {
             let outcome = fixture.sh("touch made", cwd, 10_000).await;
-            assert_eq!(outcome.disposition, ToolDisposition::Denied);
+            assert_eq!(outcome.disposition, ToolDisposition::Denied, "{cwd}");
             assert!(!outcome.spawned);
         }
         assert!(!outside.join("made").exists());

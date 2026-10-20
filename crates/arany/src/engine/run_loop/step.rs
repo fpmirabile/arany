@@ -2556,8 +2556,8 @@ mod tests {
         use crate::tools::permissions::PermissionMode;
         let read = ToolCall::Read {
             path: "file".into(),
-            offset: 0,
-            limit: 1,
+            offset: None,
+            limit: Some(1),
         };
         let mut definition = crate::tools::definitions::AgentDefinition {
             version: 1,

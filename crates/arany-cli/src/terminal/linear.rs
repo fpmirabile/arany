@@ -1038,8 +1038,8 @@ mod tests {
         let read = crate::presentation::tool_fixture(
             arany::ToolCall::Read {
                 path: "a".into(),
-                offset: 0,
-                limit: 100,
+                offset: None,
+                limit: Some(100),
             },
             r#"{"text":"a\nb\n"}"#,
         );
@@ -1091,8 +1091,8 @@ mod tests {
         let read = crate::presentation::tool_fixture(
             arany::ToolCall::Read {
                 path: "a".into(),
-                offset: 0,
-                limit: 100,
+                offset: None,
+                limit: Some(100),
             },
             r#"{"text":"a\nb\n"}"#,
         );

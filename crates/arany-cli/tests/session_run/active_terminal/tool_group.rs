@@ -112,11 +112,11 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
                 0 => call("arany_list", json!({"path":"src"})),
                 1 => call(
                     "arany_read",
-                    json!({"path":"src/note.txt","offset":0,"limit":1024}),
+                    json!({"path":"src/note.txt","offset":null,"limit":1024}),
                 ),
                 2 => call(
                     "arany_read",
-                    json!({"path":"private.txt","offset":0,"limit":1024}),
+                    json!({"path":"private.txt","offset":null,"limit":1024}),
                 ),
                 _ => arany::semantic::responses_output(&json!("TP7_FINAL_ANSWER")),
             };

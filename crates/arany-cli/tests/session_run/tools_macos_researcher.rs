@@ -166,8 +166,8 @@ done
             ToolCall::List { path: "src".into() },
             ToolCall::Read {
                 path: "src/facts.txt".into(),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             ToolCall::Search {
                 path: "src/facts.txt".into(),
@@ -333,7 +333,7 @@ done
             assert!(catalog.get("git").is_none());
             assert_eq!(
                 catalog["file_tools"],
-                "list (directory entries), read (UTF-8, zero-based byte offset, limit 1..65536, whole-file sha256), search (literal UTF-8 content in a file or directory)"
+                "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal UTF-8 content in a file or directory)"
             );
             assert_eq!(catalog["skills"][0]["name"], "synthetic");
             assert_eq!(
@@ -499,7 +499,14 @@ done
         let output =
             |index: usize| serde_json::from_str::<Value>(&observations[index].output).unwrap();
         assert_eq!(output(0)["entries"], json!(["src/facts.txt"]));
-        assert_eq!(output(1)["text"], FACTS);
+        assert_eq!(
+            output(1)["text"],
+            FACTS
+                .lines()
+                .enumerate()
+                .map(|(i, line)| format!("{}\t{line}\n", i + 1))
+                .collect::<String>()
+        );
         assert_eq!(output(1)["sha256"], hash(FACTS.as_bytes()));
         assert_eq!(
             output(2)["entries"],

@@ -1963,8 +1963,8 @@ mod peer_row_tests {
             (
                 ToolCall::Read {
                     path: "src/界.rs".into(),
-                    offset: 0,
-                    limit: 1024,
+                    offset: None,
+                    limit: Some(1024),
                 },
                 r#"{"text":"one\ntwo\n","truncated":true}"#,
                 "⏺ Read(src/界.rs)\n  ⎿ 2 lines (truncated)",
@@ -1991,11 +1991,24 @@ mod peer_row_tests {
             assert_eq!(tool_summary(&tool), expected);
             assert!(!expected.contains("succeeded"));
         }
+        let mut missing = tool_fixture(
+            ToolCall::Read {
+                path: "agents/skills/ponytail/SKILL.md".into(),
+                offset: None,
+                limit: None,
+            },
+            "File or directory not found; List the parent directory to check the path",
+        );
+        missing.observation.as_mut().unwrap().disposition = ToolDisposition::Failed;
+        assert_eq!(
+            tool_summary(&missing),
+            "⏺ Read(agents/skills/ponytail/SKILL.md)\n  ⎿ Error: File or directory not found; List the parent directory to check the path"
+        );
         let mut tool = tool_fixture(
             ToolCall::Read {
                 path: "bad\u{1b}[2J".into(),
-                offset: 0,
-                limit: 100,
+                offset: None,
+                limit: Some(100),
             },
             "blocked\u{1b}]52;forged\u{7}\nRun: forged",
         );

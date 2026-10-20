@@ -12,7 +12,8 @@ use uuid::Uuid;
 
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
-pub(crate) const MAX_READ_PAGE_BYTES: u32 = 64 * 1024;
+pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
+pub(crate) const MAX_READ_LINE_CHARS: usize = 2000;
 // ToolObservation::valid checks every producer against this serialized bound.
 pub(crate) const MAX_TOOL_OBSERVATION_BYTES: usize =
     2 * MAX_TOOL_RESULT_BYTES + MAX_TOOL_ARGUMENT_BYTES;
@@ -117,6 +118,19 @@ impl CommandChangeset {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputTotal {
+    pub bytes: u64,
+    pub lines: u64,
+}
+
+impl OutputTotal {
+    pub(crate) fn valid_for(self, text: &str) -> bool {
+        super::output::valid_total(self, text)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandResult {
@@ -124,6 +138,8 @@ pub struct CommandResult {
     pub exit_code: Option<i32>,
     pub stdout: String,
     pub stderr: String,
+    pub stdout_total: OutputTotal,
+    pub stderr_total: OutputTotal,
     pub changeset: CommandChangeset,
 }
 
@@ -142,6 +158,8 @@ pub enum CacheUpdate {
 impl CommandResult {
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
+            && self.stdout_total.valid_for(&self.stdout)
+            && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
     }
 }
@@ -158,8 +176,10 @@ pub enum ToolCall {
     },
     Read {
         path: String,
-        offset: u32,
-        limit: u32,
+        #[serde(deserialize_with = "Option::deserialize")]
+        offset: Option<u32>,
+        #[serde(deserialize_with = "Option::deserialize")]
+        limit: Option<u32>,
     },
     Search {
         path: String,
@@ -965,6 +985,20 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && (private_command
+                || !matches!(
+                    self.intent.call,
+                    ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+                )
+                || !(self.disposition == ToolDisposition::Succeeded
+                    || serde_json::from_str::<Value>(&self.output)
+                        .is_ok_and(|v| v.get("exit_code").is_some()))
+                || serde_json::from_str::<CommandResult>(&self.output).is_ok_and(|r| r.valid()))
+            && (!matches!(
+                self.intent.call,
+                ToolCall::McpCall { .. } | ToolCall::McpList { .. }
+            ) || self.disposition != ToolDisposition::Succeeded
+                || super::output::valid_mcp(&self.output))
             && (!private_command
                 || matches!(
                     self.cache_update,
@@ -1318,8 +1352,8 @@ mod model_call_tests {
 
         let read = model_call(&ToolCall::Read {
             path: "src/main.rs".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         });
         assert_eq!(read["operation"], "read");
         assert_eq!(read["path"], "src/main.rs");
@@ -1482,7 +1516,15 @@ mod unguarded_vocabulary_tests {
             intent: host.clone(),
             disposition: ToolDisposition::Succeeded,
             enforcement_cause: None,
-            output: String::new(),
+            output: serde_json::to_string(&CommandResult {
+                exit_code: Some(0),
+                stdout: String::new(),
+                stderr: String::new(),
+                stdout_total: Default::default(),
+                stderr_total: Default::default(),
+                changeset: Default::default(),
+            })
+            .unwrap(),
             attestation: Some(attestation),
             cache_update: CacheUpdate::NotApplicable,
         };
@@ -1708,8 +1750,8 @@ mod internal_call_tests {
         assert!(
             !ToolCall::Read {
                 path: "a".into(),
-                offset: 0,
-                limit: 1
+                offset: None,
+                limit: Some(1)
             }
             .is_internal()
         );

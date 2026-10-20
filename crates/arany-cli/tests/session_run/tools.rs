@@ -91,8 +91,8 @@ impl Provider for Journey {
             0 => ToolCall::List { path: "src".into() },
             1 => ToolCall::Read {
                 path: "src/main.c".into(),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             2 => ToolCall::Edit {
                 path: "src/main.c".into(),
@@ -102,8 +102,8 @@ impl Provider for Journey {
             },
             3 => ToolCall::Read {
                 path: "src/main.c".into(),
-                offset: 0,
-                limit: 4096,
+                offset: None,
+                limit: None,
             },
             4 => ToolCall::Mkdir {
                 path: "src/generated".into(),
@@ -149,8 +149,8 @@ impl Provider for Journey {
             }
             12 => ToolCall::Read {
                 path: "omitted.txt".into(),
-                offset: 0,
-                limit: 16,
+                offset: None,
+                limit: Some(16),
             },
             13 => {
                 requests.push(request);
@@ -376,7 +376,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     assert_eq!(observations[13].disposition, ToolDisposition::Denied);
     assert!(observations[13].attestation.is_none());
     let read: Value = serde_json::from_str(&observations[3].output).unwrap();
-    assert_eq!(read["text"], "int main(void) { return 0; }\n");
+    assert_eq!(read["text"], "1\tint main(void) { return 0; }\n");
     let command: Value = serde_json::from_str(&observations[6].output).unwrap();
     assert_eq!(command["exit_code"], 0);
     assert_eq!(command["stdout"], "build and test passed");
@@ -522,8 +522,8 @@ impl Provider for Proposal {
                 turn: arany::ProviderTurn::scripted(),
                 outcome: crate::tool_outcome(ToolCall::Read {
                     path: "src/current.txt".into(),
-                    offset: 0,
-                    limit: 64,
+                    offset: None,
+                    limit: Some(64),
                 }),
                 response_id: None,
                 usage: arany::Usage {
@@ -544,8 +544,8 @@ impl Provider for Proposal {
             }
             (1, _) => crate::tool_outcome(ToolCall::Read {
                 path: "src/current.txt".into(),
-                offset: 0,
-                limit: 64,
+                offset: None,
+                limit: Some(64),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
         };
@@ -772,8 +772,8 @@ impl Provider for InProcessReads {
             }),
             0 => crate::tool_outcome(ToolCall::Read {
                 path: "src/main.c".into(),
-                offset: 0,
-                limit: 65536,
+                offset: None,
+                limit: None,
             }),
             1 => crate::tool_outcome(ToolCall::List { path: "src".into() }),
             _ => crate::tool_outcome(ToolCall::Search {
@@ -1446,8 +1446,8 @@ impl Provider for BoundedLoop {
         } else {
             crate::tool_outcome(ToolCall::Read {
                 path: "src/unselected.txt".into(),
-                offset: 0,
-                limit: 1,
+                offset: None,
+                limit: Some(1),
             })
         };
         requests.push(request);
@@ -1808,8 +1808,8 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
     .unwrap();
     let read = |path: &str| ToolCall::Read {
         path: path.into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     };
     let search = |path: &str| ToolCall::Search {
         path: path.into(),

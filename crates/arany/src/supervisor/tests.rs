@@ -304,6 +304,8 @@ fn supervisor_worker_command_outcomes_ignore_seal_sequences_and_keep_the_exit_cl
             exit_code: Some(exit_code),
             stdout: String::new(),
             stderr: String::new(),
+            stdout_total: Default::default(),
+            stderr_total: Default::default(),
             private_capture: PrivateCapture::Sealed {
                 data: WorkerDataRef {
                     assignment_id: fixture.child,
