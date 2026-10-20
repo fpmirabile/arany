@@ -483,7 +483,7 @@ mod tests {
             "stop_sequence": null,
             "content": [{"type": "tool_use", "id": "toolu_safe", "name": "arany_mcp_call", "input": {
                 "server": "example", "tool": "echo", "schema_digest": "0".repeat(64),
-                "arguments": arguments, "plan_contract": null
+                "arguments": arguments
             }}],
             "usage": {"input_tokens": 12, "output_tokens": 8}
         }))

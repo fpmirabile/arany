@@ -764,7 +764,7 @@ mod account_default_tests {
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
         assert_eq!(payload_version("RunStarted"), Some(16));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(10));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(11));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -2088,7 +2088,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(10));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(11));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,
@@ -2104,7 +2104,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         failure_reason: Some(ProviderFailureReason::ProposalRefused),
         refusal: Some(ProposalRefusal {
             operation: "arany_write".into(),
-            cause: ProposalRefusalCause::PlanMissing,
+            cause: ProposalRefusalCause::PlanInvalid,
         }),
     };
     let valid = serde_json::to_value(record).unwrap();
@@ -2117,8 +2117,8 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
-    assert!(decode_call(&valid, 10).is_ok());
-    assert!(decode_call(&valid, 9).is_err());
+    assert!(decode_call(&valid, 11).is_ok());
+    assert!(decode_call(&valid, 10).is_err());
     for (field, value) in [
         ("refusal", serde_json::Value::Null),
         ("failure_reason", serde_json::Value::Null),
@@ -2126,7 +2126,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         ("disposition", serde_json::json!("finished")),
         (
             "refusal",
-            serde_json::json!({"operation":"PRIVATE_ARGUMENT", "cause":"plan_missing"}),
+            serde_json::json!({"operation":"PRIVATE_ARGUMENT", "cause":"plan_invalid"}),
         ),
         (
             "refusal",
@@ -2134,22 +2134,22 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         ),
         (
             "refusal",
-            serde_json::json!({"operation":"arany_write", "cause":"plan_missing", "arguments":"PRIVATE_ARGUMENT"}),
+            serde_json::json!({"operation":"arany_write", "cause":"plan_invalid", "arguments":"PRIVATE_ARGUMENT"}),
         ),
     ] {
         let mut invalid = valid.clone();
         invalid[field] = value;
-        assert!(decode_call(&invalid, 10).is_err(), "field {field}");
+        assert!(decode_call(&invalid, 11).is_err(), "field {field}");
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
-    assert!(decode_call(&worker_phase, 10).is_err());
+    assert!(decode_call(&worker_phase, 11).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
-    assert!(decode_call(&synthesis, 10).is_ok());
+    assert!(decode_call(&synthesis, 11).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
-    assert!(decode_call(&missing, 10).is_err());
+    assert!(decode_call(&missing, 11).is_err());
     for (disposition, failure, accepted) in [
         ("failed", serde_json::json!("proposal_refused"), true),
         ("failed", serde_json::Value::Null, false),
@@ -2181,4 +2181,48 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         )
         .is_err()
     );
+}
+
+#[test]
+fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
+    let record = ProviderCallRecord {
+        delegation: None,
+        phase: crate::provider::AgentPhase::RootPlan,
+        disposition: ProviderCallDisposition::PlanRecorded,
+        requested_tools: 0,
+        response_id: Some("response_plan".into()),
+        input_tokens: Some(8),
+        output_tokens: Some(4),
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: None,
+        wire_provenance: None,
+        failure_reason: None,
+        refusal: None,
+    };
+    let value = serde_json::to_value(&record).unwrap();
+    let decode = |payload: &serde_json::Value, version| {
+        Event::decode(
+            "ProviderCallRecorded",
+            version,
+            &payload.to_string(),
+            Some(RunId::new()),
+            Some(AgentRunId::new()),
+        )
+    };
+    assert!(decode(&value, 11).is_ok());
+    assert!(decode(&value, 10).is_err());
+    for (key, invalid) in [
+        ("phase", serde_json::json!("child_work")),
+        ("phase", serde_json::json!("tool_review")),
+        ("requested_tools", serde_json::json!(1)),
+        ("failure_reason", serde_json::json!("response_contract")),
+        (
+            "refusal",
+            serde_json::json!({"operation":"arany_plan","cause":"plan_invalid"}),
+        ),
+    ] {
+        let mut malformed = value.clone();
+        malformed[key] = invalid;
+        assert!(decode(&malformed, 11).is_err(), "{key}");
+    }
 }

@@ -295,7 +295,10 @@ async fn permission_dispatch_modes_rules_command_mcp_and_edit() {
                 let denied = mode == "plan" || rule == "deny" || mode == "dontAsk" && rule == "ask";
                 let ai = !denied && mode == "auto" && rule == "allow";
                 let human = !denied && (rule == "ask" || mode == "acceptEdits" && kind != "edit");
-                let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+                let mut outcomes = vec![
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(call.clone()),
+                ];
                 if ai {
                     outcomes.push(finish("approve"));
                 }
@@ -435,7 +438,10 @@ async fn permission_dispatch_settings_and_terminal_modes_only_narrow() {
                 Decision::Allow
             );
         }
-        let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+        let mut outcomes = vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
+        ];
         if ai {
             outcomes.push(finish("approve"));
         }
@@ -500,7 +506,7 @@ async fn permission_dispatch_denied_replay_uses_pinned_verdict_and_safe_output()
     let call = call("read");
     let (result, requests, humans) = fixture
         .run(
-            vec![tool_outcome(call, None), finish("answer")],
+            vec![tool_outcome(call), finish("answer")],
             Some(arany::ApprovalMode::Auto),
             false,
         )
@@ -565,14 +571,18 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
         plan.command_timeout_ms = Some(2_000);
         let (result, requests, humans) = fixture
             .run(
-                vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+                vec![
+                    arany::test_support::scenario::plan_outcome(plan),
+                    tool_outcome(call),
+                    finish("answer"),
+                ],
                 Some(arany::ApprovalMode::Request),
                 false,
             )
             .await;
         assert_eq!(humans, 0, "{settings}");
         assert_eq!(
-            requests[1].input.tools.as_ref().unwrap().steps[0].observations[0].output,
+            requests[2].input.tools.as_ref().unwrap().steps[1].observations[0].output,
             "Timeout 2000 ms exceeds pinned max 1000 ms. Lower request or change /settings; Goal remains pinned.",
             "{settings}"
         );
@@ -603,7 +613,11 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
     plan.command_timeout_ms = Some(1_000);
     let (result, _, _) = fixture
         .run(
-            vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+            vec![
+                arany::test_support::scenario::plan_outcome(plan),
+                tool_outcome(call),
+                finish("answer"),
+            ],
             Some(arany::ApprovalMode::Request),
             false,
         )
@@ -656,7 +670,11 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
     };
     let ((result, _, _), started) = tokio::join!(
         fixture.run(
-            vec![tool_outcome(call, Some(Box::new(plan))), finish("answer")],
+            vec![
+                arany::test_support::scenario::plan_outcome(plan),
+                tool_outcome(call),
+                finish("answer")
+            ],
             Some(arany::ApprovalMode::Request),
             false,
         ),
@@ -705,7 +723,10 @@ async fn permission_dispatch_missing_settings_preserves_existing_approval_flow()
             br#"{"permissions":{"deny":["Edit"]}}"#,
         );
         let call = call("edit");
-        let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+        let mut outcomes = vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
+        ];
         if mode == Some(arany::ApprovalMode::Auto) {
             outcomes.push(finish("approve"));
         }
@@ -774,7 +795,7 @@ async fn permission_dispatch_children_inherit_parent_restrictions_and_review() {
                     profile: None,
                 }],
             }),
-            tool_outcome(call(kind), None),
+            tool_outcome(call(kind)),
         ];
         if ai {
             outcomes.push(finish("approve"));
@@ -836,7 +857,7 @@ async fn researcher_review_approval_dispatches_within_a_short_goal_budget() {
                         profile: None,
                     }],
                 }),
-                tool_outcome(call("catalog"), None),
+                tool_outcome(call("catalog")),
                 finish("approve"),
                 finish("report"),
                 finish("answer"),
@@ -898,7 +919,7 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         .with_profile("scripted", "primary"),
     );
     let child = route(
-        ScriptedProvider::new(vec![tool_outcome(call("catalog"), None), finish("report")])
+        ScriptedProvider::new(vec![tool_outcome(call("catalog")), finish("report")])
             .with_profile("scripted", "child"),
     );
     let mut review = ScriptedProvider::new(vec![]).with_profile("scripted", "review");
@@ -959,7 +980,8 @@ async fn permission_dispatch_allow_never_expands_the_pinned_grant() {
     let (result, _, humans) = fixture
         .run(
             vec![
-                tool_outcome(call, Some(Box::new(contract))),
+                arany::test_support::scenario::plan_outcome(contract),
+                tool_outcome(call),
                 finish("answer"),
             ],
             Some(arany::ApprovalMode::Auto),
@@ -988,7 +1010,10 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
         }
         let fixture = Fixture::new(Some(&settings), true);
         let call = call("edit");
-        let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+        let mut outcomes = vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
+        ];
         if let Some(review) = review {
             outcomes.push(finish(review));
         }
@@ -1030,14 +1055,15 @@ async fn permission_dispatch_headless_auto_reviews_and_unanswered_asks_deny() {
                 }],
             }),
             finish("report"),
-            tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
         ];
         if terminal.is_some() {
             outcomes.push(finish("answer"));
         }
         let (result, requests, humans) = fixture.run(outcomes, terminal, true).await;
         assert_eq!(humans, usize::from(terminal.is_some()));
-        assert_eq!(requests[2].phase, AgentPhase::RootSynthesis);
+        assert_eq!(requests[3].phase, AgentPhase::RootSynthesis);
         assert!(
             !requests
                 .iter()
@@ -1064,7 +1090,10 @@ async fn human_denial_on_the_only_allowed_run_is_a_failure_not_a_budget_close() 
     let call = call("edit");
     let (result, _, humans) = fixture
         .run(
-            vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))],
+            vec![
+                arany::test_support::scenario::plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
+            ],
             Some(arany::ApprovalMode::Request),
             false,
         )
@@ -1110,7 +1139,7 @@ async fn hook_case(
 ) -> HookCase {
     let mut fixture = Fixture::new(Some(&settings), true);
     fixture.deny_humans = deny_humans;
-    let mut outcomes = vec![tool_outcome(call("read"), None)];
+    let mut outcomes = vec![tool_outcome(call("read"))];
     // A refused Ask ends the Run before the model sees the result.
     let continues = !(deny_humans
         || mode.is_none()
@@ -1260,7 +1289,7 @@ async fn hook_replay_never_reruns_or_rereads_hook_configuration() {
     let fixture = Fixture::new(Some(&settings), true);
     let (result, _, _) = fixture
         .run(
-            vec![tool_outcome(call("read"), None), finish("answer")],
+            vec![tool_outcome(call("read")), finish("answer")],
             None,
             false,
         )
@@ -1607,7 +1636,8 @@ async fn hook_on_a_command_keeps_changeset_integration_valid() {
     let (result, _, _) = fixture
         .run(
             vec![
-                tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                arany::test_support::scenario::plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
                 finish("answer"),
             ],
             None,
@@ -1656,7 +1686,10 @@ async fn hook_ask_over_an_auto_review_ask_goes_to_the_human() {
         });
         let mut fixture = Fixture::new(Some(&settings), true);
         fixture.restricted_approvals = restricted;
-        let mut outcomes = vec![tool_outcome(call.clone(), Some(Box::new(plan(&call))))];
+        let mut outcomes = vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call.clone()),
+        ];
         if !restricted {
             outcomes.push(finish("answer"));
         }
@@ -1759,7 +1792,7 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
                         profile: None,
                     }],
                 }),
-                tool_outcome(call("read"), None),
+                tool_outcome(call("read")),
                 finish("report"),
                 finish("answer"),
             ],
@@ -1941,11 +1974,11 @@ async fn agent_definition_guard_editor_turn_and_tool_limits_refuse_child_egress(
         ("tools: Read\nbackground: true\n", None, 1),
         (
             "tools: Read\nmaxTurns: 1\n",
-            Some(tool_outcome(call("read"), None)),
+            Some(tool_outcome(call("read"))),
             2,
         ),
-        ("tools: Glob\n", Some(tool_outcome(call("read"), None)), 2),
-        ("tools: Read\n", Some(tool_outcome(call("edit"), None)), 2),
+        ("tools: Glob\n", Some(tool_outcome(call("read"))), 2),
+        ("tools: Read\n", Some(tool_outcome(call("edit"))), 2),
     ] {
         let fixture = Fixture::new(None, false);
         agent_file(
@@ -2086,14 +2119,11 @@ async fn agent_definition_guard_goal_compacts_tool_history_with_definitions_pres
     .unwrap();
     let mut outcomes: Vec<_> = (0..READS)
         .map(|page| {
-            tool_outcome(
-                arany::ToolCall::Read {
-                    path: "notes/data.txt".into(),
-                    offset: u32::try_from(page * PAGE).unwrap(),
-                    limit: u32::try_from(PAGE).unwrap(),
-                },
-                None,
-            )
+            tool_outcome(arany::ToolCall::Read {
+                path: "notes/data.txt".into(),
+                offset: u32::try_from(page * PAGE).unwrap(),
+                limit: u32::try_from(PAGE).unwrap(),
+            })
         })
         .collect();
     outcomes.push(finish("done"));
@@ -2180,7 +2210,7 @@ async fn agent_definition_guard_modes_preserve_parent_asks_and_add_review() {
                     profile: None,
                 }],
             }),
-            tool_outcome(call(if review { "catalog" } else { "read" }), None),
+            tool_outcome(call(if review { "catalog" } else { "read" })),
         ];
         if review {
             responses.push(finish("approve"));
@@ -2223,7 +2253,7 @@ async fn agent_definition_guard_parsing_ignores_model_permission_rules_without_w
     for rule in ["deny", "ask"] {
         let fixture = Fixture::new(Some(&json!({"permissions":{ rule: ["*"]}})), false);
         agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-        let mut outcomes = vec![tool_outcome(call("read"), None)];
+        let mut outcomes = vec![tool_outcome(call("read"))];
         if rule == "deny" {
             outcomes.push(finish("answer"));
         }
@@ -2267,7 +2297,7 @@ async fn deny_all_hook_leaves_definition_parsing_working_and_still_blocks_a_mode
     );
     let (result, requests, _) = fixture
         .run(
-            vec![tool_outcome(call("read"), None), finish("answer")],
+            vec![tool_outcome(call("read")), finish("answer")],
             None,
             false,
         )
@@ -2418,19 +2448,22 @@ fn heavy_guard_journeys_fit_a_one_and_a_half_mebibyte_stack() {
 async fn post_run(hook: Value, stopped: bool) -> PostCase {
     let fixture = Fixture::new(Some(&post_settings(hook)), true);
     let write = call("edit");
-    let mut outcomes = vec![tool_outcome(write.clone(), Some(Box::new(plan(&write))))];
+    let mut outcomes = vec![
+        arany::test_support::scenario::plan_outcome(plan(&write)),
+        tool_outcome(write.clone()),
+    ];
     if !stopped {
         outcomes.push(finish("answer"));
     }
     let (result, requests, _) = fixture.run(outcomes, None, false).await;
     let live_feedback = requests
-        .get(1)
+        .get(2)
         .and_then(|request| request.input.tools.as_ref())
-        .and_then(|tools| tools.steps[0].hook_feedback.get(&0).cloned());
+        .and_then(|tools| tools.steps[1].hook_feedback.get(&0).cloned());
     let model_output = requests
-        .get(1)
+        .get(2)
         .map(|request| {
-            request.input.tools.as_ref().unwrap().steps[0].observations[0]
+            request.input.tools.as_ref().unwrap().steps[1].observations[0]
                 .output
                 .clone()
         })
@@ -2546,7 +2579,7 @@ async fn hook_post_tool_use_feedback_is_journaled_and_never_undoes() {
 async fn hook_post_tool_use_continue_false_stops_after_the_committed_effect() {
     let case = post_run(shell_hook(r#"printf '%s' '{"continue":false,"stopReason":"review required","decision":"block","reason":"not model feedback"}'"#), true).await;
     assert_eq!(case.status, RunStatus::StoppedByHook);
-    assert_eq!(case.provider_calls, 1);
+    assert_eq!(case.provider_calls, 2);
     assert_eq!(case.host_file, "done");
     assert_eq!(
         case.tool.observation.as_ref().unwrap().disposition,
@@ -2598,7 +2631,7 @@ async fn hook_post_tool_use_without_feedback_leaves_model_bytes_unchanged() {
         assert_eq!(case.live_feedback, None, "{script}");
         assert!(case.tool.hook_feedback().is_empty(), "{script}");
         assert_eq!(case.host_file, "done");
-        assert_eq!(case.provider_calls, 2);
+        assert_eq!(case.provider_calls, 3);
     }
 }
 
@@ -2626,14 +2659,17 @@ async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
     let write = call("edit");
     let (result, requests, _) = fixture
         .run(
-            vec![tool_outcome(write.clone(), Some(Box::new(plan(&write))))],
+            vec![
+                arany::test_support::scenario::plan_outcome(plan(&write)),
+                tool_outcome(write.clone()),
+            ],
             None,
             false,
         )
         .await;
     assert_eq!(
         requests.len(),
-        1,
+        2,
         "no Provider call follows an unknown hook"
     );
     assert_ne!(result.run.status, RunStatus::Finished);
@@ -2696,7 +2732,8 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
     let (result, requests, _) = fixture
         .run(
             vec![
-                tool_outcome(call.clone(), Some(Box::new(plan(&call)))),
+                arany::test_support::scenario::plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
                 finish("answer"),
             ],
             None,
@@ -2723,7 +2760,7 @@ async fn hook_post_tool_use_on_a_command_sees_the_integrated_tree() {
             .collect::<Vec<_>>()
     };
     assert_eq!(result.run.status, RunStatus::Finished, "{:?}", report());
-    let step = &requests[1].input.tools.as_ref().unwrap().steps[0];
+    let step = &requests[2].input.tools.as_ref().unwrap().steps[1];
     assert_eq!(step.observations.len(), 2, "command and integration");
     assert_eq!(
         step.hook_feedback.get(&0),
@@ -2800,7 +2837,7 @@ async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {
                     profile: None,
                 }],
             }),
-            tool_outcome(call("read"), None),
+            tool_outcome(call("read")),
         ])
         .await;
     assert_eq!(requests, 2, "no Provider call follows an unknown hook");
@@ -2824,7 +2861,7 @@ async fn hook_researcher_tool_with_default_pre_and_post_timeouts_still_runs() {
                         profile: None,
                     }],
                 }),
-                tool_outcome(call("read"), None),
+                tool_outcome(call("read")),
                 finish("report"),
                 finish("answer"),
             ],
@@ -2866,7 +2903,7 @@ async fn hook_researcher_tools_use_the_parent_hooks_and_child_journal_identity()
                             profile: None,
                         }],
                     }),
-                    tool_outcome(call("read"), None),
+                    tool_outcome(call("read")),
                     finish("report"),
                     finish("answer"),
                 ],
@@ -2950,7 +2987,7 @@ async fn hook_pre_tool_use_continue_false_stops_before_primary_or_child_tool_dis
                 }],
             }));
         }
-        outcomes.push(tool_outcome(call("read"), None));
+        outcomes.push(tool_outcome(call("read")));
         let (result, _, _) = fixture.run(outcomes, None, child).await;
         assert_eq!(result.run.status, RunStatus::StoppedByHook);
         assert_eq!(result.run.hook_stop_reason(), Some(Some("halt")));
@@ -2992,8 +3029,8 @@ async fn narrow_run(script: String, later: Vec<arany::ToolCall>) -> NarrowCase {
     );
     let (result, requests, _) = fixture
         .run(
-            std::iter::once(tool_outcome(call("read"), None))
-                .chain(later.into_iter().map(|call| tool_outcome(call, None)))
+            std::iter::once(tool_outcome(call("read")))
+                .chain(later.into_iter().map(tool_outcome))
                 .chain([finish("answer")])
                 .collect(),
             None,
@@ -3452,14 +3489,11 @@ mod lifecycle_hooks {
             .unwrap();
             let mut outcomes: Vec<_> = (0..reads)
                 .map(|_| {
-                    tool_outcome(
-                        arany::ToolCall::Read {
-                            path: "notes/data.txt".into(),
-                            offset: 0,
-                            limit: page,
-                        },
-                        None,
-                    )
+                    tool_outcome(arany::ToolCall::Read {
+                        path: "notes/data.txt".into(),
+                        offset: 0,
+                        limit: page,
+                    })
                 })
                 .collect();
             outcomes.push(finish("done"));
@@ -3665,7 +3699,7 @@ mod lifecycle_hooks {
     async fn interleaved_tool_call_does_not_reset_the_stop_cap() {
         let settings = json!({"hooks":{"Stop":[{"hooks":[shell_hook("echo again >&2; exit 2")]}]}});
         let fixture = Fixture::new(Some(&settings), false);
-        let mut outcomes = vec![finish("c0"), tool_outcome(call("read"), None)];
+        let mut outcomes = vec![finish("c0"), tool_outcome(call("read"))];
         outcomes.extend((1..9).map(|index| finish(&format!("c{index}"))));
         let (result, requests, _) = fixture.run(outcomes, None, false).await;
         assert_eq!(result.run.status, RunStatus::Finished);

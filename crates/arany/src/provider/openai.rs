@@ -466,7 +466,7 @@ mod tests {
                 "call_id": "call_safe", "name": "arany_mcp_call",
                 "arguments": serde_json::json!({
                     "server": "example", "tool": "echo", "schema_digest": "0".repeat(64),
-                    "arguments": arguments, "plan_contract": null
+                    "arguments": arguments
                 }).to_string(),
             });
             let bytes = serde_json::to_vec(&serde_json::json!({

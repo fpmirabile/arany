@@ -220,6 +220,8 @@ pub struct AgentView {
     pub status: AgentStatus,
 }
 
+const MAX_PRIMARY_REFUSALS: usize = 8;
+
 impl AgentView {
     pub(crate) fn refusal_limit_reached(&self) -> bool {
         let Some(refusal) = self
@@ -231,11 +233,17 @@ impl AgentView {
         };
         self.provider_calls
             .iter()
-            .rev()
-            .take(3)
-            .filter(|call| call.refusal.as_ref() == Some(refusal))
+            .filter(|call| call.refusal.is_some())
             .count()
-            == 3
+            >= MAX_PRIMARY_REFUSALS
+            || self
+                .provider_calls
+                .iter()
+                .rev()
+                .take(3)
+                .filter(|call| call.refusal.as_ref() == Some(refusal))
+                .count()
+                == 3
     }
 }
 
@@ -1020,22 +1028,6 @@ impl SessionView {
             && !matches!(
                 &envelope.event,
                 Event::GoalPlanContractRecorded { goal_id, .. } if *goal_id == awaiting
-            )
-            && !matches!(
-                &envelope.event,
-                Event::ToolStarted { intent, .. }
-                    if intent.call.is_goal_plan_prelude()
-            )
-            && !matches!(
-                &envelope.event,
-                Event::ToolFinished { observation, .. }
-                    if observation.intent.call.is_goal_plan_prelude()
-            )
-            && !matches!(
-                &envelope.event,
-                Event::ToolPermissionDecided { .. }
-                    | Event::HookStarted { .. }
-                    | Event::HookFinished { .. }
             )
             && !matches!(
                 &envelope.event,

@@ -387,7 +387,7 @@ pub(super) fn apply(
                         || contract.allows_call(&intent.call)
                         || matches!(&intent.call, crate::tools::ToolCall::ApplyChangeset { .. }))
             } else {
-                goal.awaiting_plan_contract && intent.call.is_goal_plan_prelude()
+                true
             };
             if !phase_allows_call
                 || !plan_allows_call
@@ -579,20 +579,6 @@ pub(super) fn apply(
                 }
                 goal.success_criterion_satisfied =
                     contract.success_state_satisfied(&goal.success_state);
-            }
-            // Tools run one at a time, so once every declared request has started, this observation completes the step.
-            let all_requests_observed = current
-                .runs
-                .iter()
-                .find(|run| run.id == *run_id)
-                .and_then(pending_tool_requests)
-                == Some(0);
-            let unplanned_prelude = current
-                .goal(goal_id)
-                .is_some_and(|goal| goal.plan_contract.is_none())
-                && observation.intent.call.is_goal_plan_prelude();
-            if unplanned_prelude && all_requests_observed {
-                current_goal_mut(current, goal_id)?.awaiting_plan_contract = false;
             }
         }
         _ => return Err(ReplayError::InvalidTransition),

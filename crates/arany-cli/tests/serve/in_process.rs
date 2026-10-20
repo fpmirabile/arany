@@ -189,22 +189,19 @@ fn rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_block
         };
         let provider = Arc::new(
             ScriptedProvider::new(vec![
+                arany::test_support::scenario::plan_outcome(plan),
                 tool_outcome(
                     arany::ToolCall::Write {
                         path: "src/a".into(),
                         expected_digest: Some(digest),
                         content: "changed".into(),
-                    },
-                    Some(Box::new(plan)),
-                ),
+                    }),
                 tool_outcome(
                     arany::ToolCall::Write {
                         path: "src/b".into(),
                         expected_digest: None,
                         content: "new".into(),
-                    },
-                    None,
-                ),
+                    }),
                 finish_with("Changed"),
             ])
             .with_profile("openai", "gpt-5.4"),
@@ -1569,14 +1566,11 @@ async fn approval_scenario(case: ApprovalCase) {
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let stalled = outbound.clone();
     let fill_output = outbound.clone();
-    let read = arany::test_support::scenario::tool_outcome(
-        arany::ToolCall::Read {
-            path: "facts.txt".into(),
-            offset: 0,
-            limit: 32,
-        },
-        None,
-    );
+    let read = arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
+        path: "facts.txt".into(),
+        offset: 0,
+        limit: 32,
+    });
     let finish = arany::ProviderOutcome::Finish(arany::Finish {
         summary: "Answer".into(),
         result: "Finished".into(),
@@ -1947,14 +1941,11 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
     .unwrap();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            arany::test_support::scenario::tool_outcome(
-                arany::ToolCall::Read {
-                    path: "facts.txt".into(),
-                    offset: 0,
-                    limit: 32,
-                },
-                None,
-            ),
+            arany::test_support::scenario::tool_outcome(arany::ToolCall::Read {
+                path: "facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            }),
             arany::ProviderOutcome::Finish(arany::Finish {
                 summary: "Answer".into(),
                 result: "Fact".into(),

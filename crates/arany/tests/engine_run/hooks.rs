@@ -201,14 +201,11 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
                     editor: None,
                 }],
             }),
-            tool_outcome(
-                arany::ToolCall::Read {
-                    path: "notes/facts.txt".into(),
-                    offset: 0,
-                    limit: 32,
-                },
-                None,
-            ),
+            tool_outcome(arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: 0,
+                limit: 32,
+            }),
             arany::test_support::goals::finish_with("child report"),
             arany::test_support::goals::finish_with("answer"),
         ]));

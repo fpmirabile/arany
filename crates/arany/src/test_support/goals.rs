@@ -489,38 +489,29 @@ impl ForegroundWorkerProvider {
                 _ => None,
             };
             if let Some(script) = script {
-                return super::scenario::tool_outcome(
-                    ToolCall::Command {
-                        program: "sh".into(),
-                        args: vec!["-c".into(), script.into()],
-                        cwd: ".".into(),
-                    },
-                    None,
-                );
+                return super::scenario::tool_outcome(ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), script.into()],
+                    cwd: ".".into(),
+                });
             }
             if self.case == "command_unguarded" && step == 1 {
                 let ToolCall::Command { program, args, cwd } = self.worker_command() else {
                     unreachable!()
                 };
-                return super::scenario::tool_outcome(
-                    ToolCall::CommandUnguarded {
-                        program,
-                        args,
-                        cwd,
-                        justification: "sandbox failed".into(),
-                    },
-                    None,
-                );
+                return super::scenario::tool_outcome(ToolCall::CommandUnguarded {
+                    program,
+                    args,
+                    cwd,
+                    justification: "sandbox failed".into(),
+                });
             }
             if self.case == "command_stale" && step == 4 {
-                return super::scenario::tool_outcome(
-                    ToolCall::Write {
-                        path: "notes/b".into(),
-                        expected_digest: Some(crate::tools::types::hex_digest(b"edited b")),
-                        content: "late edit".into(),
-                    },
-                    None,
-                );
+                return super::scenario::tool_outcome(ToolCall::Write {
+                    path: "notes/b".into(),
+                    expected_digest: Some(crate::tools::types::hex_digest(b"edited b")),
+                    content: "late edit".into(),
+                });
             }
             if self.case == "command_denied"
                 || step == 0
@@ -530,7 +521,7 @@ impl ForegroundWorkerProvider {
                         "command_success" | "command_stale" | "command_time"
                     )
             {
-                return super::scenario::tool_outcome(self.worker_command(), None);
+                return super::scenario::tool_outcome(self.worker_command());
             }
             return finish_with("Private command work ready");
         }
@@ -538,15 +529,12 @@ impl ForegroundWorkerProvider {
             return finish_with("Worker criterion remains unresolved");
         }
         match step {
-            0 => super::scenario::tool_outcome(self.worker_command(), None),
-            1 => super::scenario::tool_outcome(
-                ToolCall::Read {
-                    path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
-                },
-                None,
-            ),
+            0 => super::scenario::tool_outcome(self.worker_command()),
+            1 => super::scenario::tool_outcome(ToolCall::Read {
+                path: "notes/a".into(),
+                offset: 0,
+                limit: 128,
+            }),
             _ => finish_with("Primary verified published notes"),
         }
     }
@@ -675,38 +663,25 @@ impl crate::Provider for ForegroundWorkerProvider {
             {
                 self.command_outcome(&request, step)
             }
-            (AgentPhase::RootPlan, 0) => super::scenario::tool_outcome(
-                ToolCall::Read {
-                    path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
-                },
-                Some(Box::new(self.plan())),
-            ),
+            (AgentPhase::RootPlan, 0) => super::scenario::plan_outcome(self.plan()),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
             (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
                 tokio::time::pause();
                 tokio::time::advance(std::time::Duration::from_secs(1192)).await;
                 tokio::time::resume();
-                super::scenario::tool_outcome(
-                    ToolCall::Write {
-                        path: "notes/a".into(),
-                        expected_digest: None,
-                        content: "too late".into(),
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Write {
+                    path: "notes/a".into(),
+                    expected_digest: None,
+                    content: "too late".into(),
+                })
             }
             (AgentPhase::ChildWork, 0) if self.case == "headroom_race" => {
                 self.background_started.notified().await;
-                super::scenario::tool_outcome(
-                    ToolCall::Read {
-                        path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                })
             }
             (AgentPhase::ChildWork, 0 | 1)
                 if matches!(
@@ -719,14 +694,11 @@ impl crate::Provider for ForegroundWorkerProvider {
                 ) =>
             {
                 if step == 0 {
-                    super::scenario::tool_outcome(
-                        ToolCall::Read {
-                            path: "notes/a".into(),
-                            offset: 0,
-                            limit: 128,
-                        },
-                        None,
-                    )
+                    super::scenario::tool_outcome(ToolCall::Read {
+                        path: "notes/a".into(),
+                        offset: 0,
+                        limit: 128,
+                    })
                 } else {
                     if matches!(
                         self.case,
@@ -744,14 +716,11 @@ impl crate::Provider for ForegroundWorkerProvider {
                 std::future::pending().await
             }
             (AgentPhase::ChildWork, _) if self.case == "headroom_child" => {
-                super::scenario::tool_outcome(
-                    ToolCall::Read {
-                        path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                })
             }
             (AgentPhase::RootSynthesis, _)
                 if matches!(self.case, "headroom_background" | "headroom_race") =>
@@ -773,14 +742,11 @@ impl crate::Provider for ForegroundWorkerProvider {
                 } else if step == 0 {
                     self.background_started.notified().await;
                 }
-                super::scenario::tool_outcome(
-                    ToolCall::Read {
-                        path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                })
             }
             (AgentPhase::ChildWork, 0) if self.case == "calls" => {
                 finish_with("No Tool allowance remains")
@@ -799,28 +765,22 @@ impl crate::Provider for ForegroundWorkerProvider {
                 } else {
                     ("notes/b", b"original b".as_slice(), "edited b")
                 };
-                super::scenario::tool_outcome(
-                    ToolCall::Write {
-                        path: path.into(),
-                        expected_digest: Some(crate::tools::types::hex_digest(old)),
-                        content: new.into(),
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Write {
+                    path: path.into(),
+                    expected_digest: Some(crate::tools::types::hex_digest(old)),
+                    content: new.into(),
+                })
             }
             (AgentPhase::ChildWork, 2) => {
                 self.check(
                     std::fs::read(self.workspace.join("notes/a")).unwrap() == b"original a",
                     "private edit leaked to Workspace",
                 );
-                super::scenario::tool_outcome(
-                    ToolCall::Read {
-                        path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
-                    },
-                    None,
-                )
+                super::scenario::tool_outcome(ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                })
             }
             (AgentPhase::ChildWork, 3) => {
                 let tools = request.input.tools.as_ref().unwrap();
@@ -866,25 +826,19 @@ impl crate::Provider for ForegroundWorkerProvider {
                 if self.case == "unverified" {
                     finish_with("Unverified finish")
                 } else {
-                    super::scenario::tool_outcome(
-                        ToolCall::Read {
-                            path: "notes/a".into(),
-                            offset: 0,
-                            limit: 128,
-                        },
-                        None,
-                    )
-                }
-            }
-            (AgentPhase::RootSynthesis, 0) if self.case == "calls" => {
-                super::scenario::tool_outcome(
-                    ToolCall::Read {
+                    super::scenario::tool_outcome(ToolCall::Read {
                         path: "notes/a".into(),
                         offset: 0,
                         limit: 128,
-                    },
-                    None,
-                )
+                    })
+                }
+            }
+            (AgentPhase::RootSynthesis, 0) if self.case == "calls" => {
+                super::scenario::tool_outcome(ToolCall::Read {
+                    path: "notes/a".into(),
+                    offset: 0,
+                    limit: 128,
+                })
             }
             (AgentPhase::RootSynthesis, 0 | 1) => finish_with("Primary verified published notes"),
             _ => {

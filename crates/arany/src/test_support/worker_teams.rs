@@ -188,14 +188,11 @@ impl TeamProvider {
             .unwrap();
         let step = if self.case == "worker_command" {
             if step == 0 {
-                return Ok(tool_outcome(
-                    ToolCall::Command {
-                        program: "verify".into(),
-                        args: Vec::new(),
-                        cwd: ".".into(),
-                    },
-                    None,
-                ));
+                return Ok(tool_outcome(ToolCall::Command {
+                    program: "verify".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                }));
             }
             step - 1
         } else {
@@ -238,7 +235,7 @@ impl TeamProvider {
                 std::fs::read(self.workspace.join("notes/0")).unwrap() == b"edited 0",
                 "later wave captured before integration",
             );
-            return Ok(tool_outcome(Self::read("notes/0"), None));
+            return Ok(tool_outcome(Self::read("notes/0")));
         }
         let original = if self.case == "resume_id" {
             "resume base".to_owned()
@@ -262,14 +259,11 @@ impl TeamProvider {
                     "second wave read stale base",
                 );
             }
-            return Ok(tool_outcome(
-                ToolCall::Write {
-                    path: format!("notes/{index}"),
-                    expected_digest: Some(crate::tools::types::hex_digest(original.as_bytes())),
-                    content: format!("edited {index}"),
-                },
-                None,
-            ));
+            return Ok(tool_outcome(ToolCall::Write {
+                path: format!("notes/{index}"),
+                expected_digest: Some(crate::tools::types::hex_digest(original.as_bytes())),
+                content: format!("edited {index}"),
+            }));
         }
         self.check(step == write_step + 1, "unexpected child continuation");
         self.check(
@@ -297,7 +291,7 @@ impl TeamProvider {
             .count();
         if request.phase == AgentPhase::RootPlan {
             return if wave == 1 && self.case != "resume_id" {
-                tool_outcome(Self::read("notes/0"), Some(Box::new(self.plan())))
+                super::scenario::plan_outcome(self.plan())
             } else {
                 self.delegation(request, 1)
             };
@@ -323,7 +317,7 @@ impl TeamProvider {
         let mut stale = self.stale.lock().unwrap();
         if pending && prior != 1 {
             *stale = observations.len() + 1;
-            return tool_outcome(Self::read("notes/0"), None);
+            return tool_outcome(Self::read("notes/0"));
         }
         observations.drain(..(*stale).min(observations.len()));
         drop(stale);
@@ -340,26 +334,23 @@ impl TeamProvider {
                 | "primary_denial"
         ) && prior == 1
         {
-            return tool_outcome(
-                if self.case == "command" {
-                    ToolCall::Command {
-                        program: "verify".into(),
-                        args: Vec::new(),
-                        cwd: ".".into(),
-                    }
-                } else {
-                    ToolCall::Write {
-                        path: if self.case == "leased_edit" {
-                            "notes/0".into()
-                        } else {
-                            "notes/free".into()
-                        },
-                        expected_digest: None,
-                        content: "primary".into(),
-                    }
-                },
-                None,
-            );
+            return tool_outcome(if self.case == "command" {
+                ToolCall::Command {
+                    program: "verify".into(),
+                    args: Vec::new(),
+                    cwd: ".".into(),
+                }
+            } else {
+                ToolCall::Write {
+                    path: if self.case == "leased_edit" {
+                        "notes/0".into()
+                    } else {
+                        "notes/free".into()
+                    },
+                    expected_digest: None,
+                    content: "primary".into(),
+                }
+            });
         }
         let delegations = all
             .iter()
@@ -375,7 +366,7 @@ impl TeamProvider {
                         && o.output.contains("edited 0")
                 })
             {
-                return tool_outcome(Self::read("notes/0"), None);
+                return tool_outcome(Self::read("notes/0"));
             }
             return self.delegation(request, 2);
         }
@@ -395,7 +386,7 @@ impl TeamProvider {
                 matches!(&o.intent.call, ToolCall::Read { path: p, .. } if p == &path)
                     && o.output.contains(&format!("edited {index}"))
             }) {
-                return tool_outcome(Self::read(&path), None);
+                return tool_outcome(Self::read(&path));
             }
         }
         if matches!(self.case, "cap" | "hard_cap") && prior >= 9 {

@@ -186,7 +186,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], 10);
+                        assert_eq!(document["event_version"], 11);
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }
@@ -282,8 +282,8 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
     for (plan_calls, cause, expected) in [
         (
             None,
-            ProposalRefusalCause::PlanMissing,
-            "Arany refused the operation because its required plan was missing.",
+            ProposalRefusalCause::PlanInvalid,
+            "Arany refused an invalid or changed plan.",
         ),
         (
             Some(1),
@@ -306,37 +306,30 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         let config = state_path.join("tools.json");
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let plan = plan_calls.map(|calls| {
-            Box::new(GoalPlanContract {
-                mission: "write test.txt containing hello".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["test.txt".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
-                    path: "test.txt".into(),
-                    sha256: "0".repeat(64),
-                },
-                budget: GoalBudget {
-                    max_provider_calls: Some(calls),
-                    ..GoalBudget::default()
-                },
-            })
-        });
+        let plan = GoalPlanContract {
+            mission: if plan_calls.is_some() {
+                "write test.txt containing hello".into()
+            } else {
+                String::new()
+            },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["test.txt".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "test.txt".into(),
+                sha256: "0".repeat(64),
+            },
+            budget: GoalBudget {
+                max_provider_calls: plan_calls.or(Some(8)),
+                ..GoalBudget::default()
+            },
+        };
         let provider = Arc::new(ScriptedProvider::new(
             (0..3)
-                .map(|_| {
-                    tool_outcome(
-                        arany::ToolCall::Write {
-                            path: "test.txt".into(),
-                            content: "hello".into(),
-                            expected_digest: None,
-                        },
-                        plan.clone(),
-                    )
-                })
+                .map(|_| arany::test_support::scenario::plan_outcome(plan.clone()))
                 .collect(),
         ));
         let mut input = request(&workspace, "write test.txt containing hello");

@@ -52,37 +52,18 @@ async fn supervisor_corpus_show_is_private_recomputed_and_export_local() {
         offset: 0,
         limit: 1024,
     };
-    let mut outcomes: Vec<_> = (0..4).map(|_| tool_outcome(read.clone(), None)).collect();
-    outcomes.push(tool_outcome(
-        arany::ToolCall::Command {
-            program: "synthetic".into(),
-            args: vec![canaries[2].into()],
-            cwd: canaries[1].into(),
-        },
-        Some(Box::new(arany::GoalPlanContract {
-            mission: "Inspect the sentinel without publishing effects".into(),
-            paths: vec![canaries[1].into()],
-            commands: vec!["synthetic".into()],
-            resource_class: arany::ToolResourceClass::Default,
-            command_timeout_ms: None,
-            skills: Vec::new(),
-            mcp_tools: Vec::new(),
-            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-                path: format!("{}/data", canaries[1]),
-                content: canaries[3].into(),
-            },
-            budget: arany::GoalBudget::default(),
-        })),
-    ));
-    outcomes.push(tool_outcome(
-        arany::ToolCall::Write {
-            path: format!("{}/new", canaries[1]),
-            expected_digest: None,
-            content: canaries[3].into(),
-        },
-        None,
-    ));
-    outcomes.push(tool_outcome(read, None));
+    let mut outcomes: Vec<_> = (0..4).map(|_| tool_outcome(read.clone())).collect();
+    outcomes.push(tool_outcome(arany::ToolCall::Command {
+        program: "synthetic".into(),
+        args: vec![canaries[2].into()],
+        cwd: canaries[1].into(),
+    }));
+    outcomes.push(tool_outcome(arany::ToolCall::Write {
+        path: format!("{}/new", canaries[1]),
+        expected_digest: None,
+        content: canaries[3].into(),
+    }));
+    outcomes.push(tool_outcome(read));
     outcomes.push(arany::ProviderOutcome::Finish(arany::Finish {
         summary: "done".into(),
         result: "done".into(),

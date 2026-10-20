@@ -175,8 +175,10 @@ impl Provider for Journey {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let planned = crate::planned(&request);
+
         let mut requests = self.requests.lock().unwrap();
-        let step = requests.len();
+        let step = requests.len().saturating_sub(usize::from(planned));
         let context = request
             .input
             .tools
@@ -311,7 +313,11 @@ impl Provider for Journey {
                     })
                     .flatten()
                     .map(Box::new);
-                crate::tool_outcome(call, plan_contract)
+                if !planned && let Some(contract) = plan_contract {
+                    arany::test_support::scenario::plan_outcome(*contract)
+                } else {
+                    crate::tool_outcome(call)
+                }
             },
         );
         requests.push(request);
@@ -723,7 +729,7 @@ async fn native_file_journey_helper() {
     );
     {
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), calls.len() + 1);
+        assert_eq!(requests.len(), calls.len() + 2);
         for request in requests.iter() {
             assert_eq!(request.phase, arany::AgentPhase::RootPlan);
             assert_eq!(request.model, "file-tool-model");
@@ -1016,9 +1022,11 @@ impl Provider for RuntimeJourney {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let planned = crate::planned(&request);
+
         let step = {
             let mut requests = self.requests.lock().unwrap();
-            let step = requests.len();
+            let step = requests.len().saturating_sub(usize::from(planned));
             requests.push(request);
             step
         };
@@ -1056,7 +1064,11 @@ impl Provider for RuntimeJourney {
             } else {
                 None
             };
-            crate::tool_outcome(call, plan_contract)
+            if !planned && let Some(contract) = plan_contract {
+                arany::test_support::scenario::plan_outcome(*contract)
+            } else {
+                crate::tool_outcome(call)
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Runtime profile checked".into(),
@@ -1415,10 +1427,19 @@ fn assert_guarded_build_observation(observation: &arany::ToolObservation) {
 
 fn assert_provider_journal(requests: &Arc<Mutex<Vec<ProviderRequest>>>, call: &ToolCall) {
     let requests = requests.lock().unwrap();
-    assert_eq!(requests.len(), 2);
-    let first = requests[0].input.tools.as_ref().unwrap().observations();
-    assert!(first.is_empty());
-    let second = requests[1].input.tools.as_ref().unwrap().observations();
+    assert_eq!(requests.len(), 3);
+    for before_dispatch in &requests[..2] {
+        assert!(
+            before_dispatch
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations()
+                .is_empty()
+        );
+    }
+    let second = requests[2].input.tools.as_ref().unwrap().observations();
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].intent.call, *call);
     assert_eq!(second[0].disposition, ToolDisposition::Succeeded);
@@ -1639,7 +1660,7 @@ async fn native_runtime_mount_journey_helper() {
         crate::safe_run_diagnostics(&refused.run)
     );
     assert_eq!(refused.run.tools.len(), 1);
-    assert_eq!(refused_requests.lock().unwrap().len(), 2);
+    assert_eq!(refused_requests.lock().unwrap().len(), 3);
     let refused_observation = refused.run.tools[0].observation.as_ref().unwrap();
     assert_eq!(refused_observation.disposition, ToolDisposition::Failed);
     assert!(refused_observation.attestation.is_none());
@@ -1652,18 +1673,20 @@ async fn native_runtime_mount_journey_helper() {
             .output
             .contains("runtime mount topology")
     );
+    for before_dispatch in 0..2 {
+        assert_eq!(
+            refused_requests.lock().unwrap()[before_dispatch]
+                .input
+                .tools
+                .as_ref()
+                .unwrap()
+                .observations()
+                .len(),
+            0
+        );
+    }
     assert_eq!(
-        refused_requests.lock().unwrap()[0]
-            .input
-            .tools
-            .as_ref()
-            .unwrap()
-            .observations()
-            .len(),
-        0
-    );
-    assert_eq!(
-        refused_requests.lock().unwrap()[1]
+        refused_requests.lock().unwrap()[2]
             .input
             .tools
             .as_ref()
@@ -2016,7 +2039,7 @@ async fn native_runtime_mount_journey_helper() {
     );
     {
         let accepted_requests = accepted_requests.lock().unwrap();
-        assert_eq!(accepted_requests.len(), 4);
+        assert_eq!(accepted_requests.len(), 5);
         assert!(
             accepted_requests[0]
                 .input
@@ -2026,7 +2049,7 @@ async fn native_runtime_mount_journey_helper() {
                 .observations()
                 .is_empty()
         );
-        let first_output = &accepted_requests[1]
+        let first_output = &accepted_requests[2]
             .input
             .tools
             .as_ref()
@@ -2035,7 +2058,7 @@ async fn native_runtime_mount_journey_helper() {
             .output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
-        let overflow_observation = &accepted_requests[3]
+        let overflow_observation = &accepted_requests[4]
             .input
             .tools
             .as_ref()
@@ -2048,7 +2071,7 @@ async fn native_runtime_mount_journey_helper() {
             overflow_observation.cache_update,
             arany::CacheUpdate::Rejected
         );
-        let provider_observations = accepted_requests[2]
+        let provider_observations = accepted_requests[3]
             .input
             .tools
             .as_ref()
@@ -2414,7 +2437,7 @@ int main(void) {
         }
         assert_eq!(
             requests.lock().unwrap().len(),
-            if attested { 2 } else { 1 },
+            usize::from(case != "mcp-version") + if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
         let expected_run_status = match case {

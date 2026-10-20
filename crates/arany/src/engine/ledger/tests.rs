@@ -291,14 +291,14 @@ fn carried_acknowledgment_time_counts_toward_active_exhaustion() {
 }
 
 #[test]
-fn default_provider_action_retains_its_original_event_admission() {
+fn provider_action_reserves_plan_recording_and_terminal_events() {
     assert_eq!(
         Action::ProviderCall {
             previews: false,
             steering: false
         }
         .max_events(),
-        6
+        7
     );
     assert_eq!(
         Action::Child {
@@ -450,7 +450,7 @@ fn staged_bounds_never_exceed_the_first_admission() {
         previews: true,
         steering: true,
     };
-    assert_eq!(call.max_events(), 6 + 1 + MAX_DISPLAY_CHUNKS);
+    assert_eq!(call.max_events(), 7 + 1 + MAX_DISPLAY_CHUNKS);
     let providers = Providers::all(vec![()]);
     assert_eq!(call.remaining(1, &providers), call.max_events() - 1);
     assert_eq!(Action::Tool.remaining(0, &providers), 8);

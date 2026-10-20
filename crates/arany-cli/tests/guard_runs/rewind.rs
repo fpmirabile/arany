@@ -73,35 +73,27 @@ async fn case(case: &str) {
         content: "changed".into(),
     };
     let mut script = vec![
-        tool_outcome(
-            arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
-                expected_digest: Some(hash(b"original")),
-                content: "changed".into(),
-            },
-            Some(Box::new(plan)),
-        ),
-        tool_outcome(
-            arany::ToolCall::Write {
-                path: "notes/new.txt".into(),
-                expected_digest: None,
-                content: "new".into(),
-            },
-            None,
-        ),
+        arany::test_support::scenario::plan_outcome(plan),
+        tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(hash(b"original")),
+            content: "changed".into(),
+        }),
+        tool_outcome(arany::ToolCall::Write {
+            path: "notes/new.txt".into(),
+            expected_digest: None,
+            content: "new".into(),
+        }),
         finish_with("changed"),
     ];
     if partial {
         script.insert(
             2,
-            tool_outcome(
-                arany::ToolCall::Write {
-                    path: "notes/sub/z.txt".into(),
-                    expected_digest: None,
-                    content: "z".into(),
-                },
-                None,
-            ),
+            tool_outcome(arany::ToolCall::Write {
+                path: "notes/sub/z.txt".into(),
+                expected_digest: None,
+                content: "z".into(),
+            }),
         );
     }
     let provider = Arc::new(ScriptedProvider::new(script));
@@ -643,14 +635,12 @@ async fn conversation_rewind_orders_code_and_preserves_partial_and_crash_outcome
         };
         let provider = Arc::new(ScriptedProvider::new(vec![
             finish_with("baseline"),
-            tool_outcome(
-                arany::ToolCall::Write {
-                    path: "notes/facts.txt".into(),
-                    expected_digest: Some(hash(b"original")),
-                    content: "changed".into(),
-                },
-                Some(Box::new(plan)),
-            ),
+            arany::test_support::scenario::plan_outcome(plan),
+            tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: Some(hash(b"original")),
+                content: "changed".into(),
+            }),
             finish_with("changed"),
         ]));
         let baseline = run_with(

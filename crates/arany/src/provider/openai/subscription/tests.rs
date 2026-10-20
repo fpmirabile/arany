@@ -727,7 +727,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         history_summary: None,
         steps: Vec::new(),
     });
-    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096,"plan_contract":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
     let stream = format!(
         "data: {}\n\n",
         json!({"type":"response.completed","response":response})
@@ -743,8 +743,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
             requests[..],
             [crate::tools::ToolRequest {
                 call: crate::tools::ToolCall::Read { offset: 0, limit: 4096, .. },
-                plan_contract: None,
-                ..
+                    ..
             }]
         )
     ));
@@ -1267,7 +1266,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
     let reply = json!({"id":"resp_1","status":"completed","model":"model-a","output":[
         {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"CIPHERTEXT=="},
         {"type":"function_call","id":"fc_1","call_id":"call_1","name":"arany_read",
-         "arguments":json!({"path":"README.md","offset":0,"limit":10,"plan_contract":null}).to_string(),"status":"completed"}
+         "arguments":json!({"path":"README.md","offset":0,"limit":10}).to_string(),"status":"completed"}
     ],"usage":{"input_tokens":1,"output_tokens":1}});
     let conversation = render::conversation(&coding).unwrap();
     let decoded = wire::decode_run(
@@ -1282,6 +1281,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            plan: None,
             turn: decoded.turn,
             requests: match decoded.outcome {
                 ProviderOutcome::Tools(requests) => requests,
@@ -1379,4 +1379,65 @@ fn chatgpt_keeps_phase_specific_functions_until_probe_p3() {
     next_run.run_id = RunId::new();
     let next: Value = serde_json::from_slice(&body_for(&next_run, Effort::Low).unwrap()).unwrap();
     assert_eq!(next["prompt_cache_key"], primary.session_id.to_string());
+}
+
+#[test]
+fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
+    let mut request = crate::provider::test_support::primary_request("model-a");
+    let body: serde_json::Value =
+        serde_json::from_slice(&body_for(&request, Effort::Low).unwrap()).unwrap();
+    let functions = body["tools"].as_array().unwrap();
+    assert!(
+        functions
+            .iter()
+            .any(|function| function["name"] == "arany_plan")
+    );
+    assert!(functions.iter().all(|function| {
+        function["parameters"]["properties"]
+            .get("plan_contract")
+            .is_none()
+    }));
+    let contract = crate::provider::test_support::goal_plan_contract();
+    let reply = json!({"id":"resp_plan", "status":"completed", "model":"model-a", "output":[
+        {"type":"function_call", "id":"fc_plan", "call_id":"plan_1", "name":"arany_plan", "arguments":serde_json::to_string(&contract).unwrap(), "status":"completed"}
+    ], "usage":{"input_tokens":8,"output_tokens":4}});
+    let conversation = render::conversation(&request).unwrap();
+    let decoded = wire::decode_run(
+        &serde_json::to_vec(&reply).unwrap(),
+        &wire::RunScope::new(&request, &conversation, TOKEN),
+    )
+    .unwrap();
+    let ProviderOutcome::Plan(plan) = decoded.outcome else {
+        panic!("optional plan");
+    };
+    assert_eq!(plan.contract, contract);
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::tools::ToolStep {
+            plan: Some(*plan),
+            turn: decoded.turn,
+            requests: Vec::new(),
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+            hook_feedback: Default::default(),
+        });
+    let continuation: serde_json::Value =
+        serde_json::from_slice(&body_for(&request, Effort::Low).unwrap()).unwrap();
+    let result = continuation["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "function_call_output")
+        .unwrap();
+    assert_eq!(result["call_id"], "plan_1");
+    let output: serde_json::Value =
+        serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+    assert_eq!(output["status"], "plan_recorded");
+    assert_eq!(output["scope"]["paths"], json!(["src"]));
 }

@@ -416,6 +416,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 return Err(ReplayError::InvalidTransition);
             }
             let goal_id = goal.id;
+            let plan_recorded = goal.plan_contract.is_some();
+            let awaiting_plan = goal.awaiting_plan_contract;
             let run = active_run(current, *run_id)?;
             let index = run
                 .agents
@@ -498,7 +500,16 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     .is_some_and(|call| call.refusal.is_some() && call.phase == record.phase)
                 && run.hooks_settled()
                 && run.tools.iter().all(ToolView::settled_without_stop);
-            let valid = refusal_continuation
+            let plan_continuation = tools_enabled
+                && agent.role == AgentRole::Primary
+                && agent.provider_calls.last().is_some_and(|call| {
+                    call.disposition == ProviderCallDisposition::PlanRecorded
+                        && call.phase == record.phase
+                })
+                && (plan_recorded && !awaiting_plan)
+                && run.hooks_settled();
+            let valid = plan_continuation
+                || refusal_continuation
                 || gate_continuation
                 || stop_continuation
                 || tool_continuation
@@ -520,6 +531,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 };
             if agent.status != AgentStatus::Active
                 || !valid
+                || record.disposition == ProviderCallDisposition::PlanRecorded
+                    && !(tools_enabled
+                        && agent.role == AgentRole::Primary
+                        && record.phase != AgentPhase::ToolReview
+                        && !plan_recorded)
                 || record.disposition == ProviderCallDisposition::ToolRequested
                     && !(tools_enabled
                         && match agent.role {
@@ -564,7 +580,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if run.agents[index].role == AgentRole::Primary
                 && matches!(
                     record.disposition,
-                    ProviderCallDisposition::Delegated | ProviderCallDisposition::ToolRequested
+                    ProviderCallDisposition::Delegated
+                        | ProviderCallDisposition::ToolRequested
+                        | ProviderCallDisposition::PlanRecorded
                 )
                 && run.display.iter().any(|chunk| {
                     chunk.category == crate::session::events::DisplayCategory::Answer
@@ -612,7 +630,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             goal.token_usage_unknown |=
                 record.input_tokens.is_none() || record.output_tokens.is_none();
             if primary_call
-                && record.disposition == ProviderCallDisposition::ToolRequested
+                && record.disposition == ProviderCallDisposition::PlanRecorded
                 && goal.plan_contract.is_none()
             {
                 if goal.awaiting_plan_contract {

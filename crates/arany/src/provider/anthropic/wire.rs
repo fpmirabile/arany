@@ -1,5 +1,5 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{structured_outcome, tool_request, tools_outcome};
+use crate::provider::decode::{structured_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec};
 use crate::provider::{
@@ -667,7 +667,7 @@ impl Admitted {
                     .strip_prefix(NAME_PREFIX)
                     .filter(|_| offered.iter().any(|spec| spec.name == name))
                     .ok_or(ProviderError::InvalidOutcome)?;
-                requests.push(tool_request(
+                requests.push(tool_function(
                     ToolUseId::new(block.id.clone().unwrap_or_default())?,
                     operation,
                     block.input.clone().unwrap_or_default(),
@@ -676,7 +676,10 @@ impl Admitted {
                 return Err(ProviderError::InvalidOutcome);
             }
         }
-        tools_outcome(requests)
+        match <[_; 1]>::try_from(requests) {
+            Ok([outcome]) => Ok(outcome),
+            Err(_) => Err(ProviderError::InvalidOutcome),
+        }
     }
 }
 

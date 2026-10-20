@@ -240,6 +240,7 @@ impl RunLoop<'_> {
         };
         let mut narrowings = 0;
         let mut step = ToolStep {
+            plan: None,
             turn,
             requests: vec![request],
             observations: Vec::new(),

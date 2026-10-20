@@ -71,7 +71,7 @@ fn finish_text() -> &'static str {
 }
 
 fn read_arguments() -> Value {
-    json!({"path": "README.md", "offset": 0, "limit": 4096, "plan_contract": null})
+    json!({"path": "README.md", "offset": 0, "limit": 4096})
 }
 
 fn function_names(body: &Value) -> Vec<String> {
@@ -457,7 +457,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 15);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 16);
 }
 
 #[test]
@@ -540,6 +540,7 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            plan: None,
             turn: delegated.turn,
             requests: Vec::new(),
             observations: Vec::new(),
@@ -658,7 +659,13 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
     assert!(rendered.get("text").is_none());
     assert_eq!(
         function_names(&rendered),
-        ["arany_list", "arany_read", "arany_search", "arany_finish"]
+        [
+            "arany_list",
+            "arany_read",
+            "arany_search",
+            "arany_plan",
+            "arany_finish"
+        ]
     );
     assert!(
         rendered["tools"]
@@ -679,6 +686,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "arany_list",
             "arany_read",
             "arany_search",
+            "arany_plan",
             "arany_finish",
             "arany_delegate"
         ]
@@ -780,7 +788,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
                 .unwrap()
                 .remove("operation")
                 .unwrap();
-            arguments["plan_contract"] = Value::Null;
+
             let name = format!("arany_{}", operation.as_str().unwrap());
             rendered["tools"]
                 .as_array()
@@ -833,7 +841,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             .unwrap()
             .remove("operation")
             .unwrap();
-        arguments["plan_contract"] = Value::Null;
+
         let fixture = response(
             "completed",
             json!([
@@ -853,7 +861,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             };
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].id.as_str(), "call_test");
-            assert!(requests[0].plan_contract.is_none());
+
             assert_eq!(serde_json::to_value(&requests[0].call).unwrap(), row);
             assert_eq!(
                 decoded.turn.items("openai").unwrap().len(),
@@ -863,21 +871,24 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
         }
     }
     let contract = serde_json::to_value(goal_plan_contract()).unwrap();
-    let mut with_contract =
-        json!({"path": "src/new.rs", "expected_digest": null, "content": "verified\n"});
-    with_contract["plan_contract"] = contract.clone();
     let planned = decode(
         &request,
-        &response(
-            "completed",
-            json!([function_call("arany_write", &with_contract)]),
-        ),
+        &response("completed", json!([function_call("arany_plan", &contract)])),
     )
     .unwrap();
-    assert!(matches!(
-        planned.outcome,
-        ProviderOutcome::Tools(requests) if serde_json::to_value(requests[0].plan_contract.as_deref().unwrap()).unwrap() == contract
-    ));
+    assert!(
+        matches!(planned.outcome, ProviderOutcome::Plan(plan) if serde_json::to_value(&plan.contract).unwrap() == contract)
+    );
+    for value in [Value::Null, contract.clone()] {
+        let legacy = json!({"path":"src/new.rs", "expected_digest":null, "content":"x", "plan_contract":value});
+        assert!(
+            decode(
+                &request,
+                &response("completed", json!([function_call("arany_write", &legacy)]))
+            )
+            .is_err()
+        );
+    }
 
     for (name, arguments) in [
         ("arany_finish", json!({"summary":"done","result":"applied"})),
@@ -921,14 +932,14 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             "read bounds",
             json!([function_call(
                 "arany_read",
-                &json!({"path":"README.md","offset":0,"limit":65537,"plan_contract":null})
+                &json!({"path":"README.md","offset":0,"limit":65537})
             )]),
         ),
         (
             "path escape",
             json!([function_call(
                 "arany_read",
-                &json!({"path":"../outside","offset":0,"limit":4096,"plan_contract":null})
+                &json!({"path":"../outside","offset":0,"limit":4096})
             )]),
         ),
         (
@@ -939,14 +950,14 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             "operation injected",
             json!([function_call(
                 "arany_read",
-                &json!({"operation":"edit","path":"README.md","offset":0,"limit":4096,"plan_contract":null})
+                &json!({"operation":"edit","path":"README.md","offset":0,"limit":4096})
             )]),
         ),
         (
             "duplicate keys",
             json!([function_call_raw(
                 "arany_read",
-                "{\"path\":\"one\",\"path\":\"two\",\"offset\":0,\"limit\":4096,\"plan_contract\":null}"
+                "{\"path\":\"one\",\"path\":\"two\",\"offset\":0,\"limit\":4096}"
             )]),
         ),
         (
@@ -1028,7 +1039,7 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
             .unwrap()
             .remove("operation")
             .unwrap();
-        arguments["plan_contract"] = Value::Null;
+
         let fixture = response(
             "completed",
             json!([function_call(
@@ -1415,7 +1426,7 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
     );
     assert!(matches!(
         decode(&request, &read).unwrap().outcome,
-        ProviderOutcome::Tools(requests) if requests[0].plan_contract.is_none()
+        ProviderOutcome::Tools(_)
     ));
     let mut spent = catalog();
     spent["tool_calls_remaining"] = json!(0);
@@ -1457,10 +1468,9 @@ fn git_reads_encode_as_strict_native_functions() {
         assert_eq!(function["strict"], true);
         assert!(!function["description"].as_str().unwrap().is_empty());
         assert!(
-            function["parameters"]["properties"]["plan_contract"]["anyOf"]
-                .as_array()
-                .unwrap()
-                .contains(&json!({"type": "null"}))
+            function["parameters"]["properties"]
+                .get("plan_contract")
+                .is_none()
         );
     }
     for (call, name) in [
@@ -1485,7 +1495,7 @@ fn git_reads_encode_as_strict_native_functions() {
     ] {
         let mut arguments = serde_json::to_value(&call).unwrap();
         arguments.as_object_mut().unwrap().remove("operation");
-        arguments["plan_contract"] = Value::Null;
+
         let decoded = decode(
             &request,
             &response("completed", json!([function_call(name, &arguments)])),
@@ -1495,7 +1505,6 @@ fn git_reads_encode_as_strict_native_functions() {
             panic!("{name} did not decode as a Tool request");
         };
         assert_eq!(requests[0].call, call);
-        assert!(requests[0].plan_contract.is_none());
     }
     for catalog in [json!("unavailable"), Value::Null] {
         request.input.tools = Some(git_catalog(catalog));

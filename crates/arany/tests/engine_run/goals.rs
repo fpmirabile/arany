@@ -185,14 +185,11 @@ fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
 fn paged_read_outcomes() -> Vec<ProviderOutcome> {
     let mut outcomes = (0..READS)
         .map(|page| {
-            crate::tool_outcome(
-                arany::ToolCall::Read {
-                    path: "notes/data.txt".into(),
-                    offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
-                    limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
-                },
-                None,
-            )
+            crate::tool_outcome(arany::ToolCall::Read {
+                path: "notes/data.txt".into(),
+                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+            })
         })
         .collect::<Vec<_>>();
     outcomes.push(ProviderOutcome::Finish(Finish {
@@ -1053,7 +1050,6 @@ async fn tool_request_refused_on_the_last_allowed_call_is_a_budget_close() {
             path: "notes/facts.txt".into(),
             query: "v".into(),
         },
-        None,
     )]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, "Read after the budget");
@@ -1095,7 +1091,8 @@ async fn single_run_goal_with_an_unmet_plan_criterion_is_not_a_budget_close() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = Arc::new(ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("criterion unmet"),
     ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -1940,11 +1937,12 @@ async fn interrupted_autonomous_goal(
     let cancellation = RunCancellation::new();
     let cancel = cancellation.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("interrupted pass"),
     ])
-    .with_before_call(2, move || assert!(cancel.cancel(), "first cancellation"));
+    .with_before_call(3, move || assert!(cancel.cancel(), "first cancellation"));
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(state_path).expect("state"), state_path);
     let outcome = run_with(
@@ -1970,12 +1968,13 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("verified"),
     ])
-    .with_before_call(2, write_facts(&workspace, "v2"));
+    .with_before_call(3, write_facts(&workspace, "v2"));
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -1993,9 +1992,13 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
     assert_eq!(outcome.run.status, RunStatus::Finished);
     {
         let calls = requests.lock().expect("Provider requests");
-        assert_eq!(calls.len(), 4, "two Runs, each a Read then a Finish");
         assert_eq!(
-            calls[2].input.objective, AUTONOMOUS_OBJECTIVE,
+            calls.len(),
+            5,
+            "one plan call and two Runs with a Read then Finish"
+        );
+        assert_eq!(
+            calls[3].input.objective, AUTONOMOUS_OBJECTIVE,
             "the next Run takes the pinned objective and no new text"
         );
     }
@@ -2031,12 +2034,13 @@ async fn autonomous_goal_pins_permissions_settings_at_submission() {
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     write_settings(br#"{"permissions":{"allow":["Read"]}}"#)();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("verified"),
     ])
-    .with_before_call(1, {
+    .with_before_call(2, {
         let facts = write_facts(&workspace, "v2");
         let settings = write_settings(br#"{ "permissions": { "allow": ["Read"] } }"#);
         move || {
@@ -2089,7 +2093,8 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 2;
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("second pass"),
         finish_with("never requested"),
@@ -2119,7 +2124,7 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
-        3,
+        4,
         "the second Run's Finish is refused, and no third Run dispatches"
     );
     engine.close().await.expect("engine shutdown");
@@ -2145,13 +2150,14 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
-        max_provider_calls: Some(3),
+        max_provider_calls: Some(4),
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("second pass"),
         finish_with("never requested"),
@@ -2161,7 +2167,7 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    // The second Run's Finish is the third and last admissible call.
+    // The second Run's Finish is the fourth and last admissible call.
     let outcome = run_with(
         &engine,
         &provider,
@@ -2176,8 +2182,8 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     assert_eq!(outcome.run.status, RunStatus::Failed);
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
-        3,
-        "the call cap admits no fourth Provider call"
+        4,
+        "the call cap admits no fifth Provider call"
     );
     engine.close().await.expect("engine shutdown");
 
@@ -2192,7 +2198,7 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
         Some(goal.id)
     );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
-    assert_eq!(goal.provider_calls, 3);
+    assert_eq!(goal.provider_calls, 4);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
@@ -2246,16 +2252,17 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
-        max_tokens: Some(10),
+        max_tokens: Some(15),
         ..arany::GoalBudget::default()
     };
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
-    // Five input tokens per call: the Read and the Finish reach the 10-token cap exactly.
+    // Five input tokens per call: Plan, Read and Finish reach the 15-token cap exactly.
     let provider = MeteredProvider {
         tokens: 5,
         responses: std::sync::Mutex::new(VecDeque::from([
-            crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+            arany::test_support::scenario::plan_outcome(plan),
+            crate::tool_outcome(facts_read()),
             finish_with("first pass"),
             finish_with("never requested"),
         ])),
@@ -2289,8 +2296,11 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
         Some(goal.id)
     );
     assert_eq!(goal.status, arany::GoalStatus::Failed);
-    assert_eq!(goal.provider_calls, 2, "no third Provider call is reserved");
-    assert_eq!(goal.known_tokens, 10);
+    assert_eq!(
+        goal.provider_calls, 3,
+        "no fourth Provider call is reserved"
+    );
+    assert_eq!(goal.known_tokens, 15);
     assert!(goal.report.is_some(), "exhausted Goal keeps its report");
 }
 
@@ -2326,9 +2336,9 @@ async fn resumed_autonomous_goal_continues_with_its_pinned_objective_and_no_new_
     let (session_id, goal_id) = interrupted_autonomous_goal(&state_path, &workspace).await;
 
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("resumed, still unverified"),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("verified"),
     ])
     .with_before_call(2, write_facts(&workspace, "v2"));
@@ -2391,7 +2401,8 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("never requested"),
     ]);
@@ -2412,7 +2423,7 @@ async fn plain_prompt_is_one_run_even_when_its_criterion_is_unsatisfied() {
     .await
     .expect("terminal Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
-    assert_eq!(requests.lock().expect("Provider requests").len(), 2);
+    assert_eq!(requests.lock().expect("Provider requests").len(), 3);
     engine.close().await.expect("engine shutdown");
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
@@ -2469,7 +2480,8 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("never requested"),
     ]);
@@ -2487,7 +2499,7 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     assert_eq!(outcome.run.status, RunStatus::Finished);
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
-        2,
+        3,
         "cancellation after the first Finish starts no second Run"
     );
     engine.close().await.expect("engine shutdown");
@@ -2517,12 +2529,13 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("never requested"),
     ])
     // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
-    .with_clock_advance_before_call(1, Duration::from_secs(60));
+    .with_clock_advance_before_call(2, Duration::from_secs(60));
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -2546,7 +2559,7 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     );
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
-        2,
+        3,
         "no third Provider call is dispatched"
     );
     engine.close().await.expect("engine shutdown");
@@ -2681,12 +2694,13 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("never requested"),
     ])
     // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
-    .with_clock_advance_before_call(1, Duration::from_secs(60));
+    .with_clock_advance_before_call(2, Duration::from_secs(60));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     let endpoint = format!(
         "http://{}",
@@ -2807,12 +2821,13 @@ async fn live_reduction_of_an_autonomous_goal_equals_the_reloaded_view() {
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
         finish_with("earlier turn"),
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("verified"),
     ])
-    .with_before_call(3, write_facts(&workspace, "v2"));
+    .with_before_call(4, write_facts(&workspace, "v2"));
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut earlier = request(&workspace, "Earlier");
@@ -2894,7 +2909,7 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     plan.budget.max_runs = 1;
     let provider = ScriptedProvider::new(
         (0..3)
-            .map(|_| crate::tool_outcome(facts_read(), Some(Box::new(plan.clone()))))
+            .map(|_| arany::test_support::scenario::plan_outcome(plan.clone()))
             .collect(),
     );
     let provider = Arc::new(provider);
@@ -2931,17 +2946,77 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
 }
 
 #[tokio::test]
+async fn plan_exhausted_by_its_own_call_is_refused_and_the_goal_continues() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let mut plan = facts_plan(facts_digest("v2"));
+    plan.budget.max_active_ms = Some(1);
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        finish_with("done without a plan"),
+    ])
+    .with_clock_advance_before_call(0, Duration::from_secs(1));
+    let requests = Arc::clone(&provider.requests);
+    let provider = Arc::new(provider);
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let outcome = run_with(
+        &engine,
+        &provider,
+        autonomous_input(&workspace),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("refused plan Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    {
+        let calls = requests.lock().expect("Provider requests");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[1].input.last_answer_refused.as_ref().map(|r| r.cause),
+            Some(arany::ProposalRefusalCause::PlanBudgetSpent)
+        );
+    }
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        view.goal(outcome.goal_id)
+            .expect("Goal")
+            .plan_contract
+            .is_none()
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.event, Event::GoalPlanContractRecorded { .. }))
+    );
+    let refusals: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.event {
+            Event::ProviderCallRecorded { record, .. } => record.refusal.as_ref().map(|r| r.cause),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(refusals, [arany::ProposalRefusalCause::PlanBudgetSpent]);
+}
+
+#[tokio::test]
 async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_active_ms = Some(1);
-    // The plan-bearing call runs longer than the plan's active-time limit, so the plan cannot narrow the Goal.
-    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
-        facts_read(),
-        Some(Box::new(plan)),
-    )])
+    // The settled Read call runs longer than the plan's active-time limit, so no later plan can narrow the Goal.
+    let provider = ScriptedProvider::new(
+        std::iter::once(crate::tool_outcome(facts_read()))
+            .chain((0..3).map(|_| arany::test_support::scenario::plan_outcome(plan.clone())))
+            .collect(),
+    )
     .with_before_call(0, || {
         std::thread::sleep(std::time::Duration::from_millis(20))
     });
@@ -2959,8 +3034,8 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
     .await
     .expect("an unnarrowable plan is a Failed Run, not a Store error");
     assert_eq!(outcome.run.status, RunStatus::Failed);
-    assert_eq!(outcome.run.failure, Some(arany::RunFailure::PlanAdmission));
     engine.close().await.expect("engine shutdown");
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
@@ -2968,19 +3043,22 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         goal.plan_contract.is_none(),
         "the refused plan is not recorded"
     );
-    let root_plan_dispositions: Vec<_> = events
+    let dispositions: Vec<_> = events
         .iter()
         .filter_map(|event| match &event.event {
-            Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::RootPlan => {
-                Some(record.disposition)
-            }
+            Event::ProviderCallRecorded { record, .. } => Some(record.disposition),
             _ => None,
         })
         .collect();
     assert_eq!(
-        root_plan_dispositions,
-        [ProviderCallDisposition::ToolRequested],
-        "the plan-bearing call is refused at the plan contract, after its Tool was requested"
+        dispositions,
+        [
+            ProviderCallDisposition::ToolRequested,
+            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::InvalidResponse,
+        ],
+        "each unnarrowable plan call is refused and never recorded"
     );
 }
 
@@ -2995,10 +3073,10 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
     };
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
-    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
-        facts_read(),
-        Some(Box::new(plan)),
-    )]);
+    let provider = ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
+    ]);
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
@@ -3020,7 +3098,11 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
     assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
-    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+    assert_eq!(
+        provider.requests.lock().expect("requests").len(),
+        2,
+        "the plan call and the stopped Read call; no third call"
+    );
 }
 
 #[tokio::test]
@@ -3038,8 +3120,11 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
     };
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
-    let mut script = vec![crate::tool_outcome(facts_read(), Some(Box::new(plan)))];
-    script.extend((0..11).map(|_| crate::tool_outcome(facts_read(), None)));
+    let mut script = vec![
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
+    ];
+    script.extend((0..11).map(|_| crate::tool_outcome(facts_read())));
     script.push(finish_with("done"));
     let provider = Arc::new(ScriptedProvider::new(script));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -3072,11 +3157,12 @@ async fn cancelled_autonomous_segment_exports_its_run_outcome() {
     let cancellation = RunCancellation::new();
     let cancel = cancellation.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("cancelled pass"),
     ])
-    .with_before_call(2, move || assert!(cancel.cancel(), "first cancellation"));
+    .with_before_call(3, move || assert!(cancel.cancel(), "first cancellation"));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     let endpoint = format!(
         "http://{}",
@@ -3128,10 +3214,11 @@ async fn autonomous_goal_stopped_by_a_failed_admission_returns_the_committed_run
     // Removing the Workspace after the first Run finishes makes the next admission fail.
     let removed = workspace.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
     ])
-    .with_before_call(1, move || {
+    .with_before_call(2, move || {
         std::fs::remove_dir_all(&removed).expect("Workspace removed")
     });
     let provider = Arc::new(provider);
@@ -3388,7 +3475,7 @@ async fn steering_note_reaches_the_next_primary_call_and_is_journaled_once() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("noted"),
     ])
     .with_before_call(0, move || {
@@ -3439,7 +3526,7 @@ async fn steering_notes_offered_before_delivery_reach_one_primary_call_as_one_no
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("noted"),
     ])
     .with_before_call(0, move || {
@@ -3639,7 +3726,7 @@ async fn steering_note_is_history_for_a_later_run_and_never_redelivered() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("first answer"),
         finish_with("second answer"),
     ])
@@ -3709,7 +3796,7 @@ async fn pause_waits_for_the_in_flight_call_and_pauses_before_its_tool() {
     let steering = RunSteering::new();
     let pause = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
     .with_before_call(0, move || assert!(pause.pause(), "first pause"));
@@ -3797,11 +3884,12 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
     let pause = steering.clone();
     // The first Run's Finish is unsatisfied against the planned digest, so the Goal would continue.
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("never started"),
     ])
-    .with_before_call(1, move || assert!(pause.pause(), "first pause"));
+    .with_before_call(2, move || assert!(pause.pause(), "first pause"));
     let requests = provider.requests.clone();
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -3820,7 +3908,7 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
     assert_eq!(outcome.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
-    assert_eq!(requests.lock().expect("requests").len(), 2);
+    assert_eq!(requests.lock().expect("requests").len(), 3);
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     assert_eq!(view.runs.len(), 1);
     // Like Ctrl+C between Runs, the pause leaves the Goal open for explicit resume.
@@ -3960,11 +4048,12 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 2;
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(plan))),
+        arany::test_support::scenario::plan_outcome(plan),
+        crate::tool_outcome(facts_read()),
         finish_with("first pass"),
         finish_with("second pass"),
     ])
-    .with_before_call(1, move || {
+    .with_before_call(2, move || {
         steering_note_at(&offer, "carry this into the next Run")
     });
     let requests = provider.requests.clone();
@@ -3993,10 +4082,10 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     engine.close().await.expect("engine shutdown");
 
     let calls = requests.lock().expect("requests").clone();
-    assert_eq!(calls.len(), 3);
-    assert!(call_steering_notes(&calls[1]).is_empty());
+    assert_eq!(calls.len(), 4);
+    assert!(call_steering_notes(&calls[2]).is_empty());
     assert_eq!(
-        call_steering_notes(&calls[2]),
+        call_steering_notes(&calls[3]),
         ["carry this into the next Run"]
     );
     assert_eq!(steering.delivered_notes(), 1);
@@ -4041,7 +4130,7 @@ async fn read_only_child_reads_the_workspace_and_its_report_reaches_synthesis() 
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("facts say v1"),
         finish_with("synthesized"),
     ]);
@@ -4161,7 +4250,7 @@ async fn child_mcp_write_or_unguarded_request_is_rejected_before_dispatch() {
                     profile: None,
                 }],
             }),
-            crate::tool_outcome(call, None),
+            crate::tool_outcome(call),
             finish_with("never reached"),
         ]);
         let requests = provider.requests.clone();
@@ -4215,13 +4304,11 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
     std::fs::write(workspace.join("notes/other.txt"), "OTHER-CANARY").expect("other file");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(
-            arany::ToolCall::Search {
-                path: "notes/facts.txt".into(),
-                query: "v".into(),
-            },
-            Some(Box::new(facts_plan(facts_digest("v1")))),
-        ),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v1"))),
+        crate::tool_outcome(arany::ToolCall::Search {
+            path: "notes/facts.txt".into(),
+            query: "v".into(),
+        }),
         ProviderOutcome::Delegate(Delegate {
             agent: None,
             children: vec![arany::ChildAssignment {
@@ -4230,15 +4317,12 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
-        crate::tool_outcome(
-            arany::ToolCall::Read {
-                path: "notes/other.txt".into(),
-                offset: 0,
-                limit: 4096,
-            },
-            None,
-        ),
+        crate::tool_outcome(facts_read()),
+        crate::tool_outcome(arany::ToolCall::Read {
+            path: "notes/other.txt".into(),
+            offset: 0,
+            limit: 4096,
+        }),
         finish_with("report"),
         finish_with("done"),
     ]);
@@ -4311,9 +4395,9 @@ async fn child_tool_bound_offers_only_finish_and_rejects_a_further_tool() {
                 profile: None,
             }],
         })];
-        outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read(), None)));
+        outcomes.extend((0..16).map(|_| crate::tool_outcome(facts_read())));
         if further_tool {
-            outcomes.push(crate::tool_outcome(facts_read(), None));
+            outcomes.push(crate::tool_outcome(facts_read()));
         } else {
             outcomes.push(finish_with("report"));
         }
@@ -4384,7 +4468,7 @@ async fn pause_during_research_finishes_the_child_call_and_dispatches_no_child_t
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
@@ -4429,7 +4513,7 @@ async fn cancellation_after_a_child_tool_request_dispatches_no_child_tool() {
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ]);
     provider.cancel_at_completion = Some((AgentPhase::ChildWork, cancellation.clone()));
@@ -4473,7 +4557,7 @@ async fn child_read_request_at_an_exhausted_goal_budget_stops_as_budget_not_fail
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
     .with_known_input_tokens();
@@ -4560,7 +4644,7 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
                 profile: None,
             }],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ]);
     let requests = provider.requests.clone();
@@ -4639,7 +4723,7 @@ async fn pause_before_queued_children_start_cancels_them_without_failing_the_run
                 },
             ],
         }),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("never reached"),
     ])
     .with_before_call(1, move || assert!(pause.pause(), "first pause"));
@@ -4697,8 +4781,8 @@ async fn tool_step_journals_requested_tools_one_and_replays() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
+        crate::tool_outcome(facts_read()),
         finish_with("done"),
     ]);
     let requests = provider.requests.clone();
@@ -4813,7 +4897,7 @@ async fn interrupted_prefix_replays_and_a_new_run_starts_without_steps() {
     let workspace = facts_workspace(temp.path(), "v1");
     let state_path = temp.path().join("state");
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("first"),
         finish_with("retry"),
     ]);
@@ -4877,8 +4961,8 @@ async fn step_facts_and_notes_are_written_before_render() {
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
+        crate::tool_outcome(facts_read()),
         finish_with("noted"),
     ])
     .with_before_call(1, move || steering_note_at(&offer, "mid-run note"));
@@ -4933,23 +5017,25 @@ async fn step_facts_and_notes_are_written_before_render() {
 }
 
 #[tokio::test]
-async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_refused() {
-    for (restated_plan, differs) in [
-        (facts_plan(facts_digest("v1")), false),
+async fn a_recorded_plan_cannot_be_replaced_or_restated() {
+    for (restated_plan, expected) in [
+        (facts_plan(facts_digest("v1")), RunStatus::Finished),
         (
             arany::GoalPlanContract {
                 mission: "A different mission".into(),
                 ..facts_plan(facts_digest("v1"))
             },
-            true,
+            RunStatus::Finished,
         ),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let provider = ScriptedProvider::new(vec![
-            crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v1"))))),
-            crate::tool_outcome(facts_read(), Some(Box::new(restated_plan))),
+            arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v1"))),
+            crate::tool_outcome(facts_read()),
+            arany::test_support::scenario::plan_outcome(restated_plan),
+            crate::tool_outcome(facts_read()),
             finish_with("done"),
         ]);
         let provider = Arc::new(provider);
@@ -4967,19 +5053,14 @@ async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_
         )
         .await
         .expect("Run");
-        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(outcome.run.status, expected);
         engine.close().await.expect("engine shutdown");
-        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let (events, _) = replayed(&state_path, outcome.session_id).await;
         let recorded = events
             .iter()
             .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
             .count();
         assert_eq!(recorded, 1, "the contract is journaled once");
-        let refusal = view.runs[0].agents[0].provider_calls[1].refusal.as_ref();
-        assert_eq!(
-            refusal.map(|refusal| refusal.cause),
-            differs.then_some(arany::ProposalRefusalCause::PlanInvalid)
-        );
     }
 }
 
@@ -5016,16 +5097,14 @@ async fn plan_contract_recorded_mid_run_survives_compaction() {
     };
     let mut outcomes: Vec<_> = (0..READS)
         .map(|page| {
-            crate::tool_outcome(
-                arany::ToolCall::Read {
-                    path: "notes/data.txt".into(),
-                    offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
-                    limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
-                },
-                (page == 0).then(|| Box::new(plan.clone())),
-            )
+            crate::tool_outcome(arany::ToolCall::Read {
+                path: "notes/data.txt".into(),
+                offset: u32::try_from(page * PAGE_BYTES).expect("bounded file offset"),
+                limit: u32::try_from(PAGE_BYTES).expect("bounded page size"),
+            })
         })
         .collect();
+    outcomes.insert(0, arany::test_support::scenario::plan_outcome(plan.clone()));
     outcomes.push(finish_with("inspected"));
     let compaction = || {
         Ok(CompactionResponse {
@@ -5359,7 +5438,7 @@ async fn steered_run(
     let steering = RunSteering::new();
     let offer = steering.clone();
     let provider = ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), None),
+        crate::tool_outcome(facts_read()),
         finish_with("noted"),
     ])
     .with_before_call(0, move || {
@@ -5522,15 +5601,13 @@ async fn reviewed_write_run(
         transaction.commit().expect("padding commit");
     }
     let provider = Arc::new(ScriptedProvider::new(vec![
-        crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
-        crate::tool_outcome(
-            arany::ToolCall::Write {
-                path: "notes/facts.txt".into(),
-                expected_digest: None,
-                content: "v2".into(),
-            },
-            None,
-        ),
+        arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+        crate::tool_outcome(facts_read()),
+        crate::tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: None,
+            content: "v2".into(),
+        }),
         finish_with("ask"),
         finish_with("done"),
     ]));
@@ -5633,19 +5710,17 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
     let pause = steering.clone();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            crate::tool_outcome(facts_read(), Some(Box::new(facts_plan(facts_digest("v2"))))),
-            crate::tool_outcome(
-                arany::ToolCall::Write {
-                    path: "notes/facts.txt".into(),
-                    expected_digest: None,
-                    content: "v2".into(),
-                },
-                None,
-            ),
+            arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
+            crate::tool_outcome(facts_read()),
+            crate::tool_outcome(arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: None,
+                content: "v2".into(),
+            }),
             finish_with("approve"),
             finish_with("never reached"),
         ])
-        .with_before_call(2, move || assert!(pause.pause(), "first pause")),
+        .with_before_call(3, move || assert!(pause.pause(), "first pause")),
     );
     let outcome = run_with(
         &engine,
@@ -5882,7 +5957,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             },
         )
         .await;
-        if free.is_some_and(|(_, free)| free == 9) {
+        if free.is_some_and(|(_, free)| free == 10) {
             assert!(matches!(
                 result,
                 Err(EngineError::Store(arany::StoreError::ReplayLimit))
@@ -5904,7 +5979,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         .position(|e| matches!(e.event, Event::GoalStarted { .. }))
         .unwrap();
     let offset = last_hook - initial;
-    for free in [9, 10] {
+    for free in [10, 11] {
         let events = run(
             &temp.path().join(format!("free-{free}")),
             Some((offset, free)),
@@ -5915,7 +5990,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .iter()
                 .filter(|e| matches!(e.event, Event::HookStarted { .. }))
                 .count(),
-            if free == 9 { 7 } else { 8 },
+            if free == 10 { 7 } else { 8 },
             "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
         );
         assert!(
@@ -5944,9 +6019,7 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
         if !enabled {
             arany::FaultPlan::supervisor_off(session);
         }
-        let mut outcomes: Vec<_> = (0..4)
-            .map(|_| crate::tool_outcome(facts_read(), None))
-            .collect();
+        let mut outcomes: Vec<_> = (0..4).map(|_| crate::tool_outcome(facts_read())).collect();
         outcomes.push(finish_with("done"));
         let provider = Arc::new(ScriptedProvider::new(outcomes));
         let mut input = request(&workspace, "Inspect repeatedly");
@@ -6031,4 +6104,96 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
         );
     }
     assert_eq!(observations[0], observations[1]);
+}
+
+#[tokio::test]
+async fn optional_plan_narrows_later_calls_and_keeps_the_success_gate() {
+    let temp = tempfile::tempdir().expect("fixture");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let plan = facts_plan(facts_digest("v1"));
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan.clone()),
+        crate::tool_outcome(arany::ToolCall::Write {
+            path: "outside.txt".into(),
+            expected_digest: None,
+            content: "never published".into(),
+        }),
+        crate::tool_outcome(facts_read()),
+        finish_with("verified"),
+        finish_with("history checked"),
+    ]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Verify the selected file");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
+    engine.close().await.expect("shutdown");
+    let engine = engine_support::open(
+        StateRoot::open_existing(&state_path).expect("state"),
+        EngineConfig::default(),
+    )
+    .expect("reopened Engine");
+    let mut follow_up = request(&workspace, "What happened?");
+    follow_up.include_paths.clear();
+    follow_up.session_id = Some(result.session_id);
+    follow_up.title = None;
+    run_to_end(&engine, &provider, follow_up)
+        .await
+        .expect("follow-up");
+    engine.close().await.expect("follow-up shutdown");
+    let (events, view) = replayed(&state_path, result.session_id).await;
+    assert_eq!(view.runs[0].status, RunStatus::Finished);
+    assert_eq!(view.goals[0].plan_contract, Some(plan));
+    assert!(view.goals[0].success_criterion_satisfied);
+    assert!(!workspace.join("outside.txt").exists());
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let calls = &view.runs[0].agents[0].provider_calls;
+    assert_eq!(calls[0].disposition, ProviderCallDisposition::PlanRecorded);
+    assert_eq!(calls[0].requested_tools, 0);
+    assert_eq!(
+        calls[1].refusal.as_ref().expect("scope refusal").cause,
+        arany::ProposalRefusalCause::PlanScopeExcludesCall
+    );
+    let requests = provider.requests.lock().expect("requests");
+    assert_eq!(requests.len(), 5);
+    let history = &requests[4].input.history[0].assistant;
+    assert!(history.contains("verified"));
+    assert!(!history.contains("last_answer_refused"));
+    assert!(!history.contains("nothing dispatched"));
+    assert!(
+        requests[1].input.tools.as_ref().expect("context").steps[0]
+            .plan
+            .is_some()
+    );
+    assert_eq!(requests[2].input.last_answer_refused, calls[1].refusal);
+    let plan_call = events.iter().position(|event| matches!(&event.event, Event::ProviderCallRecorded { record, .. } if record.disposition == ProviderCallDisposition::PlanRecorded)).expect("plan call");
+    let contract = events
+        .iter()
+        .position(|event| matches!(&event.event, Event::GoalPlanContractRecorded { .. }))
+        .expect("contract");
+    assert!(plan_call < contract);
+    assert!(
+        SessionView::replay(result.session_id, &events[..=plan_call])
+            .expect("interrupted plan prefix")
+            .expect("Session")
+            .goals[0]
+            .plan_contract
+            .is_none()
+    );
+    let mut missing = events.clone();
+    missing.remove(contract);
+    for (index, event) in missing.iter_mut().enumerate() {
+        event.sequence = u64::try_from(index + 1).expect("bounded journal");
+    }
+    assert!(SessionView::replay(result.session_id, &missing).is_err());
 }

@@ -12,23 +12,6 @@ use std::{
 const CACHE_CANARY: &str = "EXPLICIT_CACHE_OUTPUT_CANARY";
 const PRIVATE_CACHE_CANARY: &str = "ARANY_PRIVATE_CACHE_PERSISTENCE_CANARY";
 
-fn shipped_exec_plan_contract() -> arany::GoalPlanContract {
-    arany::GoalPlanContract {
-        mission: "Run the guarded check and update the selected note".into(),
-        paths: vec!["src/check.sh".into(), "src/note.txt".into()],
-        commands: vec!["bash".into()],
-        resource_class: arany::ToolResourceClass::Default,
-        command_timeout_ms: None,
-        skills: Vec::new(),
-        mcp_tools: Vec::new(),
-        success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
-            path: "src/note.txt".into(),
-            content: "native note\n2026-10-06\n".into(),
-        },
-        budget: arany::GoalBudget::default(),
-    }
-}
-
 fn cache_progress(stage: &str) {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "cache-canary:{stage}").expect("cache fixture progress write");
@@ -231,9 +214,11 @@ impl Provider for CacheCanary {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+        let planned = crate::planned(&request);
+
         let step = {
             let mut requests = self.requests.lock().unwrap();
-            let step = requests.len();
+            let step = requests.len().saturating_sub(usize::from(planned));
             requests.push(request);
             step
         };
@@ -269,7 +254,11 @@ impl Provider for CacheCanary {
             } else {
                 None
             };
-            crate::tool_outcome(call, plan_contract)
+            if !planned && let Some(contract) = plan_contract {
+                arany::test_support::scenario::plan_outcome(*contract)
+            } else {
+                crate::tool_outcome(call)
+            }
         } else {
             ProviderOutcome::Finish(Finish {
                 summary: "Selected cache output was explicit".into(),
@@ -696,7 +685,7 @@ async fn selected_cache_canary_helper_inner() {
     assert_eq!(observations[2].cache_update, arany::CacheUpdate::Rejected);
     {
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
         let _initial_tools = requests[0]
             .input
             .tools
@@ -707,20 +696,20 @@ async fn selected_cache_canary_helper_inner() {
             !initial.contains(CACHE_CANARY),
             "cache canary was present in the initial Provider request"
         );
-        let first_output = &requests[1].input.tools.as_ref().unwrap().observations()[0].output;
+        let first_output = &requests[2].input.tools.as_ref().unwrap().observations()[0].output;
         let first_command: serde_json::Value = serde_json::from_str(first_output).unwrap();
         assert!(first_command["stdout"].as_str().is_some_and(str::is_empty));
         assert!(!first_output.contains(PRIVATE_CACHE_CANARY));
         assert!(
-            requests[2].input.tools.as_ref().unwrap().observations()[1]
+            requests[3].input.tools.as_ref().unwrap().observations()[1]
                 .output
                 .contains(PRIVATE_CACHE_CANARY)
-                && requests[2].input.tools.as_ref().unwrap().observations()[1]
+                && requests[3].input.tools.as_ref().unwrap().observations()[1]
                     .output
                     .contains(CACHE_CANARY),
             "explicit cache output missing from the later Provider request"
         );
-        let overflow_observation = &requests[3].input.tools.as_ref().unwrap().observations()[2];
+        let overflow_observation = &requests[4].input.tools.as_ref().unwrap().observations()[2];
         let overflow = overflow_observation.output.as_str();
         let overflow_result: serde_json::Value = serde_json::from_str(overflow).unwrap();
         assert_eq!(overflow_result["exit_code"], 0);
@@ -1129,7 +1118,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                 assert_eq!(context["tools"]["catalog"]["write"], true);
                 let outcome = match step {
                     0 => {
-                        json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""},"plan_contract":shipped_exec_plan_contract()}})
+                        json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}})
                     }
                     1 => {
                         json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
@@ -1161,12 +1150,6 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                     } else {
                         outcome["outcome"].clone()
                     };
-                    if tool {
-                        arguments["plan_contract"] = outcome["outcome"]
-                            .get("plan_contract")
-                            .cloned()
-                            .unwrap_or(Value::Null);
-                    }
                     let key = if tool { "operation" } else { "type" };
                     let operation = arguments.as_object_mut().unwrap().remove(key).unwrap();
                     if profile == "openai" {
@@ -1305,7 +1288,7 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
             assert_eq!(replay.goals.len(), 1);
             let goal = &replay.goals[0];
             assert_eq!(goal.status, arany::GoalStatus::Completed);
-            assert_eq!(goal.plan_contract, Some(shipped_exec_plan_contract()));
+            assert!(goal.plan_contract.is_none());
             assert!(goal.success_criterion_satisfied);
             assert!(!goal.awaiting_plan_contract);
             assert!(goal.report.is_some());

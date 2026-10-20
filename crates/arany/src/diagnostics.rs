@@ -559,7 +559,7 @@ mod tests {
                 wire_provenance: None,
                 refusal: Some(crate::session::ProposalRefusal {
                     operation: "arany_write".into(),
-                    cause: crate::session::ProposalRefusalCause::PlanMissing,
+                    cause: crate::session::ProposalRefusalCause::PlanInvalid,
                 }),
                 failure_reason: Some(crate::provider::ProviderFailureReason::ProposalRefused),
                 requested_tools: 0,
@@ -622,7 +622,7 @@ mod tests {
             "engine cause=Store",
             "filesystem kind=Other",
             "guard stage=execution",
-            r#"provider phase=RootSynthesis disposition=InvalidResponse reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanMissing })"#,
+            r#"provider phase=RootSynthesis disposition=InvalidResponse reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanInvalid })"#,
             "tool operation=edit disposition=Uncertain receipt=false stops_run=true",
             "run disposition=Failed cause=Some(ProposalRefused)",
         ] {

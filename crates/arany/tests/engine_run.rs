@@ -75,14 +75,11 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private configuration");
         let refused_write = || {
-            tool_outcome(
-                arany::ToolCall::Write {
-                    path: "test.txt".into(),
-                    expected_digest: None,
-                    content: "hello".into(),
-                },
-                None,
-            )
+            tool_outcome(arany::ToolCall::Write {
+                path: String::new(),
+                expected_digest: None,
+                content: "hello".into(),
+            })
         };
         let attempts = if known_reason { 1 } else { 3 };
         let provider = ScriptedProvider::new(
@@ -178,7 +175,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 "last_call": if known_reason {
                     serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
                 } else {
-                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "plan_missing"}})
+                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_arguments"}})
                 },
             })
         );
@@ -1287,16 +1284,16 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
         // largest prefix that still admits the Run: 11 Events for a single plain Run, 17 for one Team child.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9990, CollaborationPolicy::Single, false, false, false, false),
-            (9989, CollaborationPolicy::Single, true, false, false, false),
+            (9989, CollaborationPolicy::Single, false, false, false, false),
+            (9988, CollaborationPolicy::Single, true, false, false, false),
             (9984, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9983, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9989, CollaborationPolicy::Single, false, true, false, false),
-            (9988, CollaborationPolicy::Single, true, true, false, false),
-            (9989, CollaborationPolicy::Single, false, false, true, false),
-            (9988, CollaborationPolicy::Single, true, false, true, false),
-            (9926, CollaborationPolicy::Single, false, false, false, true),
-            (9925, CollaborationPolicy::Single, true, false, false, true),
+            (9982, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9988, CollaborationPolicy::Single, false, true, false, false),
+            (9987, CollaborationPolicy::Single, true, true, false, false),
+            (9988, CollaborationPolicy::Single, false, false, true, false),
+            (9987, CollaborationPolicy::Single, true, false, true, false),
+            (9925, CollaborationPolicy::Single, false, false, false, true),
+            (9924, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
@@ -1403,8 +1400,8 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
-        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9979 admits to exactly 10,000 Events.
-        for (prefix, admitted) in [(9979_i64, true), (9980, false)] {
+        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9978 admits to 9,999 Events and the root call reserves one more for a recorded plan.
+        for (prefix, admitted) in [(9978_i64, true), (9980, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Finish(Finish { summary: "done".into(), result: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
@@ -1458,7 +1455,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let events = store.load_session(id).await.unwrap();
             let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
             assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
-            assert_eq!(events.len(), if admitted { 10_000 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
+            assert_eq!(events.len(), if admitted { 9_999 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
@@ -2069,6 +2066,7 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
             }],
         }),
         finish.clone(),
+        finish.clone(),
         finish,
     ]));
     let engine = engine_support::open(
@@ -2084,10 +2082,18 @@ async fn team_planning_refusal_can_be_repaired_with_delegate() {
     let result = run_to_end(&engine, &provider, input)
         .await
         .expect("team repaired");
+    let mut follow_up = request(&workspace, "What happened?");
+    follow_up.include_paths.clear();
+    follow_up.session_id = Some(result.session_id);
+    follow_up.title = None;
+    run_to_end(&engine, &provider, follow_up)
+        .await
+        .expect("follow-up");
     engine.close().await.expect("close engine");
     {
         let requests = provider.requests.lock().expect("requests");
-        assert_eq!(requests.len(), 4);
+        assert_eq!(requests.len(), 5);
+        assert_eq!(requests[4].input.history[0].assistant, "answer");
         assert_eq!(
             requests[1].input.last_answer_refused,
             Some(arany::ProposalRefusal {
@@ -5506,27 +5512,38 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
     };
     use std::os::unix::fs::PermissionsExt;
 
-    for (plan_calls, cause, goal_calls, expected_calls, failure) in [
+    for (plan_calls, cause, goal_calls, expected_calls, failure, alternating) in [
         (
             None,
-            ProposalRefusalCause::PlanMissing,
-            8,
+            ProposalRefusalCause::PlanInvalid,
+            Some(8),
             3,
             Some(RunFailure::RefusalLimit),
+            false,
         ),
         (
             Some(1),
             ProposalRefusalCause::PlanBudgetSpent,
-            8,
+            Some(8),
             3,
             Some(RunFailure::RefusalLimit),
+            false,
         ),
         (
             None,
-            ProposalRefusalCause::PlanMissing,
-            2,
+            ProposalRefusalCause::PlanInvalid,
+            Some(2),
             2,
             Some(RunFailure::BudgetExhausted),
+            false,
+        ),
+        (
+            None,
+            ProposalRefusalCause::PlanInvalid,
+            None,
+            8,
+            Some(RunFailure::RefusalLimit),
+            true,
         ),
     ] {
         let temp = tempfile::tempdir().expect("fixture");
@@ -5545,46 +5562,46 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]}"#).expect("grant");
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
             .expect("private grant");
-        let plan = plan_calls.map(|calls| {
-            Box::new(GoalPlanContract {
-                mission: "write test.txt containing hello".into(),
-                resource_class: arany::ToolResourceClass::Default,
-                command_timeout_ms: None,
-                paths: vec!["test.txt".into()],
-                commands: Vec::new(),
-                skills: Vec::new(),
-                mcp_tools: Vec::new(),
-                success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
-                    path: "test.txt".into(),
-                    sha256: Sha256::digest(b"hello")
-                        .iter()
-                        .map(|byte| format!("{byte:02x}"))
-                        .collect(),
-                },
-                budget: GoalBudget {
-                    max_provider_calls: Some(calls),
-                    ..GoalBudget::default()
-                },
-            })
-        });
+        let plan = GoalPlanContract {
+            mission: if plan_calls.is_some() {
+                "write test.txt containing hello".into()
+            } else {
+                String::new()
+            },
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec!["PRIVATE_ARGUMENT_path".into(), "test.txt".into()],
+            commands: Vec::new(),
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
+                path: "test.txt".into(),
+                sha256: Sha256::digest(b"hello")
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect(),
+            },
+            budget: GoalBudget {
+                max_provider_calls: plan_calls.or(Some(8)),
+                ..GoalBudget::default()
+            },
+        };
         let provider = Arc::new(ScriptedProvider::new(
             (0..expected_calls)
                 .map(|index| {
-                    tool_outcome(
-                        arany::ToolCall::Write {
-                            path: "test.txt".into(),
-                            content: format!("PRIVATE_ARGUMENT_{index}"),
-                            expected_digest: None,
-                        },
-                        plan.clone(),
-                    )
+                    let mut plan = plan.clone();
+                    if alternating && index % 2 == 1 {
+                        plan.mission = "write test.txt containing hello".into();
+                        plan.budget.max_provider_calls = Some(1);
+                    }
+                    arany::test_support::scenario::plan_outcome(plan)
                 })
                 .collect(),
         ));
         let mut input = request(&workspace, "write test.txt containing hello");
         input.include_paths.clear();
         input.goal.budget = Some(GoalBudget {
-            max_provider_calls: Some(goal_calls),
+            max_provider_calls: goal_calls,
             ..Default::default()
         });
         let result = run_with(
@@ -5626,7 +5643,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         {
             let requests = provider.requests.lock().expect("requests");
             assert!(requests[0].input.last_answer_refused.is_none());
-            for request in &requests[1..] {
+            for (index, request) in requests[1..].iter().enumerate() {
                 assert_eq!(
                     request
                         .input
@@ -5634,7 +5651,11 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
                         .as_ref()
                         .expect("repair note")
                         .cause,
-                    cause
+                    if alternating && index % 2 == 1 {
+                        ProposalRefusalCause::PlanBudgetSpent
+                    } else {
+                        cause
+                    }
                 );
             }
         }
@@ -5645,7 +5666,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             Some(arany::ProviderFailureReason::ProposalRefused)
         );
         let refusal = call.refusal.as_ref().expect("closed refusal");
-        assert_eq!(refusal.operation, "arany_write");
+        assert_eq!(refusal.operation, "arany_plan");
         assert_eq!(refusal.cause, cause);
         assert_eq!(call.requested_tools, 0);
         assert!(!events.iter().any(|event| matches!(
@@ -5656,7 +5677,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
         assert!(!format!("{events:?}").contains("PRIVATE_ARGUMENT_"));
         assert!(!workspace.join("test.txt").exists());
         store.close().await.expect("close store");
-        if plan_calls.is_none() && goal_calls == 8 {
+        if plan_calls.is_none() && goal_calls == Some(8) {
             let crash_path = temp.path().join("crashed-state");
             let crash_store = Store::open(StateRoot::admit(&crash_path).expect("crash state"))
                 .expect("crash store");
@@ -5705,7 +5726,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             assert_eq!(requests.len(), 1);
             let history = &requests[0].input.history;
             assert_eq!(history.len(), 1);
-            assert!(history[0].assistant.contains("plan_missing"));
+            assert!(history[0].assistant.contains("plan_invalid"));
             assert!(history[0].assistant.contains("nothing dispatched"));
         }
     }

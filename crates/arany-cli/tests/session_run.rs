@@ -52,15 +52,21 @@ fn prepare_test_file_account_at(account_root: &std::path::Path) -> uuid::Uuid {
     account_id
 }
 
-fn tool_outcome(
-    call: arany::ToolCall,
-    plan_contract: Option<Box<arany::GoalPlanContract>>,
-) -> arany::ProviderOutcome {
+fn tool_outcome(call: arany::ToolCall) -> arany::ProviderOutcome {
     arany::ProviderOutcome::Tools(vec![arany::ToolRequest {
         id: arany::ToolUseId::new("call_1").expect("scripted Tool id"),
         call,
-        plan_contract,
     }])
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn planned(request: &arany::ProviderRequest) -> bool {
+    request.input.goal_plan_contract.is_some()
+        || request
+            .input
+            .tools
+            .as_ref()
+            .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()))
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]

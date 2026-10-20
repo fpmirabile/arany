@@ -1026,12 +1026,12 @@ impl ToolObservation {
 pub struct ToolRequest {
     pub id: crate::provider::ToolUseId,
     pub call: ToolCall,
-    pub plan_contract: Option<Box<crate::session::GoalPlanContract>>,
 }
 
 /// One Provider turn and the observations of the requests it declared, in request order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolStep {
+    pub plan: Option<crate::provider::PlanRequest>,
     pub turn: crate::provider::ProviderTurn,
     /// Empty for a Delegate step.
     pub requests: Vec<ToolRequest>,
@@ -1075,6 +1075,9 @@ impl ToolStep {
 
     fn rendered_len(&self) -> usize {
         self.turn.len()
+            + self.plan.as_ref().map_or(0, |plan| {
+                plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
+            })
             + self
                 .observations
                 .iter()

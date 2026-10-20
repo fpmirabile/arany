@@ -149,6 +149,7 @@ pub(crate) fn observed_step(
         panic!("a Tool response");
     };
     crate::tools::ToolStep {
+        plan: None,
         turn: response.turn,
         observations: requests
             .iter()

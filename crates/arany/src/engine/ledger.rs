@@ -30,7 +30,7 @@ impl Action {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
             Self::ProviderCall { previews, steering } => {
-                6 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
+                7 + usize::from(steering) + if previews { MAX_DISPLAY_CHUNKS } else { 0 }
             }
             Self::Child {
                 in_flight,
@@ -460,10 +460,9 @@ impl GoalLedger {
 
     pub(super) fn allows_tool(&self, call: &crate::tools::ToolCall) -> bool {
         self.read(|goal, _| {
-            goal.plan_contract.as_ref().map_or_else(
-                || call.is_goal_plan_prelude(),
-                |contract| contract.allows_call(call),
-            )
+            goal.plan_contract
+                .as_ref()
+                .is_none_or(|contract| contract.allows_call(call))
         })
         .unwrap_or(false)
     }

@@ -1,4 +1,4 @@
-use super::catalog::{call_schemas, catalog_call_schemas, plan_contract_property};
+use super::catalog::{call_schemas, catalog_call_schemas, plan_schema};
 use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
@@ -1630,11 +1630,11 @@ fn goal_success_criterion_offers_only_admitted_calls() {
         "skills": [],
         "mcp_servers": []
     }));
-    let property = plan_contract_property(&calls);
-    let success_calls = property["anyOf"][0]["properties"]["success_criterion"]["anyOf"][0]
-        ["properties"]["call"]["anyOf"]
-        .as_array()
-        .expect("admitted success calls");
+    let property = plan_schema(&calls);
+    let success_calls =
+        property["properties"]["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"]
+            .as_array()
+            .expect("admitted success calls");
     let operations: Vec<&str> = success_calls
         .iter()
         .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
@@ -1671,9 +1671,9 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
         "skills": [],
         "mcp_servers": []
     }));
-    let property = plan_contract_property(&calls);
+    let property = plan_schema(&calls);
     assert_no_empty_any_of(&property);
-    let kinds: Vec<&str> = property["anyOf"][0]["properties"]["success_criterion"]["anyOf"]
+    let kinds: Vec<&str> = property["properties"]["success_criterion"]["anyOf"]
         .as_array()
         .expect("success criterion alternatives")
         .iter()

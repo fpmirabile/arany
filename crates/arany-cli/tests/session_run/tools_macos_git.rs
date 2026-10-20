@@ -45,32 +45,23 @@ impl Provider for GitJourney {
         let step = requests.len();
         requests.push(request);
         let outcome = match step {
-            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }, None),
-            1 => crate::tool_outcome(
-                ToolCall::GitDiff {
-                    path: "src".into(),
-                    base: None,
-                    head: None,
-                    staged: false,
-                },
-                None,
-            ),
-            2 => crate::tool_outcome(
-                ToolCall::GitLog {
-                    path: ".".into(),
-                    revision: None,
-                    max_count: 5,
-                },
-                None,
-            ),
-            3 => crate::tool_outcome(
-                ToolCall::GitLog {
-                    path: ".".into(),
-                    revision: Some("missing-branch".into()),
-                    max_count: 1,
-                },
-                None,
-            ),
+            0 => crate::tool_outcome(ToolCall::GitStatus { path: ".".into() }),
+            1 => crate::tool_outcome(ToolCall::GitDiff {
+                path: "src".into(),
+                base: None,
+                head: None,
+                staged: false,
+            }),
+            2 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 5,
+            }),
+            3 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("missing-branch".into()),
+                max_count: 1,
+            }),
             4 => ProviderOutcome::Finish(Finish {
                 summary: "Inspected".into(),
                 result: "Git state observed".into(),
