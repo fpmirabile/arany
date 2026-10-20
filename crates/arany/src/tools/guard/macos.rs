@@ -243,6 +243,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
         return Err(ToolError::ProtectionUnavailable);
     }
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
+    bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant");
@@ -1053,6 +1054,40 @@ async fn worker_ready(
     .map_err(|_| ToolError::GuardBootstrap(BootstrapFailure::at(BootstrapStage::Handshake)))?
 }
 
+struct WorkerOutput {
+    observation: ToolObservation,
+    windows: Option<crate::tools::output::CommandWindows>,
+}
+
+async fn read_command_windows(
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+) -> Result<Option<crate::tools::output::CommandWindows>, ToolError> {
+    if runtime.worker.is_none()
+        && matches!(intent.call, ToolCall::Command { .. })
+        && tokio::io::AsyncBufReadExt::fill_buf(stdout)
+            .await
+            .map_err(|_| ToolError::Operation)?
+            .first()
+            == Some(&b'W')
+    {
+        if read_line_capped(stdout, 8).await? != b"WINDOWS\n" {
+            return Err(ToolError::Operation);
+        }
+        let bytes =
+            read_line_capped(stdout, 8 * intent.limits.result_bytes as usize + 1024).await?;
+        let windows: crate::tools::output::CommandWindows =
+            serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+        if !windows.valid(intent.limits.result_bytes as usize) {
+            return Err(ToolError::Operation);
+        }
+        Ok(Some(windows))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -1061,7 +1096,7 @@ async fn execute_worker(
     control: &mut tokio::net::unix::OwnedWriteHalf,
     receive_go: tokio::sync::oneshot::Receiver<()>,
     root: &Path,
-) -> Result<ToolObservation, ToolError> {
+) -> Result<WorkerOutput, ToolError> {
     crate::tools::fs::validate_workspace(runtime)?;
     let task = super::encode_task(&Task::new(runtime, intent, None)?)?;
     let mut child = super::launcher_command(&runtime.guard_executable)
@@ -1125,6 +1160,7 @@ async fn execute_worker(
                     .await
                     .map_err(|_| ToolError::Operation)?;
                 drop(stdin);
+                let windows = read_command_windows(&mut stdout, runtime, intent).await?;
                 let observation = if runtime.worker.is_some() {
                     super::read_worker_observation(
                         &mut stdout,
@@ -1137,7 +1173,10 @@ async fn execute_worker(
                     read_observation(&mut stdout, intent).await?
                 };
                 capture.complete();
-                Ok(observation)
+                Ok(WorkerOutput {
+                    observation,
+                    windows,
+                })
             })
             .await
             .map_err(|_| ToolError::Limit)?
