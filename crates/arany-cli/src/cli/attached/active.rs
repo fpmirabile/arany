@@ -457,25 +457,26 @@ pub(super) async fn submit_objective(
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let mut shown_retries = (None, 0usize);
+    let mut exit_after_run = false;
     let shutdown_reason = loop {
         let approval_more = match &pending {
-            Some(approval) => terminal
-                .draw_tool_approval(
-                    approval,
-                    view,
-                    approval_page,
-                    (!approval_unarmed).then_some(approval_choice),
-                    approval_review_notice,
-                )
-                .map_err(|error| error.to_string())?,
+            Some(approval) => match terminal.draw_tool_approval(
+                approval,
+                view,
+                approval_page,
+                (!approval_unarmed).then_some(approval_choice),
+                approval_review_notice,
+            ) {
+                Ok(more) => more,
+                Err(_) => break "terminal rendering failed".to_owned(),
+            },
             None => false,
         };
         // Only bytes the reader reads after this barrier reach the armed redraw.
         if std::mem::take(&mut approval_unarmed) {
-            terminal
-                .discard_approval_typeahead()
-                .await
-                .map_err(|error| error.to_string())?;
+            if terminal.discard_approval_typeahead().await.is_err() {
+                break "terminal input admission failed".to_owned();
+            }
             continue;
         }
         let (result, mut events) = handle
@@ -613,7 +614,7 @@ pub(super) async fn submit_objective(
                     break "terminal rendering failed".to_owned();
                 }
             }
-            input = terminal.next_input() => {
+            input = terminal.next_input(), if !exit_after_run => {
                 let input = match input {
                     Ok(input) => input,
                     Err(_) => break "terminal input failed".to_owned(),
@@ -926,6 +927,7 @@ pub(super) async fn submit_objective(
                     // The screen already shows the outcome, so exit once the Run returns.
                     TerminalInput::EndOfInput if run_settled(view, starting_sequence) => {
                         terminal.defer_input(TerminalInput::EndOfInput);
+                        exit_after_run = true;
                         None
                     }
                     _ => None,
