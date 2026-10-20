@@ -650,7 +650,7 @@ fn run_process(
 }
 
 pub(super) const MAX_COPY_BYTES: usize = 100_000;
-const COPY_TOO_LARGE: &str = "Selection exceeds 100 KB; use arany show";
+const COPY_TOO_LARGE: &str = "Copy exceeds 100 KB; use arany show";
 
 pub(super) struct CopyRequest(String);
 
