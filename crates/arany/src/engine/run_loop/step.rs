@@ -2212,6 +2212,11 @@ impl RunLoop<'_> {
             name,
             resource: None,
         };
+        if !self.ledger().allows_tool(&call) {
+            return Ok(SkillInitialization::Failed(
+                crate::session::RunFailure::ToolStopped,
+            ));
+        }
         let intent = match self.primary_intent(runtime, call.clone())? {
             None => return Ok(SkillInitialization::Stopped),
             Some(intent) => intent,

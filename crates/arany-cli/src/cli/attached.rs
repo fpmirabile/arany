@@ -979,6 +979,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             GoalStart::Plain,
                             objective,
                             skill,
+                            line,
                         )
                         .await?;
                     }
@@ -1003,6 +1004,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             start,
                             objective,
                             None,
+                            line,
                         )
                         .await?;
                     }
@@ -1435,22 +1437,12 @@ async fn submit_idle_run(
     start: GoalStart,
     objective: String,
     skill: Option<String>,
+    draft: String,
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
     let draft = match start {
-        GoalStart::Plain => skill.as_ref().map_or_else(
-            || objective.clone(),
-            |name| {
-                let invocation = format!("/{name}");
-                if objective == invocation {
-                    invocation
-                } else {
-                    format!("{invocation} {objective}")
-                }
-            },
-        ),
-        GoalStart::Autonomous => format!("/goal {objective}"),
+        GoalStart::Plain | GoalStart::Autonomous => draft,
         GoalStart::Resume | GoalStart::Continue => String::new(),
     };
     match submit_objective(

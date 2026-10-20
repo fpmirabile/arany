@@ -3269,6 +3269,7 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
     for (draft, task) in [
         ("/ask-matt", ""),
         ("/ask-matt do X", "do X"),
+        ("/ask-matt /ask-matt", "/ask-matt"),
         ("/ask-m", ""),
     ] {
         composer.clear();
@@ -3308,6 +3309,12 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
             task: ""
         })
     );
+    tabs.clear();
+    tabs.set_runtime_skills(&["ask-matt".into(), "ask-mary".into()]);
+    tabs.insert_paste("/ask-m").unwrap();
+    assert_eq!(tabs.apply(TerminalInput::Submit), ComposerEdit::Unchanged);
+    assert_eq!(tabs.text(), "/ask-m");
+    assert!(tabs.submission().is_err());
     composer.clear();
     composer.insert_paste("/ask-m").unwrap();
     assert_eq!(composer.apply(TerminalInput::Tab), ComposerEdit::Changed);

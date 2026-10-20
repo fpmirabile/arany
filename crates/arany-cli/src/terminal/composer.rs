@@ -483,10 +483,13 @@ impl Composer {
             {
                 let submit = input == TerminalInput::Submit && !self.skills_tab && self.text != "/";
                 if submit {
-                    let skill = self
-                        .skill_matches(&self.text[1..])
-                        .next()
-                        .map(str::to_owned);
+                    let skill = {
+                        let mut matches = self.skill_matches(&self.text[1..]);
+                        match (matches.next(), matches.next()) {
+                            (Some(name), None) => Some(name.to_owned()),
+                            _ => None,
+                        }
+                    };
                     if let Some(name) = skill {
                         self.text = format!("/{name}");
                         self.cursor = self.text.len();
