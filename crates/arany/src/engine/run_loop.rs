@@ -697,7 +697,6 @@ impl<'a> RunLoop<'a> {
                 | StopCause::Budget
                 | StopCause::Capacity
                 | StopCause::DelegationDeadline
-                | StopCause::Refused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
             )) => {

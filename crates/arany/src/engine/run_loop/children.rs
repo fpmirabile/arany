@@ -386,7 +386,6 @@ impl RunLoop<'_> {
                         | StopCause::Capacity
                         | StopCause::ContextFull
                         | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
                         | StopCause::ToolStopped
                         | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
                     };
@@ -440,7 +439,6 @@ impl RunLoop<'_> {
                         | StopCause::Budget
                         | StopCause::Capacity
                         | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
                         | StopCause::ToolStopped
                         | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
                     };
@@ -877,7 +875,6 @@ impl RunLoop<'_> {
                                             | StopCause::Paused
                                             | StopCause::Budget
                                             | StopCause::DelegationDeadline
-                                            | StopCause::Refused(_)
                                             | StopCause::ToolStopped
                                             | StopCause::InvalidCommandResult,
                                         ),
@@ -1111,7 +1108,6 @@ impl RunLoop<'_> {
                                 | StopCause::Capacity
                                 | StopCause::ContextFull
                                 | StopCause::DelegationDeadline
-                                | StopCause::Refused(_)
                                 | StopCause::ToolStopped
                                 | StopCause::InvalidCommandResult,
                             )) => false,
@@ -1334,7 +1330,6 @@ impl RunLoop<'_> {
                         | StopCause::Capacity
                         | StopCause::ContextFull
                         | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
                         | StopCause::ToolStopped
                         | StopCause::InvalidCommandResult,
                     ) => {}

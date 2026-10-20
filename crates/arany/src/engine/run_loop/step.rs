@@ -2468,7 +2468,6 @@ pub(super) fn intent_observation(
             | StopCause::Budget
             | StopCause::ContextFull
             | StopCause::DelegationDeadline
-            | StopCause::Refused(_)
             | StopCause::ToolStopped
             | StopCause::InvalidCommandResult,
         ) => Ok(None),

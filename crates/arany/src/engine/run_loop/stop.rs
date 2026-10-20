@@ -1,5 +1,3 @@
-use crate::session::ProposalRefusalCause;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StopCause {
     Uncertain,
@@ -11,11 +9,6 @@ pub(super) enum StopCause {
     Capacity,
     ContextFull,
     DelegationDeadline,
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "proposal decisions migrate after R1")
-    )]
-    Refused(ProposalRefusalCause),
     ToolStopped,
     InvalidCommandResult,
 }
@@ -23,16 +16,15 @@ pub(super) enum StopCause {
 impl StopCause {
     const fn rank(self) -> u8 {
         match self {
-            Self::Uncertain => 12,
-            Self::Cancelled => 11,
-            Self::HookStop => 10,
-            Self::Paused => 9,
-            Self::ActiveTime => 8,
-            Self::Budget => 7,
-            Self::Capacity => 6,
-            Self::ContextFull => 5,
-            Self::DelegationDeadline => 4,
-            Self::Refused(_) => 3,
+            Self::Uncertain => 11,
+            Self::Cancelled => 10,
+            Self::HookStop => 9,
+            Self::Paused => 8,
+            Self::ActiveTime => 7,
+            Self::Budget => 6,
+            Self::Capacity => 5,
+            Self::ContextFull => 4,
+            Self::DelegationDeadline => 3,
             Self::ToolStopped => 2,
             Self::InvalidCommandResult => 1,
         }
@@ -95,8 +87,6 @@ mod tests {
             StopCause::Capacity,
             StopCause::ContextFull,
             StopCause::DelegationDeadline,
-            StopCause::Refused(ProposalRefusalCause::Phase),
-            StopCause::Refused(ProposalRefusalCause::InvalidArguments),
             StopCause::ToolStopped,
             StopCause::InvalidCommandResult,
         ];
