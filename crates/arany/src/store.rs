@@ -198,6 +198,7 @@ enum Request {
         event_slots: usize,
         tool_observations: usize,
         run_start: bool,
+        sealed_data: bool,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     Append {
@@ -327,6 +328,7 @@ impl Store {
                             event_slots,
                             tool_observations,
                             run_start,
+                            sealed_data,
                             reply,
                         } => {
                             let result = if read_only {
@@ -338,6 +340,7 @@ impl Store {
                                     event_slots,
                                     tool_observations,
                                     run_start,
+                                    sealed_data,
                                 )
                             };
                             let _ = reply.send(result);
@@ -658,7 +661,18 @@ impl Store {
         event_slots: usize,
         tool_observations: usize,
     ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, tool_observations, false)
+        self.admit(session_id, event_slots, tool_observations, false, false)
+            .await
+    }
+
+    // The allowance budgets its own sealed-data chunks, so it is not headroom for later Events.
+    pub(crate) async fn admit_sealed_data(
+        &self,
+        session_id: SessionId,
+        event_slots: usize,
+        tool_observations: usize,
+    ) -> Result<(), StoreError> {
+        self.admit(session_id, event_slots, tool_observations, false, true)
             .await
     }
 
@@ -668,7 +682,7 @@ impl Store {
         session_id: SessionId,
         event_slots: usize,
     ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, 0, true).await
+        self.admit(session_id, event_slots, 0, true, false).await
     }
 
     async fn admit(
@@ -677,12 +691,14 @@ impl Store {
         event_slots: usize,
         tool_observations: usize,
         run_start: bool,
+        sealed_data: bool,
     ) -> Result<(), StoreError> {
         self.call(|reply| Request::AdmitOperation {
             session_id,
             event_slots,
             tool_observations,
             run_start,
+            sealed_data,
             reply,
         })
         .await

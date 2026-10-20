@@ -3627,6 +3627,55 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
 }
 
 #[tokio::test]
+async fn two_child_research_delegation_admission_covers_its_spawns() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "v1");
+    let state_path = temp.path().join("state");
+    let assignment = |objective: &str| arany::ChildAssignment {
+        editor: None,
+        objective: objective.into(),
+        profile: None,
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![assignment("Inspect facts"), assignment("Inspect notes")],
+        }),
+        finish_with("first child"),
+        finish_with("second child"),
+        finish_with("synthesized"),
+    ]));
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Check the facts");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("engine shutdown");
+
+    let (events, _) = replayed(&state_path, outcome.session_id).await;
+    assert!(
+        arany::test_support::admissions::recorded(outcome.session_id)
+            .iter()
+            .any(|(_, slots, sealed_data)| *slots > 200 && !sealed_data),
+        "the research delegation admission exceeds 200 slots"
+    );
+    assert_action_bounds(&events, false, false);
+}
+
+#[tokio::test]
 async fn undelivered_steering_note_stays_with_the_caller_when_the_run_finishes() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
