@@ -1749,6 +1749,30 @@ done
         String::from_utf8_lossy(&bytes).into_owned()
     }
 
+    fn native_storage_snapshot(root: &Path) -> String {
+        let parent_device = std::fs::metadata(root).ok().map(|metadata| metadata.dev());
+        let volumes: Vec<_> = ["workspace", "scratch", "cache"]
+            .into_iter()
+            .map(|name| {
+                let mounted = std::fs::metadata(root.join(name))
+                    .ok()
+                    .zip(parent_device)
+                    .is_some_and(|(metadata, parent)| metadata.dev() != parent);
+                let image_bytes = std::fs::metadata(root.join(format!("{name}.dmg")))
+                    .ok()
+                    .map(|metadata| metadata.len());
+                format!("{name}={{mounted:{mounted},image_bytes:{image_bytes:?}}}")
+            })
+            .collect();
+        format!("volumes={volumes:?}")
+    }
+
+    fn native_storage_stage(phase: &str, stage: &str) {
+        if matches!(phase, "storage" | "storage-drop" | "command-profile") {
+            eprintln!("native {phase} stage: {stage}");
+        }
+    }
+
     fn child(root: &Path, phase: &str) -> std::process::Child {
         std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", HELPER, "--ignored", "--nocapture"])
@@ -1792,6 +1816,39 @@ done
         ));
         assert!(matches!(storage, Err(ToolError::ChangedInput)));
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn runtime_compat_payload_rejects_missing_or_changed_library() {
+        let directory = tempfile::tempdir().unwrap();
+        let resources = directory.path().join("runtime");
+        std::fs::create_dir(&resources).unwrap();
+        let library = resources.join(super::super::RUNTIME_COMPAT_FILE);
+        std::fs::write(&library, super::super::RUNTIME_COMPAT_BYTES).unwrap();
+        let program = crate::tools::config::Program {
+            name: "probe".into(),
+            executable: "/usr/bin/true".into(),
+            sha256: "0".repeat(64),
+            interpreter: false,
+            inputs: Vec::new(),
+        };
+        let mut command = tokio::process::Command::new("/usr/bin/true");
+        super::super::configure_runtime_compat(&mut command, &program, &mut [], &resources)
+            .unwrap();
+
+        let mut changed = super::super::RUNTIME_COMPAT_BYTES.to_vec();
+        changed[0] ^= 1;
+        std::fs::write(&library, changed).unwrap();
+        assert!(matches!(
+            super::super::configure_runtime_compat(&mut command, &program, &mut [], &resources),
+            Err(ToolError::ChangedInput)
+        ));
+
+        std::fs::remove_file(library).unwrap();
+        assert!(matches!(
+            super::super::configure_runtime_compat(&mut command, &program, &mut [], &resources),
+            Err(ToolError::Path)
+        ));
     }
 
     fn snapshot_runtime(workspace: &Path) -> ToolRuntime {
@@ -1873,6 +1930,48 @@ done
             &runtime_grants,
         )
         .unwrap();
+        let mut commands = vec![
+            crate::tools::config::Program {
+                name: "shell".into(),
+                executable: shell.into(),
+                sha256: crate::tools::types::hex_digest(&std::fs::read(shell).unwrap()),
+                interpreter: true,
+                inputs: vec![crate::tools::config::ProgramInput {
+                    path: workspace.join("runtime-input").to_str().unwrap().into(),
+                    destination: "fixture.txt".into(),
+                    sha256: crate::tools::types::hex_digest(b"pinned synthetic input"),
+                }],
+            },
+            crate::tools::config::Program {
+                name: "native".into(),
+                executable: workspace.join("script").to_str().unwrap().into(),
+                sha256: crate::tools::types::hex_digest(
+                    &std::fs::read(workspace.join("script")).unwrap(),
+                ),
+                interpreter: false,
+                inputs: Vec::new(),
+            },
+        ];
+        let sysctl_probe = workspace.join("sysctl-probe");
+        let mut workspace_paths = vec!["selected".into(), "empty".into(), "script".into()];
+        if sysctl_probe.is_file() {
+            workspace_paths.push("sysctl-probe".into());
+            commands.push(crate::tools::config::Program {
+                name: "sysctl-probe".into(),
+                executable: sysctl_probe.to_str().unwrap().into(),
+                sha256: crate::tools::types::hex_digest(&std::fs::read(&sysctl_probe).unwrap()),
+                interpreter: false,
+                inputs: Vec::new(),
+            });
+            let rust_probe = workspace.join("rust-startup-probe");
+            commands.push(crate::tools::config::Program {
+                name: "rust-startup-probe".into(),
+                executable: rust_probe.to_str().unwrap().into(),
+                sha256: crate::tools::types::hex_digest(&std::fs::read(rust_probe).unwrap()),
+                interpreter: false,
+                inputs: Vec::new(),
+            });
+        }
         ToolRuntime {
             worker: None,
             handover: None,
@@ -1888,31 +1987,10 @@ done
             cache_state: None,
             config: crate::tools::config::Config {
                 version: 1,
-                workspace_paths: vec!["selected".into(), "empty".into(), "script".into()],
+                workspace_paths,
                 write: true,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
-                commands: vec![
-                    crate::tools::config::Program {
-                        name: "shell".into(),
-                        executable: shell.into(),
-                        sha256: crate::tools::types::hex_digest(&std::fs::read(shell).unwrap()),
-                        interpreter: true,
-                        inputs: vec![crate::tools::config::ProgramInput {
-                            path: workspace.join("runtime-input").to_str().unwrap().into(),
-                            destination: "fixture.txt".into(),
-                            sha256: crate::tools::types::hex_digest(b"pinned synthetic input"),
-                        }],
-                    },
-                    crate::tools::config::Program {
-                        name: "native".into(),
-                        executable: workspace.join("script").to_str().unwrap().into(),
-                        sha256: crate::tools::types::hex_digest(
-                            &std::fs::read(workspace.join("script")).unwrap(),
-                        ),
-                        interpreter: false,
-                        inputs: Vec::new(),
-                    },
-                ],
+                commands,
                 skills: Vec::new(),
                 mcp: vec![crate::tools::config::Server {
                     name: "local".into(),
@@ -2042,7 +2120,7 @@ done
         ));
     }
 
-    fn native_actors(directory: &Path) -> (PathBuf, PathBuf) {
+    fn native_actors(directory: &Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         use crate::test_process::BoundedOutput;
 
         let actor = directory.join("actor");
@@ -2070,6 +2148,189 @@ done
             "native actor compilation: {compiled:?}"
         );
         assert!(compiled.stdout.is_empty() && compiled.stderr.is_empty());
+        let sysctl_source = directory.join("sysctl-probe.c");
+        let sysctl_probe = directory.join("sysctl-probe");
+        std::fs::write(
+            &sysctl_source,
+            br#"#include <errno.h>
+#include <stdint.h>
+#include <pthread.h>
+#include <signal.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/sysctl.h>
+#include <mach/vm_page_size.h>
+#include <unistd.h>
+int main(int argc, char **argv) {
+    if (argc != 3) return 1;
+    sigset_t full_mask, previous_mask;
+    if (sigfillset(&full_mask) != 0) return 3;
+    int mask_result = pthread_sigmask(SIG_SETMASK, &full_mask, &previous_mask);
+    if (mask_result != 0) {
+        fprintf(stderr, "pthread_sigmask block: %d\n", mask_result);
+        return 3;
+    }
+    mask_result = pthread_sigmask(SIG_SETMASK, &previous_mask, NULL);
+    if (mask_result != 0) {
+        fprintf(stderr, "pthread_sigmask restore: %d\n", mask_result);
+        return 3;
+    }
+    int guarded = strcmp(argv[1], "shimmed") == 0;
+    int outside_pid = atoi(argv[2]);
+    if (outside_pid <= 0 || outside_pid == getpid()) return 1;
+    int page_mib[] = { CTL_HW, HW_PAGESIZE };
+    int page_size = 0;
+    size_t page_size_len = sizeof(page_size);
+    errno = 0;
+    int page_result = sysctl(page_mib, 2, &page_size, &page_size_len, NULL, 0);
+    int page_errno = errno;
+    long runtime_page_size = sysconf(_SC_PAGESIZE);
+    long clock_ticks = sysconf(_SC_CLK_TCK);
+    int named_compat_page = 0;
+    size_t named_compat_page_len = sizeof(named_compat_page);
+    errno = 0;
+    int named_compat_result = sysctlbyname("hw.pagesize_compat", &named_compat_page, &named_compat_page_len, NULL, 0);
+    int named_compat_errno = errno;
+    uint64_t named_page_size = 0;
+    size_t named_page_size_len = sizeof(named_page_size);
+    errno = 0;
+    int named_page_result = sysctlbyname("hw.pagesize", &named_page_size, &named_page_size_len, NULL, 0);
+    int named_page_errno = errno;
+    int kernel_mib[] = { CTL_KERN, KERN_OSTYPE };
+    char kernel_type[128];
+    size_t kernel_type_len = sizeof(kernel_type);
+    errno = 0;
+    int kernel_result = sysctl(kernel_mib, 2, kernel_type, &kernel_type_len, NULL, 0);
+    int kernel_errno = errno;
+    char named_kernel_type[128];
+    size_t named_kernel_type_len = sizeof(named_kernel_type);
+    errno = 0;
+    int named_kernel_result = sysctlbyname("kern.ostype", named_kernel_type, &named_kernel_type_len, NULL, 0);
+    int named_kernel_errno = errno;
+    int process_mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid() };
+    char process_info[4096];
+    size_t process_info_len = sizeof(process_info);
+    errno = 0;
+    int process_result = sysctl(process_mib, 4, process_info, &process_info_len, NULL, 0);
+    int process_errno = errno;
+    int outside_process_mib[] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, outside_pid };
+    char outside_process_info[4096];
+    size_t outside_process_info_len = sizeof(outside_process_info);
+    errno = 0;
+    int outside_process_result = sysctl(outside_process_mib, 4, outside_process_info, &outside_process_info_len, NULL, 0);
+    int outside_process_errno = errno;
+    int policy_ok = guarded
+        ? vm_page_size > 0 && runtime_page_size == (long)vm_page_size
+            && clock_ticks > 0
+            && getpagesize() == (int)vm_page_size
+            && page_result == -1 && page_errno == EPERM
+            && named_compat_result == -1 && named_compat_errno == EPERM
+            && named_page_result == -1 && named_page_errno == EPERM
+            && kernel_result == -1 && kernel_errno == EPERM
+            && named_kernel_result == -1 && named_kernel_errno == EPERM
+            && process_result == -1 && process_errno == EPERM
+            && outside_process_result == -1 && outside_process_errno == EPERM
+        : runtime_page_size > 0 && clock_ticks > 0 && getpagesize() == page_size
+            && page_result == 0 && page_size > 0
+            && runtime_page_size == page_size && page_size_len == sizeof(page_size)
+            && named_compat_result == 0 && named_compat_page == page_size
+            && named_compat_page_len == sizeof(named_compat_page)
+            && named_page_result == 0 && named_page_size_len == sizeof(named_page_size)
+            && kernel_result == 0 && kernel_type_len > 0
+            && named_kernel_result == 0 && named_kernel_type_len > 0
+            && process_result == 0 && process_info_len > 0
+            && outside_process_result == 0 && outside_process_info_len > 0;
+    if (!policy_ok) {
+        fprintf(stderr, "sysctl probe: guarded=%d sysconf=%ld clock_ticks=%ld page_result=%d page_errno=%d page_len=%zu compat_result=%d compat_errno=%d compat_len=%zu quad_result=%d quad_errno=%d quad_len=%zu kernel_result=%d kernel_errno=%d named_kernel_result=%d named_kernel_errno=%d process_result=%d process_errno=%d process_len=%zu outside_process_result=%d outside_process_errno=%d outside_process_len=%zu\n",
+            guarded, runtime_page_size, clock_ticks, page_result, page_errno, page_size_len,
+            named_compat_result, named_compat_errno, named_compat_page_len,
+            named_page_result, named_page_errno, named_page_size_len,
+            kernel_result, kernel_errno, named_kernel_result, named_kernel_errno,
+            process_result, process_errno, process_info_len,
+            outside_process_result, outside_process_errno, outside_process_info_len);
+        return 2;
+    }
+    puts("sysctl isolation policy ok");
+    return 0;
+}
+"#,
+        )
+        .unwrap();
+        let probe_compiled = std::process::Command::new("/usr/bin/xcrun")
+            .args([
+                "--sdk", "macosx", "clang", "-Wall", "-Wextra", "-Werror", "-O1",
+            ])
+            .arg(&sysctl_source)
+            .arg("-o")
+            .arg(&sysctl_probe)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .current_dir(directory)
+            .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+            .unwrap();
+        assert!(
+            probe_compiled.status.success(),
+            "native sysctl probe compilation: {probe_compiled:?}"
+        );
+        assert!(probe_compiled.stdout.is_empty() && probe_compiled.stderr.is_empty());
+        let rust_source = directory.join("rust-startup-probe.rs");
+        let rust_probe = directory.join("rust-startup-probe");
+        std::fs::write(
+            &rust_source,
+            "fn main() { println!(\"rust startup reached main\"); }\n",
+        )
+        .unwrap();
+        let mut sysroot_command = std::process::Command::new("rustc");
+        sysroot_command
+            .args(["--print", "sysroot"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .env_clear();
+        for name in ["PATH", "HOME", "RUSTUP_HOME"] {
+            if let Some(value) = std::env::var_os(name) {
+                sysroot_command.env(name, value);
+            }
+        }
+        let sysroot = sysroot_command
+            .bounded_output_for(Duration::from_secs(10), 4096)
+            .unwrap();
+        assert!(
+            sysroot.status.success(),
+            "Rust sysroot discovery: {sysroot:?}"
+        );
+        let sysroot = String::from_utf8(sysroot.stdout).unwrap().trim().to_owned();
+        let rustc = Path::new(&sysroot).join("bin/rustc");
+        let sdk = std::process::Command::new("/usr/bin/xcrun")
+            .args(["--sdk", "macosx", "--show-sdk-path"])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .current_dir(directory)
+            .bounded_output_for(Duration::from_secs(10), 4096)
+            .unwrap();
+        assert!(sdk.status.success(), "native SDK discovery: {sdk:?}");
+        let sdk = String::from_utf8(sdk.stdout).unwrap().trim().to_owned();
+        let rust_compiled = std::process::Command::new(rustc)
+            .args(["--edition=2021"])
+            .arg(&rust_source)
+            .arg("-o")
+            .arg(&rust_probe)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", directory)
+            .env("TMPDIR", directory)
+            .env("SDKROOT", sdk)
+            .current_dir(directory)
+            .bounded_output_for(Duration::from_secs(30), 16 * 1024)
+            .unwrap();
+        assert!(
+            rust_compiled.status.success(),
+            "native Rust startup actor compilation: {rust_compiled:?}"
+        );
+        assert!(rust_compiled.stdout.is_empty() && rust_compiled.stderr.is_empty());
         std::fs::copy(&actor, &plain).unwrap();
         std::fs::write(
             &entitlements,
@@ -2096,7 +2357,7 @@ done
         for executable in [&actor, &plain] {
             assert!(std::fs::metadata(executable).unwrap().len() < 1024 * 1024);
         }
-        (actor, plain)
+        (actor, plain, sysctl_probe, rust_probe)
     }
 
     async fn verify_uncertain_storage_is_retained(fixture: &Path) {
@@ -2410,7 +2671,7 @@ done
         }
         let mut fixture = tempfile::tempdir().unwrap();
         fixture.disable_cleanup(true);
-        let source = phase_workspace(script);
+        let source = phase_workspace(script, None);
         std::fs::write(fixture.path().join("errors"), []).unwrap();
         let listener = UnixListener::bind(fixture.path().join("crash")).unwrap();
         listener.set_nonblocking(true).unwrap();
@@ -2567,7 +2828,7 @@ done
         fixture.close().unwrap();
     }
 
-    fn phase_workspace(script: &Path) -> tempfile::TempDir {
+    fn phase_workspace(script: &Path, sysctl_probe: Option<(&Path, &Path)>) -> tempfile::TempDir {
         let source = tempfile::tempdir().unwrap();
         std::fs::write(source.path().join("selected"), b"before edit").unwrap();
         std::fs::write(source.path().join("omitted"), b"omitted synthetic data").unwrap();
@@ -2579,6 +2840,15 @@ done
         std::fs::create_dir(source.path().join("empty")).unwrap();
         std::fs::write(source.path().join("server.sh"), MCP_SCRIPT).unwrap();
         std::fs::copy(script, source.path().join("script")).unwrap();
+        if let Some((sysctl_probe, rust_probe)) = sysctl_probe {
+            std::fs::copy(sysctl_probe, source.path().join("sysctl-probe")).unwrap();
+            std::fs::copy(rust_probe, source.path().join("rust-startup-probe")).unwrap();
+            std::fs::set_permissions(
+                source.path().join("sysctl-probe"),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
         std::fs::set_permissions(
             source.path().join("script"),
             std::fs::Permissions::from_mode(0o6755),
@@ -2647,8 +2917,9 @@ done
         let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
         assert!(
             accepted.is_ok(),
-            "native {phase} readiness: {}",
-            diagnostic(&unit.root)
+            "native {phase} readiness: {}; {}",
+            diagnostic(&unit.root),
+            native_storage_snapshot(&unit.root)
         );
         let attestation = accepted.unwrap().unwrap().0.into_std().unwrap();
         assert_eq!(peer(&attestation).unwrap(), pid);
@@ -2662,13 +2933,36 @@ done
     )]
     #[allow(clippy::await_holding_lock)]
     async fn native_unit_owns_descendants_and_supervises_resources() {
+        use crate::test_process::BoundedOutput;
+
         let _gate = crate::test_process::NATIVE_GATE
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         let mut generated = tempfile::tempdir().unwrap();
         generated.disable_cleanup(true);
-        let (actor, plain) = native_actors(generated.path());
+        #[cfg(target_arch = "aarch64")]
+        {
+            let library = generated.path().join(super::super::RUNTIME_COMPAT_FILE);
+            std::fs::write(&library, super::super::RUNTIME_COMPAT_BYTES).unwrap();
+            let architectures = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--sdk", "macosx", "lipo"])
+                .arg(&library)
+                .args(["-verify_arch", "arm64", "arm64e"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", generated.path())
+                .env("TMPDIR", generated.path())
+                .current_dir(generated.path())
+                .bounded_output_for(Duration::from_secs(20), 16 * 1024)
+                .unwrap();
+            assert!(
+                architectures.status.success(),
+                "runtime compatibility library architectures: {architectures:?}"
+            );
+            assert!(architectures.stdout.is_empty() && architectures.stderr.is_empty());
+        }
+        let (actor, plain, sysctl_probe, rust_probe) = native_actors(generated.path());
         let disk_gate = disk_gate_actor(generated.path());
         verify_uncertain_storage_is_retained(generated.path()).await;
         verify_partial_storage_is_cleaned(generated.path()).await;
@@ -2677,6 +2971,20 @@ done
         verify_previous_boot_never_signals().await;
         verify_controller_crash_recovery(&plain, &disk_gate).await;
         verify_recovery_cancellation(&disk_gate, generated.path()).await;
+
+        let baseline = std::process::Command::new(&sysctl_probe)
+            .arg("baseline")
+            .arg(std::process::id().to_string())
+            .env_clear()
+            .current_dir(generated.path())
+            .bounded_output_for(Duration::from_secs(5), 1024)
+            .unwrap();
+        assert!(
+            baseline.status.success(),
+            "unsandboxed sysctl baseline: {baseline:?}"
+        );
+        assert_eq!(baseline.stdout, b"sysctl isolation policy ok\n");
+        assert!(baseline.stderr.is_empty());
 
         for phase in [
             "descendants",
@@ -2700,7 +3008,10 @@ done
                     .unwrap();
                 }
             }
-            let source = phase_workspace(&plain);
+            let source = phase_workspace(
+                &plain,
+                (phase == "command-profile").then_some((&sysctl_probe, &rust_probe)),
+            );
             let (root, mut attestation, listener) =
                 launch_helper(&mut unit, phase, source.path()).await;
             if matches!(phase, "storage" | "storage-drop" | "command-profile") {
@@ -2716,11 +3027,20 @@ done
                 .unwrap();
             }
             attestation.write_all(b"G").unwrap();
-            let accepted = tokio::time::timeout(Duration::from_secs(10), listener.accept()).await;
+            // Storage phases use the full product preparation window before the fixture times out.
+            let readiness_bound = if matches!(phase, "storage" | "storage-drop" | "command-profile")
+            {
+                PREPARATION_DEADLINE + Duration::from_secs(5)
+            } else {
+                Duration::from_secs(10)
+            };
+            let accepted = tokio::time::timeout(readiness_bound, listener.accept()).await;
             assert!(
                 accepted.is_ok(),
-                "native {phase} descendant readiness: {}",
-                diagnostic(&unit.root)
+                "native {phase} descendant readiness after {}s: {}; {}",
+                readiness_bound.as_secs(),
+                diagnostic(&unit.root),
+                native_storage_snapshot(&unit.root)
             );
             drop(attestation);
             let stream = accepted.unwrap().unwrap().0;
@@ -2892,11 +3212,12 @@ done
     #[test]
     #[ignore = "isolated helper owned by the native unit gate"]
     fn native_unit_helper() {
-        // The fixture owns a finite process and intentionally ignores the inherited CPU signal.
+        // The finite fixture ignores and blocks SIGXCPU to require external CPU supervision.
         assert!(ffi::ignore_cpu_signal_with_watchdog(75));
         let root = std::env::var_os("ARANY_TEST_NATIVE_UNIT_ROOT").unwrap();
         let root = Path::new(&root);
         let phase = std::env::var("ARANY_TEST_NATIVE_UNIT_PHASE").unwrap();
+        native_storage_stage(&phase, "helper-entered");
         if phase == "storage-free-cleanup" {
             let reactor = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2988,7 +3309,7 @@ done
                     rustix::process::Resource::Cpu,
                     rustix::process::Rlimit {
                         current: Some(CPU_LIMIT.as_secs()),
-                        maximum: Some(CPU_LIMIT.as_secs()),
+                        maximum: Some(75),
                     },
                 )
                 .unwrap();
@@ -3080,12 +3401,15 @@ done
             phase.as_str(),
             "storage" | "storage-drop" | "command-profile"
         ) {
+            native_storage_stage(&phase, "runtime-building");
             let reactor = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
+            native_storage_stage(&phase, "snapshot-runtime-building");
             let source = std::env::var_os("ARANY_TEST_NATIVE_UNIT_WORKSPACE").unwrap();
             let runtime = snapshot_runtime(Path::new(&source));
+            native_storage_stage(&phase, "command-storage-preparation-started");
             let limits = crate::tools::types::ToolLimits {
                 cache_requested_bytes: 0,
                 cache_bytes: 0,
@@ -3096,6 +3420,7 @@ done
             let volumes = reactor
                 .block_on(prepare_command_storage(root, &runtime, &limits))
                 .unwrap();
+            native_storage_stage(&phase, "command-storage-preparation-finished");
             assert_eq!(volumes[0].read("selected").unwrap(), b"after typed edit");
             assert!(!volumes[0].exists("omitted"));
             assert!(volumes[0].is_dir("empty"));
@@ -3105,10 +3430,13 @@ done
                 0o700
             );
             volumes[0].write("selected", b"disposable").unwrap();
+            native_storage_stage(&phase, "volume-verification-finished");
             let mut stream = UnixStream::connect(root.join("s")).unwrap();
             send(&mut stream, &[identity(std::process::id()).unwrap()]);
+            native_storage_stage(&phase, "second-readiness-published");
             let mut go = [0];
             stream.read_exact(&mut go).unwrap();
+            native_storage_stage(&phase, "second-readiness-released");
             assert_eq!(&go, b"G");
             if phase == "command-profile" {
                 use crate::test_process::BoundedOutput;
@@ -3158,6 +3486,68 @@ done
                 super::super::configure_resources().unwrap();
                 let mut stage = super::super::super::BootstrapStage::Workspace;
                 super::super::install(&task, &mut stage).unwrap();
+                let probe = runtime
+                    .config
+                    .commands
+                    .iter()
+                    .find(|definition| definition.name == "sysctl-probe")
+                    .expect("command-profile fixture includes its sysctl actor");
+                let mut probe = super::super::super::payload(
+                    probe,
+                    &["shimmed".into(), outside_pid.to_string()],
+                    ".",
+                    root,
+                    &runtime.config.runtime_grants,
+                    false,
+                )
+                .unwrap();
+                let (probe_status, probe_stdout, probe_stderr) = reactor
+                    .block_on(async {
+                        super::super::super::capture(
+                            probe.spawn().unwrap(),
+                            1024,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    })
+                    .unwrap();
+                assert!(
+                    probe_status.success(),
+                    "native sysctl command actor: {probe_status}; stderr={probe_stderr:?}"
+                );
+                assert_eq!(probe_stdout, b"sysctl isolation policy ok\n");
+                assert!(probe_stderr.is_empty());
+                let rust_probe = runtime
+                    .config
+                    .commands
+                    .iter()
+                    .find(|definition| definition.name == "rust-startup-probe")
+                    .expect("command-profile fixture includes its Rust startup actor");
+                let mut rust_probe = super::super::super::payload(
+                    rust_probe,
+                    &[],
+                    ".",
+                    root,
+                    &runtime.config.runtime_grants,
+                    false,
+                )
+                .unwrap();
+                let (rust_status, rust_stdout, rust_stderr) = reactor
+                    .block_on(async {
+                        super::super::super::capture(
+                            rust_probe.spawn().unwrap(),
+                            1024,
+                            Duration::from_secs(5),
+                        )
+                        .await
+                    })
+                    .unwrap();
+                assert!(
+                    rust_status.success(),
+                    "native Rust startup actor: {rust_status}; stdout={rust_stdout:?}; stderr={rust_stderr:?}"
+                );
+                assert_eq!(rust_stdout, b"rust startup reached main\n");
+                assert!(rust_stderr.is_empty());
                 let cpu = rustix::process::getrlimit(rustix::process::Resource::Cpu);
                 assert_eq!(cpu.current, None);
                 assert_eq!(cpu.maximum, None);

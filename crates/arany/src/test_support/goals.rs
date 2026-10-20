@@ -28,6 +28,8 @@ pub async fn replayed(
 
 /// Splits a journal at each action's first admission and asserts that the action's bound covers the
 /// Events up to the next admission, or up to the end of the journal (the terminal Events).
+const MAX_ACTION_SLOTS: usize = 200;
+
 pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, steering: bool) {
     use crate::Action;
     let primaries: std::collections::HashSet<_> = events
@@ -312,9 +314,61 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                 || action.max_events(),
                 |providers| action.max_events_for(&providers),
             );
+        // A primary step also reserves the Events that draining each in-flight editor appends.
+        let bound = bound
+            + if matches!(action, Action::Tool | Action::ProviderCall { .. }) {
+                let held = events[..*index]
+                    .iter()
+                    .map(|event| match event.event {
+                        Event::AgentSpawned {
+                            assignment: Some(_),
+                            ..
+                        } => 1_i64,
+                        Event::WorkerLeaseReleased { .. } => -1,
+                        _ => 0,
+                    })
+                    .sum::<i64>();
+                // Each editor still holding its lease drains with four Events and one shadow verdict.
+                usize::try_from(held).unwrap_or(0) * (4 + usize::from(verdicts > 0))
+            } else {
+                0
+            };
         assert!(
             bound >= observed,
             "{action:?} at {index} bounds {bound} Events but appends {observed}",
+        );
+    }
+    // Admission checks headroom once and holds nothing back, so each Event needs an earlier Store admission whose slots reach it.
+    // Sealed-data allowances budget their own chunks, so only call, Tool and settlement admissions count as headroom.
+    let admissions: Vec<_> = super::admissions::recorded(events[0].session_id)
+        .into_iter()
+        .filter(|(_, slots)| *slots <= MAX_ACTION_SLOTS)
+        .collect();
+    assert!(!admissions.is_empty(), "the Store recorded no admissions");
+    let first = admissions.iter().map(|(count, _)| *count).min();
+    for (position, envelope) in events.iter().enumerate() {
+        let admitted_elsewhere = matches!(
+            envelope.event,
+            Event::GoalStarted { .. }
+                | Event::GoalResumed { .. }
+                | Event::GoalRunLinked { .. }
+                | Event::SessionStarted { .. }
+                | Event::MessageAccepted { .. }
+                | Event::RunStarted { .. }
+                | Event::AgentSpawned {
+                    role: crate::AgentRole::Primary,
+                    ..
+                }
+        );
+        if admitted_elsewhere || first.is_none_or(|first| position < first) {
+            continue;
+        }
+        assert!(
+            admissions
+                .iter()
+                .any(|(count, slots)| *count <= position && position < count + slots),
+            "{:?} at {position} is past every earlier Store admission",
+            envelope.event.kind(),
         );
     }
 }

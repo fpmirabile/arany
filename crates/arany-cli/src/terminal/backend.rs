@@ -11,6 +11,7 @@ pub(super) struct TerminalBackend {
     cursor: Option<CursorQuery>,
     mode: TerminalMode,
     area: Rect,
+    position: Position,
 }
 
 impl TerminalBackend {
@@ -20,11 +21,16 @@ impl TerminalBackend {
             cursor,
             mode,
             area: Rect::default(),
+            position: Position::default(),
         }
     }
 
     pub(super) fn set_area(&mut self, area: Rect) {
         self.area = area;
+    }
+
+    pub(super) fn cursor_offset(&self) -> u16 {
+        self.position.y.saturating_sub(self.area.y)
     }
 
     pub(super) fn clear_owned(&mut self) -> io::Result<()> {
@@ -51,7 +57,9 @@ impl Backend for TerminalBackend {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
-        self.inner.draw(content)
+        self.inner.draw(content.inspect(|(_, y, _)| {
+            self.position.y = *y;
+        }))
     }
 
     fn append_lines(&mut self, count: u16) -> io::Result<()> {
@@ -88,7 +96,10 @@ impl Backend for TerminalBackend {
     }
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
-        self.inner.set_cursor_position(position)
+        let position = position.into();
+        self.inner.set_cursor_position(position)?;
+        self.position = position;
+        Ok(())
     }
 
     fn clear(&mut self) -> io::Result<()> {

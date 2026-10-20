@@ -27,7 +27,6 @@ use std::{
 };
 use tokio::sync::{mpsc, oneshot};
 
-#[cfg(target_os = "linux")]
 mod performance;
 
 fn in_memory() -> (Telemetry, InMemorySpanExporter) {
@@ -2018,9 +2017,8 @@ fn stalled_collector_cannot_hold_shutdown_open() {
     collector.join().expect("slow Collector thread");
 }
 
-#[cfg(target_os = "linux")]
 #[test]
-#[ignore = "native Linux trickle-response OTLP deadline release gate"]
+#[ignore = "native Linux and macOS trickle-response OTLP deadline release gate"]
 fn trickling_collector_cannot_hold_the_export_worker() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("local Collector");
     listener.set_nonblocking(true).expect("bounded accept");
@@ -2038,6 +2036,9 @@ fn trickling_collector_cannot_hold_the_export_worker() {
                 Err(error) => panic!("Collector accept failed: {error}"),
             }
         };
+        first
+            .set_nonblocking(false)
+            .expect("blocking first Collector connection");
         first
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("first request timeout");
@@ -2059,6 +2060,9 @@ fn trickling_collector_cannot_hold_the_export_worker() {
         let second_seen = loop {
             match listener.accept() {
                 Ok((mut second, _)) => {
+                    second
+                        .set_nonblocking(false)
+                        .expect("blocking second Collector connection");
                     second
                         .set_read_timeout(Some(Duration::from_secs(2)))
                         .expect("second request timeout");
