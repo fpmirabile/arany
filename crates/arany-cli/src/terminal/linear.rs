@@ -870,7 +870,7 @@ mod tests {
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /settings; Slash menu and chat view; during Run: locked\n",
-                "Command: /transcript; Show or hide transcript details; during Run: available\n",
+                "Command: /transcript; Write or toggle transcript details; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
         );

@@ -663,10 +663,7 @@ pub(super) async fn submit_objective(
                 {
                     break "terminal input cleanup failed".to_owned();
                 }
-                if terminal.mode() == crate::terminal::TerminalMode::Classic
-                    && !terminal.is_linear()
-                    && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
-                {
+                if terminal.ignores_page_key(input) {
                     continue;
                 }
                 match terminal.handle_transcript_input(input, view) {

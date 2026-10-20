@@ -185,7 +185,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
         InteractiveCommand::Settings => "Slash menu and chat view",
-        InteractiveCommand::Transcript => "Show or hide transcript details",
+        InteractiveCommand::Transcript => "Write or toggle transcript details",
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Status => "Session status",
         InteractiveCommand::New => "New Session",

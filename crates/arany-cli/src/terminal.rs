@@ -958,6 +958,13 @@ impl AttachedTerminal {
         Ok(())
     }
 
+    #[must_use]
+    pub fn ignores_page_key(&self, input: TerminalInput) -> bool {
+        self.mode == TerminalMode::Classic
+            && !self.is_linear()
+            && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
+    }
+
     pub fn handle_transcript_input(
         &mut self,
         input: TerminalInput,
@@ -972,19 +979,16 @@ impl AttachedTerminal {
             self.toggle_transcript(view)?;
             return Ok(true);
         }
-        if self.mode == TerminalMode::Classic && !self.is_linear() {
-            match input {
-                TerminalInput::PageUp | TerminalInput::PageDown => return Ok(true),
-                TerminalInput::HistoryFind => {
-                    self.prepare_frame()?;
-                    self.insert_native(
-                        history::MessageKind::Notice,
-                        "Use your terminal's find; Ctrl+T writes details to scrollback",
-                    )?;
-                    return Ok(true);
-                }
-                _ => {}
-            }
+        if self.mode == TerminalMode::Classic
+            && !self.is_linear()
+            && input == TerminalInput::HistoryFind
+        {
+            self.prepare_frame()?;
+            self.insert_native(
+                history::MessageKind::Notice,
+                "Use your terminal's find; Ctrl+T writes details to scrollback",
+            )?;
+            return Ok(true);
         }
         Ok(false)
     }

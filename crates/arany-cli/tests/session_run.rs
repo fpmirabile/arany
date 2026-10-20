@@ -423,13 +423,11 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     for character in "retained 🚀 draft".chars() {
                         draft.apply(TerminalInput::Character(character));
                     }
-                    for input in [
-                        TerminalInput::PageUp,
-                        TerminalInput::PageDown,
-                        TerminalInput::HistoryFind,
-                    ] {
-                        assert!(terminal.handle_transcript_input(input, &view).unwrap());
-                    }
+                    assert!(
+                        terminal
+                            .handle_transcript_input(TerminalInput::HistoryFind, &view)
+                            .unwrap()
+                    );
                     let mut details = view.clone();
                     let mut run = view.runs[0].clone();
                     run.display.push(arany::DisplayChunk {
