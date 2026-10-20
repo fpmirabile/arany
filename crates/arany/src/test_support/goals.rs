@@ -535,8 +535,8 @@ impl ForegroundWorkerProvider {
             0 => super::scenario::tool_outcome(self.worker_command()),
             1 => super::scenario::tool_outcome(ToolCall::Read {
                 path: "notes/a".into(),
-                offset: 0,
-                limit: 128,
+                offset: None,
+                limit: Some(128),
             }),
             _ => finish_with("Primary verified published notes"),
         }
@@ -682,8 +682,8 @@ impl crate::Provider for ForegroundWorkerProvider {
                 self.background_started.notified().await;
                 super::scenario::tool_outcome(ToolCall::Read {
                     path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
+                    offset: None,
+                    limit: Some(128),
                 })
             }
             (AgentPhase::ChildWork, 0 | 1)
@@ -699,8 +699,8 @@ impl crate::Provider for ForegroundWorkerProvider {
                 if step == 0 {
                     super::scenario::tool_outcome(ToolCall::Read {
                         path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
+                        offset: None,
+                        limit: Some(128),
                     })
                 } else {
                     if matches!(
@@ -721,8 +721,8 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::ChildWork, _) if self.case == "headroom_child" => {
                 super::scenario::tool_outcome(ToolCall::Read {
                     path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
+                    offset: None,
+                    limit: Some(128),
                 })
             }
             (AgentPhase::RootSynthesis, _)
@@ -747,8 +747,8 @@ impl crate::Provider for ForegroundWorkerProvider {
                 }
                 super::scenario::tool_outcome(ToolCall::Read {
                     path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
+                    offset: None,
+                    limit: Some(128),
                 })
             }
             (AgentPhase::ChildWork, 0) if self.case == "calls" => {
@@ -781,8 +781,8 @@ impl crate::Provider for ForegroundWorkerProvider {
                 );
                 super::scenario::tool_outcome(ToolCall::Read {
                     path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
+                    offset: None,
+                    limit: Some(128),
                 })
             }
             (AgentPhase::ChildWork, 3) => {
@@ -831,16 +831,16 @@ impl crate::Provider for ForegroundWorkerProvider {
                 } else {
                     super::scenario::tool_outcome(ToolCall::Read {
                         path: "notes/a".into(),
-                        offset: 0,
-                        limit: 128,
+                        offset: None,
+                        limit: Some(128),
                     })
                 }
             }
             (AgentPhase::RootSynthesis, 0) if self.case == "calls" => {
                 super::scenario::tool_outcome(ToolCall::Read {
                     path: "notes/a".into(),
-                    offset: 0,
-                    limit: 128,
+                    offset: None,
+                    limit: Some(128),
                 })
             }
             (AgentPhase::RootSynthesis, 0 | 1) => finish_with("Primary verified published notes"),

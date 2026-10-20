@@ -605,8 +605,8 @@ async fn native_file_journey_helper() {
     let calls = vec![
         ToolCall::Read {
             path: "src/main.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
         ToolCall::Edit {
             path: "src/main.txt".into(),
@@ -671,8 +671,8 @@ async fn native_file_journey_helper() {
         },
         ToolCall::Read {
             path: "src/linked.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         },
     ];
     let requests = Arc::new(Mutex::new(Vec::new()));

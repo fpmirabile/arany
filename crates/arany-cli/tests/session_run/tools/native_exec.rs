@@ -1037,12 +1037,12 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
                         json!({"outcome":{"type":"tool","call":{"operation":"command","program":"bash","args":["src/check.sh"],"cwd":""}}})
                     }
                     1 => {
-                        json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":0,"limit":4096}}})
+                        json!({"outcome":{"type":"tool","call":{"operation":"read","path":"src/note.txt","offset":null,"limit":null}}})
                     }
                     2 => {
                         assert!(observations[1].get("call").is_none());
                         assert_eq!(observations[1]["workspace_effect"], "none");
-                        assert_eq!(observations[1]["output"]["text"], "native note\n");
+                        assert_eq!(observations[1]["output"]["text"], "1\tnative note\n");
                         assert_eq!(observations[1]["output"]["sha256"], hash(b"native note\n"));
                         json!({"outcome":{"type":"tool","call":{"operation":"edit","path":"src/note.txt","expected_digest":observations[1]["output"]["sha256"],"old":"native note\n","new":"native note\n2026-10-06\n"}}})
                     }

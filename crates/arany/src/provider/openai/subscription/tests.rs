@@ -730,7 +730,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         history_summary: None,
         steps: Vec::new(),
     });
-    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":0,"limit":4096}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
+    let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":null,"limit":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
     let stream = format!(
         "data: {}\n\n",
         json!({"type":"response.completed","response":response})
@@ -745,7 +745,7 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
         ProviderOutcome::Tools(requests) if matches!(
             requests[..],
             [crate::tools::ToolRequest {
-                call: crate::tools::ToolCall::Read { offset: 0, limit: 4096, .. },
+                call: crate::tools::ToolCall::Read { offset: None, limit: None, .. },
                     ..
             }]
         )
@@ -1299,9 +1299,29 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
     let reply = json!({"id":"resp_1","status":"completed","model":"model-a","output":[
         {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"CIPHERTEXT=="},
         {"type":"function_call","id":"fc_1","call_id":"call_1","name":"arany_read",
-         "arguments":json!({"path":"README.md","offset":0,"limit":10}).to_string(),"status":"completed"}
+         "arguments":json!({"path":"README.md","offset":null,"limit":10}).to_string(),"status":"completed"}
     ],"usage":{"input_tokens":1,"output_tokens":1}});
     let conversation = render::conversation(&coding).unwrap();
+    for (offset, limit, accepted) in [
+        (json!(null), json!(null), true),
+        (json!(1), json!(2000), true),
+        (json!(2001), json!(1), true),
+        (json!(0), json!(1), false),
+        (json!(1), json!(0), false),
+        (json!(1), json!(2001), false),
+    ] {
+        let mut fixture = reply.clone();
+        fixture["output"][1]["arguments"] =
+            json!(json!({"path":"README.md","offset":offset,"limit":limit}).to_string());
+        assert_eq!(
+            wire::decode_run(
+                &serde_json::to_vec(&fixture).unwrap(),
+                &wire::RunScope::new(&coding, &conversation, TOKEN)
+            )
+            .is_ok(),
+            accepted
+        );
+    }
     let decoded = wire::decode_run(
         &serde_json::to_vec(&reply).unwrap(),
         &wire::RunScope::new(&coding, &conversation, TOKEN),
@@ -1331,8 +1351,8 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         .push(crate::provider::test_support::observation(
             crate::tools::ToolCall::Read {
                 path: "README.md".into(),
-                offset: 0,
-                limit: 10,
+                offset: None,
+                limit: Some(10),
             },
             "{}",
         ));

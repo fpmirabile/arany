@@ -31,8 +31,8 @@ use crate::provider::test_support::observation;
 fn read(path: &str) -> ToolCall {
     ToolCall::Read {
         path: path.into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     }
 }
 

@@ -184,8 +184,8 @@ impl ToolArgumentShape {
         }
         match call {
             ToolCall::Read { offset, limit, .. } => {
-                shape.read_offset = Some(*offset);
-                shape.read_limit = Some(*limit);
+                shape.read_offset = *offset;
+                shape.read_limit = *limit;
             }
             ToolCall::Edit { old, new, .. } => {
                 shape.old_bytes = Some(old.len());

@@ -652,8 +652,8 @@ async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_t
             std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
             let first = ToolCall::Read {
                 path: "notes/input".into(),
-                offset: 0,
-                limit: 64,
+                offset: None,
+                limit: Some(64),
             };
             let rules_before = host.rules();
             let exact = unguarded(HOOK);
@@ -756,8 +756,8 @@ async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approva
                     arany::test_support::scenario::plan_outcome(plan(&call)),
                     tool_outcome(ToolCall::Read {
                         path: "notes/input".into(),
-                        offset: 0,
-                        limit: 64,
+                        offset: None,
+                        limit: Some(64),
                     }),
                     finish("candidate"),
                     tool_outcome(call.clone()),
@@ -823,8 +823,8 @@ async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
                     }),
                     tool_outcome(ToolCall::Read {
                         path: "notes/input".into(),
-                        offset: 0,
-                        limit: 64,
+                        offset: None,
+                        limit: Some(64),
                     }),
                     finish("fact"),
                     arany::test_support::scenario::plan_outcome(plan(&call)),
@@ -968,7 +968,7 @@ fn command_output_truncation_continues_integrates_and_replays_without_execution(
                 assert!(stdout.ends_with("line 19999\nline 20000\n"));
                 assert!(stdout.contains("\n…["));
                 assert!(
-                    observation.output.len() < 64 * 1024,
+                    observation.output.len() <= 64 * 1024,
                     "{}",
                     observation.output.len()
                 );

@@ -516,8 +516,8 @@ async fn fallback_after_a_tool_observation_never_redispatches_the_tool() {
     let state = temp.path().join("state");
     let read = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 4096,
+        offset: None,
+        limit: None,
     };
     // The clock pauses after the Tool result, for the backoff only.
     let mut primary = ScriptedProvider::new(vec![])
@@ -1360,8 +1360,8 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
             ScriptedProvider::new(vec![
                 tool_outcome(arany::ToolCall::Read {
                     path: "notes/facts.txt".into(),
-                    offset: 0,
-                    limit: 4096,
+                    offset: None,
+                    limit: None,
                 }),
                 finish("read facts"),
             ])

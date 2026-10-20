@@ -109,8 +109,8 @@ fn poisoned_state_fails_closed() {
     ));
     assert!(!ledger.allows_tool(&crate::tools::ToolCall::Read {
         path: "src/main.rs".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     }));
     assert!(!ledger.admits(Action::ProviderCall {
         previews: false,

@@ -1624,8 +1624,8 @@ async fn primary_tool_step_events_match_the_snapshot() {
     };
     let read = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     };
     let git = arany::ToolCall::GitStatus {
         path: "notes".into(),
@@ -1709,11 +1709,11 @@ async fn primary_tool_step_events_match_the_snapshot() {
 }
 
 #[tokio::test]
-async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit() {
+async fn primary_and_researcher_reads_receive_the_general_rendered_ceiling() {
     let read = || arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     };
     let finish = || {
         ProviderOutcome::Answer(Answer {
@@ -1754,8 +1754,8 @@ async fn researcher_tool_results_use_the_general_ceiling_reduced_by_context_fit(
         READ_ONLY,
     )
     .await;
-    assert!(result_bytes(&child) > 16 * 1024);
-    assert!(result_bytes(&primary) > result_bytes(&child));
+    assert_eq!(result_bytes(&child), 64 * 1024);
+    assert_eq!(result_bytes(&primary), 64 * 1024);
 }
 
 #[tokio::test]
@@ -1770,8 +1770,8 @@ async fn researcher_tool_step_events_match_the_snapshot() {
             "in-process read",
             arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             RESEARCHER_READ,
         ),
@@ -1822,7 +1822,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62426 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1840,7 +1840,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62431 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1858,7 +1858,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1876,7 +1876,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1896,7 +1896,7 @@ GoalProviderCallReserved
 ProviderCallRecorded RootPlan
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1914,7 +1914,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 GoalProviderCallReserved
 ProviderCallRecorded ToolReview
 ToolFinished Succeeded
@@ -1934,7 +1934,7 @@ RunStarted
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
-ToolStarted result_bytes=62423 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded RootPlan
@@ -1955,7 +1955,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59099 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Succeeded
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -1979,7 +1979,7 @@ ProviderCallRecorded RootPlan
 AgentSpawned
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
-ToolStarted result_bytes=59101 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
+ToolStarted result_bytes=65536 runtime_ms=60000 cache_bytes=67108864 cache_transfer_ms=0
 ToolFinished Denied
 GoalProviderCallReserved
 ProviderCallRecorded ChildWork
@@ -2874,8 +2874,8 @@ mod routing {
         // The clock pauses after the Guard Read, only for the backoff before the switch.
         let mut first = ScriptedProvider::new(vec![tool_outcome(arany::ToolCall::Read {
             path: "notes/facts.txt".into(),
-            offset: 0,
-            limit: 4096,
+            offset: None,
+            limit: None,
         })])
         .with_profile("scripted", "spare-first")
         .with_before_call(1, tokio::time::pause);
@@ -3300,8 +3300,8 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
             }),
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/facts.txt".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             }),
             ProviderOutcome::Answer(Answer {
                 text: "Applied the Skill.".into(),

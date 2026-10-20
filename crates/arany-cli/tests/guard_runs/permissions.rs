@@ -44,8 +44,8 @@ fn call(kind: &str) -> arany::ToolCall {
         },
         _ => arany::ToolCall::Read {
             path: "notes/facts.txt".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         },
     }
 }
@@ -1511,7 +1511,7 @@ async fn hook_hostile_output_is_stripped_bounded_and_never_an_instruction() {
     let widening = json!({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
         "permissionDecision": "allow",
-        "updatedInput": {"operation": "read", "path": "/", "offset": 0, "limit": 1},
+        "updatedInput": {"operation": "read", "path": "/", "offset": null, "limit": 1},
     }});
     let case = hook_case(
         hook_settings(
@@ -2128,19 +2128,18 @@ async fn agent_definition_guard_active_time_too_short_for_parsing_fails_the_run_
 async fn agent_definition_guard_goal_compacts_tool_history_with_definitions_present() {
     let fixture = Fixture::new(None, false);
     agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-    const PAGE: usize = 4096;
     const READS: usize = 104;
     std::fs::write(
         fixture.workspace.join("notes/data.txt"),
-        "x".repeat(PAGE * READS),
+        format!("{}\n", "x".repeat(1023)).repeat(4 * READS),
     )
     .unwrap();
     let mut outcomes: Vec<_> = (0..READS)
         .map(|page| {
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: u32::try_from(page * PAGE).unwrap(),
-                limit: u32::try_from(PAGE).unwrap(),
+                offset: Some(u32::try_from(page * 4 + 1).unwrap()),
+                limit: Some(4),
             })
         })
         .collect();
@@ -3082,8 +3081,8 @@ async fn narrow_run(script: String, later: Vec<arany::ToolCall>) -> NarrowCase {
 async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
     let narrowed = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 8,
+        offset: None,
+        limit: Some(8),
     };
     let case = narrow_case(narrowing_script(&json!(narrowed), "\"limit\":32")).await;
     assert_eq!(case.tools.len(), 2);
@@ -3152,8 +3151,8 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
         .unwrap();
     second.call = arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit: 32,
+        offset: None,
+        limit: Some(32),
     };
     assert!(SessionView::replay(case.session, &forged).is_err());
 }
@@ -3161,21 +3160,21 @@ async fn hook_narrowed_read_dispatches_once_and_denies_the_original() {
 #[tokio::test]
 async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
     let widening =
-        json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 64});
+        json!({"operation": "read", "path": "notes/facts.txt", "offset": null, "limit": 64});
     let case = narrow_case(narrowing_script(&widening, "\"limit\":32")).await;
     assert_eq!(case.tools.len(), 1);
     assert_eq!(
         case.observed,
         vec!["Hook denied this Tool: hook input update does not narrow"]
     );
-    let other = json!({"operation": "read", "path": "notes/other.txt", "offset": 0, "limit": 8});
+    let other = json!({"operation": "read", "path": "notes/other.txt", "offset": null, "limit": 8});
     let case = narrow_case(narrowing_script(&other, "\"limit\"")).await;
     assert_eq!(case.tools.len(), 1);
 
     let read = |limit: u32| arany::ToolCall::Read {
         path: "notes/facts.txt".into(),
-        offset: 0,
-        limit,
+        offset: None,
+        limit: Some(limit),
     };
     // 32 narrows to 8, 8 narrows to 4: the replacement's own narrowing is the second one in the step.
     let chain = format!(
@@ -3206,7 +3205,7 @@ async fn hook_widening_or_repeated_updates_deny_without_a_second_dispatch() {
 
 #[tokio::test]
 async fn hook_identity_update_proceeds_unchanged() {
-    let same = json!({"operation": "read", "path": "notes/facts.txt", "offset": 0, "limit": 32});
+    let same = json!({"operation": "read", "path": "notes/facts.txt", "offset": null, "limit": 32});
     let case = narrow_case(narrowing_script(&same, "\"limit\"")).await;
     assert_eq!(case.tools.len(), 1);
     assert!(case.tools[0].permission_verdict.as_ref().unwrap().approved);
@@ -3505,15 +3504,15 @@ mod lifecycle_hooks {
             };
             std::fs::write(
                 fixture.workspace.join("notes/data.txt"),
-                "x".repeat(usize::try_from(page).unwrap()),
+                format!("{}\n", "x".repeat(1023)).repeat(usize::try_from(page / 1024).unwrap()),
             )
             .unwrap();
             let mut outcomes: Vec<_> = (0..reads)
                 .map(|_| {
                     tool_outcome(arany::ToolCall::Read {
                         path: "notes/data.txt".into(),
-                        offset: 0,
-                        limit: page,
+                        offset: None,
+                        limit: None,
                     })
                 })
                 .collect();

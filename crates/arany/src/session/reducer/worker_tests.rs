@@ -413,8 +413,8 @@ impl Fixture {
             self.primary,
             ToolCall::Read {
                 path: "src/a".into(),
-                offset: 0,
-                limit: 32,
+                offset: None,
+                limit: Some(32),
             },
             EffectTarget::Workspace,
         );
@@ -697,8 +697,8 @@ fn fixture_with_manifest(
         primary,
         ToolCall::Read {
             path: "src/base".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         },
         EffectTarget::Workspace,
     );
@@ -1520,8 +1520,8 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("AgentSpawned", 11),
         ("ProviderCallRecorded", 13),
         ("AgentFinished", 10),
-        ("ToolStarted", 12),
-        ("ToolFinished", 17),
+        ("ToolStarted", 13),
+        ("ToolFinished", 18),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2503,8 +2503,8 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
         f.child,
         ToolCall::Read {
             path: "src/base".into(),
-            offset: 0,
-            limit: 32,
+            offset: None,
+            limit: Some(32),
         },
         f.target(0),
     );

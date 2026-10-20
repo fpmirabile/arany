@@ -72,7 +72,7 @@ fn answer_text() -> &'static str {
 }
 
 fn read_arguments() -> Value {
-    json!({"path": "README.md", "offset": 0, "limit": 4096})
+    json!({"path": "README.md", "offset": null, "limit": null})
 }
 
 fn function_names(body: &Value) -> Vec<String> {
@@ -922,14 +922,14 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             "read bounds",
             json!([function_call(
                 "arany_read",
-                &json!({"path":"README.md","offset":0,"limit":65537})
+                &json!({"path":"README.md","offset":null,"limit":65537})
             )]),
         ),
         (
             "path escape",
             json!([function_call(
                 "arany_read",
-                &json!({"path":"../outside","offset":0,"limit":4096})
+                &json!({"path":"../outside","offset":null,"limit":null})
             )]),
         ),
         (
@@ -940,7 +940,7 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             "operation injected",
             json!([function_call(
                 "arany_read",
-                &json!({"operation":"edit","path":"README.md","offset":0,"limit":4096})
+                &json!({"operation":"edit","path":"README.md","offset":null,"limit":null})
             )]),
         ),
         (
@@ -995,7 +995,7 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
     let request = primary_request(MODEL);
     for (call, expected) in [
         (
-            json!({"operation":"read","path":"README.md","offset":0,"limit":65537}),
+            json!({"operation":"read","path":"README.md","offset":null,"limit":65537}),
             Stage::OutcomeReadBounds,
         ),
         (
@@ -1007,7 +1007,7 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
             Stage::OutcomeToolEmptyEdit,
         ),
         (
-            json!({"operation":"read","path":"./README.md","offset":0,"limit":4096}),
+            json!({"operation":"read","path":"./README.md","offset":null,"limit":null}),
             Stage::OutcomeToolPath,
         ),
         (
@@ -1398,7 +1398,7 @@ fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion
         "completed",
         json!([function_call(
             "arany_read",
-            &json!({"path": "src/lib.rs", "offset": 0, "limit": 1024})
+            &json!({"path": "src/lib.rs", "offset": null, "limit": 1024})
         )]),
     );
     assert!(matches!(
@@ -1648,4 +1648,35 @@ fn final_answer_message_followed_by_a_call_is_a_contract_failure() {
     );
     let phase_less = message("working");
     assert!(decode(&request, &response("completed", json!([phase_less, call]))).is_ok());
+}
+
+#[test]
+fn read_arguments_require_nullable_line_ranges() {
+    let request = primary_request(MODEL);
+    for (offset, limit, accepted) in [
+        (json!(null), json!(null), true),
+        (json!(1), json!(2000), true),
+        (json!(u32::MAX), json!(1), true),
+        (json!(0), json!(1), false),
+        (json!(1), json!(0), false),
+        (json!(1), json!(2001), false),
+        (json!(-1), json!(1), false),
+        (json!(1.5), json!(1), false),
+    ] {
+        let args = json!({"path":"README.md","offset":offset,"limit":limit});
+        let fixture = response("completed", json!([function_call("arany_read", &args)]));
+        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{args}");
+    }
+    for args in [
+        json!({"path":"README.md","offset":null}),
+        json!({"path":"README.md","limit":null}),
+    ] {
+        assert!(
+            decode(
+                &request,
+                &response("completed", json!([function_call("arany_read", &args)]))
+            )
+            .is_err()
+        );
+    }
 }

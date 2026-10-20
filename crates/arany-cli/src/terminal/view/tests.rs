@@ -3102,8 +3102,8 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             let long = crate::presentation::tool_fixture(
                 arany::ToolCall::Read {
                     path: "界".repeat(70),
-                    offset: 0,
-                    limit: 100,
+                    offset: None,
+                    limit: Some(100),
                 },
                 r#"{"text":"one\ntwo\n"}"#,
             );
