@@ -605,3 +605,124 @@ fn continuation_notes_follow_the_stop_feedback_without_touching_the_prefix() {
     assert_eq!(before.messages[..kept], after.messages[..kept]);
     assert!(after.messages.last().unwrap().blocks.len() > 1);
 }
+
+#[test]
+fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
+    use crate::session::{ProposalRefusal, ProposalRefusalCause::*};
+    for cause in [
+        InvalidArguments,
+        Phase,
+        PlanMissing,
+        PlanInvalid,
+        PlanBudgetOutsideGoal,
+        PlanBudgetSpent,
+        PlanScopeExcludesCall,
+        PlanOutsideGrant,
+        ArgumentBytes,
+        LeaseOverlap,
+        NotOffered,
+        FinishInvalid,
+        DelegateInvalid,
+    ] {
+        for tools_enabled in [false, true] {
+            let mut request = request(vec![step("first", "src/lib.rs")]);
+            if !tools_enabled {
+                request.input.tools = None;
+                request.input.role = PromptRole::ReadOnly;
+            }
+            let before = conversation(&request).expect("original request");
+            request.input.last_answer_refused = Some(ProposalRefusal {
+                operation: "arany_write".into(),
+                cause,
+            });
+            let rendered = conversation(&request).expect("refusal request");
+            assert_eq!(rendered.system, before.system);
+            assert_eq!(
+                before.messages,
+                rendered.messages[..before.messages.len()],
+                "a refusal must preserve the earlier request prefix"
+            );
+            assert_eq!(rendered.messages.len(), before.messages.len() + 1);
+            let tail = rendered.messages.last().expect("refusal data");
+            assert_eq!(tail.role, Role::User);
+            assert_eq!(tail.blocks.len(), 1);
+            let Block::Text(text) = &tail.blocks[0] else {
+                panic!("refusal must be labelled data");
+            };
+            let value: Value = serde_json::from_str(text).expect("refusal data block");
+            assert_eq!(value["scope"], "worker_coordination");
+            assert_eq!(
+                rendered
+                    .tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(|tool| &tool.name).collect::<Vec<_>>()),
+                before
+                    .tools
+                    .as_ref()
+                    .map(|tools| tools.iter().map(|tool| &tool.name).collect::<Vec<_>>())
+            );
+            let notes = rendered
+                .messages
+                .iter()
+                .flat_map(|message| &message.blocks)
+                .filter_map(|block| match block {
+                    Block::Text(text) => serde_json::from_str::<Value>(text).ok(),
+                    _ => None,
+                })
+                .filter_map(|value| value["data"].get("last_answer_refused").cloned())
+                .collect::<Vec<_>>();
+            assert_eq!(notes.len(), 1);
+            assert_eq!(notes[0]["operation"], "arany_write");
+            assert_eq!(notes[0]["cause"], json!(cause));
+            assert!(
+                !notes[0]["remediation"]
+                    .as_str()
+                    .expect("fixed remediation")
+                    .is_empty()
+            );
+            assert_eq!(notes[0].as_object().expect("closed note").len(), 3);
+            if cause == PlanMissing {
+                assert_eq!(
+                    notes[0]["remediation"],
+                    "Supply a valid plan_contract before a non-prelude Tool call."
+                );
+            }
+            if cause == PlanBudgetOutsideGoal {
+                assert_eq!(
+                    notes[0]["remediation"],
+                    "The plan budget must not exceed the Goal budget."
+                );
+            }
+            assert!(notes[0].to_string().len() <= 512);
+            assert!(!notes[0].to_string().contains("canary"));
+            request.input.last_answer_refused = None;
+            assert_eq!(
+                conversation(&request).expect("repaired request").messages,
+                before.messages,
+                "clearing a refusal must preserve the earlier request prefix"
+            );
+        }
+    }
+    let mut request = request(Vec::new());
+    request.input.last_answer_refused = Some(crate::session::ProposalRefusal {
+        operation: "arany_write".into(),
+        cause: crate::session::ProposalRefusalCause::PlanMissing,
+    });
+    for catalog in [
+        json!({"padding": "x".repeat(MAX_TOOL_CATALOG_BYTES - 20)}).to_string(),
+        "[]".into(),
+    ] {
+        request.input.tools.as_mut().expect("Tools").catalog = catalog;
+        assert!(conversation(&request).is_ok());
+    }
+    request
+        .input
+        .last_answer_refused
+        .as_mut()
+        .expect("refusal")
+        .operation = "x".repeat(MAX_TOOL_CATALOG_BYTES);
+    assert!(matches!(
+        conversation(&request),
+        Err(ProviderError::Rejected)
+    ));
+}

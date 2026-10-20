@@ -613,24 +613,20 @@ async fn session_admission_preserves_cli_child_restrictions() {
             selection.collaboration = collaboration.clone();
             selection.max_active_children = limit;
             let provider = Arc::new(
-                ScriptedProvider::new(vec![
-                    arany::ProviderOutcome::Delegate(arany::Delegate {
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "Inspect".into(),
-                            profile: None,
-                        }],
-                        agent: None,
-                    }),
-                    arany::ProviderOutcome::Finish(arany::Finish {
-                        summary: "Child".into(),
-                        result: "Inspected".into(),
-                    }),
-                    arany::ProviderOutcome::Finish(arany::Finish {
-                        summary: "Answer".into(),
-                        result: "Done".into(),
-                    }),
-                ])
+                ScriptedProvider::new(
+                    (0..3)
+                        .map(|_| {
+                            arany::ProviderOutcome::Delegate(arany::Delegate {
+                                children: vec![arany::ChildAssignment {
+                                    editor: None,
+                                    objective: "Inspect".into(),
+                                    profile: None,
+                                }],
+                                agent: None,
+                            })
+                        })
+                        .collect(),
+                )
                 .with_profile("openai", "gpt-5.4"),
             );
             let (mut writer, mut reader, mut task) = start_with_config(
@@ -693,7 +689,7 @@ async fn session_admission_preserves_cli_child_restrictions() {
                 "{method} under {policy:?} spawned a child"
             );
             let requests = provider.requests.lock().unwrap();
-            assert_eq!(requests.len(), 1, "{method} under {policy:?}");
+            assert_eq!(requests.len(), 3, "{method} under {policy:?}");
             assert_eq!(requests[0].collaboration, policy, "{method}");
             assert_eq!(
                 response["error"]["data"]["reason"], "turnFailed",

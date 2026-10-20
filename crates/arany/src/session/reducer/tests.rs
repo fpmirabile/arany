@@ -421,6 +421,11 @@ mod goal_replay_tests {
                 Some(RunFailure::ProposalRefused),
                 true,
             ),
+            (
+                RunDisposition::Failed,
+                Some(RunFailure::RefusalLimit),
+                false,
+            ),
             (RunDisposition::Failed, None, false),
             (RunDisposition::Cancelled, None, true),
             (
@@ -4101,6 +4106,79 @@ mod goal_replay_tests {
         }
         let (goal, run, agent) = (view.goals[0].id, view.runs[0].id, view.runs[0].agents[0].id);
         (view, goal, run, agent)
+    }
+
+    #[test]
+    fn primary_refusal_continuations_validate_phase_and_identical_pair_limit() {
+        use crate::session::{ProposalRefusal, ProposalRefusalCause};
+        let same = ProposalRefusal {
+            operation: "arany_write".into(),
+            cause: ProposalRefusalCause::PlanMissing,
+        };
+        for (middle, limited) in [
+            (same.clone(), true),
+            (
+                ProposalRefusal {
+                    operation: "arany_read".into(),
+                    ..same.clone()
+                },
+                false,
+            ),
+            (
+                ProposalRefusal {
+                    cause: ProposalRefusalCause::PlanInvalid,
+                    ..same.clone()
+                },
+                false,
+            ),
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            for (index, refused) in [same.clone(), middle, same.clone()].into_iter().enumerate() {
+                let mut refusal = record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::InvalidResponse,
+                    Some(0),
+                );
+                refusal.failure_reason =
+                    Some(crate::provider::ProviderFailureReason::ProposalRefused);
+                refusal.refusal = Some(refused);
+                apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+                if index > 0 {
+                    let mut wrong_phase = refusal.clone();
+                    wrong_phase.phase = AgentPhase::RootSynthesis;
+                    assert!(rejected(
+                        &view,
+                        Event::ProviderCallRecorded {
+                            run_id: run,
+                            agent_run_id: agent,
+                            record: wrong_phase
+                        }
+                    ));
+                }
+                apply(
+                    &mut view,
+                    Event::ProviderCallRecorded {
+                        run_id: run,
+                        agent_run_id: agent,
+                        record: refusal,
+                    },
+                )
+                .unwrap();
+                assert!(rejected(
+                    &view,
+                    Event::ToolStarted {
+                        run_id: run,
+                        agent_run_id: agent,
+                        active_ceiling_ms: 0,
+                        intent: read_intent(run, agent, "src/main.rs")
+                    }
+                ));
+            }
+            assert_eq!(
+                rejected(&view, reserve_child_call(goal, run, agent)),
+                limited
+            );
+        }
     }
 
     fn read_intent(run: RunId, agent: AgentRunId, path: &str) -> EffectIntent {

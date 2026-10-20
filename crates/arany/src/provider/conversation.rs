@@ -54,6 +54,7 @@ pub struct RunInput {
     pub context_summary: Option<String>,
     pub child_results: Vec<ChildResult>,
     pub tools: Option<ToolContext>,
+    pub last_answer_refused: Option<crate::session::ProposalRefusal>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -84,6 +85,7 @@ impl RunInput {
             context_summary: None,
             child_results: Vec::new(),
             tools: None,
+            last_answer_refused: None,
         }
     }
 }

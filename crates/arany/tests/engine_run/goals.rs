@@ -490,10 +490,16 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
                 result: "answer".into(),
             })])
         } else {
-            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: String::new(),
-                result: "invalid finish".into(),
-            })])
+            ScriptedProvider::new(
+                (0..3)
+                    .map(|_| {
+                        ProviderOutcome::Finish(Finish {
+                            summary: String::new(),
+                            result: "invalid finish".into(),
+                        })
+                    })
+                    .collect(),
+            )
         };
         if cancel {
             provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
@@ -991,7 +997,7 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
 }
 
 #[tokio::test]
-async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_close() {
+async fn refused_answer_on_the_last_allowed_call_is_a_budget_close() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
@@ -1026,8 +1032,11 @@ async fn invalid_response_on_the_last_allowed_call_is_a_failure_not_a_budget_clo
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 1);
-    assert!(!goal.budget_closed);
-    assert!(view.continuable_goal().is_none());
+    assert!(goal.budget_closed);
+    assert_eq!(
+        view.continuable_goal().map(|source| source.id),
+        Some(goal.id)
+    );
 }
 
 #[tokio::test]
@@ -2883,10 +2892,11 @@ async fn plan_with_fewer_runs_than_linked_is_refused_as_an_invalid_plan() {
     // Resuming links a second Run, so a plan allowing one Run is invalid for this Goal.
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 1;
-    let provider = ScriptedProvider::new(vec![crate::tool_outcome(
-        facts_read(),
-        Some(Box::new(plan)),
-    )]);
+    let provider = ScriptedProvider::new(
+        (0..3)
+            .map(|_| crate::tool_outcome(facts_read(), Some(Box::new(plan.clone()))))
+            .collect(),
+    );
     let provider = Arc::new(provider);
     let engine = facts_engine(
         StateRoot::open_existing(&state_path).expect("state"),
@@ -4924,14 +4934,14 @@ async fn step_facts_and_notes_are_written_before_render() {
 
 #[tokio::test]
 async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_refused() {
-    for (restated_plan, expected) in [
-        (facts_plan(facts_digest("v1")), RunStatus::Finished),
+    for (restated_plan, differs) in [
+        (facts_plan(facts_digest("v1")), false),
         (
             arany::GoalPlanContract {
                 mission: "A different mission".into(),
                 ..facts_plan(facts_digest("v1"))
             },
-            RunStatus::Failed,
+            true,
         ),
     ] {
         let temp = tempfile::tempdir().expect("temporary root");
@@ -4957,14 +4967,19 @@ async fn restating_the_recorded_plan_contract_is_a_no_op_and_a_different_one_is_
         )
         .await
         .expect("Run");
-        assert_eq!(outcome.run.status, expected);
+        assert_eq!(outcome.run.status, RunStatus::Finished);
         engine.close().await.expect("engine shutdown");
-        let (events, _) = replayed(&state_path, outcome.session_id).await;
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
         let recorded = events
             .iter()
             .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
             .count();
         assert_eq!(recorded, 1, "the contract is journaled once");
+        let refusal = view.runs[0].agents[0].provider_calls[1].refusal.as_ref();
+        assert_eq!(
+            refusal.map(|refusal| refusal.cause),
+            differs.then_some(arany::ProposalRefusalCause::PlanInvalid)
+        );
     }
 }
 
@@ -5779,12 +5794,16 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
                 profile: None,
             });
         }
-        let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Delegate(
-            Delegate {
-                agent: None,
-                children: assignments,
-            },
-        )]));
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..3)
+                .map(|_| {
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: assignments.clone(),
+                    })
+                })
+                .collect(),
+        ));
         let engine = engine_support::open(
             StateRoot::admit(&state_path).unwrap(),
             EngineConfig::default(),
@@ -5799,7 +5818,7 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
         assert_eq!(outcome.run.status, RunStatus::Failed, "{case}");
         assert_eq!(
             provider.requests.lock().unwrap().len(),
-            1,
+            3,
             "{case}: no child egress"
         );
         assert!(provider.responses.lock().unwrap().is_empty());

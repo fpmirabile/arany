@@ -207,6 +207,10 @@ pub(super) fn apply(
         } => {
             let run = active_run(current, *run_id)?;
             if (*disposition == RunDisposition::Failed) != failure.is_some()
+                || *failure == Some(crate::session::RunFailure::RefusalLimit)
+                    && !run
+                        .primary()
+                        .is_some_and(|agent| agent.refusal_limit_reached())
                 || run.agents.is_empty()
                 || run
                     .agents

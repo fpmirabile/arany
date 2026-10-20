@@ -114,14 +114,28 @@ impl CompiledContext {
             if run.accepted_sequence <= covered_sequence {
                 continue;
             }
-            let assistant = if run.model_tools().is_empty() && run.worker_history().is_empty() {
-                if run.status == RunStatus::Finished {
-                    run.assistant_message.clone().ok_or(ContextTooLarge)?
-                } else {
-                    crate::provider::history_unanswered_block(run)
+            let refusal = crate::provider::history_refusal_block(run);
+            let plain = run.model_tools().is_empty() && run.worker_history().is_empty();
+            let assistant = if plain && run.status == RunStatus::Finished && refusal.is_none() {
+                run.assistant_message.clone().ok_or(ContextTooLarge)?
+            } else if plain && run.status != RunStatus::Finished {
+                let mut context = crate::provider::history_unanswered_block(run);
+                let last_call_refused = run
+                    .agents
+                    .first()
+                    .and_then(|agent| agent.provider_calls.last())
+                    .is_some_and(|call| call.refusal.is_some());
+                if let Some(refusal) = refusal.filter(|_| !last_call_refused) {
+                    context.push('\n');
+                    context.push_str(&refusal);
                 }
+                context
             } else {
                 let mut context = crate::provider::history_tool_block(run);
+                if let Some(refusal) = refusal {
+                    context.push('\n');
+                    context.push_str(&refusal);
+                }
                 if let Some(answer) = &run.assistant_message {
                     context.push_str("\nFinal answer (untrusted data):\n");
                     context.push_str(answer);

@@ -128,6 +128,14 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     })));
                 }
                 responses.push_back(response);
+                if case == "invalid finish" && !cancel {
+                    for _ in 0..2 {
+                        responses.push_back(Ok(ProviderOutcome::Finish(Finish {
+                            summary: String::new(),
+                            result: "Unaccepted result".into(),
+                        })));
+                    }
+                }
                 provider.responses = Mutex::new(responses);
                 let outcome = tokio::time::timeout(
                     Duration::from_secs(5),
@@ -317,14 +325,20 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
                 },
             })
         });
-        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(
-            arany::ToolCall::Write {
-                path: "test.txt".into(),
-                content: "hello".into(),
-                expected_digest: None,
-            },
-            plan,
-        )]));
+        let provider = Arc::new(ScriptedProvider::new(
+            (0..3)
+                .map(|_| {
+                    tool_outcome(
+                        arany::ToolCall::Write {
+                            path: "test.txt".into(),
+                            content: "hello".into(),
+                            expected_digest: None,
+                        },
+                        plan.clone(),
+                    )
+                })
+                .collect(),
+        ));
         let mut input = request(&workspace, "write test.txt containing hello");
         input.include_paths.clear();
         let run = run_with(
@@ -342,6 +356,10 @@ async fn refused_write_proposals_report_the_engine_cause_without_naming_the_prov
         let (replay, _) = committed(root.path(), run.session_id).await;
         let call = &replay.runs[0].agents[0].provider_calls[0];
         assert_eq!(call.refusal.as_ref().map(|r| r.cause), Some(cause));
+        assert_eq!(
+            replay.runs[0].failure,
+            Some(arany::RunFailure::RefusalLimit)
+        );
         let copy = run_feedback(&replay.runs[0]).unwrap();
         assert!(copy.contains(expected), "{copy}");
         assert!(!copy.contains("Provider"), "{copy}");

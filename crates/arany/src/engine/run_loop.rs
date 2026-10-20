@@ -556,6 +556,12 @@ impl<'a> RunLoop<'a> {
             if self.ledger().active_time_exhausted() {
                 break Exit::Stopped;
             }
+            if refused {
+                if self.primary_refusal()?.1 {
+                    break Exit::Failed(RunFailure::RefusalLimit);
+                }
+                continue;
+            }
             match first {
                 CallResult::Response(ProviderResponse {
                     outcome: ProviderOutcome::Finish(finish),
@@ -606,11 +612,7 @@ impl<'a> RunLoop<'a> {
                 CallResult::Cancelled => break Exit::Cancelled,
                 CallResult::Response(_) if budget_refused => break Exit::Budget,
                 _ => {
-                    break Exit::Failed(if refused {
-                        RunFailure::ProposalRefused
-                    } else {
-                        RunFailure::ProviderCall
-                    });
+                    break Exit::Failed(RunFailure::ProviderCall);
                 }
             }
         };
@@ -726,7 +728,28 @@ impl<'a> RunLoop<'a> {
         Ok(true)
     }
 
+    fn primary_refusal(&self) -> Result<(Option<ProposalRefusal>, bool), EngineError> {
+        self.ledger().view(|view| {
+            let agent = view
+                .runs
+                .last()
+                .ok_or(EngineError::InvalidHistory)?
+                .agents
+                .iter()
+                .find(|agent| agent.id == self.primary_id)
+                .ok_or(EngineError::InvalidHistory)?;
+            Ok((
+                agent
+                    .provider_calls
+                    .last()
+                    .and_then(|call| call.refusal.clone()),
+                agent.refusal_limit_reached(),
+            ))
+        })?
+    }
+
     async fn primary_context(&self, root: &mut ProviderRequest) -> Result<(), EngineError> {
+        root.input.last_answer_refused = self.primary_refusal()?.0;
         self.record_steering_note(root).await?;
         let facts = self.ledger().context_facts()?;
         if let Some(feedback) = continuation_feedback(&mut root.input) {
