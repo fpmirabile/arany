@@ -97,6 +97,19 @@ pub(super) async fn worker_case(case: &'static str) {
     if case.starts_with("clear_") {
         private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes","reads"],"write":true,"commands":[],"skills":[],"mcp":[]}"#);
     }
+    if case == "clear_after_wave" {
+        let shell = std::fs::canonicalize("/bin/sh").unwrap();
+        let hash: String = Sha256::digest(std::fs::read(&shell).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        private_file(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
+            "version":1,"workspace_paths":["notes","reads"],"write":true,
+            "commands":[{"name":"sh","executable":shell,"sha256":hash,"interpreter":true,"inputs":[]}],
+            "skills":[],"mcp":[]
+        })).unwrap());
+        private_file(&state.join("permissions.json"), br#"{"hooks":{"PostToolUse":[{"matcher":"Edit","hooks":[{"type":"command","command":"mkdir .ssh","timeout":5}]}]}}"#);
+    }
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();
     // Omitted background must select the foreground path.
@@ -326,6 +339,35 @@ pub(super) async fn worker_case(case: &'static str) {
         let result = result.expect(case);
         assert_eq!(result.run.run.status, RunStatus::Finished, "{case}");
         assert_eq!(run.status, RunStatus::Finished, "{case}: strict replay");
+        if case == "clear_after_wave" {
+            let context = calls
+                .iter()
+                .find(|call| call.phase == AgentPhase::RootSynthesis)
+                .unwrap()
+                .input
+                .tools
+                .as_ref()
+                .unwrap();
+            assert!(
+                context
+                    .steps
+                    .iter()
+                    .any(|step| step.observations.iter().enumerate().any(
+                        |(index, observation)| {
+                            matches!(
+                                observation.intent.call,
+                                arany::ToolCall::ApplyChangeset { .. }
+                            ) && step.hook_feedback.get(&index).is_some_and(|lines| {
+                                lines.iter().any(|line| {
+                                    line.contains("command_unguarded")
+                                        && line.contains("mkdir .ssh")
+                                })
+                            })
+                        }
+                    )),
+                "integration carries its Guard-failure rerun proposal before clearing"
+            );
+        }
         assert_eq!(child_calls, 4, "{case}: worker completed its script");
         assert_eq!(
             run.tools

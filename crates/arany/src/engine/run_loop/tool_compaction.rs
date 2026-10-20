@@ -137,6 +137,7 @@ impl RunLoop<'_> {
     ) -> Result<PrimaryContext, EngineError> {
         let reserve = self.controls.tools.map_or(0, |runtime| {
             crate::tools::types::MAX_TOOL_RESULT_BYTES
+                + crate::provider::max_turn_bytes(request.max_output_tokens)
                 + crate::tools::ToolRuntime::step_context_reserve(
                     true,
                     Self::maximum_feedback_reserve(runtime),

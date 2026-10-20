@@ -1837,7 +1837,14 @@ impl RunLoop<'_> {
                 let step = tools.steps.last_mut().ok_or(EngineError::InvalidHistory)?;
                 for tool in integrations {
                     let index = step.observations.len();
-                    let feedback = tool.hook_feedback();
+                    let mut feedback = tool.hook_feedback();
+                    for proposal in self.hook_rerun_feedback(tool.intent.digest())? {
+                        if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
+                            <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
+                        {
+                            feedback.push(proposal);
+                        }
+                    }
                     if !feedback.is_empty() {
                         step.hook_feedback.insert(index, feedback);
                     }
@@ -2056,7 +2063,10 @@ impl RunLoop<'_> {
                     tools.rendered_len()
                         + guidance.as_ref().map_or(0, String::len)
                         + CHILD_INTENT_RESERVE_BYTES,
-                    0,
+                    crate::tools::ToolRuntime::step_context_reserve(
+                        false,
+                        Self::maximum_feedback_reserve(runtime),
+                    ),
                 )
                 .is_some_and(|capacity| capacity >= MIN_CHILD_RESULT_BYTES);
             if !room {
@@ -2336,6 +2346,115 @@ fn restrict_catalog(
 #[cfg(test)]
 mod delegation_bound_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn child_tool_room_includes_the_dispatch_feedback_reserve() {
+        use crate::engine::run_loop::{LoopControls, RunIdentity};
+        use crate::test_support::{engine as engine_support, scenario::*};
+        use crate::tools::ToolRuntime;
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = crate::test_support::goals::facts_workspace(temp.path(), "Fact");
+        let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+        let engine = engine_support::open(state, crate::EngineConfig::default()).unwrap();
+        let provider = std::sync::Arc::new(ScriptedProvider::new(vec![
+            crate::test_support::goals::finish_with("Seed context"),
+        ]));
+        let mut input = request(&workspace, "Inspect notes");
+        input.include_paths.clear();
+        let outcome = engine_support::run_to_end(&engine, &provider, input)
+            .await
+            .unwrap();
+        let view = engine
+            .journal
+            .store()
+            .load_view(outcome.session_id)
+            .await
+            .unwrap()
+            .unwrap();
+        let ledger = crate::engine::ledger::GoalLedger::new(view, Some(outcome.goal_id));
+
+        for hooks in [false, true] {
+            let settings = if hooks {
+                br#"{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":"unpinned","args":[]}]}]}}"#.as_slice()
+            } else {
+                b"{}".as_slice()
+            };
+            let path = engine.state.path().join("permissions.json");
+            std::fs::write(&path, settings).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            let config = serde_json::from_value(serde_json::json!({
+                "version":1,"workspace_paths":["notes"],"write":false,
+                "commands":[],"skills":[],"mcp":[]
+            }))
+            .unwrap();
+            let mut runtime = ToolRuntime::admit(
+                config,
+                ToolRuntime::load_permissions(&engine.state).unwrap(),
+                None,
+                &workspace,
+                &engine.state,
+                std::env::current_exe().unwrap(),
+            )
+            .unwrap();
+            let reserve = ToolRuntime::step_context_reserve(
+                false,
+                RunLoop::maximum_feedback_reserve(&runtime),
+            );
+            for (headroom, answer_only) in [(0, true), (reserve - 1, true), (reserve, false)] {
+                let tools = runtime.research_context(16).unwrap();
+                runtime
+                    .set_context_limit(
+                        tools.rendered_len()
+                            + CHILD_INTENT_RESERVE_BYTES
+                            + MIN_CHILD_RESULT_BYTES
+                            + headroom,
+                    )
+                    .unwrap();
+                let runner = RunLoop::new(
+                    &engine.journal,
+                    crate::AdmittedProviders::single(provider.clone()),
+                    RunIdentity {
+                        session_id: outcome.session_id,
+                        run_id: outcome.run.id,
+                        goal_id: Some(outcome.goal_id),
+                        primary_id: outcome.run.agents[0].id,
+                    },
+                    LoopControls {
+                        policy: CollaborationPolicy::Single,
+                        concurrency: 1,
+                        goal_phase: crate::GoalPhase::Implementation,
+                        cancellation: Default::default(),
+                        tools: Some(&runtime),
+                        approvals: None,
+                        steering: None,
+                    },
+                    &ledger,
+                    None,
+                );
+                let mut child = ChildWork {
+                    agent_run_id: AgentRunId::new(),
+                    objective: "Inspect notes".into(),
+                    definition: None,
+                    turns_remaining: 2,
+                    editor: false,
+                    source_context: None,
+                    stop_hook_feedback: Vec::new(),
+                    tools: Some(tools),
+                    tool_calls_remaining: 16,
+                };
+                let root = crate::provider::test_support::primary_request("test-model");
+                let offered = runner.child_request(&mut child, &root).unwrap();
+                assert_eq!(
+                    offered.input.tools.unwrap().answer_only(),
+                    answer_only,
+                    "hooks={hooks}, headroom={headroom}"
+                );
+            }
+        }
+        engine.close().await.unwrap();
+    }
 
     #[test]
     fn missing_editor_definition_matches_editor_stop_hooks_only() {

@@ -204,7 +204,7 @@ fn occurrence_digest(
 }
 
 impl RunLoop<'_> {
-    pub(super) fn hook_rerun_feedback(
+    pub(in crate::engine::run_loop) fn hook_rerun_feedback(
         &self,
         subject: [u8; 32],
     ) -> Result<Vec<String>, EngineError> {
