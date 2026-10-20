@@ -2955,7 +2955,11 @@ mod routing {
         let first = route(
             ScriptedProvider::new(vec![])
                 .with_profile("scripted", "compaction")
-                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+                .with_compactions(
+                    (0..=arany::MAX_PROVIDER_RETRIES)
+                        .map(|_| Err(ProviderError::RemoteHttp(503)))
+                        .collect(),
+                ),
         );
         let second = route(
             ScriptedProvider::new(vec![])
@@ -2992,6 +2996,8 @@ mod routing {
             .fork_session(outcome.session_id, workspace.clone(), None)
             .await
             .unwrap();
+        // The journaled retry delays stay; only the waits end at once.
+        arany::FaultPlan::skip_retry_backoff(fork);
         let record = engine
             .compact_session(&bindings, fork, workspace.clone())
             .await
@@ -3031,7 +3037,11 @@ mod routing {
         let first = route(
             ScriptedProvider::new(vec![])
                 .with_profile("scripted", "compaction")
-                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+                .with_compactions(
+                    (0..=arany::MAX_PROVIDER_RETRIES)
+                        .map(|_| Err(ProviderError::RemoteHttp(503)))
+                        .collect(),
+                ),
         );
         let second = route(
             ScriptedProvider::new(vec![])
@@ -3071,6 +3081,7 @@ mod routing {
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
         let before = store.load_view(fork).await.unwrap().unwrap();
         store.close().await.unwrap();
+        arany::FaultPlan::skip_retry_backoff(outcome.session_id);
         engine
             .compact_session(&bindings, outcome.session_id, workspace.clone())
             .await

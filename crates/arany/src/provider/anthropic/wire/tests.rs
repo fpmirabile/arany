@@ -885,6 +885,34 @@ fn message_start() -> Value {
 }
 
 #[test]
+fn a_clean_end_after_a_framed_event_is_a_retryable_cut_and_a_non_stream_is_not() {
+    for (label, wire, cut) in [
+        ("after message_start", sse(&[message_start()]), true),
+        ("no framed event", "not an event stream".to_owned(), false),
+        (
+            "unterminated frame",
+            "data: {\"type\":\"message_start\"".to_owned(),
+            false,
+        ),
+    ] {
+        let (preview, _) = crate::provider::ResponsePreview::new();
+        let mut decoder = MessageStream::new(KEY, "model-1", preview);
+        assert!(decoder.feed(wire.as_bytes()).unwrap().is_none(), "{label}");
+        let error = decoder.end_error();
+        assert_eq!(
+            error.retry_cause().map(|(cause, _)| cause),
+            cut.then_some(crate::provider::RetryCause::StreamCut),
+            "{label}"
+        );
+        assert_eq!(
+            error.failure_reason(),
+            Some(crate::ProviderFailureReason::StreamProtocol),
+            "{label}"
+        );
+    }
+}
+
+#[test]
 fn overloaded_stream_after_tool_input_never_allows_fallback() {
     let (preview, _) = crate::provider::ResponsePreview::new();
     let wire = sse(&[

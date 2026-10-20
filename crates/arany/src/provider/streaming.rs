@@ -126,6 +126,16 @@ pub(super) struct SseFramer {
 }
 
 impl SseFramer {
+    // A clean end after a well-formed event is a cut, retried on the same route; a body that
+    // never framed an event is not a stream.
+    pub(super) fn end_error(&self) -> ProviderError {
+        if self.events > 0 {
+            ProviderError::StreamEnded
+        } else {
+            ProviderError::InvalidStream
+        }
+    }
+
     pub(super) fn new() -> Self {
         Self {
             bytes: 0,

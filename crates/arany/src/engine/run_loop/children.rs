@@ -1019,19 +1019,25 @@ impl RunLoop<'_> {
             .then(|| crate::provider::ResponsePreview::new().0);
         let request = active.request.clone();
         let mut cancellation = self.controls.cancellation.clone();
+        let steering = self.controls.steering.clone();
+        let session_id = self.session_id;
         let handle = queue.calls.spawn(async move {
-            if !delay.is_zero() {
-                tokio::select! {
-                    biased;
-                    () = cancellation.cancelled() => {
-                        return crate::engine::routing::AttemptResult {
-                            result: CallResult::Cancelled,
-                            transient: None,
-                            visible: false,
-                        };
-                    }
-                    () = tokio::time::sleep(delay) => {}
-                }
+            // A pause or cancellation in the wait ends the child's call unsent; the wave then drains.
+            if !delay.is_zero()
+                && crate::engine::routing::back_off(
+                    session_id,
+                    delay,
+                    &mut cancellation,
+                    steering.as_ref(),
+                )
+                .await
+                    != crate::engine::routing::Backoff::Elapsed
+            {
+                return crate::engine::routing::AttemptResult {
+                    result: CallResult::Cancelled,
+                    transient: None,
+                    visible: false,
+                };
             }
             crate::engine::routing::invoke_attempt(
                 provider.as_ref(),
@@ -1101,6 +1107,7 @@ impl RunLoop<'_> {
                 };
                 let facts = self.routing.attempt_facts(
                     active.request.agent_run_id,
+                    role,
                     deadline,
                     abort.is_some()
                         || self.controls.cancellation.is_cancelled()
@@ -1116,7 +1123,7 @@ impl RunLoop<'_> {
                     AttemptDecision::Accept => None,
                     AttemptDecision::Retry { cause, delay } => self
                         .routing
-                        .retry(scope, role, cause, delay, &active.request)
+                        .retry(scope, role, cause, delay, Some(&active.request))
                         .await?
                         .then_some(delay),
                     AttemptDecision::Switch => {

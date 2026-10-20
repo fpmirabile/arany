@@ -1011,6 +1011,13 @@ mod goal_replay_tests {
             config(CollaborationPolicy::Single, false),
         ));
         let mut completion = complete_run_and_goal(goal, run, actor);
+        // The reservation admits 20 s of active time; the valid waits use 14 s of it.
+        if let Event::GoalProviderCallReserved {
+            active_ceiling_ms, ..
+        } = &mut completion[0]
+        {
+            *active_ceiling_ms = 20_000;
+        }
         for attempt in 1..=3 {
             completion.insert(usize::from(attempt), retry(attempt));
         }
@@ -1047,9 +1054,10 @@ mod goal_replay_tests {
                 change(retry);
             }
         };
-        for case in 0..12 {
+        for case in 0..13 {
             let mut invalid = events.clone();
             match case {
+                12 => edit(&mut invalid, 3, &|retry| retry.delay_ms = 15_000),
                 0 => edit(&mut invalid, 1, &|retry| retry.attempt = 2),
                 1 => {
                     let mut fourth = retry(3);

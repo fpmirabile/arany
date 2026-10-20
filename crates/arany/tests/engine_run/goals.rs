@@ -5824,7 +5824,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
 }
 
 #[tokio::test]
-async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
+async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
@@ -5868,13 +5868,9 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
-    assert_eq!(
-        run.provider_fallbacks
-            .iter()
-            .filter(|(_, fallback)| fallback.role == arany::ProviderRole::Compaction)
-            .count(),
-        1,
-        "the started switch completes before cancellation applies"
+    assert!(
+        run.provider_fallbacks.is_empty() && run.provider_retries.is_empty(),
+        "a cancelled compaction call starts no further attempt"
     );
     let record = events
         .iter()
@@ -5883,7 +5879,7 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
             _ => None,
         })
         .expect("compaction record");
-    assert_eq!(record.model, "compact-fallback");
+    assert_eq!(record.model, "compact-primary");
     assert!(matches!(
         record.status,
         arany::CompactionStatus::Failed {

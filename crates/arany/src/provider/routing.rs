@@ -260,6 +260,7 @@ impl ProviderFallback {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RetryCause {
+    Transport,
     RateLimited,
     ServerError,
     StreamCut,
@@ -285,6 +286,7 @@ impl ProviderRetry {
 
     pub fn notice(&self) -> String {
         let cause = match self.cause {
+            RetryCause::Transport => "connection failed",
             RetryCause::RateLimited => "rate limited",
             RetryCause::ServerError => "server error",
             RetryCause::StreamCut => "stream interrupted",

@@ -389,11 +389,8 @@ pub(super) fn respond_after_catalog(
             })
         )
     };
+    // A stream that ends before completion is a retryable cut; the wire corpus owns it.
     for (stage, stream) in [
-        (
-            "EndBeforeCompleted",
-            "data: {\"type\":\"response.created\"}\n\n".to_owned(),
-        ),
         (
             "IncompleteResponse",
             "data: {\"type\":\"response.incomplete\"}\n\n".to_owned(),
@@ -756,7 +753,7 @@ pub(super) fn accept_check_and_run(
         .write_all(format!("{FAILED_OBJECTIVE}\r").as_bytes())
         .expect("submit synthetic rejected Run");
     wait_for_stage(output, input, transcript, answered, failure_at,
-        b"Notice: Error: Run failed. Provider reported a usage limit. Check the selected account's usage before trying again. No answer was committed. Use /agents to inspect this Run.\r\n", Some(signed));
+        b"Notice: Error: Run failed. Provider rate limited the request. Wait before trying again. No answer was committed. Use /agents to inspect this Run.\r\n", Some(signed));
     wait_for_stage(
         output,
         input,
@@ -777,11 +774,6 @@ pub(super) fn accept_check_and_run(
             .any(|part| part == FAILURE_BODY_CANARY.as_bytes())
     );
     for (stage, reason, events) in [
-        (
-            "EndBeforeCompleted",
-            arany::ProviderFailureReason::StreamProtocol,
-            1,
-        ),
         (
             "IncompleteResponse",
             arany::ProviderFailureReason::StreamProtocol,
@@ -1162,9 +1154,10 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
     let call = &failed.agents[0].provider_calls[0];
     assert_eq!(call.phase, arany::AgentPhase::RootPlan);
     assert_eq!(call.disposition, arany::ProviderCallDisposition::Rejected);
+    // A 429 whose body names no quota is a rate limit, not proof of an exhausted plan.
     assert_eq!(
         call.failure_reason,
-        Some(arany::ProviderFailureReason::UsageLimit)
+        Some(arany::ProviderFailureReason::RateLimited)
     );
     assert_eq!(
         (

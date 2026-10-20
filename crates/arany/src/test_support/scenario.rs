@@ -512,7 +512,7 @@ pub type CompletionBoundaryCase = (
     Option<crate::ProviderFailureReason>,
 );
 
-pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 11] {
+pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
     [
         (
             "rejected call",
@@ -522,10 +522,16 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 11] {
         ),
         (
             // A Retry-After past the action deadline is never waited out, so the 429 settles at once.
-            "usage limit with a hostile Retry-After",
+            "rate limit with a hostile Retry-After",
             Err(ProviderError::RateLimited(Some(Duration::from_secs(
                 u64::from(u32::MAX),
             )))),
+            ProviderCallDisposition::Rejected,
+            Some(crate::ProviderFailureReason::RateLimited),
+        ),
+        (
+            "quota exhausted",
+            Err(ProviderError::QuotaExceeded),
             ProviderCallDisposition::Rejected,
             Some(crate::ProviderFailureReason::UsageLimit),
         ),

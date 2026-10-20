@@ -216,8 +216,7 @@ impl Event {
             Self::ProviderRetryScheduled { retry, .. } => {
                 use crate::provider::{MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS};
                 let backoff = crate::provider::ProviderRetry::backoff(retry.attempt).as_millis();
-                if retry.role != crate::provider::ProviderRole::Compaction
-                    && (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
+                if (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
                     && (backoff..=u128::from(MAX_PROVIDER_RETRY_DELAY_MS))
                         .contains(&u128::from(retry.delay_ms))
                 {

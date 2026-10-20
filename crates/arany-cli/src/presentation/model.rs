@@ -1077,6 +1077,11 @@ mod tests {
                 "Provider reported a usage limit. Check the selected account's usage before trying again.",
             ),
             (
+                ProviderFailureReason::RateLimited,
+                ProviderCallDisposition::Rejected,
+                "Provider rate limited the request. Wait before trying again.",
+            ),
+            (
                 ProviderFailureReason::UsageTemporarilyUnavailable,
                 ProviderCallDisposition::Unavailable,
                 "Provider usage is temporarily unavailable. Check provider status before trying again.",

@@ -764,7 +764,7 @@ mod account_default_tests {
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
         assert_eq!(payload_version("RunStarted"), Some(16));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(12));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(13));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -1688,6 +1688,7 @@ mod payload_version_tests {
             ("HookFinished", 6),
             ("AgentFinished", 8),
             ("AgentFinished", 9),
+            ("ProviderCallRecorded", 12),
             ("ProviderCallRecorded", 8),
             ("RunStarted", 14),
             ("RunStarted", 15),
@@ -2096,7 +2097,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(12));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(13));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,

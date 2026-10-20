@@ -214,9 +214,9 @@ impl AnthropicProvider {
             .request(request)?
             .send()
             .await
-            .map_err(|_| ProviderError::Unavailable)?;
+            .map_err(|error| super::send_failure(&error))?;
         if !response.status().is_success() {
-            return Err(super::http_failure(response.status(), response.headers()));
+            return Err(super::http_failure(&mut response).await);
         }
         let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
         if raw_reflects_secret(&bytes, &self.key) {
@@ -306,9 +306,9 @@ impl Provider for AnthropicProvider {
             .header(reqwest::header::ACCEPT, "text/event-stream")
             .send()
             .await
-            .map_err(|_| ProviderError::Unavailable)?;
+            .map_err(|error| super::send_failure(&error))?;
         if !response.status().is_success() {
-            return Err(super::http_failure(response.status(), response.headers()));
+            return Err(super::http_failure(&mut response).await);
         }
         super::streaming::validate_stream_response(&response)?;
         let mut decoder = wire::MessageStream::new(&self.key, &self.identity.model, preview);
@@ -321,7 +321,7 @@ impl Provider for AnthropicProvider {
                 return self.decode_run(&bytes, &request, &conversation);
             }
         }
-        Err(ProviderError::InvalidStream)
+        Err(decoder.end_error())
     }
 
     async fn compact(

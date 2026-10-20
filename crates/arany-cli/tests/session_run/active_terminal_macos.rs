@@ -813,7 +813,8 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                         ready_tx.send(()).unwrap();
                         release.recv_timeout(Duration::from_secs(10)).unwrap();
                         if matches!(exit, Exit::Failure) {
-                            stream.write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                            // A Retry-After past the action deadline ends the call without a same-route retry.
+                            stream.write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                         } else {
                             stream
                                 .set_read_timeout(Some(Duration::from_secs(5)))

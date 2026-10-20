@@ -124,8 +124,11 @@ fn transport_error(error: TransportError) -> ProviderError {
         TransportError::Unavailable => ProviderError::Unavailable,
         TransportError::PartialTransport => ProviderError::PartialTransport,
         TransportError::Rejected => ProviderError::Rejected,
-        TransportError::HttpServerUnavailable => ProviderError::HttpServerUnavailable,
+        TransportError::HttpServerUnavailable(after) => ProviderError::HttpServerUnavailable(after),
         TransportError::RateLimited(after) => ProviderError::RateLimited(after),
+        TransportError::QuotaExceeded => ProviderError::QuotaExceeded,
+        TransportError::Transport => ProviderError::Transport,
+        TransportError::StreamEnded => ProviderError::StreamEnded,
         TransportError::InvalidOutcome => ProviderError::InvalidOutcome,
     }
 }
@@ -147,7 +150,6 @@ mod tests {
         ] {
             let error = super::super::transport::streaming_admission(
                 reqwest::StatusCode::from_u16(status).unwrap(),
-                &reqwest::header::HeaderMap::new(),
                 false,
             )
             .err()

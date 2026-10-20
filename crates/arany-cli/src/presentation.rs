@@ -996,6 +996,9 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
                 "Provider reported a usage limit. Check the selected account's usage before trying again.",
             );
         }
+        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::RateLimited)) => {
+            return Some("Provider rate limited the request. Wait before trying again.");
+        }
         (
             ProviderCallDisposition::Unavailable,
             Some(ProviderFailureReason::UsageTemporarilyUnavailable),

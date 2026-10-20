@@ -855,6 +855,12 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
                 "{label}"
             );
             assert_eq!(error.failure_reason(), Some(reason), "{label}");
+            // Only a well-formed stream that ends early is a cut retried on the same route.
+            assert_eq!(
+                error.retry_cause().map(|(cause, _)| cause),
+                (label == "interrupted").then_some(crate::provider::RetryCause::StreamCut),
+                "{label}"
+            );
             assert!(!error.to_string().contains(TOKEN));
             server.await.expect("server");
         }
@@ -999,6 +1005,10 @@ async fn transport_rejects_non_event_and_encoded_replies() {
             Some(crate::ProviderFailureReason::StreamProtocol),
             "{label}"
         );
+        assert!(
+            error.retry_cause().is_none(),
+            "a malformed reply never retries: {label}"
+        );
         server.await.expect("server");
     }
 }
@@ -1059,6 +1069,7 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
         let actual = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
             .await
             .expect_err("non-success direct route");
+        // The bounded 429 body names no quota, so it is a retryable rate limit.
         assert!(match &actual {
             ProviderError::RateLimited(None) => status == 429,
             ProviderError::RemoteHttp(actual_status) => *actual_status == status && status != 429,
@@ -1069,6 +1080,35 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
             actual.to_string(),
             format!("Provider returned HTTP {status}")
         );
+        server.await.expect("server");
+    }
+}
+
+#[tokio::test]
+async fn direct_route_429_honors_retry_after_and_never_retries_a_quota_body() {
+    for (body, quota) in [
+        (r#"{"error":{"type":"usage_limit_reached"}}"#, true),
+        (r#"{"error":{"code":"rate_limit_exceeded"}}"#, false),
+    ] {
+        let reply = format!(
+            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 30\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes();
+        let (endpoint, server) = serve(reply).await;
+        let actual = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
+            .await
+            .expect_err("429");
+        if quota {
+            assert!(matches!(actual, ProviderError::QuotaExceeded));
+            assert!(actual.retry_cause().is_none());
+        } else {
+            assert!(matches!(
+                actual,
+                ProviderError::RateLimited(Some(after)) if after == std::time::Duration::from_secs(30)
+            ));
+        }
+        assert_eq!(actual.to_string(), "Provider returned HTTP 429");
         server.await.expect("server");
     }
 }

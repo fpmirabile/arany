@@ -357,6 +357,7 @@ impl Engine {
                     journal: &self.journal,
                     ledger,
                     publisher: None,
+                    steering: None,
                 };
                 // A fresh token is never cancelled, so the router always yields an outcome.
                 let super::routing::CompactionOutcome { response, provider } = router

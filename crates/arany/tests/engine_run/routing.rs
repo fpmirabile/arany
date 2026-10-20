@@ -234,7 +234,11 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
     let compaction = route(
         ScriptedProvider::new(vec![])
             .with_profile("scripted", "compact")
-            .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+            .with_compactions(
+                (0..=MAX_PROVIDER_RETRIES)
+                    .map(|_| Err(ProviderError::RemoteHttp(503)))
+                    .collect(),
+            ),
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
@@ -277,13 +281,19 @@ async fn child_and_compaction_fallbacks_keep_role_provenance() {
             ProviderRole::Compaction
         ]
     );
-    // Each child retries its own call; compaction keeps no same-route retry.
-    assert_eq!(view.runs[0].provider_retries.len(), 6);
-    assert!(
-        view.runs[0]
-            .provider_retries
+    // Each child and the between-Run compaction retry their own call before switching.
+    let roles: Vec<_> = view.runs[0]
+        .provider_retries
+        .iter()
+        .map(|(_, retry)| retry.role)
+        .collect();
+    assert_eq!(roles.len(), 9);
+    assert_eq!(
+        roles
             .iter()
-            .all(|(_, retry)| retry.role == ProviderRole::Child)
+            .filter(|role| **role == ProviderRole::Compaction)
+            .count(),
+        3
     );
     assert_eq!(fallback.requests.lock().unwrap()[0].model, "child-fallback");
     assert_eq!(
@@ -296,7 +306,8 @@ fn goal_request(workspace: &Path) -> RunRequest {
     let mut request = input(workspace);
     request.goal = arany::GoalRequest::new(
         arany::GoalBudget {
-            max_provider_calls: Some(4),
+            // Room for each compaction's three same-route retries and its switch.
+            max_provider_calls: Some(12),
             ..arany::GoalBudget::default()
         },
         arany::GoalPhase::Implementation,
@@ -314,7 +325,7 @@ fn summary_response() -> Result<CompactionResponse, ProviderError> {
     })
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compaction() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
@@ -325,10 +336,12 @@ async fn exhausted_compaction_routes_settle_the_reservation_for_the_next_compact
     let compaction = route(
         ScriptedProvider::new(vec![])
             .with_profile("scripted", "compact")
-            .with_compactions(vec![
-                Err(ProviderError::RemoteHttp(503)),
-                summary_response(),
-            ]),
+            .with_compactions(
+                (0..=MAX_PROVIDER_RETRIES)
+                    .map(|_| Err(ProviderError::RemoteHttp(503)))
+                    .chain([summary_response()])
+                    .collect(),
+            ),
     );
     let compaction_fallback = route(
         ScriptedProvider::new(vec![])
@@ -742,9 +755,11 @@ async fn crash_after_fallback_charges_open_ceiling_and_resume_starts_at_first_ro
 async fn fallback_only_on_pre_output_call_failure_and_never_after_partial_output() {
     // (failure, visible partial output, same-route retries, fallback)
     type Case = (fn() -> ProviderError, bool, u8, bool);
-    let cases: [Case; 12] = [
+    let cases: [Case; 14] = [
         (|| ProviderError::RemoteHttp(503), false, 3, true),
         (|| ProviderError::Unavailable, false, 0, false),
+        (|| ProviderError::Transport, false, 3, false),
+        (|| ProviderError::StreamEnded, false, 3, false),
         (|| ProviderError::RemoteHttp(400), false, 0, false),
         (|| ProviderError::RemoteHttp(401), false, 0, false),
         (|| ProviderError::RemoteHttp(413), false, 0, false),
@@ -912,7 +927,15 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
     bindings.roles.child = vec![first.clone(), default.clone()];
     pin_roster(&mut bindings, Some(vec![first.clone(), spare.clone()]));
     let engine = open(&state);
+    let session = engine
+        .create_session(workspace.clone(), Some("Assignments".into()))
+        .await
+        .unwrap();
+    // The journaled retry delays stay; only the waits end at once.
+    arany::FaultPlan::skip_retry_backoff(session);
     let mut request = input(&workspace);
+    request.session_id = Some(session);
+    request.title = None;
     request.policy = CollaborationPolicy::Team {
         max_active_children: 3,
     };
@@ -949,9 +972,7 @@ async fn assignment_profiles_keep_shared_first_routes_distinct_and_finish_in_ass
             }
         }
     };
-    // Real time: gated fallback calls hold Provider deadlines a paused clock would expire; the
-    // watchdog covers the three concurrent 2 + 4 + 8 s same-route backoffs.
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(60), async {
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(run, release)
     })
     .await
@@ -1626,5 +1647,107 @@ async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_fur
             1,
             "replay never re-sends"
         );
+    }
+}
+
+#[tokio::test]
+async fn a_pause_in_the_retry_backoff_starts_no_further_reservation_or_dispatch() {
+    for child in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let mut failing =
+            ScriptedProvider::new(vec![finish("never")]).with_profile("scripted", "failing");
+        failing
+            .responses
+            .get_mut()
+            .unwrap()
+            .push_front(Err(ProviderError::RemoteHttp(503)));
+        let failing = route(failing);
+        let primary = if child {
+            route(
+                ScriptedProvider::new(vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect".into(),
+                            profile: None,
+                        }],
+                    }),
+                    finish("never synthesized"),
+                ])
+                .with_profile("scripted", "primary"),
+            )
+        } else {
+            failing.clone()
+        };
+        let mut bindings = routes(&primary);
+        let mut request = input(&workspace);
+        if child {
+            bindings.roles.child = vec![failing.clone()];
+            request.policy = CollaborationPolicy::Team {
+                max_active_children: 1,
+            };
+        }
+        let engine = open(&state);
+        let session = engine
+            .create_session(workspace.clone(), Some("Pause".into()))
+            .await
+            .unwrap();
+        request.session_id = Some(session);
+        request.title = None;
+        let (entered, release) = arany::FaultPlan::gate_retry_backoff(session);
+        let steering = RunSteering::new();
+        let run = run_routed(
+            &engine,
+            bindings,
+            request,
+            RunControls {
+                steering: Some(steering.clone()),
+                ..RunControls::default()
+            },
+        );
+        let outcome = {
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => panic!("Run ended before its held backoff: {}", result.is_ok()),
+                entered = entered => entered.unwrap(),
+            }
+            assert!(steering.pause());
+            run.await.unwrap()
+        };
+        // The gate stays held: only the pause can end the wait.
+        drop(release);
+        engine.close().await.unwrap();
+        assert_eq!(outcome.run.status, RunStatus::Cancelled, "child {child}");
+        let (events, view) = reopen(&state, session).await;
+        let run = &view.runs[0];
+        let actor = run.agents.last().unwrap();
+        assert_eq!(run.provider_retries.len(), 1, "child {child}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event.event,
+                    Event::GoalProviderCallReserved { agent_run_id, .. } if agent_run_id == actor.id
+                ))
+                .count(),
+            1,
+            "no reservation after the paused backoff"
+        );
+        assert_eq!(
+            actor.provider_calls.last().unwrap().disposition,
+            ProviderCallDisposition::Cancelled
+        );
+        assert_eq!(
+            failing.requests.lock().unwrap().len(),
+            1,
+            "no dispatch after the paused backoff"
+        );
+        if child {
+            assert_eq!(primary.requests.lock().unwrap().len(), 1, "no synthesis");
+        }
     }
 }

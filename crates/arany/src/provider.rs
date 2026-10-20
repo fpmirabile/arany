@@ -99,17 +99,53 @@ async fn read_identity_body(
     Ok(bytes)
 }
 
-pub(crate) fn http_failure(
-    status: reqwest::StatusCode,
-    headers: &reqwest::header::HeaderMap,
-) -> ProviderError {
+const MAX_RATE_LIMIT_BODY_BYTES: usize = 16 * 1024;
+
+// A send that times out has spent its deadline; any other send failure happened before a response.
+pub(crate) fn send_failure(error: &reqwest::Error) -> ProviderError {
+    if error.is_timeout() {
+        ProviderError::Unavailable
+    } else {
+        ProviderError::Transport
+    }
+}
+
+pub(crate) async fn http_failure(response: &mut reqwest::Response) -> ProviderError {
+    let status = response.status();
     if status.is_server_error() {
-        ProviderError::HttpServerUnavailable
+        ProviderError::HttpServerUnavailable(retry_after(response.headers()))
     } else if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        ProviderError::RateLimited(retry_after(headers))
+        rate_limit_failure(response).await
     } else {
         ProviderError::Rejected
     }
+}
+
+// The bounded 429 body only tells a quota from a rate limit; it is never kept or shown.
+pub(crate) async fn rate_limit_failure(response: &mut reqwest::Response) -> ProviderError {
+    let after = retry_after(response.headers());
+    let body = read_identity_body(response, MAX_RATE_LIMIT_BODY_BYTES)
+        .await
+        .unwrap_or_default();
+    if quota_exhausted(&body) {
+        ProviderError::QuotaExceeded
+    } else {
+        ProviderError::RateLimited(after)
+    }
+}
+
+// OpenAI and ChatGPT error codes that a wait cannot clear; Anthropic 429s are rate limits only.
+fn quota_exhausted(body: &[u8]) -> bool {
+    let Ok(document) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let error = &document["error"];
+    [&error["code"], &error["type"]].into_iter().any(|field| {
+        matches!(
+            field.as_str(),
+            Some("insufficient_quota" | "usage_limit_reached" | "usage_not_included")
+        )
+    })
 }
 
 // Only delta-seconds; an HTTP date or malformed value leaves the Engine's own backoff in place.
@@ -885,8 +921,12 @@ fn tool_request_reflects_secret(request: &crate::tools::ToolRequest, secret: &st
 pub enum ProviderError {
     #[error("Provider unavailable")]
     Unavailable,
+    // HTTP 5xx at status admission, with the server's bounded delta-seconds Retry-After.
     #[error("Provider server unavailable before response admission")]
-    HttpServerUnavailable,
+    HttpServerUnavailable(Option<Duration>),
+    // The request could not be sent or answered before any response; nothing was decoded.
+    #[error("Provider connection failed before a response")]
+    Transport,
     #[error("Provider transport failed after response admission")]
     PartialTransport,
     #[error("Provider call timed out")]
@@ -897,6 +937,9 @@ pub enum ProviderError {
     InvalidOutcome,
     #[error("Provider stream was incomplete or malformed")]
     InvalidStream,
+    // A well-formed stream that ended cleanly before its terminal event.
+    #[error("Provider stream ended before a complete outcome")]
+    StreamEnded,
     #[error("Provider response did not match the selected response contract")]
     InvalidResponseContract,
     #[error("Provider output did not match Arany's structured outcome contract")]
@@ -906,6 +949,9 @@ pub enum ProviderError {
     // HTTP 429 at status admission, with the server's bounded delta-seconds Retry-After.
     #[error("Provider returned HTTP 429")]
     RateLimited(Option<Duration>),
+    // HTTP 429 whose bounded body names an exhausted quota or plan limit.
+    #[error("Provider returned HTTP 429")]
+    QuotaExceeded,
     // Only status-check failures, before any response body is admitted.
     #[error("Provider returned HTTP {0}")]
     RemoteHttp(u16),
@@ -926,6 +972,7 @@ pub enum ProviderFailureReason {
     ProposalRefused,
     AccountAccess,
     UsageLimit,
+    RateLimited,
     UsageTemporarilyUnavailable,
     ServiceUnavailable,
     StreamProtocol,
@@ -939,34 +986,38 @@ pub enum ProviderFailureReason {
 }
 
 impl ProviderError {
+    // Only a server failure at status admission may switch to a fallback route.
+    #[cfg(test)]
     pub(crate) fn allows_fallback(&self) -> bool {
-        matches!(
-            self,
-            Self::HttpServerUnavailable | Self::RemoteHttp(500..=599)
-        )
+        self.retry_cause()
+            .is_some_and(|(cause, _)| cause == RetryCause::ServerError)
     }
 
-    // Only failures before a decoded outcome qualify: a 429 or 5xx at status admission, or a cut body.
+    // Only failures before a decoded outcome qualify: a send failure, a 429 or 5xx at status
+    // admission, or a body or stream that ends early. A quota 429 does not recover by waiting.
     pub(crate) fn retry_cause(&self) -> Option<(RetryCause, Option<Duration>)> {
         match self {
+            Self::Transport => Some((RetryCause::Transport, None)),
             Self::RateLimited(after) => Some((RetryCause::RateLimited, *after)),
             Self::RemoteHttp(429) => Some((RetryCause::RateLimited, None)),
-            Self::HttpServerUnavailable | Self::RemoteHttp(500..=599) => {
-                Some((RetryCause::ServerError, None))
-            }
-            Self::PartialTransport => Some((RetryCause::StreamCut, None)),
+            Self::HttpServerUnavailable(after) => Some((RetryCause::ServerError, *after)),
+            Self::RemoteHttp(500..=599) => Some((RetryCause::ServerError, None)),
+            Self::PartialTransport | Self::StreamEnded => Some((RetryCause::StreamCut, None)),
             _ => None,
         }
     }
 
     pub(crate) fn failure_reason(&self) -> Option<ProviderFailureReason> {
         match self {
-            Self::InvalidStream => Some(ProviderFailureReason::StreamProtocol),
+            Self::InvalidStream | Self::StreamEnded => Some(ProviderFailureReason::StreamProtocol),
             Self::InvalidResponseContract => Some(ProviderFailureReason::ResponseContract),
             Self::InvalidOutcomeContract => Some(ProviderFailureReason::OutcomeContract),
             Self::LocalOutputLimit => Some(ProviderFailureReason::LocalOutputLimit),
             Self::RemoteHttp(401 | 403) => Some(ProviderFailureReason::AccountAccess),
-            Self::RateLimited(_) | Self::RemoteHttp(429) => Some(ProviderFailureReason::UsageLimit),
+            Self::QuotaExceeded => Some(ProviderFailureReason::UsageLimit),
+            Self::RateLimited(_) | Self::RemoteHttp(429) => {
+                Some(ProviderFailureReason::RateLimited)
+            }
             Self::RemoteHttp(500..=599) => Some(ProviderFailureReason::ServiceUnavailable),
             Self::RemoteStreamCode(code)
                 if matches!(
@@ -984,7 +1035,8 @@ impl ProviderError {
     pub(crate) fn failure_class(&self) -> ProviderFailureClass {
         match self {
             Self::Unavailable
-            | Self::HttpServerUnavailable
+            | Self::HttpServerUnavailable(_)
+            | Self::Transport
             | Self::PartialTransport
             | Self::CallTimedOut
             | Self::RemoteHttp(500..=599) => ProviderFailureClass::Unavailable,
@@ -996,10 +1048,12 @@ impl ProviderError {
             }
             Self::Rejected
             | Self::RateLimited(_)
+            | Self::QuotaExceeded
             | Self::RemoteHttp(400..=499)
             | Self::RemoteStreamCode(_) => ProviderFailureClass::Rejected,
             Self::InvalidOutcome
             | Self::InvalidStream
+            | Self::StreamEnded
             | Self::InvalidResponseContract
             | Self::InvalidOutcomeContract
             | Self::LocalOutputLimit
@@ -1169,26 +1223,30 @@ stop_bytes: 0,
 
     #[test]
     fn fallback_requires_a_server_failure_at_the_http_status_stage() {
-        let rate_limit = http_failure(
-            reqwest::StatusCode::TOO_MANY_REQUESTS,
-            &reqwest::header::HeaderMap::new(),
-        );
-        assert_eq!(rate_limit.failure_class(), ProviderFailureClass::Rejected);
+        for (limit, reason) in [
+            (
+                ProviderError::RateLimited(None),
+                ProviderFailureReason::RateLimited,
+            ),
+            (
+                ProviderError::QuotaExceeded,
+                ProviderFailureReason::UsageLimit,
+            ),
+        ] {
+            assert_eq!(limit.failure_class(), ProviderFailureClass::Rejected);
+            assert_eq!(limit.failure_reason(), Some(reason));
+            assert!(!limit.allows_fallback());
+        }
         assert_eq!(
-            rate_limit.failure_reason(),
-            Some(ProviderFailureReason::UsageLimit)
-        );
-        assert!(!rate_limit.allows_fallback());
-        assert_eq!(
-            ProviderError::HttpServerUnavailable.failure_class(),
+            ProviderError::HttpServerUnavailable(None).failure_class(),
             ProviderError::Unavailable.failure_class()
         );
         assert_eq!(
-            ProviderError::HttpServerUnavailable.failure_reason(),
+            ProviderError::HttpServerUnavailable(None).failure_reason(),
             ProviderError::Unavailable.failure_reason()
         );
         for (error, eligible) in [
-            (ProviderError::HttpServerUnavailable, true),
+            (ProviderError::HttpServerUnavailable(None), true),
             (ProviderError::RemoteHttp(500), true),
             (ProviderError::RemoteHttp(503), true),
             (ProviderError::RemoteHttp(529), true),
@@ -1198,6 +1256,8 @@ stop_bytes: 0,
             (ProviderError::RemoteHttp(413), false),
             (ProviderError::RemoteHttp(429), false),
             (ProviderError::RateLimited(None), false),
+            (ProviderError::Transport, false),
+            (ProviderError::StreamEnded, false),
             (ProviderError::Unavailable, false),
             (ProviderError::PartialTransport, false),
             (ProviderError::CallTimedOut, false),
@@ -1212,7 +1272,7 @@ stop_bytes: 0,
     }
 
     #[test]
-    fn only_status_rejections_and_cut_bodies_before_an_outcome_retry() {
+    fn only_failures_before_a_decoded_outcome_retry_and_quota_bodies_never_do() {
         let headers = |value: &str| {
             let mut headers = reqwest::header::HeaderMap::new();
             headers.insert(
@@ -1221,7 +1281,6 @@ stop_bytes: 0,
             );
             headers
         };
-        let too_many = reqwest::StatusCode::TOO_MANY_REQUESTS;
         for (value, after) in [
             ("7", Some(Duration::from_secs(7))),
             ("0", Some(Duration::ZERO)),
@@ -1232,28 +1291,34 @@ stop_bytes: 0,
             ("Wed, 21 Oct 2026 07:28:00 GMT", None),
             ("", None),
         ] {
-            assert!(
-                matches!(http_failure(too_many, &headers(value)), ProviderError::RateLimited(actual) if actual == after),
-                "{value}"
-            );
+            assert_eq!(retry_after(&headers(value)), after, "{value}");
         }
-        for (status, cause) in [
-            (503, Some(RetryCause::ServerError)),
-            (529, Some(RetryCause::ServerError)),
-            (429, Some(RetryCause::RateLimited)),
-            (400, None),
-            (401, None),
+        for (body, quota) in [
+            (
+                br#"{"error":{"code":"insufficient_quota"}}"#.as_slice(),
+                true,
+            ),
+            (br#"{"error":{"type":"usage_limit_reached"}}"#, true),
+            (br#"{"error":{"code":"usage_not_included"}}"#, true),
+            (br#"{"error":{"code":"rate_limit_exceeded"}}"#, false),
+            (
+                br#"{"type":"error","error":{"type":"rate_limit_error"}}"#,
+                false,
+            ),
+            (br#"{"detail":"insufficient_quota"}"#, false),
+            (b"insufficient_quota", false),
+            (b"", false),
         ] {
-            let status = reqwest::StatusCode::from_u16(status).unwrap();
-            assert_eq!(
-                http_failure(status, &reqwest::header::HeaderMap::new())
-                    .retry_cause()
-                    .map(|(cause, _)| cause),
-                cause,
-                "{status}"
-            );
+            assert_eq!(quota_exhausted(body), quota);
         }
         for (error, cause) in [
+            (ProviderError::Transport, Some(RetryCause::Transport)),
+            (
+                ProviderError::RateLimited(Some(Duration::from_secs(3))),
+                Some(RetryCause::RateLimited),
+            ),
+            (ProviderError::QuotaExceeded, None),
+            (ProviderError::StreamEnded, Some(RetryCause::StreamCut)),
             (
                 ProviderError::RemoteHttp(429),
                 Some(RetryCause::RateLimited),
@@ -1263,7 +1328,7 @@ stop_bytes: 0,
                 Some(RetryCause::ServerError),
             ),
             (
-                ProviderError::HttpServerUnavailable,
+                ProviderError::HttpServerUnavailable(None),
                 Some(RetryCause::ServerError),
             ),
             (ProviderError::PartialTransport, Some(RetryCause::StreamCut)),
@@ -1304,7 +1369,7 @@ stop_bytes: 0,
             (
                 429,
                 ProviderFailureClass::Rejected,
-                Some(ProviderFailureReason::UsageLimit),
+                Some(ProviderFailureReason::RateLimited),
             ),
             (
                 500,

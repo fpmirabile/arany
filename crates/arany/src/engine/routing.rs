@@ -1,7 +1,7 @@
 use super::hints::HintPublisher;
 use super::ledger::{Action, GoalLedger};
 use super::run_loop::{CallResult, invoke_bounded_with_preview};
-use super::{EngineError, RunCancellation};
+use super::{EngineError, RunCancellation, RunSteering};
 use crate::journal::Journal;
 use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS, MAX_PROVIDER_SWITCHES,
@@ -62,10 +62,64 @@ pub(super) fn decide_attempt(failure: Option<Transient>, facts: AttemptFacts) ->
     }
     match cause {
         RetryCause::ServerError if !facts.visible => AttemptDecision::Switch,
-        RetryCause::ServerError | RetryCause::RateLimited | RetryCause::StreamCut => {
-            AttemptDecision::Accept
-        }
+        RetryCause::ServerError
+        | RetryCause::Transport
+        | RetryCause::RateLimited
+        | RetryCause::StreamCut => AttemptDecision::Accept,
     }
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Backoff {
+    Elapsed,
+    Paused,
+    Cancelled,
+}
+
+// The one wait both attempt loops use. A pause or cancellation ends it and is checked again
+// just before the re-dispatch, so neither allows another reservation or call.
+pub(super) async fn back_off(
+    session_id: SessionId,
+    delay: Duration,
+    cancellation: &mut RunCancellation,
+    steering: Option<&RunSteering>,
+) -> Backoff {
+    let paused = async {
+        match steering {
+            Some(steering) => steering.paused().await,
+            None => std::future::pending().await,
+        }
+    };
+    let ended = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Backoff::Cancelled,
+        () = paused => Backoff::Paused,
+        () = wait(session_id, delay) => Backoff::Elapsed,
+    };
+    if cancellation.is_cancelled() {
+        Backoff::Cancelled
+    } else if steering.is_some_and(RunSteering::pause_requested) {
+        Backoff::Paused
+    } else {
+        ended
+    }
+}
+
+async fn wait(session_id: SessionId, delay: Duration) {
+    #[cfg(any(test, feature = "test-support"))]
+    match crate::fault::FaultPlan::retry_backoff(session_id) {
+        Some(crate::fault::RetryBackoff::Immediate) => return,
+        Some(crate::fault::RetryBackoff::Gated(entered, release)) => {
+            let _ = entered.send(());
+            let _ = release.await;
+            return;
+        }
+        None => {}
+    }
+    #[cfg(not(any(test, feature = "test-support")))]
+    let _ = session_id;
+    tokio::time::sleep(delay).await;
 }
 
 pub(super) struct CompactionOutcome {
@@ -85,6 +139,7 @@ pub(super) struct CallRouter<'a> {
     pub(super) journal: &'a Journal,
     pub(super) ledger: &'a GoalLedger,
     pub(super) publisher: Option<&'a HintPublisher>,
+    pub(super) steering: Option<RunSteering>,
 }
 
 pub(super) fn switched_identity(
@@ -203,8 +258,9 @@ impl CallRouter<'_> {
             .await;
             let facts = self.attempt_facts(
                 scope.agent_run_id,
+                role,
                 deadline,
-                cancellation.is_cancelled(),
+                cancellation.is_cancelled() || self.pause_requested(),
                 attempt.visible,
             )?;
             match decide_attempt(attempt.transient, facts) {
@@ -214,13 +270,23 @@ impl CallRouter<'_> {
                     if let Some(preview) = &preview {
                         preview.clear();
                     }
-                    if !self.retry(scope, role, cause, delay, &request).await? {
+                    if !self
+                        .retry(scope, role, cause, delay, Some(&request))
+                        .await?
+                    {
                         return Ok(attempt.result);
                     }
-                    tokio::select! {
-                        biased;
-                        () = cancellation.cancelled() => return Ok(CallResult::Cancelled),
-                        () = tokio::time::sleep(delay) => {}
+                    // A pause ends the call unsent, as a pause during an approval does.
+                    match back_off(
+                        scope.session_id,
+                        delay,
+                        &mut cancellation,
+                        self.steering.as_ref(),
+                    )
+                    .await
+                    {
+                        Backoff::Elapsed => {}
+                        Backoff::Paused | Backoff::Cancelled => return Ok(CallResult::Cancelled),
                     }
                 }
                 AttemptDecision::Switch => {
@@ -235,35 +301,45 @@ impl CallRouter<'_> {
         }
     }
 
+    pub(super) fn pause_requested(&self) -> bool {
+        self.steering
+            .as_ref()
+            .is_some_and(RunSteering::pause_requested)
+    }
+
     pub(super) fn attempt_facts(
         &self,
         actor: AgentRunId,
+        role: ProviderRole,
         deadline: Instant,
         stopping: bool,
         visible: bool,
     ) -> Result<AttemptFacts, EngineError> {
-        let (retries, displayed) = self.ledger.view(|view| {
+        let (retries, displayed, running) = self.ledger.view(|view| {
+            let running = view.active_goal().is_some();
             let current = view.runs.last().and_then(|run| {
                 let agent = run.agents.iter().find(|agent| agent.id == actor)?;
-                let index = u32::try_from(agent.provider_calls.len()).ok()?;
-                let retries = run
-                    .provider_retries
-                    .iter()
-                    .filter(|(id, retry)| *id == actor && retry.call_index == index)
-                    .count();
-                let displayed = agent.role == AgentRole::Primary
+                let index = call_index(view, run, agent, role)?;
+                let retries = earlier_retries(run, actor, role, index);
+                let displayed = role == ProviderRole::Primary
+                    && agent.role == AgentRole::Primary
                     && run.display.iter().any(|chunk| chunk.call_index == index);
                 Some((u8::try_from(retries).unwrap_or(u8::MAX), displayed))
             });
-            current.unwrap_or((MAX_PROVIDER_RETRIES, true))
+            let (retries, displayed) = current.unwrap_or((MAX_PROVIDER_RETRIES, true));
+            (retries, displayed, running)
         })?;
-        let admitted = self.ledger.view(|view| view.active_goal().is_some())?
-            && self.ledger.can_start_provider_call()
-            && self.ledger.remaining_calls() != Some(0)
-            && self
-                .ledger
-                .effective_budget()
-                .is_ok_and(|budget| budget.max_tokens.is_none());
+        // Without a running Goal only a between-Run compaction can retry, with nothing to charge.
+        let admitted = if running {
+            self.ledger.can_start_provider_call()
+                && self.ledger.remaining_calls() != Some(0)
+                && self
+                    .ledger
+                    .effective_budget()
+                    .is_ok_and(|budget| budget.max_tokens.is_none())
+        } else {
+            role == ProviderRole::Compaction
+        };
         Ok(AttemptFacts {
             retries,
             remaining: deadline.saturating_duration_since(Instant::now()),
@@ -304,23 +380,48 @@ impl CallRouter<'_> {
                     }
                 }
             };
-            if !response
+            // A failure under cancellation ends the compaction as cancelled, with no further attempt.
+            if response.is_err() && cancellation.is_cancelled() {
+                return Ok(None);
+            }
+            let scope = CallScope {
+                session_id: request.session_id,
+                run_id: request.covered_run_id,
+                agent_run_id: actor,
+            };
+            let transient = response
                 .as_ref()
-                .is_err_and(|error| error.allows_fallback())
-                || Instant::now() >= deadline
-                || !self
-                    .switch(
-                        CallScope {
-                            session_id: request.session_id,
-                            run_id: request.covered_run_id,
-                            agent_run_id: actor,
-                        },
-                        ProviderRole::Compaction,
-                        provider.identity(),
-                        None,
-                    )
-                    .await?
-            {
+                .err()
+                .and_then(ProviderError::retry_cause)
+                .map(|(cause, retry_after)| Transient { cause, retry_after });
+            let facts = self.attempt_facts(
+                actor,
+                ProviderRole::Compaction,
+                deadline,
+                cancellation.is_cancelled(),
+                false,
+            )?;
+            let continued = match decide_attempt(transient, facts) {
+                AttemptDecision::Accept => false,
+                AttemptDecision::Retry { cause, delay } => {
+                    if !self
+                        .retry(scope, ProviderRole::Compaction, cause, delay, None)
+                        .await?
+                    {
+                        false
+                    } else {
+                        match back_off(scope.session_id, delay, &mut cancellation, None).await {
+                            Backoff::Elapsed => true,
+                            Backoff::Paused | Backoff::Cancelled => return Ok(None),
+                        }
+                    }
+                }
+                AttemptDecision::Switch => {
+                    self.switch(scope, ProviderRole::Compaction, provider.identity(), None)
+                        .await?
+                }
+            };
+            if !continued {
                 return Ok(Some(CompactionOutcome { response, provider }));
             }
         }
@@ -419,7 +520,7 @@ impl CallRouter<'_> {
         role: ProviderRole,
         cause: RetryCause,
         delay: Duration,
-        request: &ProviderRequest,
+        request: Option<&ProviderRequest>,
     ) -> Result<bool, EngineError> {
         let retry = self.ledger.view(|view| {
             let run = view.runs.last()?;
@@ -427,12 +528,8 @@ impl CallRouter<'_> {
                 .agents
                 .iter()
                 .find(|agent| agent.id == scope.agent_run_id)?;
-            let call_index = u32::try_from(agent.provider_calls.len()).ok()?;
-            let earlier = run
-                .provider_retries
-                .iter()
-                .filter(|(id, retry)| *id == scope.agent_run_id && retry.call_index == call_index)
-                .count();
+            let call_index = call_index(view, run, agent, role)?;
+            let earlier = earlier_retries(run, scope.agent_run_id, role, call_index);
             Some(ProviderRetry {
                 role,
                 call_index,
@@ -447,7 +544,7 @@ impl CallRouter<'_> {
         self.commit_attempt(
             scope,
             role,
-            Some(request),
+            request,
             Event::ProviderRetryScheduled {
                 run_id: scope.run_id,
                 agent_run_id: scope.agent_run_id,
@@ -525,6 +622,37 @@ impl CallRouter<'_> {
         }
         Ok(true)
     }
+}
+
+// The semantic call an attempt belongs to; compaction numbers its calls as a switch does.
+fn call_index(
+    view: &crate::session::SessionView,
+    run: &crate::session::RunView,
+    agent: &crate::session::AgentView,
+    role: ProviderRole,
+) -> Option<u32> {
+    let index = match role {
+        ProviderRole::Compaction if run.status == crate::session::RunStatus::Active => {
+            run.tools.len()
+        }
+        ProviderRole::Compaction => view.compactions.len(),
+        ProviderRole::Primary | ProviderRole::Child | ProviderRole::Review => {
+            agent.provider_calls.len()
+        }
+    };
+    u32::try_from(index).ok()
+}
+
+fn earlier_retries(
+    run: &crate::session::RunView,
+    actor: AgentRunId,
+    role: ProviderRole,
+    call_index: u32,
+) -> usize {
+    run.provider_retries
+        .iter()
+        .filter(|(id, retry)| *id == actor && retry.role == role && retry.call_index == call_index)
+        .count()
 }
 
 pub(super) struct AttemptResult {

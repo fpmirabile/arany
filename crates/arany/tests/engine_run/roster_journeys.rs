@@ -4,8 +4,7 @@ use arany::test_support::routing::*;
 use arany::{AgentRole, FaultPlan};
 use tokio::sync::oneshot;
 
-// Real-time journeys include three same-route backoffs of 2 + 4 + 8 s before a switch.
-const WATCHDOG: Duration = Duration::from_secs(60);
+const WATCHDOG: Duration = Duration::from_secs(20);
 // The first attempt and its three same-route retries.
 const ATTEMPTS: usize = arany::MAX_PROVIDER_RETRIES as usize + 1;
 
@@ -242,6 +241,8 @@ async fn interruptions_around_spawn_and_switch_acknowledgements_start_no_further
             .create_session(workspace.clone(), Some("Roster".into()))
             .await
             .unwrap();
+        // The journaled retry delays stay; only the waits before the switch end at once.
+        FaultPlan::skip_retry_backoff(session);
         let cancellation = RunCancellation::new();
         let controls = RunControls {
             cancellation: cancellation.clone(),
@@ -444,8 +445,8 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "facts");
     let state = temp.path().join("state");
-    let goal_request = || {
-        let mut request = team(&workspace, None, 1);
+    let goal_request = |session| {
+        let mut request = team(&workspace, Some(session), 1);
         request.goal = arany::GoalRequest::new(
             arany::GoalBudget::default(),
             arany::GoalPhase::Implementation,
@@ -466,11 +467,17 @@ async fn explicit_resume_continues_the_read_only_researcher_only_with_the_same_p
     let held = gated("spare-last", 3, &started);
     let bindings = researcher_bindings(&primary, vec![first.clone(), held.clone()]);
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    let session = engine
+        .create_session(workspace.clone(), Some("Roster".into()))
+        .await
+        .unwrap();
+    // The journaled retry delays stay; only the waits before the switch end at once.
+    FaultPlan::skip_retry_backoff(session);
     let cancellation = RunCancellation::new();
     let run = run_routed(
         &engine,
         bindings,
-        goal_request(),
+        goal_request(session),
         RunControls {
             cancellation: cancellation.clone(),
             ..configured()

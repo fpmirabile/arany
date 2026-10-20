@@ -156,6 +156,7 @@ impl<'a> RunLoop<'a> {
                 journal,
                 ledger,
                 publisher: hints,
+                steering: controls.steering.clone(),
             },
             worker_data_bytes: Default::default(),
             worker_requests: Default::default(),
