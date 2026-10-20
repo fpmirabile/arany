@@ -169,14 +169,14 @@ async fn prose_objective_at_the_limit_compacts_its_read_only_goal_prefix() {
     compact_read_only_goal_prefix(&prose[..64 * 1024]).await;
 }
 
-const READS: usize = 104;
+const READS: usize = 400;
 
 fn paged_read_workspace(root: &Path) -> std::path::PathBuf {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
     std::fs::write(
         workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(1023)).repeat(2 * READS),
+        format!("{}\n", "x".repeat(31)).repeat(2 * READS),
     )
     .expect("bounded fixture file");
     workspace
@@ -311,6 +311,14 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         };
         let input: serde_json::Value =
             serde_json::from_str(&turn.assistant).expect("bounded compaction context JSON");
+        let observations = input["tool_observations"].as_array().unwrap();
+        assert!(observations.iter().any(|result| result["cleared"] == true));
+        assert!(
+            observations
+                .iter()
+                .filter(|result| result["cleared"] == true)
+                .all(|result| result.get("output").is_none())
+        );
         let goal = &input["pinned_goal"];
         assert_eq!(goal["objective"], objective);
         assert_eq!(goal["project_instructions"], serde_json::Value::Null);
@@ -373,6 +381,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
                     !matches!(
                         envelope.event,
                         Event::GoalCompactionCallReserved { .. }
+                            | Event::ToolResultsCleared { .. }
                             | Event::GoalContextCompacted { .. }
                     )
                 })
@@ -5137,12 +5146,12 @@ async fn a_recorded_plan_cannot_be_replaced_or_restated() {
 
 #[tokio::test]
 async fn plan_contract_recorded_mid_run_survives_compaction() {
-    const READS: usize = 104;
+    const READS: usize = 400;
 
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
-    let content = format!("{}\n", "x".repeat(1023)).repeat(4 * READS);
+    let content = format!("{}\n", "x".repeat(31)).repeat(4 * READS);
     std::fs::write(workspace.join("notes/data.txt"), &content).expect("bounded fixture file");
     let state_path = temp.path().join("state");
     let budget = arany::GoalBudget {
@@ -6411,4 +6420,334 @@ async fn resumed_goal_refuses_plan_excluded_invoked_skill_before_tool_started() 
         Event::ToolStarted { run_id, .. } | Event::GoalProviderCallReserved { run_id, .. }
             if run_id == run.id
     )));
+}
+
+#[tokio::test]
+async fn long_run_clears_before_reserving_and_reopens_the_crash_boundary_without_old_bodies() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), &format!("{}\n", "x".repeat(99)).repeat(150));
+    let state_path = temp.path().join("state");
+    let script = (0..40)
+        .map(|_| crate::tool_outcome(facts_read()))
+        .chain([finish_with("Inspected forty pages")])
+        .collect();
+    let provider = Arc::new(ScriptedProvider::new(script));
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut input = request(&workspace, "Inspect forty pages");
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: Some(64),
+        max_runs: 2,
+        ..Default::default()
+    });
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("long Run");
+    assert_eq!(result.run.status, RunStatus::Finished);
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state_path, result.session_id).await;
+    assert_eq!(view.runs[0].tools.len(), 40);
+    assert!(
+        view.runs[0]
+            .tools
+            .iter()
+            .all(|tool| tool.intent.limits.result_bytes == 64 * 1024)
+    );
+    assert!(
+        provider.compact_requests.lock().unwrap().is_empty(),
+        "clearing costs no summary call"
+    );
+    assert_eq!(provider.requests.lock().unwrap().len(), 41);
+    let clears: Vec<_> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| match event.event {
+            Event::ToolResultsCleared {
+                covered_tool_count,
+                cleared_bytes,
+                ..
+            } => Some((index, covered_tool_count, cleared_bytes)),
+            _ => None,
+        })
+        .collect();
+    assert!(clears.len() >= 2, "multiple clearing batches");
+    for &(index, count, bytes) in &clears {
+        assert!(bytes >= 64 * 1024);
+        assert!(matches!(
+            events[index + 1].event,
+            Event::GoalProviderCallReserved { .. }
+        ));
+        let observed = events[..index]
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolFinished { .. }))
+            .count();
+        assert_eq!(observed - count as usize, 3);
+        let requests = provider.requests.lock().unwrap();
+        let context = requests[observed].input.tools.as_ref().unwrap();
+        assert_eq!(
+            context.steps.iter().filter(|step| step.cleared).count(),
+            count as usize
+        );
+    }
+    assert!(clears.windows(2).all(|pair| pair[0].1 < pair[1].1));
+    let crash_path = temp.path().join("crash-state");
+    let store = Store::open(StateRoot::admit(&crash_path).unwrap()).unwrap();
+    let (boundary, covered, _) = clears[0];
+    for event in &events[..=boundary] {
+        store
+            .append(result.session_id, event.event.clone())
+            .await
+            .unwrap();
+    }
+    store.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&crash_path).unwrap()).unwrap();
+    let prefix = store.load_session(result.session_id).await.unwrap();
+    let crashed = SessionView::replay(result.session_id, &prefix)
+        .unwrap()
+        .unwrap();
+    assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(crashed.runs[0].tool_results_cleared_count, covered);
+    store.close().await.unwrap();
+    let resumed_provider = Arc::new(ScriptedProvider::new(vec![finish_with(
+        "Checked the saved facts",
+    )]));
+    let engine = facts_engine(StateRoot::open_existing(&crash_path).unwrap(), &crash_path);
+    let mut input = request(&workspace, "Continue the inspection");
+    input.session_id = Some(result.session_id);
+    input.title = None;
+    input.include_paths.clear();
+    input.goal = arany::GoalRequest::resume(result.goal_id, true);
+    run_with(
+        &engine,
+        &resumed_provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("fresh Run after clearing crash");
+    engine.close().await.unwrap();
+    let requests = resumed_provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 1, "no historical Tool or summary retried");
+    let history = &requests[0].input.history;
+    let records: serde_json::Value =
+        serde_json::from_str(&history.last().unwrap().assistant).unwrap();
+    let records = records["tool_records"].as_array().unwrap();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| record["cleared"] == true)
+            .count(),
+        covered as usize
+    );
+    assert!(
+        records[..covered as usize]
+            .iter()
+            .all(|record| !record.to_string().contains(&"x".repeat(99)))
+    );
+    assert!(
+        records[covered as usize..]
+            .iter()
+            .all(|record| record.to_string().contains(&"x".repeat(99)))
+    );
+}
+
+#[tokio::test]
+async fn command_step_clears_old_results_with_a_small_context_allowance() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let page = format!("{}\n", "x".repeat(99)).repeat(130);
+    let workspace = facts_workspace(temp.path(), &page);
+    for name in ["big1.txt", "big2.txt"] {
+        std::fs::write(workspace.join(name), "b".repeat(72 * 1024)).expect("include");
+    }
+    let state_path = temp.path().join("state");
+    let command = arany::ToolCall::Command {
+        program: "unconfigured".into(),
+        args: Vec::new(),
+        cwd: "notes".into(),
+    };
+    let provider = Arc::new(
+        ScriptedProvider::new(
+            (0..4)
+                .map(|_| crate::tool_outcome(facts_read()))
+                .chain([
+                    crate::tool_outcome(command.clone()),
+                    finish_with("Checked the Command refusal"),
+                ])
+                .collect(),
+        )
+        .with_compactions(vec![Err(ProviderError::Unavailable)]),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Inspect four pages then request a Command");
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run with room for the complete Command step");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.status, RunStatus::Finished);
+    assert_eq!(run.failure, None);
+    let allowance = run
+        .config
+        .as_ref()
+        .unwrap()
+        .tool_policy
+        .as_ref()
+        .unwrap()
+        .max_context_bytes;
+    assert!((220 * 1024..=224 * 1024).contains(&allowance));
+    assert_eq!(run.tools.len(), 5);
+    assert_eq!(run.tools[4].intent.call, command);
+    assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
+    assert_eq!(
+        run.tools[4].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Denied
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    let context = requests[4].input.tools.as_ref().unwrap();
+    assert_eq!(context.observation_count(), 4);
+    assert!(context.steps[0].cleared);
+    let mut uncleared = context.clone();
+    uncleared.steps[0].cleared = false;
+    let used = arany::test_support::tool_context_bytes(&uncleared);
+    assert!((52 * 1024..=64 * 1024).contains(&used));
+    let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
+    assert!(used + reserve > allowance as usize);
+    assert!(arany::test_support::tool_context_bytes(context) + reserve <= allowance as usize);
+    let clearing = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                Event::ToolResultsCleared {
+                    covered_tool_count: 1,
+                    ..
+                }
+            )
+        })
+        .expect("older result cleared");
+    assert!(matches!(
+        events[clearing + 1].event,
+        Event::GoalCompactionCallReserved { .. }
+    ));
+    let reservation = events[clearing + 1..]
+        .iter()
+        .position(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+        .expect("next primary reservation")
+        + clearing
+        + 1;
+    assert!(events[..reservation].iter().all(|event| !matches!(
+        &event.event, Event::ToolStarted { intent, .. } if intent.call == command
+    )));
+}
+
+#[tokio::test]
+async fn insufficient_clearing_summarizes_then_stops_context_full_without_a_smaller_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "");
+    let state_path = temp.path().join("state");
+    let provider = Arc::new(
+        ScriptedProvider::new(
+            (0..600)
+                .map(|_| crate::tool_outcome(facts_read()))
+                .collect(),
+        )
+        .with_compactions(
+            (0..600)
+                .map(|_| {
+                    Ok(CompactionResponse {
+                        summary: String::new(),
+                        response_id: None,
+                        usage: arany::Usage::default(),
+                        wire_provenance: None,
+                    })
+                })
+                .collect(),
+        ),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+    let mut input = request(
+        &workspace,
+        "Inspect bounded empty pages until context is full",
+    );
+    input.include_paths.clear();
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("honest context-full outcome");
+    engine.close().await.unwrap();
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(
+        view.runs[0].failure,
+        Some(arany::RunFailure::ToolContextFull)
+    );
+    assert!(
+        view.runs[0]
+            .tools
+            .iter()
+            .all(|tool| tool.intent.limits.result_bytes == 64 * 1024)
+    );
+    let clearing = events
+        .iter()
+        .position(|event| matches!(event.event, Event::ToolResultsCleared { .. }))
+        .unwrap();
+    assert!(
+        matches!(events[clearing].event, Event::ToolResultsCleared { cleared_bytes, .. } if cleared_bytes < 64 * 1024)
+    );
+    let summary = events[clearing + 1..]
+        .iter()
+        .position(|event| matches!(event.event, Event::GoalCompactionCallReserved { .. }))
+        .unwrap()
+        + clearing
+        + 1;
+    assert!(
+        events[clearing + 1..summary]
+            .iter()
+            .all(|event| !matches!(event.event, Event::GoalProviderCallReserved { .. }))
+    );
+    assert!(
+        events[summary + 1..]
+            .iter()
+            .any(|event| matches!(event.event, Event::GoalContextCompacted { .. }))
+    );
+    assert!(!provider.compact_requests.lock().unwrap().is_empty());
+    let goal = &view.goals[0];
+    assert_eq!(
+        goal.provider_calls as usize,
+        provider.requests.lock().unwrap().len() + provider.compact_requests.lock().unwrap().len()
+    );
 }

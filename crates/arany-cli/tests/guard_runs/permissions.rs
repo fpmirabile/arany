@@ -2152,18 +2152,20 @@ async fn agent_definition_guard_active_time_too_short_for_parsing_fails_the_run_
 async fn agent_definition_guard_goal_compacts_tool_history_with_definitions_present() {
     let fixture = Fixture::new(None, false);
     agent_file(&fixture, "reader.md", "tools: Read\n", "Body");
-    const READS: usize = 104;
+    const READS: usize = 8;
+    // Clearing one page must free less than the full 64 KiB result budget.
+    const PAGE_LINES: usize = 63;
     std::fs::write(
         fixture.workspace.join("notes/data.txt"),
-        format!("{}\n", "x".repeat(1023)).repeat(4 * READS),
+        format!("{}\n", "x".repeat(1023)).repeat(PAGE_LINES * READS),
     )
     .unwrap();
     let mut outcomes: Vec<_> = (0..READS)
         .map(|page| {
             tool_outcome(arany::ToolCall::Read {
                 path: "notes/data.txt".into(),
-                offset: Some(u32::try_from(page * 4 + 1).unwrap()),
-                limit: Some(4),
+                offset: Some(u32::try_from(page * PAGE_LINES + 1).unwrap()),
+                limit: Some(u32::try_from(PAGE_LINES).unwrap()),
             })
         })
         .collect();
@@ -3493,13 +3495,10 @@ mod lifecycle_hooks {
     #[tokio::test]
     async fn in_run_auto_pre_compact_journals_before_reservation_or_skips_and_continues() {
         use arany::permissions::{HookEvent, HookResult};
-        use arany::test_support::{MAX_TOOL_CONTEXT_BYTES, tool_context_bytes};
-
-        const THRESHOLD: usize = (MAX_TOOL_CONTEXT_BYTES * 2).div_ceil(3);
-        const STOPPED_UNCONSUMED: usize = 3;
-        // Half-size pages leave room for shrinking result grants near the threshold.
-        let page = arany::ToolLimits::default().result_bytes / 2;
-        let reads = THRESHOLD.div_ceil(usize::try_from(page).unwrap()) + 2;
+        const STOPPED_UNCONSUMED: usize = 2;
+        // Three recent pages leave room for the next turn; clearing one page still needs a summary.
+        let page = 60 * 1024;
+        let reads = 5;
         let call_budget = u32::try_from(2 * reads + 1).unwrap();
 
         for (script, expected) in [
@@ -3581,10 +3580,7 @@ mod lifecycle_hooks {
             assert_eq!(final_context.history_summary.is_some(), passed);
             if !passed {
                 assert_eq!(final_context.observation_count(), reads);
-                assert!(
-                    tool_context_bytes(final_context) >= THRESHOLD,
-                    "read workload must reach automatic compaction pressure"
-                );
+                assert!(final_context.steps.iter().any(|step| step.cleared));
             }
             let (events, view) = fixture.reopen(result.session_id).await;
             let run = &view.runs[0];
@@ -3604,10 +3600,12 @@ mod lifecycle_hooks {
             let mut subjects = std::collections::HashSet::new();
             let mut starts = Vec::new();
             let mut finishes = Vec::new();
+            let mut clearings = Vec::new();
             let mut reservations = Vec::new();
             let mut compacted = 0;
             for (index, envelope) in events.iter().enumerate() {
                 match &envelope.event {
+                    Event::ToolResultsCleared { .. } => clearings.push(index),
                     Event::ProviderCallRecorded { .. } => calls += 1,
                     Event::HookStarted {
                         run_id,
@@ -3657,6 +3655,10 @@ mod lifecycle_hooks {
             assert_eq!(reservations.len(), compactions);
             assert_eq!(compacted, compactions);
             if !passed {
+                assert_eq!(clearings.len(), starts.len());
+                for (clearing, start) in clearings.iter().zip(&starts) {
+                    assert!(clearing < start);
+                }
                 let first = *hook_calls.first().unwrap();
                 assert!(first < reads, "must exercise later occurrences");
                 assert_eq!(

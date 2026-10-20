@@ -155,6 +155,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         | "WorkerLeaseReleased"
         | "WorkerVerificationRecorded" => Some(1),
         "WorkerHandoverRecorded" => Some(2),
+        "ToolResultsCleared" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
         "SupervisorVerdictRecorded" => Some(1),
         "WorkspaceRewindStarted"
@@ -325,6 +326,11 @@ pub enum Event {
         goal_id: GoalId,
         run_id: RunId,
         active_ceiling_ms: u64,
+    },
+    ToolResultsCleared {
+        run_id: RunId,
+        covered_tool_count: u32,
+        cleared_bytes: u32,
     },
     GoalContextCompacted {
         goal_id: GoalId,
@@ -547,6 +553,12 @@ struct GoalProviderCallPayload {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+struct ToolResultsClearedPayload {
+    covered_tool_count: u32,
+    cleared_bytes: u32,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ToolFinishedPayload {
     #[serde(flatten)]
     observation: crate::tools::ToolObservation,
@@ -660,6 +672,7 @@ impl Event {
             Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
             Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
             Self::GoalContextCompacted { .. } => "GoalContextCompacted",
+            Self::ToolResultsCleared { .. } => "ToolResultsCleared",
             Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
@@ -698,6 +711,7 @@ impl Event {
             | Self::GoalPlanContractRecorded { run_id, .. }
             | Self::GoalCompactionCallReserved { run_id, .. }
             | Self::GoalContextCompacted { run_id, .. }
+            | Self::ToolResultsCleared { run_id, .. }
             | Self::GoalSteeringNoteRecorded { run_id, .. }
             | Self::MessageAccepted { run_id, .. }
             | Self::RunStarted { run_id, .. }
@@ -950,6 +964,14 @@ impl Event {
             } => serialize(&GoalProviderCallPayload {
                 goal_id: *goal_id,
                 active_ceiling_ms: *active_ceiling_ms,
+            }),
+            Self::ToolResultsCleared {
+                covered_tool_count,
+                cleared_bytes,
+                ..
+            } => serialize(&ToolResultsClearedPayload {
+                covered_tool_count: *covered_tool_count,
+                cleared_bytes: *cleared_bytes,
             }),
             Self::GoalContextCompacted {
                 goal_id,
@@ -1264,6 +1286,14 @@ impl Event {
                     active_ceiling_ms: data.active_ceiling_ms,
                 }
             }
+            "ToolResultsCleared" if run_id.is_some() && agent_run_id.is_none() => {
+                let data: ToolResultsClearedPayload = parse(payload)?;
+                Self::ToolResultsCleared {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    covered_tool_count: data.covered_tool_count,
+                    cleared_bytes: data.cleared_bytes,
+                }
+            }
             "GoalContextCompacted" if run_id.is_some() && agent_run_id.is_none() => {
                 let data: GoalContextCompactionPayload = parse(payload)?;
                 Self::GoalContextCompacted {
@@ -1357,6 +1387,7 @@ impl Event {
             | "AgentFinished"
             | "GoalCompactionCallReserved"
             | "GoalContextCompacted"
+            | "ToolResultsCleared"
             | "GoalSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
             | "ToolStarted"

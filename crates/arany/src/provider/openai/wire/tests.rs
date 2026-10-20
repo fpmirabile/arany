@@ -552,6 +552,7 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
     let input = body(&request)["input"].as_array().unwrap().clone();

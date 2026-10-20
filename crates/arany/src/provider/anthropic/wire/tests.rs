@@ -1614,6 +1614,7 @@ fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
     let messages = body(&request, Effort::Low)["messages"]

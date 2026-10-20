@@ -485,8 +485,17 @@ impl ToolRuntime {
     pub(crate) fn result_capacity(&self, overhead: usize, reserved: usize) -> Option<usize> {
         let capacity = self
             .context_limit_bytes
-            .saturating_sub(overhead.saturating_add(512 + reserved));
+            .saturating_sub(overhead.saturating_add(reserved));
         (capacity >= 128).then_some(capacity)
+    }
+
+    pub(crate) fn step_context_reserve(command_integration: bool, feedback: usize) -> usize {
+        512 + feedback
+            + if command_integration {
+                types::MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
+            } else {
+                0
+            }
     }
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {

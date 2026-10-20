@@ -385,6 +385,15 @@ impl<'a> RunLoop<'a> {
             if self.pause_at_boundary() {
                 break PrimaryEnd::Stopped(StopCause::Paused);
             }
+            if self.controls.cancellation.is_cancelled() {
+                break PrimaryEnd::Stopped(StopCause::Cancelled);
+            }
+            match self.maintain_primary_context(root_request, None).await? {
+                tool_compaction::PrimaryContext::Ready => {}
+                tool_compaction::PrimaryContext::Stop(cause) => {
+                    break PrimaryEnd::Stopped(cause);
+                }
+            }
             let (first, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
@@ -951,9 +960,10 @@ impl<'a> RunLoop<'a> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
-        self.compact_tool_context_if_needed(root).await?;
+
         if root.input.tools.as_ref().is_none_or(|tools| {
             tools.rendered_len()
                 > self

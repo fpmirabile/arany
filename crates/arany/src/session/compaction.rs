@@ -187,19 +187,16 @@ pub(crate) fn validate_goal_context_compactions(
     events: &[EventEnvelope],
 ) -> Result<(), ReplayError> {
     let mut hasher = PrefixHasher::new();
-    let mut tool_counts = HashMap::<super::RunId, u32>::new();
-    let mut tool_prefixes = HashMap::<super::RunId, Vec<(u32, u64, [u8; 32])>>::new();
+    // Child Tools finish under the same Run, so the reducer binds the covered count to its sequence.
+    let mut tool_prefixes = HashMap::<super::RunId, Vec<(u64, [u8; 32])>>::new();
     let mut last_attempts = HashMap::<super::RunId, (u32, u64)>::new();
     for envelope in events {
         if let Event::ToolFinished { run_id, .. } = &envelope.event {
-            let count = tool_counts.entry(*run_id).or_default();
-            *count = count.checked_add(1).ok_or(ReplayError::InvalidSnapshot)?;
             hasher.update(envelope)?;
-            tool_prefixes.entry(*run_id).or_default().push((
-                *count,
-                envelope.sequence,
-                hasher.digest(),
-            ));
+            tool_prefixes
+                .entry(*run_id)
+                .or_default()
+                .push((envelope.sequence, hasher.digest()));
             continue;
         }
         if let Event::GoalContextCompacted {
@@ -214,12 +211,11 @@ pub(crate) fn validate_goal_context_compactions(
                 .and_then(|prefixes| {
                     prefixes
                         .iter()
-                        .find(|(count, _, _)| count == covered_tool_count)
+                        .find(|(sequence, _)| *sequence == record.covered_sequence)
                 })
                 .ok_or(ReplayError::InvalidSnapshot)?;
             if record.covered_run_id != *run_id
-                || record.covered_sequence != point.1
-                || record.source_digest != point.2
+                || record.source_digest != point.1
                 || matches!(
                     &record.status,
                     CompactionStatus::Succeeded {
