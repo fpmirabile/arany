@@ -1,3 +1,4 @@
+use super::stop::{StepEnd, StopCause};
 use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, RunLoop, call_record, valid_answer,
 };
@@ -81,7 +82,7 @@ struct ActiveChild {
 enum AbortReason {
     PlanAdmission,
     ToolContextFull,
-    Failed,
+    Failed(StopCause),
     Hook,
     Budget,
     Cancelled,
@@ -338,7 +339,7 @@ impl RunLoop<'_> {
             abort_reason = Some(AbortReason::Budget);
         }
         if abort_reason.is_none() && !pending.is_empty() {
-            abort_reason = Some(AbortReason::Failed);
+            abort_reason = Some(AbortReason::Failed(StopCause::ToolStopped));
         }
         if let Some(reason) = abort_reason {
             if children.iter().any(|c| c.editor) {
@@ -371,10 +372,25 @@ impl RunLoop<'_> {
                 return self.settle_stopped_primary().await.map(|()| false);
             }
             return match reason {
-                AbortReason::Failed if self.ledger().active_time_exhausted() => {
+                AbortReason::Failed(_) if self.ledger().active_time_exhausted() => {
                     self.settle_stopped_primary().await
                 }
-                AbortReason::Failed => self.fail_primary(self.tool_stop_cause()).await,
+                AbortReason::Failed(cause) => {
+                    let failure = match cause {
+                        StopCause::ActiveTime => super::RunFailure::BudgetExhausted,
+                        StopCause::Uncertain
+                        | StopCause::Cancelled
+                        | StopCause::HookStop
+                        | StopCause::Paused
+                        | StopCause::Budget
+                        | StopCause::Capacity
+                        | StopCause::ContextFull
+                        | StopCause::DelegationDeadline
+                        | StopCause::ToolStopped
+                        | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
+                    };
+                    self.fail_primary(failure).await
+                }
                 AbortReason::PlanAdmission => {
                     self.fail_primary(super::RunFailure::PlanAdmission).await
                 }
@@ -404,21 +420,30 @@ impl RunLoop<'_> {
                 turn,
             ))
             .await;
-            let continues = match continues {
-                Ok(continues) => continues,
-                Err(EngineError::ContextTooLarge) => {
-                    return self
-                        .fail_primary(super::RunFailure::ToolContextFull)
-                        .await
-                        .map(|()| false);
+            match continues? {
+                StepEnd::Continue => {}
+                StepEnd::Stopped(cause) => {
+                    let failure = match cause {
+                        StopCause::ContextFull => super::RunFailure::ToolContextFull,
+                        StopCause::ActiveTime => {
+                            if self.take_active_time_floor() {
+                                super::RunFailure::BudgetExhausted
+                            } else {
+                                return Err(EngineError::GoalBudgetExhausted);
+                            }
+                        }
+                        StopCause::Uncertain
+                        | StopCause::Cancelled
+                        | StopCause::HookStop
+                        | StopCause::Paused
+                        | StopCause::Budget
+                        | StopCause::Capacity
+                        | StopCause::DelegationDeadline
+                        | StopCause::ToolStopped
+                        | StopCause::InvalidCommandResult => super::RunFailure::ToolStopped,
+                    };
+                    return self.fail_primary(failure).await.map(|()| false);
                 }
-                Err(error) => return Err(error),
-            };
-            if !continues {
-                return self
-                    .fail_primary(self.tool_stop_cause())
-                    .await
-                    .map(|()| false);
             }
             self.verify_workers().await?;
         }
@@ -812,7 +837,7 @@ impl RunLoop<'_> {
                                 }
                                 Err(error) => return Err(error),
                             };
-                            let continues = if let Some(request) = request {
+                            let end = if let Some(request) = request {
                                 match Box::pin(self.execute_step(
                                     Grant::Primary {
                                         request: root_request,
@@ -823,29 +848,49 @@ impl RunLoop<'_> {
                                 ))
                                 .await
                                 {
-                                    Ok(continues) => continues,
-                                    Err(
-                                        EngineError::GoalBudgetExhausted
-                                        | EngineError::Tool(crate::tools::ToolError::Limit),
-                                    ) => {
+                                    Ok(StepEnd::Continue) => StepEnd::Continue,
+                                    Ok(StepEnd::Stopped(StopCause::ActiveTime))
+                                        if self
+                                            .active_time_floor
+                                            .load(std::sync::atomic::Ordering::Relaxed) =>
+                                    {
+                                        StepEnd::Stopped(StopCause::ActiveTime)
+                                    }
+                                    Ok(StepEnd::Stopped(
+                                        StopCause::ActiveTime | StopCause::Capacity,
+                                    )) => {
                                         queue.budget_stopped = true;
                                         self.observe_worker_stop().await?;
-                                        true
+                                        StepEnd::Continue
                                     }
-                                    Err(EngineError::ContextTooLarge) => {
+                                    Ok(StepEnd::Stopped(StopCause::ContextFull)) => {
                                         abort_reason = Some(AbortReason::ToolContextFull);
-                                        false
+                                        StepEnd::Stopped(StopCause::ContextFull)
                                     }
+                                    Ok(
+                                        end @ StepEnd::Stopped(
+                                            StopCause::Uncertain
+                                            | StopCause::Cancelled
+                                            | StopCause::HookStop
+                                            | StopCause::Paused
+                                            | StopCause::Budget
+                                            | StopCause::DelegationDeadline
+                                            | StopCause::ToolStopped
+                                            | StopCause::InvalidCommandResult,
+                                        ),
+                                    ) => end,
                                     Err(error) => return Err(error),
                                 }
+                            } else if queue.budget_stopped {
+                                StepEnd::Continue
                             } else {
-                                queue.budget_stopped
+                                StepEnd::Stopped(StopCause::ToolStopped)
                             };
-                            if !continues {
+                            if let StepEnd::Stopped(cause) = end {
                                 abort_reason = self
                                     .hook_abort()?
                                     .or(abort_reason)
-                                    .or(Some(AbortReason::Failed));
+                                    .or(Some(AbortReason::Failed(cause)));
                             }
                             if !queue.budget_stopped {
                                 self.verify_workers().await?;
@@ -887,7 +932,7 @@ impl RunLoop<'_> {
                         abort_reason = Some(if self.controls.cancellation.is_cancelled() {
                             AbortReason::Cancelled
                         } else {
-                            AbortReason::Failed
+                            AbortReason::Failed(StopCause::ToolStopped)
                         })
                     }
                 }
@@ -1053,9 +1098,20 @@ impl RunLoop<'_> {
                         ))
                         .await
                         {
-                            Ok(continues) => continues,
-                            Err(EngineError::Tool(crate::tools::ToolError::Limit)) => false,
-                            Err(EngineError::GoalBudgetExhausted) => {
+                            Ok(StepEnd::Continue) => true,
+                            Ok(StepEnd::Stopped(
+                                StopCause::Uncertain
+                                | StopCause::Cancelled
+                                | StopCause::HookStop
+                                | StopCause::Paused
+                                | StopCause::Budget
+                                | StopCause::Capacity
+                                | StopCause::ContextFull
+                                | StopCause::DelegationDeadline
+                                | StopCause::ToolStopped
+                                | StopCause::InvalidCommandResult,
+                            )) => false,
+                            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
                                 queue.budget_stopped = true;
                                 self.observe_worker_stop().await?;
                                 false
@@ -1094,7 +1150,7 @@ impl RunLoop<'_> {
                         matches!(
                             abort_reason,
                             Some(
-                                AbortReason::Failed
+                                AbortReason::Failed(_)
                                     | AbortReason::PlanAdmission
                                     | AbortReason::ToolContextFull
                                     | AbortReason::Cancelled
@@ -1156,7 +1212,7 @@ impl RunLoop<'_> {
                 } else if let Some(reason) = self.hook_abort()? {
                     Some(reason)
                 } else if step_disposition == Some(AgentDisposition::Failed) {
-                    Some(AbortReason::Failed)
+                    Some(AbortReason::Failed(StopCause::ToolStopped))
                 } else if step_disposition == Some(AgentDisposition::Cancelled) {
                     Some(AbortReason::Cancelled)
                 } else {
@@ -1243,7 +1299,7 @@ impl RunLoop<'_> {
                     || self.pause_requested()
                     || abort_reason.is_some();
                 let continues = if skipped {
-                    false
+                    StepEnd::Stopped(StopCause::Cancelled)
                 } else {
                     let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
                     // Boxed: the Tool future is large and would overflow the caller's stack.
@@ -1257,9 +1313,26 @@ impl RunLoop<'_> {
                     ))
                     .await?
                 };
-                if continues {
-                    child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-                    return Ok(None);
+                match continues {
+                    StepEnd::Continue => {
+                        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+                        return Ok(None);
+                    }
+                    StepEnd::Stopped(StopCause::ActiveTime) => {
+                        return Err(EngineError::GoalBudgetExhausted);
+                    }
+                    StepEnd::Stopped(
+                        StopCause::Uncertain
+                        | StopCause::Cancelled
+                        | StopCause::HookStop
+                        | StopCause::Paused
+                        | StopCause::Budget
+                        | StopCause::Capacity
+                        | StopCause::ContextFull
+                        | StopCause::DelegationDeadline
+                        | StopCause::ToolStopped
+                        | StopCause::InvalidCommandResult,
+                    ) => {}
                 }
                 let disposition = if self.actor_hook_requested_stop(agent_run_id)? {
                     AgentDisposition::StoppedByHook
@@ -1437,7 +1510,7 @@ impl RunLoop<'_> {
 
     fn hook_abort(&self) -> Result<Option<AbortReason>, EngineError> {
         if self.uncertain_hook()? {
-            return Ok(Some(AbortReason::Failed));
+            return Ok(Some(AbortReason::Failed(StopCause::ToolStopped)));
         }
         if self.hook_requested_stop()? {
             return Ok(Some(AbortReason::Hook));
@@ -1447,7 +1520,7 @@ impl RunLoop<'_> {
                 .last()
                 .is_some_and(crate::session::RunView::hooks_settled)
         })?;
-        Ok((!settled).then_some(AbortReason::Failed))
+        Ok((!settled).then_some(AbortReason::Failed(StopCause::ToolStopped)))
     }
 
     pub(super) async fn begin_synthesis(
