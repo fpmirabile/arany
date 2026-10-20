@@ -51,6 +51,20 @@ fn window_pressure(input_tokens: u32, context_window_tokens: u32) -> bool {
     u64::from(input_tokens) * 10 >= u64::from(context_window_tokens) * 9
 }
 
+// Tool reviews also record under the primary; only its own planning or synthesis call measures the context.
+// Returns the 1-based position of the latest such record when it reports 90% of the window.
+fn pressured_report(
+    calls: impl Iterator<Item = (crate::provider::AgentPhase, Option<u32>)>,
+    context_window_tokens: u32,
+) -> Option<u64> {
+    use crate::provider::AgentPhase;
+    let (index, (_, input)) = calls
+        .enumerate()
+        .filter(|(_, (phase, _))| matches!(phase, AgentPhase::RootPlan | AgentPhase::RootSynthesis))
+        .last()?;
+    window_pressure(input?, context_window_tokens).then_some(index as u64 + 1)
+}
+
 fn context_decision(
     context: &crate::tools::ToolContext,
     limit: usize,
@@ -347,7 +361,7 @@ impl RunLoop<'_> {
         Ok(())
     }
 
-    // The latest primary call's reported input at 90% of the pinned window maintains context once.
+    // Each pressured primary report maintains context once, however often maintenance runs before the next call.
     fn unhandled_window_pressure(&self) -> Result<Option<u64>, EngineError> {
         let handled = self
             .window_pressure_handled
@@ -355,15 +369,16 @@ impl RunLoop<'_> {
         self.ledger().view(|view| {
             let run = view.runs.iter().find(|run| run.id == self.run_id)?;
             let window = run.config.as_ref()?.context_window_tokens?;
-            let input = run
+            let calls = &run
                 .agents
                 .iter()
                 .find(|agent| agent.id == self.primary_id)?
-                .provider_calls
-                .last()?
-                .input_tokens?;
-            let sequence = *run.provider_sequences.get(&self.primary_id)?;
-            (sequence != handled && window_pressure(input, window)).then_some(sequence)
+                .provider_calls;
+            pressured_report(
+                calls.iter().map(|call| (call.phase, call.input_tokens)),
+                window,
+            )
+            .filter(|report| *report != handled)
         })
     }
 
@@ -666,6 +681,30 @@ mod tests {
             (0, 32_768, false),
         ] {
             assert_eq!(window_pressure(input, window), pressure);
+        }
+
+        use crate::provider::AgentPhase::{RootPlan, RootSynthesis, ToolReview};
+        for (calls, report) in [
+            (
+                vec![(RootPlan, Some(244_800)), (ToolReview, Some(10))],
+                Some(1),
+            ),
+            (
+                vec![(RootPlan, Some(10)), (ToolReview, Some(272_000))],
+                None,
+            ),
+            (
+                vec![
+                    (RootPlan, Some(244_800)),
+                    (ToolReview, None),
+                    (RootSynthesis, Some(244_800)),
+                ],
+                Some(3),
+            ),
+            (vec![(RootPlan, Some(244_800)), (RootPlan, None)], None),
+            (vec![(ToolReview, Some(272_000))], None),
+        ] {
+            assert_eq!(pressured_report(calls.into_iter(), 272_000), report);
         }
 
         for (sizes, limit, reserve, pressure, expected) in [
