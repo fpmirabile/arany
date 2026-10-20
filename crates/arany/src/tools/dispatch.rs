@@ -79,6 +79,15 @@ pub(super) fn outcome(
             ToolDisposition::Denied,
             "File path is unavailable or outside the admitted regular-file boundary".into(),
         ),
+        Err(ToolError::NotFound) => (
+            ToolDisposition::Failed,
+            if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Mkdir { .. }) {
+                "Parent directory not found; create it with Mkdir first"
+            } else {
+                "File or directory not found; List the parent directory to check the path"
+            }
+            .into(),
+        ),
         Err(ToolError::Uncertain) => (
             ToolDisposition::Uncertain,
             "Filesystem change may have occurred; inspect current state before another attempt"

@@ -6006,3 +6006,92 @@ async fn line_paged_read_returns_all_eighty_lines_after_twenty_steps() {
     );
     store.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn missing_skill_path_is_attested_failed_and_the_run_continues() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join(".agents/skills/ponytail")).unwrap();
+    std::fs::write(
+        workspace.join(".agents/skills/ponytail/SKILL.md"),
+        "Use existing code",
+    )
+    .unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let read = |path: &str| {
+        tool_outcome(arany::ToolCall::Read {
+            path: path.into(),
+            offset: None,
+            limit: None,
+        })
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        read("agents/skills/ponytail/SKILL.md"),
+        tool_outcome(arany::ToolCall::List { path: ".".into() }),
+        read(".agents/skills/ponytail/SKILL.md"),
+        arany::test_support::goals::finish_with("Found and read the Skill"),
+    ]));
+    let mut input = request(&workspace, "Read Ponytail guidance");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    {
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(requests.len(), 4);
+        let observed = requests[1].input.tools.as_ref().unwrap().observations();
+        assert_eq!(observed[0].disposition, arany::ToolDisposition::Failed);
+        assert_eq!(
+            observed[0].output,
+            "File or directory not found; List the parent directory to check the path"
+        );
+    }
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.runs[0], result.run);
+    let missing = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(missing.disposition, arany::ToolDisposition::Failed);
+    assert_eq!(
+        missing.output,
+        "File or directory not found; List the parent directory to check the path"
+    );
+    assert!(matches!(
+        missing.attestation,
+        Some(arany::Attestation::InProcess { .. })
+    ));
+    assert_eq!(
+        view.runs[0].tools[2]
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        arany::ToolDisposition::Succeeded
+    );
+    store.close().await.unwrap();
+}
