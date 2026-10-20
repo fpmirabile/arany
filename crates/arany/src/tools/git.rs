@@ -79,7 +79,7 @@ const MAX_ROWS: usize = 256;
 const ENVELOPE_BYTES: usize = 1024;
 const HEAD_BYTES: usize = 256;
 const CONFIG_BYTES: usize = 64 * 1024;
-const MAX_GIT_RUNTIME: Duration = Duration::from_secs(20);
+const MAX_GIT_RUNTIME: Duration = Duration::from_millis(super::types::GIT_TIMEOUT_MS as u64);
 pub(super) const VIEW: &str = "git-view";
 pub(super) const HOME: &str = "git-home";
 const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";

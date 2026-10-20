@@ -219,7 +219,7 @@ pub(super) async fn execute(
         next_id: 1,
         notifications: 0,
     };
-    let result = tokio::time::timeout(Duration::from_secs(40), async {
+    let result = tokio::time::timeout(Duration::from_millis(u64::from(super::types::MCP_TIMEOUT_MS)), async {
         let init = connection.request("initialize", json!({"protocolVersion":VERSION,"capabilities":{},"clientInfo":{"name":"arany","version":env!("CARGO_PKG_VERSION")}})).await?;
         if init["protocolVersion"] != VERSION || !init["capabilities"]["tools"].is_object() { return Err(ToolError::ProtectionUnavailable); }
         connection.send(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;

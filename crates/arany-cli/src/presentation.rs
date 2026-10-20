@@ -239,8 +239,16 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
     use arany::LimitCause;
     match observation.limit_cause.unwrap_or(LimitCause::Resource) {
         LimitCause::Timeout => format!(
-            "timed out after {} s; /settings raises it",
-            observation.intent.limits.runtime_ms / 1_000
+            "timed out after {} s{}",
+            f64::from(observation.intent.effective_timeout_ms()) / 1_000.0,
+            if matches!(
+                observation.intent.call,
+                arany::ToolCall::Command { .. } | arany::ToolCall::CommandUnguarded { .. }
+            ) {
+                "; /settings raises it"
+            } else {
+                ""
+            }
         ),
         LimitCause::OutputCeiling => "output passed 1 GiB; stopped".into(),
         LimitCause::ContextFull => "no room left in this Run's context".into(),
@@ -261,11 +269,7 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         .into_iter()
         .any(|(total, name)| {
             result[name].as_str().is_some_and(|text| {
-                total.bytes > text.len() as u64
-                    || text.contains(&format!(
-                        " lines omitted; {} bytes, {} lines total]…\n",
-                        total.bytes, total.lines
-                    ))
+                total.bytes > text.len() as u64 || total.lines != text.lines().count() as u64
             })
         });
     let lines = stdout.lines.saturating_add(stderr.lines);
@@ -2038,6 +2042,106 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn timeout_rows_use_operation_caps_and_only_offer_settings_for_commands() {
+        for (call, operation, cap, guidance) in [
+            (
+                ToolCall::GitStatus { path: ".".into() },
+                "Git status(.)",
+                20_000,
+                "",
+            ),
+            (
+                ToolCall::GitDiff {
+                    path: ".".into(),
+                    base: None,
+                    head: None,
+                    staged: false,
+                },
+                "Git diff(.)",
+                20_000,
+                "",
+            ),
+            (
+                ToolCall::GitLog {
+                    path: ".".into(),
+                    revision: None,
+                    max_count: 10,
+                },
+                "Git log(.)",
+                20_000,
+                "",
+            ),
+            (
+                ToolCall::McpList {
+                    server: "local".into(),
+                },
+                "MCP list(local)",
+                40_000,
+                "",
+            ),
+            (
+                ToolCall::McpCall {
+                    server: "local".into(),
+                    tool: "inspect".into(),
+                    schema_digest: "a".repeat(64),
+                    arguments: "{}".into(),
+                },
+                "MCP(local / inspect)",
+                40_000,
+                "",
+            ),
+            (
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec![],
+                    cwd: String::new(),
+                },
+                "Command(sh )",
+                60_000,
+                "; /settings raises it",
+            ),
+            (
+                ToolCall::CommandUnguarded {
+                    program: "sh".into(),
+                    args: vec![],
+                    cwd: String::new(),
+                    justification: "Run the timed-out command".into(),
+                },
+                "Unguarded command(sh )",
+                60_000,
+                "; /settings raises it",
+            ),
+        ] {
+            for runtime_ms in [60_000, 1_500] {
+                let mut tool = tool_fixture(call.clone(), "untrusted timeout text");
+                let observation = tool.observation.as_mut().unwrap();
+                observation.intent.limits.runtime_ms = runtime_ms;
+                observation.disposition = ToolDisposition::Limit;
+                observation.limit_cause = Some(arany::LimitCause::Timeout);
+                let seconds = f64::from(runtime_ms.min(cap)) / 1_000.0;
+                let marker = if tool.ran_unguarded() {
+                    " · UNGUARDED"
+                } else {
+                    ""
+                };
+                let summary = tool_summary(&tool);
+                assert_eq!(
+                    summary,
+                    format!(
+                        "⏺ {operation}\n  ⎿ limit: timed out after {seconds} s{guidance}{marker}"
+                    )
+                );
+                assert_eq!(
+                    plain_tool_summary(&summary),
+                    format!(
+                        "{operation}\nResult: limit: timed out after {seconds} s{guidance}{marker}"
+                    )
+                );
+            }
+        }
+    }
+
+    #[test]
     fn command_rows_use_typed_line_totals_and_mark_truncation() {
         let output = serde_json::json!({
             "exit_code": 0,
@@ -2060,6 +2164,19 @@ mod peer_row_tests {
         assert_eq!(
             plain_tool_summary(&tool_summary(&tool)),
             "Command(sh )\nResult: exit 0 · 12,340 lines (truncated)"
+        );
+        let mut tool = tool;
+        tool.observation.as_mut().unwrap().output = serde_json::json!({
+            "exit_code": 0,
+            "stdout": "x lines omitted; 45 bytes, 1 lines total]…\n",
+            "stderr": "", "stdout_total": {"bytes":45,"lines":1},
+            "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
+        })
+        .to_string();
+        assert_eq!(tool_summary(&tool), "⏺ Command(sh )\n  ⎿ exit 0 · 1 line");
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 1 line"
         );
     }
 

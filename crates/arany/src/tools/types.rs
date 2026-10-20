@@ -475,6 +475,17 @@ pub struct EffectIntent {
 }
 
 impl EffectIntent {
+    pub fn effective_timeout_ms(&self) -> u32 {
+        let cap = match self.call {
+            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
+                GIT_TIMEOUT_MS
+            }
+            ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
+            _ => self.limits.runtime_ms,
+        };
+        self.limits.runtime_ms.min(cap)
+    }
+
     pub(crate) fn digest(&self) -> [u8; 32] {
         digest(&serde_json::to_vec(self).expect("typed intent is serializable"))
     }
@@ -491,6 +502,9 @@ impl EffectIntent {
             && self.limits.valid()
     }
 }
+
+pub(super) const GIT_TIMEOUT_MS: u32 = 20_000;
+pub(super) const MCP_TIMEOUT_MS: u32 = 40_000;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

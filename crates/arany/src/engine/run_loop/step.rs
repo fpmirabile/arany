@@ -553,11 +553,15 @@ impl RunLoop<'_> {
         self.append(Event::ToolFinished {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
-            observation: not_dispatched(
-                intent,
-                ToolDisposition::Limit,
-                "Delegation deadline reached; no operation was dispatched",
-            ),
+            observation: {
+                let mut observation = not_dispatched(
+                    intent,
+                    ToolDisposition::Limit,
+                    "Delegation deadline reached; no operation was dispatched",
+                );
+                observation.limit_cause = Some(crate::tools::LimitCause::Timeout);
+                observation
+            },
 
             checkpoint: None,
         })
