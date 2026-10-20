@@ -159,17 +159,15 @@ fn submit_with_providers<'a>(
 
 pub(super) fn finish_run(
     result: Result<RunResult, arany::EngineError>,
+    pause_requested: bool,
 ) -> Result<RunOutcome, RunAttemptError> {
-    match result {
-        Ok(RunResult {
-            run,
-            stopped: Some(reason),
-        }) => Err(RunAttemptError::Stopped {
+    let RunResult { run, stopped } = result.map_err(classify_run_error)?;
+    match crate::cli::exec::stop_after_answer(run.run.status, stopped, pause_requested) {
+        Some(reason) => Err(RunAttemptError::Stopped {
             outcome: Box::new(run),
-            reason: reason.to_string(),
+            reason: reason.to_owned(),
         }),
-        Ok(RunResult { run, stopped: None }) => Ok(run),
-        Err(error) => Err(classify_run_error(error)),
+        None => Ok(run),
     }
 }
 
@@ -1361,7 +1359,7 @@ mod tests {
                 },
                 RunSteering::new(),
             ) {
-                Ok(handle) => finish_run(handle.await)
+                Ok(handle) => finish_run(handle.await, false)
                     .expect_err("explicit Tool admission must reject before inference"),
                 Err(error) => error,
             };

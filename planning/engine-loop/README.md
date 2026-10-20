@@ -174,7 +174,7 @@ pub(super) enum Settlement {
     Cancel,                // Cancelled
     HookStop,              // StoppedByHook
     Unknown,               // no terminal Event; Err(ToolError::Uncertain) (D3)
-    Unsettleable,          // no terminal Event; today Err(GoalBudgetExhausted), RunStop after R7
+    Unsettleable,          // no terminal Event; reported as RunStop::Uncertain since R7
 }
 
 pub(super) fn settle(end: PrimaryEnd, facts: &RunFacts) -> Settlement;

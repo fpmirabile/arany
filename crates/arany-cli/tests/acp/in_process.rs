@@ -1744,12 +1744,34 @@ impl Adapter {
 #[tokio::test]
 async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans() {
     let _deadline = crate::cli::serve::tests::deadline();
-    for (reason, status, expected) in [
-        ("actionBudgetExhausted", "failed", "max_turn_requests"),
-        ("tokenBudgetExhausted", "failed", "max_tokens"),
-        ("", "completed", "end_turn"),
-        ("", "failed", "turnFailed"),
+    let exhausted = |limit| json!({"reason":"goalExhausted","limit":limit});
+    // (serve `goal.stopped`, turn and Goal status, ACP stopReason or error reason)
+    for (stopped, status, expected) in [
+        (exhausted("calls"), "failed", "max_turn_requests"),
+        (exhausted("runs"), "completed", "max_turn_requests"),
+        (exhausted("activeTime"), "failed", "max_turn_requests"),
+        (exhausted("tokens"), "failed", "max_tokens"),
+        (Value::Null, "completed", "end_turn"),
+        (Value::Null, "failed", "turnFailed"),
+        (json!({"reason":"paused"}), "interrupted", "cancelled"),
+        (json!({"reason":"cancelled"}), "interrupted", "cancelled"),
+        (
+            json!({"reason":"stoppedByHook"}),
+            "interrupted",
+            "stoppedByHook",
+        ),
+        (
+            json!({"reason":"uncertain"}),
+            "interrupted",
+            "effectUncertain",
+        ),
+        (
+            json!({"reason":"failed","failure":"tool_stopped"}),
+            "failed",
+            "turnFailed",
+        ),
     ] {
+        let tokens = stopped["limit"] == "tokens";
         let mut adapter = Adapter::new().await;
         adapter.prompt(json!([{"type":"text","text":"Work"}])).await;
         let goal = arany::GoalId::new();
@@ -1760,7 +1782,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             "success_criterion":{"kind":"workspace_file_content","path":"facts.txt","content":"data"},
             "budget":arany::GoalBudget::default()
         });
-        if reason == "tokenBudgetExhausted" {
+        if tokens {
             contract["success_criterion"] = json!(arany::GoalSuccessCriterion::ToolCallSucceeded {
                 call: Box::new(arany::ToolCall::Write {
                     path: "facts.txt".into(),
@@ -1813,7 +1835,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
         assert!(!mission.contains(['\u{001b}', '\u{202e}']));
         assert!(mission.len() <= 2048 + 80);
         assert!(mission.ends_with(&format!("[truncated; see arany show {}]", adapter.session)));
-        if reason == "tokenBudgetExhausted" {
+        if tokens {
             assert!(entries[1]["content"].as_str().unwrap().len() <= 2048 + 80);
             assert!(
                 entries[1]["content"]
@@ -1835,8 +1857,12 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
                 params: Some(
                     json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":goal,
                 "status":status,
-                "stopReason":if reason.is_empty() {Value::Null} else {json!(reason)},
-                "items":[],"goal":{"status":status}}}),
+                "stopReason":match stopped["limit"].as_str() {
+                    Some("tokens") => json!("tokenBudgetExhausted"),
+                    Some(_) => json!("actionBudgetExhausted"),
+                    None => Value::Null,
+                },
+                "items":[],"goal":{"status":status,"stopped":stopped}}}),
                 ),
             }))
             .await
@@ -1867,10 +1893,11 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             assert_eq!(entry["status"], final_status);
         }
         let result = adapter.next().await;
-        if expected == "turnFailed" {
-            assert_eq!(result["error"]["data"]["reason"], expected);
+        if matches!(expected, "turnFailed" | "stoppedByHook" | "effectUncertain") {
+            assert_eq!(result["error"]["code"], -32603, "{stopped}");
+            assert_eq!(result["error"]["data"]["reason"], expected, "{stopped}");
         } else {
-            assert_eq!(result["result"]["stopReason"], expected);
+            assert_eq!(result["result"]["stopReason"], expected, "{stopped}");
         }
         assert!(
             adapter.output.try_recv().is_err(),

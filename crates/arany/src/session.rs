@@ -7,6 +7,7 @@ pub(crate) mod input;
 mod lineage;
 mod reducer;
 pub mod rewind;
+mod stop;
 #[cfg(test)]
 pub(crate) mod tests;
 pub mod worker;
@@ -58,6 +59,7 @@ pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
     private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
+pub use stop::{GoalLimit, RunStop};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

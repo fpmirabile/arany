@@ -167,14 +167,14 @@ pub(in crate::cli) async fn run_configured(
                 Input(Option<ClientMessage>),
                 Event(Option<Tapped>),
                 Committed(Option<Tapped>),
-                Done(Result<Option<String>, EngineError>),
+                Done(Result<(), EngineError>),
             }
             let next = if let Some(turn) = active.as_mut() {
                 tokio::select! { biased;
                     input = inbound.recv(), if !shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
                     event = committed.next() => Next::Committed(event),
-                    result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(|result| result.stopped.map(|reason| reason.to_string()))),
+                    result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(|_| ())),
                 }
             } else {
                 if shutdown {
@@ -606,14 +606,13 @@ pub(in crate::cli) async fn run_configured(
                     } else {
                         None
                     };
-                    let stopped = result.as_ref().ok().cloned().flatten();
                     if result.is_err()
                         && let Some(id) = turn.pending_start.take()
                     {
                         let error = result.expect_err("failed Run");
                         send(&outbound, Fault::engine(error).message(Some(id))).await?;
                     }
-                    complete(turn, &state, &outbound, &opt_out, true, stopped).await?;
+                    complete(turn, &state, &outbound, &opt_out, true).await?;
                     if let Some(id) = turn.pending_close.take() {
                         history.unsubscribe(turn.thread_id);
                         threads.map.remove(&turn.thread_id);
@@ -669,7 +668,7 @@ async fn observe(
         }
         if turn.state.pending_completion && matches!(envelope.event, Event::MessageAccepted { .. })
         {
-            complete(turn, state, outbound, opt_out, false, None).await?;
+            complete(turn, state, outbound, opt_out, false).await?;
         }
         if let Event::MessageAccepted { run_id, .. } = envelope.event
             && turn.state.goal_id.is_none()
@@ -718,7 +717,6 @@ async fn complete(
     outbound: &mpsc::Sender<Message>,
     opt_out: &[String],
     finalizing: bool,
-    stopped: Option<String>,
 ) -> Result<(), String> {
     let view = threads::load_view(state, turn.thread_id)
         .await
@@ -743,7 +741,7 @@ async fn complete(
             response(
                 id,
                 TurnResult {
-                    turn: items::turn_summary(run, goal, false),
+                    turn: items::turn_summary(&view, run, goal, false),
                 },
             ),
         )
@@ -769,10 +767,7 @@ async fn complete(
             .iter()
             .find(|goal| goal.run_ids.contains(&run.id))
             .ok_or("Run has no Goal")?;
-        let mut summary = items::turn_summary(run, goal, false);
-        if finalizing && let Some(goal) = &mut summary.goal {
-            goal.stopped = stopped.clone();
-        }
+        let mut summary = items::turn_summary(&view, run, goal, false);
         if !finalizing {
             summary.stop_reason = None;
             summary.goal = Some(GoalSummary {
@@ -957,7 +952,7 @@ mod tests {
             },
         };
         let (outbound, mut output) = mpsc::channel(super::super::OUTBOUND_CAPACITY);
-        complete(&mut turn, &state, &outbound, &[], true, None)
+        complete(&mut turn, &state, &outbound, &[], true)
             .await
             .unwrap();
         let response = serde_json::to_value(output.recv().await.unwrap()).unwrap();

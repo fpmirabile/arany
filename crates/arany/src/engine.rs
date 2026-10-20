@@ -311,8 +311,9 @@ pub struct RunControls {
 #[derive(Debug)]
 pub struct RunResult {
     pub run: RunOutcome,
-    /// Why an autonomous Goal admitted no further Run after `run` committed.
-    pub stopped: Option<EngineError>,
+    /// Why the submission's Goal stopped at its latest Run, as `SessionView::run_stop` projects
+    /// the reopened history; a later Run with no terminal receipt reports `Uncertain`.
+    pub stopped: Option<crate::session::RunStop>,
 }
 
 pub type RunFuture<'a> = Pin<Box<dyn Future<Output = Result<RunResult, EngineError>> + Send + 'a>>;
@@ -437,11 +438,6 @@ struct RunTurn {
 }
 
 impl RunTurn {
-    fn exhausted(&self) -> bool {
-        self.goal_status == GoalStatus::Failed
-            && self.outcome.run.status == crate::session::RunStatus::Finished
-    }
-
     fn continues(&self) -> bool {
         self.autonomous
             && self.goal_status == GoalStatus::Running
@@ -1029,13 +1025,8 @@ impl Engine {
             let result = self
                 .run_inner(&submission, request, run_cancellation, hints)
                 .await;
-            match &result {
-                Ok(RunResult {
-                    stopped: Some(reason),
-                    ..
-                }) => crate::diagnostics::engine_failure(reason),
-                Ok(_) => {}
-                Err(error) => crate::diagnostics::engine_failure(error),
+            if let Err(error) = &result {
+                crate::diagnostics::engine_failure(error);
             }
             result
         });
@@ -1100,20 +1091,41 @@ impl Engine {
                 Ok(turn) => turn,
                 // Cancellation before MessageAccepted admits no Run; the committed Finished Run keeps its outcome.
                 Err(EngineError::CancelledBeforeStart) => break,
-                // The earlier Finished Run stays committed; the caller gets it with the reason the loop stopped.
+                // The earlier Finished Run stays committed; the projection below names where the Goal stopped.
                 Err(error) => {
-                    return Ok(RunResult {
-                        run: turn.outcome,
-                        stopped: Some(error),
-                    });
+                    crate::diagnostics::engine_failure(&error);
+                    break;
                 }
             };
         }
-        let stopped = turn.exhausted().then_some(EngineError::GoalBudgetExhausted);
+        let stopped = self.run_stop(&turn.outcome).await?;
         Ok(RunResult {
             run: turn.outcome,
             stopped,
         })
+    }
+
+    // Projected from the reopened history, so a live result and its replayed turn agree.
+    async fn run_stop(
+        &self,
+        outcome: &RunOutcome,
+    ) -> Result<Option<crate::session::RunStop>, EngineError> {
+        let view = self
+            .journal
+            .store()
+            .load_view(outcome.session_id)
+            .await?
+            .ok_or(EngineError::InvalidHistory)?;
+        let goal = view
+            .goal(outcome.goal_id)
+            .ok_or(EngineError::InvalidHistory)?;
+        let latest = view
+            .runs
+            .iter()
+            .rev()
+            .find(|run| goal.run_ids.contains(&run.id))
+            .ok_or(EngineError::InvalidHistory)?;
+        Ok(view.run_stop(latest))
     }
 
     #[expect(

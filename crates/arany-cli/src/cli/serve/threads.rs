@@ -315,7 +315,7 @@ pub(super) async fn resume(
                 .iter()
                 .find(|goal| goal.run_ids.contains(&run.id))
                 .ok_or_else(|| Fault::engine(arany::EngineError::InvalidHistory))?;
-            Ok(items::turn_summary(run, goal, true))
+            Ok(items::turn_summary(&view, run, goal, true))
         })
         .collect::<Result<_, Fault>>()?;
     let thread = thread(&view, created, &loaded.workspace);

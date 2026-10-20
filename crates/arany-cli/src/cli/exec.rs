@@ -4,7 +4,7 @@ use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
     GoalId, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls, RunRequest,
-    RunResult, RunStatus, SessionId, StateRoot, Store, Telemetry, ToolGrant,
+    RunResult, RunStatus, RunStop, SessionId, StateRoot, Store, Telemetry, ToolGrant,
     native_protection_supported,
 };
 use clap::{Args, ValueEnum};
@@ -349,12 +349,8 @@ async fn run_on_engine(
         interrupted,
         forced,
     } = end?;
-    let (outcome, stop) = match result {
-        // The committed answer is still printed; the stop error makes the exit nonzero.
-        Ok(RunResult { run, stopped }) => (
-            run,
-            stopped.map(|reason| format!("Goal stopped after a committed Run: {reason}")),
-        ),
+    let (outcome, stopped) = match result {
+        Ok(RunResult { run, stopped }) => (run, stopped),
         Err(EngineError::CancelledBeforeStart) if interrupted => {
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
@@ -386,6 +382,9 @@ async fn run_on_engine(
             matches!(goal.status, GoalStatus::Running | GoalStatus::Interrupted)
         });
     let success = run.status == RunStatus::Finished && !paused;
+    // The committed answer is still printed; the stop line makes the exit nonzero.
+    let stop = stop_after_answer(run.status, stopped, interrupted)
+        .map(|reason| format!("Goal stopped after a committed Run: {reason}"));
     if !run.status.is_outcome() {
         return Err("Run did not reach a terminal state".into());
     }
@@ -493,6 +492,26 @@ async fn run_on_engine(
         stdout,
         stderr,
         success: success && stop.is_none(),
+    })
+}
+
+// Why an autonomous loop stopped after its committed answer; a pause the caller asked for is no stop.
+pub(in crate::cli) fn stop_after_answer(
+    status: RunStatus,
+    stop: Option<RunStop>,
+    pause_requested: bool,
+) -> Option<&'static str> {
+    if status != RunStatus::Finished {
+        return None;
+    }
+    Some(match stop? {
+        RunStop::GoalExhausted(_) => "Goal budget is exhausted",
+        RunStop::Paused if pause_requested => return None,
+        RunStop::Paused => "Goal paused before completion",
+        RunStop::Uncertain => "Tool effect completion is uncertain",
+        RunStop::Cancelled => "Run cancelled",
+        RunStop::StoppedByHook => "Run stopped by hook",
+        RunStop::Failed(_) => "Run failed",
     })
 }
 
@@ -764,6 +783,61 @@ mod tests {
             stop_step(true, StopSignal::Hangup),
             StopStep::Force("terminated by SIGHUP")
         );
+    }
+
+    #[test]
+    fn only_a_stop_after_a_committed_answer_writes_the_stop_line() {
+        let exhausted = RunStop::GoalExhausted(arany::GoalLimit::Tokens);
+        // (Run status, projected stop, pause requested, stop line)
+        let rows = [
+            (RunStatus::Finished, None, false, None),
+            (
+                RunStatus::Finished,
+                Some(exhausted),
+                false,
+                Some("Goal budget is exhausted"),
+            ),
+            (
+                RunStatus::Finished,
+                Some(exhausted),
+                true,
+                Some("Goal budget is exhausted"),
+            ),
+            (
+                RunStatus::Finished,
+                Some(RunStop::Paused),
+                false,
+                Some("Goal paused before completion"),
+            ),
+            (RunStatus::Finished, Some(RunStop::Paused), true, None),
+            (
+                RunStatus::Finished,
+                Some(RunStop::Uncertain),
+                true,
+                Some("Tool effect completion is uncertain"),
+            ),
+            (RunStatus::Failed, Some(exhausted), false, None),
+            (
+                RunStatus::Failed,
+                Some(RunStop::Failed(arany::RunFailure::ToolStopped)),
+                false,
+                None,
+            ),
+            (RunStatus::Cancelled, Some(RunStop::Paused), true, None),
+            (
+                RunStatus::StoppedByHook,
+                Some(RunStop::StoppedByHook),
+                false,
+                None,
+            ),
+        ];
+        for (status, stop, pause_requested, line) in rows {
+            assert_eq!(
+                stop_after_answer(status, stop, pause_requested),
+                line,
+                "{status:?} {stop:?} {pause_requested}"
+            );
+        }
     }
 
     #[test]

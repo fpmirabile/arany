@@ -212,6 +212,56 @@ fn every_conformance_message_validates_against_the_schema() {
             valid
         );
     }
+    for (stopped, valid) in [
+        (json!({"reason": "goalExhausted", "limit": "calls"}), true),
+        (json!({"reason": "goalExhausted", "limit": "runs"}), true),
+        (
+            json!({"reason": "goalExhausted", "limit": "activeTime"}),
+            true,
+        ),
+        (json!({"reason": "goalExhausted", "limit": "tokens"}), true),
+        (json!({"reason": "paused"}), true),
+        (json!({"reason": "cancelled"}), true),
+        (json!({"reason": "stoppedByHook"}), true),
+        (json!({"reason": "uncertain"}), true),
+        (
+            json!({"reason": "failed", "failure": "provider_call"}),
+            true,
+        ),
+        (
+            json!({"reason": "failed", "failure": "refusal_limit"}),
+            true,
+        ),
+        (json!("Goal budget is exhausted"), false),
+        (json!({"reason": "goalExhausted"}), false),
+        (
+            json!({"reason": "goalExhausted", "limit": "wallClock"}),
+            false,
+        ),
+        (
+            json!({"reason": "failed", "failure": "providerCall"}),
+            false,
+        ),
+        (json!({"reason": "futureStop"}), false),
+    ] {
+        let mut completed = turn.clone();
+        completed["status"] = json!("completed");
+        completed["goal"] = json!({"status": "failed", "stopped": stopped});
+        assert_eq!(
+            serde_json::from_value::<Turn>(completed.clone()).is_ok(),
+            valid,
+            "{stopped}"
+        );
+        let mut part = schema.clone();
+        part["$ref"] = json!("#/$defs/Turn");
+        assert_eq!(
+            jsonschema::validator_for(&part)
+                .unwrap()
+                .is_valid(&completed),
+            valid,
+            "{stopped}"
+        );
+    }
     for (index, (name, params, result)) in [
         ("initialize", json!({"clientInfo": {"name": "fixture", "version": "1"}, "capabilities": {"futureFlag": true}}), json!({"userAgent": "arany/0.1.0", "platformOs": "linux", "capabilities": CAPABILITIES})),
         ("thread/start", json!({"cwd": "/workspace", "provider": "openai", "model": "model", "effort": "high", "permissionMode": "acceptEdits", "includePaths": ["/workspace/file"]}), json!({"thread": thread})),

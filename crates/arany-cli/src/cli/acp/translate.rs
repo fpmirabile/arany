@@ -1298,41 +1298,12 @@ async fn finish(
     let incomplete = incomplete
         || active.incomplete
         || (turn.status == TurnStatus::Completed && !active.answered);
-    let mut response = if active.cancelled
-        || turn.status == TurnStatus::Interrupted
-            && turn.error.is_none()
-            && turn.goal.as_ref().is_some_and(|g| g.stopped.is_none())
-    {
-        wire::response(active.id, json!({"stopReason":"cancelled"}))
-    } else if turn.status == TurnStatus::Completed
-        && turn
-            .goal
-            .as_ref()
-            .is_some_and(|g| g.status == GoalStatus::Completed && g.stopped.is_none())
-    {
-        wire::response(active.id, json!({"stopReason":"end_turn"}))
-    } else if active.uncertain == 0
-        && let Some(reason) = turn.stop_reason
-    {
-        wire::response(
-            active.id,
-            json!({"stopReason": match reason {
-                TurnStopReason::ActionBudgetExhausted => "max_turn_requests",
-                TurnStopReason::TokenBudgetExhausted => "max_tokens",
-            }}),
-        )
-    } else {
-        let reason = if active.uncertain > 0 {
-            "effectUncertain"
-        } else if turn.status == TurnStatus::Interrupted {
-            "stoppedByHook"
-        } else {
-            "turnFailed"
-        };
-        wire::error(
+    let mut response = match prompt_outcome(active.cancelled, active.uncertain > 0, &turn) {
+        Ok(stop_reason) => wire::response(active.id, json!({ "stopReason": stop_reason })),
+        Err(reason) => wire::error(
             Some(active.id),
             -32603,
-            if active.uncertain > 0 {
+            if reason == "effectUncertain" {
                 tools::UNKNOWN
             } else {
                 turn.error
@@ -1340,7 +1311,7 @@ async fn finish(
                     .map_or("Run stopped; check Session history", |e| e.message.as_str())
             },
             reason,
-        )
+        ),
     };
     if active.uncertain > 0 && response.get("result").is_some() {
         response["result"]["_meta"]["arany.uncertainEffects"] = json!(active.uncertain);
@@ -1349,6 +1320,40 @@ async fn finish(
         response["result"]["_meta"]["arany.incompleteUpdates"] = json!(true);
     }
     emit(output, response).await
+}
+
+// The ACP stopReason for a committed turn, or the `data.reason` of its -32603 error.
+fn prompt_outcome(
+    cancelled: bool,
+    uncertain_observed: bool,
+    turn: &Turn,
+) -> Result<&'static str, &'static str> {
+    if cancelled {
+        return Ok("cancelled");
+    }
+    if uncertain_observed {
+        return Err("effectUncertain");
+    }
+    match turn.goal.as_ref().and_then(|goal| goal.stopped) {
+        None if turn.status == TurnStatus::Completed
+            && turn
+                .goal
+                .as_ref()
+                .is_some_and(|goal| goal.status == GoalStatus::Completed) =>
+        {
+            Ok("end_turn")
+        }
+        None | Some(GoalStop::Failed { .. }) => Err("turnFailed"),
+        Some(GoalStop::GoalExhausted {
+            limit: GoalLimit::Tokens,
+        }) => Ok("max_tokens"),
+        Some(GoalStop::GoalExhausted {
+            limit: GoalLimit::Calls | GoalLimit::Runs | GoalLimit::ActiveTime,
+        }) => Ok("max_turn_requests"),
+        Some(GoalStop::Paused | GoalStop::Cancelled) => Ok("cancelled"),
+        Some(GoalStop::StoppedByHook) => Err("stoppedByHook"),
+        Some(GoalStop::Uncertain) => Err("effectUncertain"),
+    }
 }
 
 fn remap(id: RequestId, error: ErrorObject) -> Value {
