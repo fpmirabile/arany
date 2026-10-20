@@ -122,7 +122,10 @@ to the user's credential store or clipboard.
    behavior, modal discard and rejection without submission. Test native
    Wayland/X11 service interoperability and deliberately authorized image-only/
    text-plus-image Runs with closed replay. Confirm metadata-only human history,
-   private image-bearing JSONL and lossy pixel compaction. Follow
+   private image-bearing JSONL and lossy pixel compaction. Run `/copy` locally
+   (`wl-copy`, `xclip` or `xsel`), inside tmux 3.2 or later and over SSH in an
+   OSC 52 terminal, paste elsewhere, and confirm the serving client exits once
+   another application takes the selection. Follow
    [Terminal spec](./docs/specs/terminal.md).
 7. **Real coding workflow.** Review private grants on a disposable small project,
    then inspect/edit, run an offline check, load pinned Skill data and call local

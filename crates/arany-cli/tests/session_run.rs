@@ -310,6 +310,38 @@ fn seed_transcript_session(state: &std::path::Path, workspace: &std::path::Path)
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn seed_answer_session(
+    state: &std::path::Path,
+    workspace: &std::path::Path,
+    answer: &str,
+) -> SessionId {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let engine =
+            engine_support::open(StateRoot::admit(state).unwrap(), Default::default()).unwrap();
+        let provider = std::sync::Arc::new(
+            arany::test_support::scenario::ScriptedProvider::new(vec![
+                arany::test_support::goals::finish_with(answer),
+            ])
+            .with_profile("openai", "gpt-5.4"),
+        );
+        let mut request = arany::test_support::scenario::request(workspace, "Copy objective");
+        request.include_paths.clear();
+        request.title = None;
+        let result = engine_support::run_with(&engine, &provider, request, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(result.run.status, RunStatus::Finished);
+        assert_eq!(result.run.assistant_message.as_deref(), Some(answer));
+        engine.close().await.unwrap();
+        result.session_id
+    })
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/roster.rs"]
 mod roster;
 

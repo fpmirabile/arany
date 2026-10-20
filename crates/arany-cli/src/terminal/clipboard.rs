@@ -102,21 +102,23 @@ pub(super) enum ClipboardContent {
     Image(ImageAttachment),
 }
 
-pub(super) struct ClipboardRead {
-    result: oneshot::Receiver<Result<ClipboardContent, &'static str>>,
+pub(super) struct ClipboardJob<T> {
+    result: oneshot::Receiver<Result<T, &'static str>>,
     cancelled: Arc<AtomicBool>,
 }
+
+pub(super) type ClipboardRead = ClipboardJob<ClipboardContent>;
 
 impl ClipboardRead {
     pub(super) fn start() -> Result<Self, &'static str> {
         Self::start_with(&WORKER, read)
     }
+}
 
+impl<T: Send + 'static> ClipboardJob<T> {
     fn start_with(
         owner: &Arc<ClipboardWorker>,
-        read: impl FnOnce(&AtomicBool, &mut Cleanup) -> Result<ClipboardContent, &'static str>
-        + Send
-        + 'static,
+        job: impl FnOnce(&AtomicBool, &mut Cleanup) -> Result<T, &'static str> + Send + 'static,
     ) -> Result<Self, &'static str> {
         let mut task = owner
             .task
@@ -126,7 +128,7 @@ impl ClipboardRead {
             return Err(CLEANUP_UNCONFIRMED);
         }
         if task.as_ref().is_some_and(|task| !task.thread.is_finished()) {
-            return Err("clipboard read or cleanup already in progress");
+            return Err("clipboard read, copy or cleanup already in progress");
         }
         let (sender, result) = oneshot::channel();
         let (finished, completion) = mpsc::sync_channel(1);
@@ -137,11 +139,11 @@ impl ClipboardRead {
             cancelled: Arc::clone(&cancelled),
             finished: completion,
             thread: std::thread::Builder::new()
-                .name("arany-clipboard-read".into())
+                .name("arany-clipboard".into())
                 .spawn(move || {
                     let mut cleanup = Cleanup::default();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        read(&stop, &mut cleanup)
+                        job(&stop, &mut cleanup)
                     }))
                     .unwrap_or(Err("clipboard worker unavailable"));
                     let result = if cleanup.child.is_some() {
@@ -165,14 +167,14 @@ impl ClipboardRead {
         Ok(Self { result, cancelled })
     }
 
-    pub(super) async fn recv(&mut self) -> Result<ClipboardContent, &'static str> {
+    pub(super) async fn recv(&mut self) -> Result<T, &'static str> {
         (&mut self.result)
             .await
-            .unwrap_or(Err("clipboard read unavailable"))
+            .unwrap_or(Err("clipboard worker unavailable"))
     }
 }
 
-impl Drop for ClipboardRead {
+impl<T> Drop for ClipboardJob<T> {
     fn drop(&mut self) {
         self.cancelled.store(true, Ordering::Release);
     }
@@ -190,45 +192,11 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + Duration::from_secs(2);
-    let (mut command, image) = {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt};
-        use std::path::Path;
-        if let Some(display) = std::env::var_os("WAYLAND_DISPLAY") {
-            let display = display
-                .to_str()
-                .filter(|display| {
-                    !display.is_empty()
-                        && display.len() <= 128
-                        && !matches!(*display, "." | "..")
-                        && display
-                            .bytes()
-                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
-                })
-                .ok_or("invalid local Wayland display")?;
-            let runtime =
-                std::env::var_os("XDG_RUNTIME_DIR").ok_or("Wayland runtime unavailable")?;
-            let path = Path::new(&runtime);
-            let metadata =
-                std::fs::symlink_metadata(path).map_err(|_| "Wayland runtime unavailable")?;
-            if !path.is_absolute()
-                || !metadata.is_dir()
-                || metadata.uid() != rustix::process::getuid().as_raw()
-                || metadata.mode() & 0o077 != 0
-                || std::fs::canonicalize(path).ok().as_deref() != Some(path)
-            {
-                return Err("unsafe Wayland runtime");
-            }
-            let socket = std::fs::symlink_metadata(path.join(display))
-                .map_err(|_| "Wayland clipboard unavailable")?;
-            if !socket.file_type().is_socket() || socket.uid() != metadata.uid() {
-                return Err("unsafe Wayland display");
-            }
-            let mut command = Command::new(installed("wl-paste")?);
-            command
-                .env_clear()
-                .env("XDG_RUNTIME_DIR", runtime)
-                .env("WAYLAND_DISPLAY", display)
-                .arg("--list-types");
+    let display = LocalDisplay::detect(&|name| std::env::var_os(name))?;
+    let (mut command, image) = match display {
+        LocalDisplay::Wayland { .. } => {
+            let mut command = display.command("wl-paste")?;
+            command.arg("--list-types");
             let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
@@ -236,48 +204,13 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
                 &["text/plain;charset=utf-8", "text/plain", "UTF8_STRING"],
             )?;
             let mut text = Command::new(command.get_program());
-            text.env_clear()
-                .envs(
-                    command
-                        .get_envs()
-                        .filter_map(|(name, value)| value.map(|value| (name, value))),
-                )
-                .args(["--no-newline", "--type", kind]);
+            display.configure(&mut text);
+            text.args(["--no-newline", "--type", kind]);
             (text, kind == "image/png")
-        } else {
-            let display = std::env::var("DISPLAY")
-                .map_err(|_| "local clipboard unavailable; use terminal paste")?;
-            if !local_x11_display(&display) {
-                return Err("remote or invalid X11 clipboard display is not allowed");
-            }
-            let mut command = Command::new(installed("xclip")?);
-            command
-                .env_clear()
-                .env("DISPLAY", display)
-                .env("HOME", "/")
-                .args(["-selection", "clipboard", "-out", "-target", "TARGETS"]);
-            let authority = std::env::var_os("XAUTHORITY").or_else(|| {
-                nix::unistd::User::from_uid(nix::unistd::Uid::effective())
-                    .ok()
-                    .flatten()
-                    .map(|user| user.dir.join(".Xauthority").into_os_string())
-            });
-            if let Some(authority) = authority {
-                let path = Path::new(&authority);
-                match std::fs::symlink_metadata(path) {
-                    Ok(metadata)
-                        if path.is_absolute()
-                            && metadata.is_file()
-                            && metadata.nlink() == 1
-                            && metadata.uid() == rustix::process::getuid().as_raw()
-                            && metadata.mode() & 0o077 == 0 =>
-                    {
-                        command.env("XAUTHORITY", authority);
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                    _ => return Err("unsafe X11 authority file"),
-                }
-            }
+        }
+        LocalDisplay::X11 { .. } => {
+            let mut command = display.command("xclip")?;
+            command.args(["-selection", "clipboard", "-out", "-target", "TARGETS"]);
             let types = run_process(&mut command, cancelled, deadline, 16 * 1024, cleanup)?;
             let types = std::str::from_utf8(&types).map_err(|_| "invalid clipboard types")?;
             let kind = selected_type(
@@ -285,14 +218,8 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
                 &["UTF8_STRING", "text/plain;charset=utf-8", "text/plain"],
             )?;
             let mut payload = Command::new(command.get_program());
-            payload
-                .env_clear()
-                .envs(
-                    command
-                        .get_envs()
-                        .filter_map(|(name, value)| value.map(|value| (name, value))),
-                )
-                .args(["-selection", "clipboard", "-out", "-target", kind]);
+            display.configure(&mut payload);
+            payload.args(["-selection", "clipboard", "-out", "-target", kind]);
             (payload, kind == "image/png")
         }
     };
@@ -308,6 +235,113 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         String::from_utf8(bytes)
             .map(ClipboardContent::Text)
             .map_err(|_| "clipboard text is not valid UTF-8")
+    }
+}
+
+#[cfg(target_os = "linux")]
+enum LocalDisplay {
+    Wayland {
+        runtime: std::ffi::OsString,
+        display: String,
+    },
+    X11 {
+        display: String,
+        authority: Option<std::ffi::OsString>,
+    },
+}
+
+#[cfg(target_os = "linux")]
+impl LocalDisplay {
+    fn detect(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<Self, &'static str> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        use std::path::Path;
+        if let Some(display) = var("WAYLAND_DISPLAY") {
+            let display = display
+                .to_str()
+                .filter(|display| {
+                    !display.is_empty()
+                        && display.len() <= 128
+                        && !matches!(*display, "." | "..")
+                        && display
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+                })
+                .ok_or("invalid local Wayland display")?
+                .to_owned();
+            let runtime = var("XDG_RUNTIME_DIR").ok_or("Wayland runtime unavailable")?;
+            let path = Path::new(&runtime);
+            let metadata =
+                std::fs::symlink_metadata(path).map_err(|_| "Wayland runtime unavailable")?;
+            if !path.is_absolute()
+                || !metadata.is_dir()
+                || metadata.uid() != rustix::process::getuid().as_raw()
+                || metadata.mode() & 0o077 != 0
+                || std::fs::canonicalize(path).ok().as_deref() != Some(path)
+            {
+                return Err("unsafe Wayland runtime");
+            }
+            let socket = std::fs::symlink_metadata(path.join(&display))
+                .map_err(|_| "Wayland clipboard unavailable")?;
+            if !socket.file_type().is_socket() || socket.uid() != metadata.uid() {
+                return Err("unsafe Wayland display");
+            }
+            return Ok(Self::Wayland { runtime, display });
+        }
+        let display = var("DISPLAY")
+            .and_then(|display| display.into_string().ok())
+            .ok_or("local clipboard unavailable; use terminal paste")?;
+        if !local_x11_display(&display) {
+            return Err("remote or invalid X11 clipboard display is not allowed");
+        }
+        let authority = var("XAUTHORITY").or_else(|| {
+            nix::unistd::User::from_uid(nix::unistd::Uid::effective())
+                .ok()
+                .flatten()
+                .map(|user| user.dir.join(".Xauthority").into_os_string())
+        });
+        let authority = match authority {
+            None => None,
+            Some(authority) => {
+                let path = Path::new(&authority);
+                match std::fs::symlink_metadata(path) {
+                    Ok(metadata)
+                        if path.is_absolute()
+                            && metadata.is_file()
+                            && metadata.nlink() == 1
+                            && metadata.uid() == rustix::process::getuid().as_raw()
+                            && metadata.mode() & 0o077 == 0 =>
+                    {
+                        Some(authority)
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    _ => return Err("unsafe X11 authority file"),
+                }
+            }
+        };
+        Ok(Self::X11 { display, authority })
+    }
+
+    fn command(&self, client: &str) -> Result<std::process::Command, &'static str> {
+        let mut command = std::process::Command::new(installed(client)?);
+        self.configure(&mut command);
+        Ok(command)
+    }
+
+    fn configure(&self, command: &mut std::process::Command) {
+        command.env_clear();
+        match self {
+            Self::Wayland { runtime, display } => {
+                command
+                    .env("XDG_RUNTIME_DIR", runtime)
+                    .env("WAYLAND_DISPLAY", display);
+            }
+            Self::X11 { display, authority } => {
+                command.env("DISPLAY", display).env("HOME", "/");
+                if let Some(authority) = authority {
+                    command.env("XAUTHORITY", authority);
+                }
+            }
+        }
     }
 }
 
@@ -410,6 +444,120 @@ fn installed(name: &str) -> Result<std::path::PathBuf, &'static str> {
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+struct OwnedChild<'a> {
+    child: Option<std::process::Child>,
+    group: Option<rustix::process::Pid>,
+    cleanup: &'a mut Cleanup,
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl OwnedChild<'_> {
+    fn spawn<'a>(
+        command: &mut std::process::Command,
+        cleanup: &'a mut Cleanup,
+    ) -> Result<OwnedChild<'a>, &'static str> {
+        use std::os::unix::process::CommandExt;
+        let child = command
+            .current_dir("/")
+            .process_group(0)
+            .spawn()
+            .map_err(|_| "clipboard client unavailable")?;
+        let group = child
+            .id()
+            .try_into()
+            .ok()
+            .and_then(rustix::process::Pid::from_raw);
+        Ok(OwnedChild {
+            child: Some(child),
+            group,
+            cleanup,
+        })
+    }
+
+    fn kill(&mut self) {
+        use rustix::process::{Signal, kill_process_group};
+        if let Some(child) = &mut self.child {
+            if let Some(group) = self.group {
+                let _ = kill_process_group(group, Signal::KILL);
+            }
+            let _ = child.kill();
+        }
+    }
+
+    fn finish(mut self) -> Result<(), &'static str> {
+        let deadline = Instant::now() + self.cleanup.timeout;
+        self.kill();
+        while Instant::now() < deadline {
+            match self
+                .child
+                .as_mut()
+                .expect("owned clipboard child")
+                .try_wait()
+            {
+                Ok(Some(_)) => {
+                    self.child = None;
+                    return Ok(());
+                }
+                Ok(None) => std::thread::park_timeout(
+                    Duration::from_millis(5)
+                        .min(deadline.saturating_duration_since(Instant::now())),
+                ),
+                Err(_) => break,
+            }
+        }
+        Err(CLEANUP_UNCONFIRMED)
+    }
+
+    // A serving client's descendant keeps the selection, so only the exited leader is reaped.
+    fn release_server(mut self) -> Result<(), &'static str> {
+        match self
+            .child
+            .as_mut()
+            .expect("owned clipboard child")
+            .try_wait()
+        {
+            Ok(Some(_)) => {
+                self.child = None;
+                Ok(())
+            }
+            _ => self.finish(),
+        }
+    }
+
+    fn exited(&self) -> Result<Option<bool>, &'static str> {
+        use rustix::process::{WaitId, WaitIdOptions, waitid};
+        let group = self.group.ok_or("clipboard process unavailable")?;
+        // Keep the leader waitable until group cleanup to prevent process-ID reuse.
+        waitid(
+            WaitId::Pid(group),
+            WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
+        )
+        .map(|status| status.map(|status| status.exit_status() == Some(0)))
+        .map_err(|_| "clipboard process unavailable")
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+impl Drop for OwnedChild<'_> {
+    fn drop(&mut self) {
+        self.kill();
+        if let Some(child) = self.child.take() {
+            self.cleanup.child = Some(child);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn set_nonblocking(pipe: &impl std::os::fd::AsFd) -> Result<(), &'static str> {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    fcntl_setfl(
+        pipe,
+        fcntl_getfl(pipe).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
+    )
+    .map_err(|_| "clipboard pipe unavailable")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_process(
     command: &mut std::process::Command,
     cancelled: &AtomicBool,
@@ -417,92 +565,25 @@ fn run_process(
     limit: usize,
     cleanup: &mut Cleanup,
 ) -> Result<Vec<u8>, &'static str> {
-    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
-    use rustix::process::{Pid, Signal, WaitId, WaitIdOptions, kill_process_group, waitid};
     use std::io::{self, Read};
-    use std::os::unix::process::CommandExt;
-    use std::process::{Child, Stdio};
-    use std::time::{Duration, Instant};
+    use std::process::Stdio;
 
-    struct OwnedChild<'a> {
-        child: Option<Child>,
-        group: Option<Pid>,
-        cleanup: &'a mut Cleanup,
-    }
-    impl OwnedChild<'_> {
-        fn kill(&mut self) {
-            if let Some(child) = &mut self.child {
-                if let Some(group) = self.group {
-                    let _ = kill_process_group(group, Signal::KILL);
-                }
-                let _ = child.kill();
-            }
-        }
-
-        fn finish(mut self) -> Result<(), &'static str> {
-            let deadline = Instant::now() + self.cleanup.timeout;
-            self.kill();
-            while Instant::now() < deadline {
-                match self
-                    .child
-                    .as_mut()
-                    .expect("owned clipboard child")
-                    .try_wait()
-                {
-                    Ok(Some(_)) => {
-                        self.child = None;
-                        return Ok(());
-                    }
-                    Ok(None) => std::thread::park_timeout(
-                        Duration::from_millis(5)
-                            .min(deadline.saturating_duration_since(Instant::now())),
-                    ),
-                    Err(_) => break,
-                }
-            }
-            Err(CLEANUP_UNCONFIRMED)
-        }
-    }
-    impl Drop for OwnedChild<'_> {
-        fn drop(&mut self) {
-            self.kill();
-            if let Some(child) = self.child.take() {
-                self.cleanup.child = Some(child);
-            }
-        }
-    }
     if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
         return Err("clipboard read cancelled or timed out");
     }
-    let child = command
-        .current_dir("/")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|_| "clipboard client unavailable")?;
-    let group = child.id().try_into().ok().and_then(Pid::from_raw);
-    let mut owner = OwnedChild {
-        child: Some(child),
-        group,
+    let mut owner = OwnedChild::spawn(
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
         cleanup,
-    };
+    )?;
     let result = (|| {
-        let group = owner.group.ok_or("clipboard process unavailable")?;
         let child = owner.child.as_mut().expect("owned clipboard child");
         let mut stdout = child.stdout.take().ok_or("clipboard pipe unavailable")?;
         let mut stderr = child.stderr.take().ok_or("clipboard pipe unavailable")?;
-        fcntl_setfl(
-            &stdout,
-            fcntl_getfl(&stdout).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
-        )
-        .map_err(|_| "clipboard pipe unavailable")?;
-        fcntl_setfl(
-            &stderr,
-            fcntl_getfl(&stderr).map_err(|_| "clipboard pipe unavailable")? | OFlags::NONBLOCK,
-        )
-        .map_err(|_| "clipboard pipe unavailable")?;
+        set_nonblocking(&stdout)?;
+        set_nonblocking(&stderr)?;
         let mut output = Vec::new();
         let mut output_bytes = 0;
         let mut error_bytes = 0;
@@ -551,16 +632,11 @@ fn run_process(
                     Err(_) => return Err("clipboard read unavailable"),
                 }
             }
-            // Keep the leader waitable until group cleanup to prevent process-ID reuse.
-            if let Some(status) = waitid(
-                WaitId::Pid(group),
-                WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT,
-            )
-            .map_err(|_| "clipboard process unavailable")?
+            if let Some(success) = owner.exited()?
                 && stdout_closed
                 && stderr_closed
             {
-                return if status.exit_status() == Some(0) {
+                return if success {
                     Ok(output)
                 } else {
                     Err("clipboard read unavailable")
@@ -570,6 +646,318 @@ fn run_process(
         }
     })();
     owner.finish()?;
+    result
+}
+
+pub(super) const MAX_COPY_BYTES: usize = 100_000;
+const COPY_TOO_LARGE: &str = "Selection exceeds 100 KB; use arany show";
+
+pub(super) struct CopyRequest(String);
+
+impl CopyRequest {
+    pub(super) fn latest_answer(view: &arany::SessionView) -> Result<Self, &'static str> {
+        Self::answer(
+            view.runs
+                .iter()
+                .rev()
+                .find_map(|run| run.assistant_message.as_deref())
+                .ok_or("No answer to copy yet")?,
+        )
+    }
+
+    fn answer(answer: &str) -> Result<Self, &'static str> {
+        use crate::presentation::{escape_terminal, escaped_terminal_bytes};
+        // Refuse before materializing an escaped copy larger than the limit.
+        let escaped = answer
+            .split('\n')
+            .map(|line| escaped_terminal_bytes(line) + 1)
+            .sum::<usize>()
+            - 1;
+        if escaped > MAX_COPY_BYTES {
+            return Err(COPY_TOO_LARGE);
+        }
+        Self::from_display(
+            answer
+                .split('\n')
+                .map(escape_terminal)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+
+    fn from_display(text: String) -> Result<Self, &'static str> {
+        let text: String = text
+            .chars()
+            .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
+            .collect();
+        if text.len() > MAX_COPY_BYTES {
+            return Err(COPY_TOO_LARGE);
+        }
+        Ok(Self(text))
+    }
+
+    fn osc52(&self) -> Vec<u8> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let mut sequence = b"\x1b]52;c;".to_vec();
+        sequence.extend_from_slice(STANDARD.encode(&self.0).as_bytes());
+        sequence.push(0x07);
+        sequence
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Destination {
+    Native,
+    Tmux,
+    Osc52,
+}
+
+fn destinations(
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+    terminal: bool,
+) -> Vec<Destination> {
+    let remote = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+        .into_iter()
+        .any(|name| var(name).is_some_and(|value| !value.is_empty()));
+    [
+        (!remote).then_some(Destination::Native),
+        var("TMUX")
+            .filter(|value| !value.is_empty())
+            .map(|_| Destination::Tmux),
+        terminal.then_some(Destination::Osc52),
+    ]
+    .into_iter()
+    .flatten()
+    .collect()
+}
+
+// `terminal` is the owner's non-linear stderr; OSC 52 is never written without it.
+pub(super) async fn copy(
+    request: CopyRequest,
+    terminal: Option<&mut dyn std::io::Write>,
+) -> Result<String, String> {
+    let plan = destinations(&|name| std::env::var_os(name), terminal.is_some());
+    let local: Vec<_> = plan
+        .iter()
+        .copied()
+        .filter(|destination| *destination != Destination::Osc52)
+        .collect();
+    if !local.is_empty() {
+        let text = request.0.clone();
+        let outcome = match ClipboardJob::start_with(&WORKER, move |cancelled, cleanup| {
+            copy_locally(&local, text.as_bytes(), cancelled, cleanup)
+        }) {
+            Ok(mut job) => job.recv().await,
+            Err(error) => Err(error),
+        };
+        match outcome {
+            Ok(destination) => return Ok(format!("Copied answer to {destination}")),
+            Err(CLEANUP_UNCONFIRMED) => {
+                return Err(format!("Copy unavailable: {CLEANUP_UNCONFIRMED}"));
+            }
+            Err(_) => {}
+        }
+    }
+    let Some(output) = terminal else {
+        return Err(
+            "Copy unavailable: no native or tmux clipboard worked; OSC 52 unavailable in linear mode"
+                .into(),
+        );
+    };
+    output
+        .write_all(&request.osc52())
+        .and_then(|()| output.flush())
+        .map_err(|_| "Copy unavailable: terminal output failed".to_owned())?;
+    Ok("Copied answer: sent to terminal (OSC 52); it may be ignored".into())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn copy_locally(
+    _destinations: &[Destination],
+    _payload: &[u8],
+    _cancelled: &AtomicBool,
+    _cleanup: &mut Cleanup,
+) -> Result<&'static str, &'static str> {
+    Err("native clipboard copy is unavailable on this platform")
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn copy_locally(
+    destinations: &[Destination],
+    payload: &[u8],
+    cancelled: &AtomicBool,
+    cleanup: &mut Cleanup,
+) -> Result<&'static str, &'static str> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let var = |name: &str| std::env::var_os(name);
+    let mut failure = "no native or tmux clipboard worked";
+    for destination in destinations {
+        let attempt = match destination {
+            Destination::Native => native_writer(&var).and_then(|(mut command, label, serving)| {
+                write_process(&mut command, payload, cancelled, deadline, serving, cleanup)
+                    .map(|()| label)
+            }),
+            Destination::Tmux => var("TMUX")
+                .ok_or("tmux unavailable")
+                .and_then(|value| tmux_writer(&value))
+                .and_then(|mut command| {
+                    write_process(&mut command, payload, cancelled, deadline, false, cleanup)
+                        .map(|()| "tmux buffer")
+                }),
+            Destination::Osc52 => continue,
+        };
+        match attempt {
+            Ok(label) => return Ok(label),
+            Err(CLEANUP_UNCONFIRMED) => return Err(CLEANUP_UNCONFIRMED),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+#[cfg(target_os = "linux")]
+fn native_writer(
+    var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<(std::process::Command, &'static str, bool), &'static str> {
+    let display = LocalDisplay::detect(var)?;
+    let (client, label, args): (_, _, &[&str]) = match display {
+        LocalDisplay::Wayland { .. } => (
+            "wl-copy",
+            "clipboard (wl-copy)",
+            &["--type", "text/plain;charset=utf-8"],
+        ),
+        LocalDisplay::X11 { .. } if installed("xclip").is_ok() => (
+            "xclip",
+            "clipboard (xclip)",
+            &["-selection", "clipboard", "-in"],
+        ),
+        LocalDisplay::X11 { .. } => ("xsel", "clipboard (xsel)", &["--clipboard", "--input"]),
+    };
+    let mut command = display.command(client)?;
+    command.args(args);
+    Ok((command, label, true))
+}
+
+#[cfg(target_os = "macos")]
+fn native_writer(
+    _var: &dyn Fn(&str) -> Option<std::ffi::OsString>,
+) -> Result<(std::process::Command, &'static str, bool), &'static str> {
+    let mut command = std::process::Command::new(installed("pbcopy")?);
+    // pbcopy decodes stdin by locale.
+    command.env_clear().env("LANG", "en_US.UTF-8");
+    Ok((command, "clipboard (pbcopy)", false))
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn tmux_socket(value: &std::ffi::OsStr) -> Result<std::path::PathBuf, &'static str> {
+    use std::os::unix::{
+        ffi::OsStrExt,
+        fs::{FileTypeExt, MetadataExt},
+    };
+    let socket = std::path::Path::new(std::ffi::OsStr::from_bytes(
+        value
+            .as_bytes()
+            .split(|byte| *byte == b',')
+            .next()
+            .unwrap_or_default(),
+    ));
+    let uid = rustix::process::getuid().as_raw();
+    let directory = socket
+        .parent()
+        .filter(|_| socket.is_absolute())
+        .and_then(|parent| std::fs::symlink_metadata(parent).ok());
+    let metadata = std::fs::symlink_metadata(socket).ok();
+    match (directory, metadata) {
+        (Some(directory), Some(metadata))
+            if directory.is_dir()
+                && directory.uid() == uid
+                && directory.mode() & 0o077 == 0
+                && metadata.file_type().is_socket()
+                && metadata.uid() == uid =>
+        {
+            Ok(socket.to_owned())
+        }
+        _ => Err("unsafe tmux socket"),
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn tmux_writer(value: &std::ffi::OsStr) -> Result<std::process::Command, &'static str> {
+    let socket = tmux_socket(value)?;
+    let mut command = std::process::Command::new(installed("tmux")?);
+    command
+        .env_clear()
+        .arg("-S")
+        .arg(socket)
+        .args(["load-buffer", "-w", "-"]);
+    Ok(command)
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn write_process(
+    command: &mut std::process::Command,
+    payload: &[u8],
+    cancelled: &AtomicBool,
+    deadline: Instant,
+    serving: bool,
+    cleanup: &mut Cleanup,
+) -> Result<(), &'static str> {
+    use std::io::{ErrorKind, Write};
+    use std::process::Stdio;
+
+    if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+        return Err("clipboard copy cancelled or timed out");
+    }
+    // A serving descendant inherits no pipe, so its lifetime never holds the copy open.
+    let mut owner = OwnedChild::spawn(
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        cleanup,
+    )?;
+    let result = (|| {
+        let mut stdin = owner
+            .child
+            .as_mut()
+            .expect("owned clipboard child")
+            .stdin
+            .take();
+        set_nonblocking(stdin.as_ref().ok_or("clipboard pipe unavailable")?)?;
+        let mut written = 0;
+        loop {
+            if cancelled.load(Ordering::Acquire) || Instant::now() >= deadline {
+                return Err("clipboard copy cancelled or timed out");
+            }
+            if written == payload.len() {
+                stdin = None;
+            }
+            if let Some(pipe) = stdin.as_mut() {
+                match pipe.write(&payload[written..]) {
+                    Ok(length) => written += length,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            ErrorKind::WouldBlock | ErrorKind::Interrupted
+                        ) => {}
+                    Err(_) => return Err("clipboard copy unavailable"),
+                }
+            }
+            if let Some(success) = owner.exited()? {
+                return if success && stdin.is_none() {
+                    Ok(())
+                } else {
+                    Err("clipboard copy unavailable")
+                };
+            }
+            std::thread::park_timeout(Duration::from_millis(5));
+        }
+    })();
+    if serving && result.is_ok() {
+        owner.release_server()?;
+    } else {
+        owner.finish()?;
+    }
     result
 }
 
@@ -1062,6 +1450,269 @@ mod cleanup_tests {
     }
 }
 
+#[cfg(test)]
+mod copy_tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    type Vars<'a> = &'a [(&'a str, &'a str)];
+
+    fn env<'a>(vars: Vars<'a>) -> impl Fn(&str) -> Option<OsString> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| value.into())
+        }
+    }
+
+    #[test]
+    fn copy_destinations_try_native_then_tmux_then_the_terminal_once_each() {
+        use Destination::{Native, Osc52, Tmux};
+        let cases: [(Vars, bool, &[Destination]); 8] = [
+            (&[], true, &[Native, Osc52]),
+            (&[("TMUX", "/t/default,1,0")], true, &[Native, Tmux, Osc52]),
+            (
+                &[("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22")],
+                true,
+                &[Osc52],
+            ),
+            (
+                &[("SSH_TTY", "/dev/pts/1"), ("TMUX", "/t/default,1,0")],
+                true,
+                &[Tmux, Osc52],
+            ),
+            (&[("SSH_CLIENT", "10.0.0.1 1 22")], false, &[]),
+            (&[("SSH_CONNECTION", ""), ("TMUX", "")], false, &[Native]),
+            (
+                &[("WAYLAND_DISPLAY", "wayland-0"), ("DISPLAY", ":0")],
+                false,
+                &[Native],
+            ),
+            (&[("TMUX", "/t/default,1,0")], false, &[Native, Tmux]),
+        ];
+        for (vars, terminal, expected) in cases {
+            assert_eq!(destinations(&env(vars), terminal), expected, "{vars:?}");
+        }
+    }
+
+    #[test]
+    fn copy_payload_is_sanitized_display_text_within_the_limit() {
+        assert_eq!(
+            CopyRequest::answer("tab\there\n\u{1b}]52;c;aGk=\u{7}\r\u{202e}x")
+                .unwrap()
+                .0,
+            "tab\\u{0009}here\n\\u{001b}]52;c;aGk=\\u{0007}\\u{000d}\\u{202e}x"
+        );
+        assert_eq!(
+            CopyRequest::from_display("a\u{1b}b\u{9b}c\u{7}\r\n\td\u{7f}".into())
+                .unwrap()
+                .0,
+            "abc\n\td"
+        );
+        assert_eq!(
+            CopyRequest("hé\n".into()).osc52(),
+            b"\x1b]52;c;aMOpCg==\x07"
+        );
+        let x = |count| "x".repeat(count);
+        for (answer, accepted) in [
+            (x(MAX_COPY_BYTES), true),
+            (x(MAX_COPY_BYTES + 1), false),
+            (format!("{}\u{1b}", x(MAX_COPY_BYTES - 8)), true),
+            (format!("{}\u{1b}", x(MAX_COPY_BYTES - 7)), false),
+            (format!("{}\n{}", x(50_000), x(49_999)), true),
+            (format!("{}\n{}", x(50_000), x(50_000)), false),
+        ] {
+            let request = CopyRequest::answer(&answer);
+            assert_eq!(request.is_ok(), accepted, "{} bytes", answer.len());
+            if !accepted {
+                assert_eq!(request.err(), Some(COPY_TOO_LARGE));
+            }
+        }
+        assert_eq!(
+            CopyRequest::from_display(x(MAX_COPY_BYTES + 1)).err(),
+            Some(COPY_TOO_LARGE)
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_copy_clients_receive_only_admitted_display_variables() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let runtime = root.path().join("runtime");
+        std::fs::create_dir(&runtime).unwrap();
+        std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let runtime = std::fs::canonicalize(runtime).unwrap();
+        let _socket = std::os::unix::net::UnixListener::bind(runtime.join("wayland-1")).unwrap();
+        let authority = root.path().join("authority");
+        std::fs::write(&authority, b"").unwrap();
+        std::fs::set_permissions(&authority, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (runtime, authority) = (runtime.to_str().unwrap(), authority.to_str().unwrap());
+        let missing = root.path().join("missing");
+        let missing = missing.to_str().unwrap();
+        let unrelated = [
+            ("HOME", "/home/user"),
+            ("SSH_AUTH_SOCK", "/agent"),
+            ("PATH", "/bin"),
+        ];
+        let wayland = format!("WAYLAND_DISPLAY=wayland-1\nXDG_RUNTIME_DIR={runtime}");
+        let x11 = format!("DISPLAY=:0\nHOME=/\nXAUTHORITY={authority}");
+        let cases: [(Vec<_>, Option<&str>); 6] = [
+            (
+                vec![
+                    ("WAYLAND_DISPLAY", "wayland-1"),
+                    ("XDG_RUNTIME_DIR", runtime),
+                    ("DISPLAY", ":0"),
+                ],
+                Some(&wayland),
+            ),
+            (
+                vec![("DISPLAY", ":0"), ("XAUTHORITY", authority)],
+                Some(&x11),
+            ),
+            (
+                vec![("DISPLAY", ":0"), ("XAUTHORITY", missing)],
+                Some("DISPLAY=:0\nHOME=/"),
+            ),
+            (vec![("DISPLAY", "remote:0"), ("XAUTHORITY", missing)], None),
+            (
+                vec![("WAYLAND_DISPLAY", "../x"), ("XDG_RUNTIME_DIR", runtime)],
+                None,
+            ),
+            (vec![], None),
+        ];
+        for (mut vars, expected) in cases {
+            vars.extend(unrelated);
+            let detected = LocalDisplay::detect(&env(&vars));
+            assert_eq!(detected.is_ok(), expected.is_some(), "{vars:?}");
+            let (Ok(display), Some(expected)) = (detected, expected) else {
+                continue;
+            };
+            let mut command = std::process::Command::new("/usr/bin/env");
+            display.configure(&mut command);
+            let output = command.output().unwrap();
+            let mut seen: Vec<_> = std::str::from_utf8(&output.stdout)
+                .unwrap()
+                .lines()
+                .collect();
+            seen.sort_unstable();
+            assert_eq!(seen.join("\n"), expected, "{vars:?}");
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn tmux_copy_requires_an_absolute_private_socket() {
+        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let private = root.path().join("private");
+        let shared = root.path().join("shared");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&private)
+            .unwrap();
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&shared)
+            .unwrap();
+        let _private = std::os::unix::net::UnixListener::bind(private.join("default")).unwrap();
+        let _shared = std::os::unix::net::UnixListener::bind(shared.join("default")).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(private.join("file"), b"").unwrap();
+        let value = |path: &std::path::Path| OsString::from(format!("{},4242,0", path.display()));
+        let socket = private.join("default");
+        assert_eq!(tmux_socket(&value(&socket)), Ok(socket.clone()));
+        for rejected in [
+            OsString::from("default,4242,0"),
+            OsString::new(),
+            value(std::path::Path::new("/")),
+            value(&shared.join("default")),
+            value(&private.join("file")),
+            value(&private.join("missing")),
+        ] {
+            assert_eq!(
+                tmux_socket(&rejected),
+                Err("unsafe tmux socket"),
+                "{rejected:?}"
+            );
+        }
+        if let Ok(command) = tmux_writer(&value(&socket)) {
+            let args: Vec<_> = command.get_args().collect();
+            assert_eq!(
+                args,
+                [
+                    std::ffi::OsStr::new("-S"),
+                    socket.as_os_str(),
+                    "load-buffer".as_ref(),
+                    "-w".as_ref(),
+                    "-".as_ref(),
+                ]
+            );
+            assert_eq!(command.get_envs().count(), 0);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn copy_client_receives_the_whole_payload_and_a_serving_descendant_survives() {
+        use rustix::process::{Pid, Signal, kill_process, test_kill_process};
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("payload");
+        let payload: Vec<u8> = (0..MAX_COPY_BYTES)
+            .map(|index| b'a' + (index % 26) as u8)
+            .collect();
+        let deadline = || Instant::now() + Duration::from_secs(5);
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .args(["-c", "cat > \"$0\"; sleep 30 & echo $! > \"$0.pid\""])
+            .arg(&output);
+        let mut cleanup = Cleanup::default();
+        let result = write_process(
+            &mut command,
+            &payload,
+            &AtomicBool::new(false),
+            deadline(),
+            true,
+            &mut cleanup,
+        );
+        let server = std::fs::read_to_string(root.path().join("payload.pid"))
+            .ok()
+            .and_then(|pid| pid.trim().parse().ok())
+            .and_then(Pid::from_raw);
+        let alive = server.is_some_and(|pid| test_kill_process(pid).is_ok());
+        if let Some(pid) = server {
+            let _ = kill_process(pid, Signal::KILL);
+        }
+        assert_eq!(result, Ok(()));
+        assert!(cleanup.child.is_none(), "exited leader was not reaped");
+        assert!(alive, "serving descendant did not survive the copy");
+        assert!(
+            std::fs::read(&output).unwrap() == payload,
+            "payload changed"
+        );
+
+        let mut failing = std::process::Command::new("/bin/sh");
+        failing
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .args(["-c", "cat > /dev/null; exit 3"]);
+        assert_eq!(
+            write_process(
+                &mut failing,
+                b"text",
+                &AtomicBool::new(false),
+                deadline(),
+                true,
+                &mut cleanup,
+            ),
+            Err("clipboard copy unavailable")
+        );
+        assert!(cleanup.child.is_none());
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;
@@ -1107,6 +1758,20 @@ function run(args) {
         fn drop(&mut self) {
             let _ = self.invoke(&[]);
         }
+    }
+
+    #[test]
+    fn pbcopy_receives_only_a_utf8_locale() {
+        let (command, label, serving) = native_writer(&|_| Some("ignored".into())).unwrap();
+        assert_eq!(command.get_program(), "/usr/bin/pbcopy");
+        assert_eq!(
+            command.get_envs().collect::<Vec<_>>(),
+            [(
+                std::ffi::OsStr::new("LANG"),
+                Some(std::ffi::OsStr::new("en_US.UTF-8"))
+            )]
+        );
+        assert_eq!((label, serving), ("clipboard (pbcopy)", false));
     }
 
     #[test]

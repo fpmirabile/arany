@@ -1737,10 +1737,14 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                     if width >= 79 && height == 26 && !skills_tab && !last {
                         assert_eq!(
                             labels.len(),
-                            help_len() + 1,
-                            "large Commands pane shows its header and entire registry"
+                            21,
+                            "large Commands pane shows its header and 20 entries"
                         );
-                        for index in 0..help_len() {
+                        assert!(
+                            labels[0].contains(&format!("1-20/{}", help_len())),
+                            "clipped Commands header omits the visible range: {labels:?}"
+                        );
+                        for index in 0..20 {
                             let entry = help_entry(index).expect("registered command");
                             assert!(
                                 labels

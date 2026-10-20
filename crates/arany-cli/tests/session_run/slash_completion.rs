@@ -18,12 +18,12 @@ use std::{
 };
 
 #[test]
-fn rewind_registry_has_twenty_commands_and_refuses_arguments_without_state_access() {
+fn rewind_registry_has_twenty_one_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
     };
     let names = command_completions("/");
-    assert_eq!(names.len(), 20);
+    assert_eq!(names.len(), 21);
     assert!(names.contains(&"rewind"));
     assert_eq!(
         parse_submission("/rewind"),

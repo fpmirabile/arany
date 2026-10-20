@@ -856,6 +856,7 @@ mod tests {
                 "Command: /help; List commands; during Run: available\n",
                 "Command: /setup; Set up an account; during Run: locked\n",
                 "Command: /paste; Paste clipboard into draft; during Run: view-only\n",
+                "Command: /copy; Copy the latest answer to the clipboard; during Run: locked\n",
                 "Command: /status; Session status; during Run: available\n",
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",

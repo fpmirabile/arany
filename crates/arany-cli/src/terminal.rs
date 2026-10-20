@@ -1091,6 +1091,16 @@ impl AttachedTerminal {
         Ok(())
     }
 
+    pub async fn copy_latest_answer(&self, view: &SessionView) -> Result<String, String> {
+        let request = clipboard::CopyRequest::latest_answer(view)?;
+        let mut stderr = io::stderr();
+        clipboard::copy(
+            request,
+            (self.input.is_some() && !self.is_linear()).then_some(&mut stderr as &mut dyn Write),
+        )
+        .await
+    }
+
     pub fn clipboard_loading(&self) -> bool {
         self.clipboard.is_some()
     }
