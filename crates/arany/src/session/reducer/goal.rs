@@ -367,20 +367,23 @@ impl SessionView {
                             })
                         && pending_tool_requests(run) == Some(0)
                 });
+        let primary_id = run.primary().ok_or(ReplayError::InvalidTransition)?.id;
         let goal = current_goal_mut(self, *goal_id)?;
         let budget = goal.effective_budget();
         if goal.status != GoalStatus::Running
             || !(goal.active_run.is_none() && run_status.is_terminal()
                 || goal.active_run == Some(*run_id) && active_run_ready)
             || goal.run_ids.last() != Some(run_id)
-            || !goal.unobserved_provider_calls.is_empty()
+            || goal.unobserved_provider_calls.contains(&primary_id)
             || goal.compaction_call_reserved.is_some()
             || budget
                 .max_provider_calls
                 .is_some_and(|limit| goal.provider_calls >= limit)
-            || budget
-                .max_tokens
-                .is_some_and(|limit| goal.token_usage_unknown || goal.known_tokens >= limit)
+            || budget.max_tokens.is_some_and(|limit| {
+                goal.token_usage_unknown
+                    || goal.known_tokens >= limit
+                    || !goal.unobserved_provider_calls.is_empty()
+            })
         {
             return Err(ReplayError::InvalidTransition);
         }
@@ -677,20 +680,30 @@ pub(super) fn apply(
                     .primary()
                     .is_none_or(|primary| primary.status != AgentStatus::Active)
                 || goal.status != GoalStatus::Running
-                || !goal.unobserved_provider_calls.is_empty()
+                || run
+                    .primary()
+                    .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
                 || goal.compaction_call_reserved.is_some()
                 || !run.hooks_settled()
                 || pending_tool_requests(run) != Some(0)
                 || run.tools.iter().any(|tool| tool.observation.is_none())
                 || count <= start
-                || count > run.tools.len().saturating_sub(3)
+                || count > run.tools.len()
+                || run
+                    .live_tool_records()
+                    .filter(|(index, _)| *index >= count)
+                    .count()
+                    < 3
                 || !ends_whole_step(run, count)
             {
                 return Err(ReplayError::InvalidTransition);
             }
             let mut before = 0_usize;
             let mut after = 0_usize;
-            for tool in &run.tools[start..count] {
+            for (_, tool) in run
+                .live_tool_records()
+                .filter(|(index, _)| (start..count).contains(index))
+            {
                 let observation = tool
                     .observation
                     .as_ref()
@@ -740,7 +753,9 @@ pub(super) fn apply(
                 || goal.active_run != Some(*run_id)
                 || goal.run_ids.last() != Some(run_id)
                 || goal.compaction_call_reserved != Some(*run_id)
-                || !goal.unobserved_provider_calls.is_empty()
+                || run
+                    .primary()
+                    .is_none_or(|primary| goal.unobserved_provider_calls.contains(&primary.id))
                 || !run.compaction_matches(record)
                 || record.covered_run_id != *run_id
                 || run.status != RunStatus::Active
@@ -807,16 +822,26 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
             .tools
             .get(covered_count)
             .is_some_and(is_integration_tool)
-        || run
-            .tools
-            .get(covered_count - 1)
-            .is_some_and(|tool| tool.narrowed_call().is_some())
+        || run.tools.get(covered_count - 1).is_some_and(|tool| {
+            tool.narrowed_call().is_some()
+                || matches!(
+                    tool.intent.call,
+                    crate::tools::ToolCall::PrepareWorker { .. }
+                )
+        })
     {
         return false;
     }
     let covered = run.tools[run.initial_tool_count()..covered_count]
         .iter()
-        .filter(|tool| !is_integration_tool(tool) && tool.narrowed_call().is_none())
+        .filter(|tool| {
+            !is_integration_tool(tool)
+                && tool.narrowed_call().is_none()
+                && !matches!(
+                    tool.intent.call,
+                    crate::tools::ToolCall::PrepareWorker { .. }
+                )
+        })
         .count();
     let step_ends = primary
         .provider_calls

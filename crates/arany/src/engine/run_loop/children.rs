@@ -1788,8 +1788,8 @@ impl RunLoop<'_> {
                 .collect::<Vec<_>>();
             let wave = run.primary().into_iter().flat_map(|a| &a.provider_calls).filter(|c| c.delegation.is_some()).count();
             let observations = run
-                .tools
-                .iter()
+                .live_tool_records()
+                .map(|(_, tool)| tool)
                 .filter(|t| {
                     matches!(
                         &t.intent.call,
@@ -1806,19 +1806,47 @@ impl RunLoop<'_> {
         })?;
         root.input.child_results = reports;
         if let Some(tools) = root.input.tools.as_mut() {
-            if let Some(step) = tools.steps.iter_mut().rev().find(|s| s.requests.is_empty()) {
-                step.observations = integrations
-                    .iter()
-                    .filter_map(|tool| tool.observation.clone())
-                    .collect();
-                step.hook_feedback = integrations
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(index, tool)| {
-                        let feedback = tool.hook_feedback();
-                        (!feedback.is_empty()).then_some((index, feedback))
-                    })
-                    .collect();
+            let integrations: Vec<_> = integrations
+                .iter()
+                .filter(|tool| {
+                    !tools
+                        .steps
+                        .iter()
+                        .flat_map(|step| &step.observations)
+                        .any(|observation| observation.intent.id == tool.intent.id)
+                })
+                .collect();
+            if !integrations.is_empty() {
+                if tools
+                    .steps
+                    .last()
+                    .is_none_or(|step| !step.requests.is_empty() || step.cleared)
+                {
+                    tools.steps.push(ToolStep {
+                        plan: None,
+                        turn: ProviderTurn::scripted(),
+                        requests: Vec::new(),
+                        observations: Vec::new(),
+                        facts: None,
+                        steering_notes: Vec::new(),
+                        calls_remaining: None,
+                        cleared: false,
+                        hook_feedback: Default::default(),
+                    });
+                }
+                let step = tools.steps.last_mut().ok_or(EngineError::InvalidHistory)?;
+                for tool in integrations {
+                    let index = step.observations.len();
+                    let feedback = tool.hook_feedback();
+                    if !feedback.is_empty() {
+                        step.hook_feedback.insert(index, feedback);
+                    }
+                    step.observations.push(
+                        tool.observation
+                            .clone()
+                            .ok_or(EngineError::InvalidHistory)?,
+                    );
+                }
             }
             let mut catalog: serde_json::Value =
                 serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
@@ -1851,6 +1879,11 @@ impl RunLoop<'_> {
     fn unstarted_stop(&self, queue: &ChildQueue) -> Option<WaveStop> {
         if self.pause_requested() {
             Some(WaveStop::Boundary(StopCause::Paused))
+        } else if let Some(
+            cause @ (StopCause::ContextFull | StopCause::Cancelled | StopCause::HookStop),
+        ) = queue.stop
+        {
+            Some(WaveStop::Boundary(cause))
         } else if queue.stop.is_some() {
             Some(WaveStop::BUDGET)
         } else if queue.pending.is_empty() && queue.unspawned.is_empty() {
@@ -2129,6 +2162,16 @@ impl RunLoop<'_> {
                 tools.catalog = catalog.to_string();
             }
             root_request.phase = AgentPhase::RootSynthesis;
+            match self
+                .maintain_primary_context(root_request, Some(deadline))
+                .await?
+            {
+                super::tool_compaction::PrimaryContext::Ready => {}
+                super::tool_compaction::PrimaryContext::Stop(cause) => {
+                    queue.stop.get_or_insert(cause);
+                    return Ok(false);
+                }
+            }
             let mut request = root_request.clone();
             self.routing.bind(
                 crate::provider::ProviderRole::Primary,

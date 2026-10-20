@@ -378,6 +378,7 @@ pub struct ForegroundWorkerProvider {
     pub requests: std::sync::Mutex<Vec<crate::ProviderRequest>>,
     pub violations: std::sync::Mutex<Vec<&'static str>>,
     background_started: tokio::sync::Notify,
+    clearing_finished: tokio::sync::Notify,
     identity: crate::ProviderIdentity,
     deadline_identity: crate::ProviderIdentity,
 }
@@ -386,7 +387,10 @@ impl ForegroundWorkerProvider {
     pub fn new(workspace: &Path, case: &'static str, budget: crate::GoalBudget) -> Self {
         let mut identity =
             crate::ProviderIdentity::new("scripted", "test-model", crate::Provenance::native());
-        if matches!(case, "headroom_background" | "headroom_race") {
+        if matches!(
+            case,
+            "headroom_background" | "headroom_race" | "clear_background"
+        ) {
             identity.limits.concurrency = 2;
         }
         let mut deadline_identity = identity.clone();
@@ -398,6 +402,7 @@ impl ForegroundWorkerProvider {
             requests: Default::default(),
             violations: Default::default(),
             background_started: Default::default(),
+            clearing_finished: Default::default(),
             identity,
             deadline_identity,
         }
@@ -539,7 +544,11 @@ impl ForegroundWorkerProvider {
     fn plan(&self) -> crate::GoalPlanContract {
         crate::GoalPlanContract {
             mission: "Edit two leased files and verify their publication".into(),
-            paths: vec!["notes".into()],
+            paths: if self.case.starts_with("clear_") {
+                vec!["notes".into(), "reads".into()]
+            } else {
+                vec!["notes".into()]
+            },
             commands: if self.case.starts_with("command_") {
                 vec!["sh".into()]
             } else {
@@ -595,7 +604,10 @@ impl ForegroundWorkerProvider {
                 } else {
                     self.plan().success_criterion
                 },
-                mode: if matches!(self.case, "headroom_background" | "headroom_race") {
+                mode: if matches!(
+                    self.case,
+                    "headroom_background" | "headroom_race" | "clear_background"
+                ) {
                     crate::worker::WorkerMode::Background
                 } else {
                     crate::worker::WorkerMode::Foreground
@@ -650,6 +662,10 @@ impl crate::Provider for ForegroundWorkerProvider {
             tokio::time::advance(std::time::Duration::from_secs(3600)).await;
             tokio::time::resume();
         }
+        if self.case == "clear_background" && request.phase == AgentPhase::ChildWork && step == 0 {
+            self.background_started.notify_one();
+            self.clearing_finished.notified().await;
+        }
         let mut release_child = None;
         let outcome = match (request.phase, step) {
             (AgentPhase::ToolReview, _) if self.case == "command_review_denied" => {
@@ -662,6 +678,44 @@ impl crate::Provider for ForegroundWorkerProvider {
             }
             (AgentPhase::RootPlan, 0) => super::scenario::plan_outcome(self.plan()),
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
+            (AgentPhase::RootSynthesis, _) if self.case.starts_with("clear_") => {
+                if self.case == "clear_background" && step == 0 {
+                    self.background_started.notified().await;
+                }
+                if step < 40 {
+                    super::scenario::tool_outcome(ToolCall::Read {
+                        path: "reads/facts.txt".into(),
+                        offset: None,
+                        limit: None,
+                    })
+                } else {
+                    self.check(
+                        request
+                            .input
+                            .tools
+                            .as_ref()
+                            .is_some_and(|tools| tools.steps.iter().any(|step| step.cleared)),
+                        "old results were not cleared",
+                    );
+                    self.clearing_finished.notify_one();
+                    let verified = request.input.tools.as_ref().is_some_and(|tools| {
+                        tools.observations().iter().any(|observation| {
+                            matches!(&observation.intent.call,
+                                ToolCall::Read { path, .. } if path == "notes/a"
+                            )
+                        })
+                    });
+                    if !request.input.child_results.is_empty() && !verified {
+                        super::scenario::tool_outcome(ToolCall::Read {
+                            path: "notes/a".into(),
+                            offset: None,
+                            limit: None,
+                        })
+                    } else {
+                        finish_with("Primary verified published notes")
+                    }
+                }
+            }
             (AgentPhase::ChildWork, 0) if self.case == "tool_deadline" => {
                 tokio::time::pause();
                 tokio::time::advance(std::time::Duration::from_secs(1192)).await;

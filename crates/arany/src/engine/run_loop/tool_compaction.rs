@@ -1,4 +1,5 @@
 use super::RunLoop;
+use super::stop::StopCause;
 use crate::engine::EngineError;
 use crate::engine::compaction::{COMPACTION_CALL_DEADLINE, classify_response};
 use crate::engine::ledger::Action;
@@ -29,6 +30,11 @@ pub(super) fn context_capacity(len: usize, limit: usize, reserve: usize) -> Cont
     } else {
         ContextCapacity::Full
     }
+}
+
+pub(super) enum PrimaryContext {
+    Ready,
+    Stop(StopCause),
 }
 
 enum ContextDecision {
@@ -124,6 +130,46 @@ fn compaction_context_input(
 }
 
 impl RunLoop<'_> {
+    pub(super) async fn maintain_primary_context(
+        &self,
+        request: &mut ProviderRequest,
+        deadline: Option<Instant>,
+    ) -> Result<PrimaryContext, EngineError> {
+        let reserve = crate::tools::types::MAX_TOOL_RESULT_BYTES + 512;
+        match self
+            .compact_tool_context_if_needed(request, reserve, deadline)
+            .await
+        {
+            Ok(()) => {}
+            Err(EngineError::GoalBudgetExhausted) => {
+                return Ok(PrimaryContext::Stop(StopCause::Budget));
+            }
+            Err(EngineError::ContextTooLarge) => {
+                return Ok(PrimaryContext::Stop(StopCause::ContextFull));
+            }
+            Err(error) => return Err(error),
+        }
+        if self.controls.cancellation.is_cancelled() {
+            return Ok(PrimaryContext::Stop(StopCause::Cancelled));
+        }
+        if self.hook_requested_stop()? {
+            return Ok(PrimaryContext::Stop(StopCause::HookStop));
+        }
+        if let Some((context, runtime)) = request.input.tools.as_ref().zip(self.controls.tools)
+            && matches!(
+                context_capacity(
+                    context.rendered_len(),
+                    runtime.context_limit_bytes(),
+                    reserve
+                ),
+                ContextCapacity::Full
+            )
+        {
+            return Ok(PrimaryContext::Stop(StopCause::ContextFull));
+        }
+        Ok(PrimaryContext::Ready)
+    }
+
     fn compaction_request(
         &self,
         previous_summary: Option<String>,
@@ -149,10 +195,11 @@ impl RunLoop<'_> {
         Ok(request)
     }
 
-    pub(super) async fn compact_tool_context_if_needed(
+    async fn compact_tool_context_if_needed(
         &self,
         request: &mut ProviderRequest,
         reserve: usize,
+        deadline: Option<Instant>,
     ) -> Result<(), EngineError> {
         let Some(runtime) = self.controls.tools else {
             return Ok(());
@@ -171,15 +218,16 @@ impl RunLoop<'_> {
                 covered,
                 bytes,
             } => {
-                let base = self.ledger().view(|view| {
+                let boundary = self.ledger().view(|view| {
                     let run = view
                         .runs
                         .iter()
                         .find(|run| run.id == self.run_id)
                         .ok_or(EngineError::InvalidHistory)?;
-                    Ok::<_, EngineError>(
-                        (run.tool_compaction_covered_count as usize).max(run.initial_tool_count()),
-                    )
+                    run.live_tool_records()
+                        .nth(covered - 1)
+                        .map(|(index, _)| index + 1)
+                        .ok_or(EngineError::InvalidHistory)
                 })??;
                 self.journal
                     .admit(
@@ -193,7 +241,7 @@ impl RunLoop<'_> {
                     .await?;
                 self.append(Event::ToolResultsCleared {
                     run_id: self.run_id,
-                    covered_tool_count: u32::try_from(base + covered)
+                    covered_tool_count: u32::try_from(boundary)
                         .map_err(|_| EngineError::InvalidHistory)?,
                     cleared_bytes: u32::try_from(bytes).map_err(|_| EngineError::InvalidHistory)?,
                 })
@@ -245,7 +293,13 @@ impl RunLoop<'_> {
         if !self.ledger().admits(Action::Compaction) {
             return Ok(());
         }
-        let active_segment = self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?;
+        let active_segment = match deadline {
+            Some(_) => None,
+            None => Some(self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?),
+        };
+        let deadline = deadline
+            .or_else(|| active_segment.as_ref().map(super::ActiveSegment::deadline))
+            .ok_or(EngineError::InvalidRequest)?;
         self.journal
             .admit(
                 self.session_id,
@@ -262,10 +316,12 @@ impl RunLoop<'_> {
         reservation.commit()?;
 
         let summary = self
-            .summarize(request, &window, active_segment.deadline(), context_limit)
+            .summarize(request, &window, deadline, context_limit)
             .await?;
         self.record_compaction(request, window, summary).await?;
-        self.settle_active_segment(active_segment)?;
+        if let Some(segment) = active_segment {
+            self.settle_active_segment(segment)?;
+        }
         if self.ledger().active_time_exhausted() {
             return Err(EngineError::GoalBudgetExhausted);
         }
@@ -285,24 +341,23 @@ impl RunLoop<'_> {
             return Ok(None);
         }
         let events = self.journal.store().load_session(self.session_id).await?;
-        let (previously_covered, total_tools, initialized) = self.ledger().view(|view| {
+        let (previously_covered, boundaries) = self.ledger().view(|view| {
             let run = view
                 .runs
                 .iter()
                 .find(|run| run.id == self.run_id)
                 .ok_or(EngineError::InvalidHistory)?;
             Ok::<_, EngineError>((
-                run.tool_compaction_covered_count,
-                u32::try_from(run.tools.len() - run.initial_tool_count())
-                    .map_err(|_| EngineError::InvalidHistory)?,
-                u32::try_from(run.initial_tool_count()).map_err(|_| EngineError::InvalidHistory)?,
+                run.tool_compaction_covered_count.max(
+                    u32::try_from(run.initial_tool_count())
+                        .map_err(|_| EngineError::InvalidHistory)?,
+                ),
+                run.live_tool_records()
+                    .map(|(index, _)| index + 1)
+                    .collect::<Vec<_>>(),
             ))
         })??;
-        // Initialization reads count as already covered; their pinned context stays live.
-        let previously_covered = previously_covered.max(initialized);
-        if total_tools.saturating_sub(previously_covered - initialized) as usize
-            != total_observations
-        {
+        if boundaries.len() != total_observations {
             return Err(EngineError::InvalidHistory);
         }
         let summary_placeholder = "x".repeat(crate::session::MAX_COMPACTION_SUMMARY_BYTES);
@@ -319,34 +374,24 @@ impl RunLoop<'_> {
             })
             .next_back()
             .unwrap_or(previously_covered);
-        let minimum_prefix_count = usize::try_from(
-            last_attempted
-                .saturating_sub(previously_covered)
-                .saturating_add(1),
-        )
-        .map_err(|_| EngineError::InvalidHistory)?;
-        if minimum_prefix_count > total_observations {
-            return Ok(None);
-        }
         // A covered prefix ends on a step boundary; the newest results stay uncompacted when possible.
-        let mut boundaries = Vec::new();
+        let mut step_boundaries = Vec::new();
         let mut observed = 0;
         for (index, step) in context.steps.iter().enumerate() {
             observed += step.observations.len();
             if !step.observations.is_empty() {
-                boundaries.push((index + 1, observed));
+                step_boundaries.push((index + 1, observed));
             }
         }
-        let candidates: Vec<_> = boundaries
+        let candidates: Vec<_> = step_boundaries
             .iter()
             .rev()
-            .filter(|(_, count)| (minimum_prefix_count..total_observations).contains(count))
-            .chain(
-                boundaries
-                    .iter()
-                    .rev()
-                    .filter(|(_, count)| *count == total_observations),
-            )
+            .filter(|(_, count)| {
+                *count < total_observations && boundaries[*count - 1] > last_attempted as usize
+            })
+            .chain(step_boundaries.iter().rev().filter(|(_, count)| {
+                *count == total_observations && boundaries[*count - 1] > last_attempted as usize
+            }))
             .copied()
             .collect();
         let plan_contract = self.ledger().plan_contract()?;
@@ -377,20 +422,16 @@ impl RunLoop<'_> {
         else {
             return Ok(None);
         };
-        let covered_tool_count = previously_covered
-            .checked_add(u32::try_from(prefix_count).map_err(|_| EngineError::InvalidHistory)?)
-            .ok_or(EngineError::InvalidHistory)?;
-        let covered_sequence = events
-            .iter()
-            .filter(|envelope| {
-                matches!(
-                    envelope.event,
-                    Event::ToolFinished { run_id, .. } if run_id == self.run_id
-                )
-            })
-            .nth(covered_tool_count as usize - 1)
-            .map(|envelope| envelope.sequence)
-            .ok_or(EngineError::InvalidHistory)?;
+        let covered_tool_count =
+            u32::try_from(boundaries[prefix_count - 1]).map_err(|_| EngineError::InvalidHistory)?;
+        let covered_sequence = self.ledger().view(|view| {
+            view.runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .and_then(|run| run.tools.get(covered_tool_count as usize - 1))
+                .and_then(|tool| tool.finished_sequence)
+                .ok_or(EngineError::InvalidHistory)
+        })??;
         let source_digest = crate::session::prefix_digest(&events, covered_sequence)
             .map_err(|_| EngineError::InvalidHistory)?;
         Ok(Some(CompactionWindow {

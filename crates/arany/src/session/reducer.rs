@@ -303,6 +303,19 @@ impl RunView {
         self.parse_count() + usize::from(self.invoked_skill_read().is_some())
     }
 
+    pub(crate) fn live_tool_records(&self) -> impl Iterator<Item = (usize, &ToolView)> {
+        self.tools
+            .iter()
+            .enumerate()
+            .skip((self.tool_compaction_covered_count as usize).max(self.initial_tool_count()))
+            .filter(|(_, tool)| {
+                !matches!(
+                    tool.intent.call,
+                    crate::tools::ToolCall::PrepareWorker { .. }
+                )
+            })
+    }
+
     // No Tool of the Run has an open or run-stopping hook; a Command's hooks sit on its source Tool.
     pub(crate) fn hooks_settled(&self) -> bool {
         self.lifecycle_hooks.iter().all(|hook| {
