@@ -148,22 +148,25 @@ impl TerminalReader {
             Self::Keys(reader) => &reader.admission,
             Self::Lines(reader) => &reader.admission,
         }
-        .after_frame()
+        .barrier()
         .await?;
         #[cfg(unix)]
+        self.discard_until(cutoff);
+        #[cfg(unix)]
         match self {
-            Self::Keys(reader) => {
-                reader.discard_before = Some(cutoff);
-                reader.paste = None;
-            }
-            #[cfg(unix)]
-            Self::Lines(reader) => {
-                reader.reset_draft();
-                reader.discard_before = Some(cutoff);
-            }
+            Self::Keys(reader) => reader.paste = None,
+            Self::Lines(reader) => reader.reset_draft(),
         }
         #[cfg(unix)]
         Ok(())
+    }
+
+    pub(super) fn discard_until(&mut self, cutoff: Instant) {
+        match self {
+            Self::Keys(reader) => reader.discard_before = Some(cutoff),
+            #[cfg(unix)]
+            Self::Lines(reader) => reader.discard_before = Some(cutoff),
+        }
     }
 
     pub(super) fn reset_draft(&mut self) {
@@ -368,7 +371,7 @@ impl InputAdmission {
         Ok((Self { sender, wake }, requests))
     }
 
-    async fn after_frame(&self) -> Result<Instant, TerminalError> {
+    async fn barrier(&self) -> Result<Instant, TerminalError> {
         let (reply, acknowledged) = oneshot::channel();
         tokio::time::timeout(Duration::from_secs(1), async {
             self.sender
@@ -435,7 +438,6 @@ fn read_lines(
             Err(error) => return Err(error),
         }
         admit_input(input, requests, || pending = None)?;
-        let observed = Instant::now();
         let event = match input.read(&mut bytes) {
             Ok(0) => LineEvent::EndOfInput,
             Ok(len) => decode_line(&bytes[..len]),
@@ -449,7 +451,8 @@ fn read_lines(
         };
         poll.registry()
             .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-        pending = Some((observed, Ok(event)));
+        // Observed after the read, so no byte predates its arrival.
+        pending = Some((Instant::now(), Ok(event)));
     }
     Ok(())
 }

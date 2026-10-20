@@ -143,15 +143,24 @@ fn run_case(case: &'static str) {
         wrapper_pid: child.child().id(),
         ..Default::default()
     };
-    let output = crate::process::capture_terminal(
-        child.child(),
-        std::fs::File::from(pipe),
-        Duration::from_secs(60),
-        256 * 1024,
-        |bytes| driver.advance(case, bytes, &input, &state, &workspace),
-    );
+    let output = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        crate::process::capture_terminal(
+            child.child(),
+            std::fs::File::from(pipe),
+            Duration::from_secs(60),
+            256 * 1024,
+            |bytes| driver.advance(case, bytes, &input, &state, &workspace),
+        )
+    }))
+    .unwrap_or_else(|panic| {
+        driver.annotate(case, "capture");
+        std::panic::resume_unwind(panic)
+    });
     drop(server);
     peer.join().unwrap();
+    if !output.status.success() || !driver.answered {
+        driver.annotate(case, "exit");
+    }
     assert!(output.status.success(), "{case}: attached exit");
     assert!(driver.answered, "{case}: approval frame missing");
     assert_replay(&state, &workspace, case);
@@ -167,9 +176,43 @@ struct Driver {
     closed: bool,
     pages: usize,
     last_frame: String,
+    output: Vec<u8>,
 }
 
 impl Driver {
+    fn annotate(&self, case: &str, stage: &str) {
+        let rows = if case == "unguarded-page-up" { 50 } else { 24 };
+        let screen = crate::session_picker::screen_rows(&self.output, 80, rows)
+            .iter()
+            .map(|row| row.trim_end())
+            .filter(|row| !row.is_empty())
+            .map(|row| format!("[{row}]"))
+            .collect::<String>();
+        let tail: String = screen
+            .chars()
+            .rev()
+            .take(1200)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || " _=:,.-()[]".contains(c) {
+                    c
+                } else {
+                    '.'
+                }
+            })
+            .collect();
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=inline_approval; case={case}; stage={stage}; answered={}; early={}; pages={}; closed={}; bytes={}; screen={tail}",
+            self.answered,
+            self.early,
+            self.pages,
+            self.closed,
+            self.output.len()
+        ));
+    }
+
     fn advance(
         &mut self,
         case: &str,
@@ -188,6 +231,10 @@ impl Driver {
                 pid,
                 state.to_path_buf(),
             ));
+        }
+        if bytes.len() != self.output.len() {
+            self.output.clear();
+            self.output.extend_from_slice(bytes);
         }
         let mut input = input.lock().unwrap();
         crate::process::decline_workspace_consent(&mut *input, bytes, &mut self.declined);

@@ -447,6 +447,14 @@ pub(super) async fn submit_objective(
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let shutdown_reason = loop {
+        // Flush before drawing: a key pressed after the frame appears must reach the dialog.
+        let first_frame = std::mem::take(&mut approval_first_frame);
+        if first_frame {
+            terminal
+                .discard_approval_typeahead()
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let approval_more = match &pending {
             Some(approval) => terminal
                 .draw_tool_approval(
@@ -459,11 +467,8 @@ pub(super) async fn submit_objective(
                 .map_err(|error| error.to_string())?,
             None => false,
         };
-        if std::mem::take(&mut approval_first_frame) {
-            terminal
-                .discard_approval_typeahead()
-                .await
-                .map_err(|error| error.to_string())?;
+        if first_frame {
+            terminal.discard_input_before_now();
         }
         let (result, mut events) = handle
             .as_mut()

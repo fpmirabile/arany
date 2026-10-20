@@ -144,7 +144,6 @@ fn read(
             Err(error) => return Err(error),
         }
         admit_input(input, requests, || decoder = Decoder::default())?;
-        let observed = Instant::now();
         match input.read(&mut bytes) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -153,7 +152,8 @@ fn read(
                 ));
             }
             Ok(len) => {
-                let now = observed;
+                // Observed after the read, so no byte predates its arrival.
+                let now = Instant::now();
                 for &byte in &bytes[..len] {
                     if shutdown.load(Ordering::Acquire) {
                         return Ok(());
@@ -708,6 +708,7 @@ mod tests {
                 start.send(()).unwrap();
             });
             admitted.unwrap();
+            reader.discard_until(Instant::now());
             master
                 .write_all(if linear { b"no\n" } else { b"n" })
                 .unwrap();

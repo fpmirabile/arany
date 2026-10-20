@@ -552,6 +552,13 @@ impl AttachedTerminal {
             .await
     }
 
+    pub fn discard_input_before_now(&mut self) {
+        self.input
+            .as_mut()
+            .expect("active terminal input")
+            .discard_until(std::time::Instant::now());
+    }
+
     pub fn draw_tool_approval(
         &mut self,
         approval: &arany::ToolApproval,
