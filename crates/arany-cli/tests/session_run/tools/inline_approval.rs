@@ -110,7 +110,8 @@ fn run_case(case: &'static str) {
             } else if case.starts_with("unguarded") {
                 "exit 42".to_owned()
             } else if case == "early-digit" {
-                format!("printf approval-dispatched;#{}", "padding ".repeat(600))
+                // Multi-page, yet within the 4096-byte Command argument limit.
+                format!("printf approval-dispatched;#{}", "padding ".repeat(450))
             } else {
                 "printf approval-dispatched".into()
             };
