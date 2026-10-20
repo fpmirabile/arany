@@ -1,4 +1,4 @@
-use super::{ActiveTime, Answer, Grant, StopCause, active_time_limit_observation, not_dispatched};
+use super::{DispatchSite, Grant, HookDenial, NotDispatched, StopCause, undispatched};
 use crate::engine::ledger::{Action, duration_ms};
 use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
@@ -26,8 +26,8 @@ pub(super) struct HookFold {
     pub(super) restriction: Option<Decision>,
     pub(super) count: u8,
     pub(super) narrowed: Option<ToolCall>,
-    reason: Option<String>,
-    stop: HookStop,
+    pub(super) reason: Option<String>,
+    pub(super) stop: HookStop,
 }
 
 pub(in crate::engine::run_loop) struct PostFold {
@@ -79,80 +79,30 @@ impl HookFold {
         self.stop == HookStop::ActiveTime
     }
 
-    pub(super) fn denial(&self, intent: EffectIntent, child: bool) -> Answer {
-        match self.stop {
-            HookStop::ActiveTime => Answer {
-                checkpoint: None,
-                observation: if child {
-                    not_dispatched(
-                        intent,
-                        ToolDisposition::Limit,
-                        "Delegation deadline reached; no operation was dispatched",
-                    )
-                } else {
-                    active_time_limit_observation(intent)
-                },
-                stop: child.then_some(StopCause::DelegationDeadline),
-                active_time: (!child).then_some(ActiveTime {
-                    segment: None,
-                    exhausted: true,
-                }),
-            },
-            HookStop::Uncertain | HookStop::Requested => Answer {
-                checkpoint: None,
-                observation: not_dispatched(
-                    intent,
-                    ToolDisposition::Denied,
-                    if self.stop == HookStop::Requested {
-                        "Hook stopped this Run; no operation was dispatched"
-                    } else {
-                        "Hook outcome uncertain; no operation was dispatched"
-                    },
-                ),
-                stop: Some(if self.stop == HookStop::Requested {
-                    StopCause::HookStop
-                } else {
-                    StopCause::Uncertain
-                }),
-                active_time: None,
-            },
-            HookStop::None if self.narrowed.is_some() => Answer {
-                checkpoint: None,
-                observation: not_dispatched(
-                    intent,
-                    ToolDisposition::Denied,
-                    format!(
-                        "Hook narrowed this Tool to: {}",
-                        self.narrowed
-                            .as_ref()
-                            .map_or_else(Default::default, peer_name)
-                    ),
-                ),
-                stop: None,
-                active_time: None,
-            },
-            HookStop::None => {
-                let room = (intent.limits.result_bytes as usize).saturating_sub(32);
-                let reason = self.reason.as_deref().unwrap_or_default();
-                let reason: String = reason
-                    .chars()
-                    .scan(0, |bytes, ch| {
-                        *bytes += ch.len_utf8();
-                        (*bytes <= room).then_some(ch)
-                    })
-                    .collect();
-                let output = if reason.is_empty() {
-                    "Hook denied this Tool".to_owned()
-                } else {
-                    format!("Hook denied this Tool: {reason}")
-                };
-                Answer {
-                    checkpoint: None,
-                    observation: not_dispatched(intent, ToolDisposition::Denied, output),
-                    stop: None,
-                    active_time: None,
-                }
+    pub(super) fn refusal(&self, site: DispatchSite) -> (NotDispatched, Option<StopCause>) {
+        match (self.stop, site) {
+            (HookStop::ActiveTime, DispatchSite::Primary) => {
+                (NotDispatched::HookDenied(HookDenial::ActiveTime), None)
             }
+            (HookStop::ActiveTime, DispatchSite::Researcher) => (
+                NotDispatched::HookDenied(HookDenial::DelegationDeadline),
+                Some(StopCause::DelegationDeadline),
+            ),
+            (HookStop::Uncertain, _) => (
+                NotDispatched::HookDenied(HookDenial::Uncertain),
+                Some(StopCause::Uncertain),
+            ),
+            (HookStop::Requested, _) => (
+                NotDispatched::HookDenied(HookDenial::Requested),
+                Some(StopCause::HookStop),
+            ),
+            (HookStop::None, _) => (
+                NotDispatched::HookDenied(match &self.narrowed {
+                    Some(call) => HookDenial::Narrowed(peer_name(call).into_owned()),
+                    None => HookDenial::Denied(self.reason.clone().unwrap_or_default()),
+                }),
+                None,
+            ),
         }
     }
 }
@@ -842,7 +792,7 @@ impl RunLoop<'_> {
             },
         })
         .await?;
-        let observation = not_dispatched(intent, ToolDisposition::Denied, reason);
+        let observation = undispatched(intent, ToolDisposition::Denied, reason);
         self.append(Event::HookFinished {
             run_id: self.run_id,
             agent_run_id: agent,

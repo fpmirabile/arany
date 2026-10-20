@@ -45,6 +45,13 @@ impl Grant<'_> {
         }
     }
 
+    fn site(&self) -> DispatchSite {
+        match self {
+            Self::Primary { .. } => DispatchSite::Primary,
+            Self::Researcher { .. } => DispatchSite::Researcher,
+        }
+    }
+
     fn context(&self) -> Result<&ToolContext, EngineError> {
         match self {
             Self::Primary { request, .. } => request
@@ -251,14 +258,15 @@ impl RunLoop<'_> {
                 match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
                     Ok(intent) => intent,
                     Err(refusal @ SizingRefusal::DelegationDeadline) => {
-                        match self.record_delegation_deadline(&grant, runtime, call).await {
-                            Ok(()) => {}
-                            Err(EngineError::Tool(ToolError::Limit)) => {
-                                return Ok(StepEnd::Stopped(StopCause::Capacity));
-                            }
-                            Err(error) => return Err(error),
-                        }
-                        return Ok(StepEnd::Stopped(refusal.into()));
+                        return Ok(StepEnd::Stopped(
+                            match self
+                                .record_delegation_deadline(&grant, runtime, call)
+                                .await?
+                            {
+                                Ok(()) => refusal.into(),
+                                Err(admission) => admission.into(),
+                            },
+                        ));
                     }
                     Err(refusal @ SizingRefusal::ActiveTime) => {
                         self.active_time_floor
@@ -483,7 +491,7 @@ impl RunLoop<'_> {
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
         call: ToolCall,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
         let Grant::Researcher { child, .. } = grant else {
             return Err(EngineError::CoordinatorFailed);
         };
@@ -494,8 +502,12 @@ impl RunLoop<'_> {
         let permission = self
             .permission(grant, runtime, &intent.call)
             .narrow_terminal(self.terminal_mode(), &intent.call);
-        self.admit_tool(grant, runtime, &intent, permission, 0, false)
-            .await?;
+        if let Err(refusal) = self
+            .admit_tool(grant, runtime, &intent, permission, 0, false)
+            .await?
+        {
+            return Ok(Err(refusal));
+        }
         self.append(Event::ToolStarted {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
@@ -536,19 +548,11 @@ impl RunLoop<'_> {
         self.append(Event::ToolFinished {
             run_id: self.run_id,
             agent_run_id: child.agent_run_id,
-            observation: {
-                let mut observation = not_dispatched(
-                    intent,
-                    ToolDisposition::Limit,
-                    "Delegation deadline reached; no operation was dispatched",
-                );
-                observation.limit_cause = Some(crate::tools::LimitCause::Timeout);
-                observation
-            },
-
+            observation: not_dispatched(intent, &NotDispatched::DelegationDeadline),
             checkpoint: None,
         })
-        .await
+        .await?;
+        Ok(Ok(()))
     }
 
     pub(super) fn primary_intent(
@@ -698,14 +702,11 @@ impl RunLoop<'_> {
             }
         }
         let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
-        match self
+        if let Err(refusal) = self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
-            .await
+            .await?
         {
-            Ok(true) => {}
-            Ok(false) => return Ok(Err(StopCause::Budget)),
-            Err(EngineError::Tool(ToolError::Limit)) => return Ok(Err(StopCause::Capacity)),
-            Err(error) => return Err(error),
+            return Ok(Err(refusal.into()));
         }
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
@@ -828,7 +829,7 @@ impl RunLoop<'_> {
         permission: Permission,
         hook_events: usize,
         narrowable: bool,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Result<(), AdmissionRefusal>, EngineError> {
         let worker = matches!(
             intent.target,
             crate::session::worker::EffectTarget::WorkerView { .. }
@@ -849,7 +850,7 @@ impl RunLoop<'_> {
                     .remaining_calls()
                     .is_some_and(|remaining| remaining < 1 + u32::from(review))
                 {
-                    return Ok(false);
+                    return Ok(Err(AdmissionRefusal::RemainingCalls));
                 }
                 // A hook may narrow this Tool: the replacement is a second intent with its own hook set.
                 let narrowing = if narrowable && hook_events > 0 {
@@ -905,15 +906,16 @@ impl RunLoop<'_> {
                 .admit(self.session_id, tail, observations)
                 .await
         };
-        admitted.map_err(|error| match error {
-            crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit
+        match admitted {
+            Ok(()) => Ok(Ok(())),
+            // A worker effect's capacity stops the wave; any other stays a Store failure.
+            Err(crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit)
                 if worker =>
             {
-                EngineError::Tool(crate::tools::ToolError::Limit)
+                Ok(Err(AdmissionRefusal::StoreCapacity))
             }
-            error => error.into(),
-        })?;
-        Ok(true)
+            Err(error) => Err(error.into()),
+        }
     }
 
     fn plan_allows(&self, call: &ToolCall) -> Result<bool, EngineError> {
@@ -1069,7 +1071,7 @@ impl RunLoop<'_> {
         narrowable: bool,
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
-        let unguarded = intent.call.is_unguarded();
+        let site = grant.site();
         let allow_auto_edits = permission.decision == Decision::Allow
             && self.terminal_mode() == Some(ApprovalMode::Request)
             && intent.call.facts().mutates;
@@ -1093,116 +1095,107 @@ impl RunLoop<'_> {
         };
         let permission =
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
-        let Permission {
-            mut decision,
-            basis,
-            ..
-        } = permission;
-        let digest = intent.digest();
-        let source = if decision == Decision::Ask {
-            PermissionSource::UnavailableApproval
-        } else {
-            basis
-        };
-        let (verdict, source) = if let Some((requested, maximum)) = timeout_limit {
-            (
-                Verdict::Deny(Answer {
-                    checkpoint: None,
-                    observation: command_timeout_limit_observation(intent, requested, maximum),
-                    stop: None,
-                    active_time: None,
-                }),
-                source,
-            )
-        } else if decision == Decision::Deny || hooks.exhausted() {
-            let answer = if hooks.exhausted() || source == PermissionSource::Hook {
-                hooks.denial(intent, grant.deadline().is_some())
-            } else {
-                Answer {
-                    checkpoint: None,
-                    observation: not_dispatched(
-                        intent,
-                        ToolDisposition::Denied,
-                        match source {
-                            PermissionSource::Rule => "Permission deny rule blocked this Tool",
-                            PermissionSource::PinnedGrant => {
-                                "Tool operation is outside the pinned grant"
-                            }
-                            _ => "Permission mode denied this Tool",
-                        },
-                    ),
-                    stop: None,
-                    active_time: None,
+        let facts = DispatchFacts {
+            site,
+            permission,
+            hooks: &hooks,
+            timeout_limit,
+            human_only_unavailable: self.controls.approvals.is_some_and(|approvals| {
+                !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+            }),
+            unguarded: match grant {
+                Grant::Primary { request, .. } if intent.call.is_unguarded() => {
+                    Some(self.unguarded(runtime, request, &intent)?)
                 }
-            };
-            (
-                match hooks.narrowed.clone() {
-                    Some(call) => Verdict::Narrow(answer, call),
-                    None => Verdict::Deny(answer),
+                Grant::Primary { .. } | Grant::Researcher { .. } => None,
+            },
+            goal_allows: intent.call.is_internal()
+                || match grant {
+                    Grant::Primary { .. } => self.plan_allows(&intent.call)?,
+                    Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
                 },
-                source,
-            )
-        } else if self.controls.approvals.is_some_and(|approvals| {
-            !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
-        }) {
-            decision = Decision::Ask;
-            unavailable_human_approval(intent)
-        } else {
-            match grant {
-                Grant::Primary {
-                    request,
-                    review_allowed,
-                } => {
-                    Box::pin(self.before_primary_dispatch(
-                        runtime,
-                        request,
-                        *review_allowed && self.ledger().admits(Action::Review),
-                        intent,
-                        permission,
-                        allow_auto_edits && hooks.restriction != Some(Decision::Ask),
-                    ))
-                    .await?
+            runtime_allows: runtime.allows(&intent.call),
+            can_start_provider_call: self.ledger().can_start_provider_call(),
+            guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
+            interactive: self.controls.approvals.is_some(),
+        };
+        let approval = match facts.ask() {
+            Some(mode) => Some(
+                Box::pin(self.ask(
+                    grant,
+                    runtime,
+                    &intent,
+                    mode,
+                    facts.unguarded_prompt(),
+                    allow_auto_edits && hooks.restriction != Some(Decision::Ask),
+                ))
+                .await?,
+            ),
+            None => None,
+        };
+        let decided = decide_dispatch(
+            &facts,
+            &AfterAsk {
+                approval,
+                paused: self.pause_requested(),
+                can_start_provider_call: self.ledger().can_start_provider_call(),
+                cancelled: self.controls.cancellation.is_cancelled(),
+                deadline_reached: grant
+                    .deadline()
+                    .is_some_and(|deadline| Instant::now() >= deadline),
+            },
+        );
+        // An in-process read waits for no Guard capacity, so it reserves its action directly.
+        let (outcome, queue_pause) = match decided.outcome {
+            Ok(Dispatch::QueuePause) => match self.reserve_active_pause() {
+                Ok(pause) => (
+                    decide_queue_pause(true, self.pause_requested()),
+                    Some(pause),
+                ),
+                Err(EngineError::GoalBudgetExhausted) => {
+                    (decide_queue_pause(false, self.pause_requested()), None)
                 }
-                Grant::Researcher { deadline, .. } => {
-                    if !intent.call.is_internal() && !self.ledger().allows_tool(&intent.call) {
-                        (
-                            Verdict::Deny(Answer {
-                                checkpoint: None,
-                                observation: outside_plan(intent),
-                                stop: None,
-                                active_time: None,
-                            }),
-                            source,
-                        )
-                    } else {
-                        self.approve_researcher(intent, *deadline, permission)
-                            .await?
-                    }
+                Err(error) => return Err(error),
+            },
+            Ok(Dispatch::Direct) => (Ok(()), None),
+            Err(refusal) => (Err(refusal), None),
+        };
+        let agent_run_id = intent.agent_run_id;
+        let digest = intent.digest();
+        let unguarded = intent.call.is_unguarded();
+        let verdict = match outcome {
+            Ok(()) => Verdict::Dispatch {
+                intent,
+                queue_pause,
+            },
+            Err(refusal) => {
+                if matches!(refusal.reason, NotDispatched::Paused) {
+                    // A pause requested during review or the approval wait stops the Run before dispatch.
+                    self.controls.cancellation.cancel();
                 }
+                if let Some(pause) = queue_pause {
+                    self.settle_active_pause(pause, None)?;
+                }
+                self.refused(site, intent, refusal)
             }
         };
         let mode = effective_permission_mode(config, grant);
         if mode.is_some() || unguarded {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
-            let source = if !approved && source == PermissionSource::AiReview {
+            let source = if !approved && decided.source == PermissionSource::AiReview {
                 PermissionSource::UnavailableApproval
             } else {
-                source
+                decided.source
             };
             self.append(Event::ToolPermissionDecided {
                 run_id: self.run_id,
-                agent_run_id: match &verdict {
-                    Verdict::Dispatch { intent, .. } => intent.agent_run_id,
-                    Verdict::Deny(answer) | Verdict::Narrow(answer, _) => {
-                        answer.observation.intent.agent_run_id
-                    }
-                },
+                agent_run_id,
                 verdict: PermissionVerdict {
                     intent_digest: digest,
-                    decision,
+                    decision: decided.decision,
                     mode,
-                    basis,
+                    basis: permission.basis,
                     source,
                     approved,
                     hook_restriction: hooks.restriction,
@@ -1215,186 +1208,130 @@ impl RunLoop<'_> {
         Ok(verdict)
     }
 
-    async fn before_primary_dispatch(
+    fn unguarded(
         &self,
         runtime: &ToolRuntime,
         request: &ProviderRequest,
-        review_allowed: bool,
-        intent: EffectIntent,
-        permission: Permission,
+        intent: &EffectIntent,
+    ) -> Result<Unguarded, EngineError> {
+        let hook_failure = self.ledger().view(|view| {
+            view.runs
+                .last()
+                .and_then(|run| run.unguarded_failure(&intent.call))
+                .filter(|(_, hook)| *hook)
+                .map(|(observation, _)| observation.clone())
+        })?;
+        Ok(Unguarded {
+            late_hook_failure: hook_failure.is_some(),
+            gate: unguarded_gate(runtime, request, intent, hook_failure.as_ref()),
+        })
+    }
+
+    async fn ask(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        mode: ApprovalMode,
+        unguarded_prompt: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
-    ) -> Result<(Verdict, PermissionSource), EngineError> {
-        let mut source = if permission.decision == Decision::Ask {
-            PermissionSource::UnavailableApproval
-        } else {
-            permission.basis
-        };
-        let mut unguarded_prompt = None;
-        if intent.call.is_unguarded() {
-            let hook_failure = self.ledger().view(|view| {
-                view.runs
-                    .last()
-                    .and_then(|run| run.unguarded_failure(&intent.call))
-                    .filter(|(_, hook)| *hook)
-                    .map(|(observation, _)| observation.clone())
-            })?;
-            if hook_failure.is_some()
-                && (permission.decision != Decision::Ask
-                    || permission.basis == PermissionSource::ExactCommandRule)
-            {
-                return Ok(self.not_offered(
-                    intent,
-                    "A hook failure arrived after this re-run was classified; propose it again; no operation was dispatched",
-                    source,
-                ));
-            }
-            match unguarded_gate(runtime, request, &intent, hook_failure.as_ref()) {
-                Ok(prompt) => unguarded_prompt = Some(prompt),
-                Err(message) => return Ok(self.not_offered(intent, message, source)),
-            }
-        }
-        let mut unsaved_rule = false;
-        let goal_allows = intent.call.is_internal() || self.plan_allows(&intent.call)?;
-        let mut approved = true;
-        let mut active_time_exhausted = false;
-        let mut paused = false;
-        if goal_allows
-            && runtime.allows(&intent.call)
-            && let Some(mode) = permission.approval
-            && self.ledger().can_start_provider_call()
-        {
-            let resolvers;
-            let chain = if mode == ApprovalMode::Auto && review_allowed {
-                resolvers = [
-                    Resolver::AiReview {
-                        objective: &request.input.objective,
-                    },
-                    Resolver::Human,
-                ];
-                &resolvers[..]
-            } else {
-                &[Resolver::Human]
-            };
-            let resolution = self
-                .resolve_ask(
+    ) -> Result<Resolution, EngineError> {
+        match grant {
+            Grant::Primary {
+                request,
+                review_allowed,
+            } => {
+                let resolvers;
+                let chain = if mode == ApprovalMode::Auto
+                    && *review_allowed
+                    && self.ledger().admits(Action::Review)
+                {
+                    resolvers = [
+                        Resolver::AiReview {
+                            objective: &request.input.objective,
+                        },
+                        Resolver::Human,
+                    ];
+                    &resolvers[..]
+                } else {
+                    &[Resolver::Human]
+                };
+                self.resolve_ask(
                     runtime,
-                    &intent,
+                    intent,
                     chain,
                     AskSite::Primary {
-                        unguarded_prompt: unguarded_prompt.clone(),
+                        unguarded_prompt,
                         allow_auto_edits,
                     },
                 )
-                .await?;
-            approved = resolution.approved;
-            source = resolution.source;
-            active_time_exhausted = resolution.active_time_exhausted;
-            unsaved_rule = resolution.unsaved_rule;
-        }
-        // An in-process read waits for no Guard capacity, so it reserves its action directly.
-        let guard_site = intent.call.facts().site == crate::tools::catalog::Site::Guard;
-        let mut queue_pause = if approved
-            && guard_site
-            && goal_allows
-            && !active_time_exhausted
-            && self.ledger().can_start_provider_call()
-        {
-            match self.reserve_active_pause() {
-                Ok(pause) => Some(pause),
-                Err(EngineError::GoalBudgetExhausted) => {
-                    approved = false;
-                    active_time_exhausted = true;
-                    None
-                }
-                Err(error) => return Err(error),
+                .await
             }
-        } else {
-            None
-        };
-        let observation = if active_time_exhausted {
-            active_time_limit_observation(intent)
-        } else if !goal_allows {
-            outside_plan(intent)
-        } else if self.pause_at_boundary() {
-            // A pause requested during review or the approval wait stops the Run before dispatch.
-            approved = false;
-            paused = true;
-            if let Some(pause) = queue_pause.take() {
-                self.settle_active_pause(pause, None)?;
-            }
-            not_dispatched(
-                intent,
-                ToolDisposition::Denied,
-                "Goal paused before this operation; no operation was dispatched",
-            )
-        } else if approved && !self.ledger().can_start_provider_call() {
-            not_dispatched(
-                intent,
-                ToolDisposition::Limit,
-                "Goal token budget exhausted; no operation was dispatched",
-            )
-        } else if approved {
-            return Ok((
-                Verdict::Dispatch {
-                    intent,
-                    queue_pause,
-                },
-                source,
-            ));
-        } else {
-            not_dispatched(
-                intent,
-                ToolDisposition::Denied,
-                if unsaved_rule {
-                    "The always-allow rule could not be saved; no operation was dispatched"
-                } else if unguarded_prompt.is_some() && self.controls.approvals.is_none() {
-                    "Unguarded re-run needs interactive approval or an exact-command rule for this project; no operation was dispatched"
+            Grant::Researcher { deadline, .. } => {
+                let objective =
+                    if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
+                        Some(
+                            self.ledger()
+                                .view(|view| {
+                                    self.goal_id
+                                        .and_then(|id| view.goal(id))
+                                        .map(|goal| goal.objective.clone())
+                                })?
+                                .ok_or(EngineError::InvalidHistory)?,
+                        )
+                    } else {
+                        None
+                    };
+                let resolvers;
+                let chain = if let Some(objective) = &objective {
+                    resolvers = [Resolver::AiReview { objective }, Resolver::Human];
+                    &resolvers[..]
                 } else {
-                    "Approval was not granted; no operation was dispatched"
-                },
-            )
-        };
-        self.clear_tool_queue();
-        Ok((
-            Verdict::Deny(Answer {
-                checkpoint: None,
-                observation,
-                stop: (!approved).then(|| {
-                    refusal_cause(
-                        active_time_exhausted,
-                        paused,
-                        self.controls.cancellation.is_cancelled(),
-                        false,
-                    )
-                }),
-                active_time: Some(ActiveTime {
-                    segment: None,
-                    exhausted: active_time_exhausted,
-                }),
-            }),
-            source,
-        ))
+                    &[Resolver::Human]
+                };
+                self.resolve_ask(
+                    runtime,
+                    intent,
+                    chain,
+                    AskSite::Delegated {
+                        deadline: *deadline,
+                    },
+                )
+                .await
+            }
+        }
     }
 
-    fn not_offered(
-        &self,
-        intent: EffectIntent,
-        message: &'static str,
-        source: PermissionSource,
-    ) -> (Verdict, PermissionSource) {
-        self.clear_tool_queue();
-        (
-            Verdict::Deny(Answer {
-                checkpoint: None,
-                observation: not_dispatched(intent, ToolDisposition::Denied, message),
-                stop: None,
-                active_time: Some(ActiveTime {
-                    segment: None,
-                    exhausted: false,
-                }),
-            }),
-            source,
-        )
+    fn refused(&self, site: DispatchSite, intent: EffectIntent, refusal: Refusal<'_>) -> Verdict {
+        let approval_stage = site == DispatchSite::Primary && refusal.reason.decided_at_approval();
+        if approval_stage {
+            self.clear_tool_queue();
+        }
+        // The primary re-reads active time after the ToolFinished it journals.
+        let exhausted = match (refusal.reason.active_time_effect(), site) {
+            (ActiveTimeEffect::Exhausted, DispatchSite::Primary | DispatchSite::Researcher) => {
+                Some(true)
+            }
+            (ActiveTimeEffect::Recheck, DispatchSite::Primary) => Some(false),
+            (ActiveTimeEffect::Recheck, DispatchSite::Researcher)
+            | (ActiveTimeEffect::Untouched, DispatchSite::Primary | DispatchSite::Researcher) => {
+                None
+            }
+        };
+        let active_time = exhausted.map(|exhausted| ActiveTime {
+            segment: None,
+            exhausted,
+        });
+        let answer = Answer {
+            checkpoint: None,
+            observation: not_dispatched(intent, &refusal.reason),
+            stop: refusal.stop,
+            active_time,
+        };
+        match refusal.narrowed {
+            Some(call) => Verdict::Narrow(answer, call.clone()),
+            None => Verdict::Deny(answer),
+        }
     }
 
     async fn human_reply(
@@ -1413,7 +1350,9 @@ impl RunLoop<'_> {
             result = tokio::time::timeout(Duration::from_millis(expires), async {
                 match prompt.clone() {
                     Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => ApprovalReply::from(approvals.ask_with_auto_edits(intent, allow_auto_edits).await),
+                    None => ApprovalReply::from(
+                        approvals.ask_with_auto_edits(intent, allow_auto_edits).await,
+                    ),
                 }
             }) => result.unwrap_or(ApprovalReply::Deny),
         };
@@ -1444,7 +1383,7 @@ impl RunLoop<'_> {
                 Err(EngineError::GoalBudgetExhausted) => {
                     return Ok(Answer {
                         checkpoint: None,
-                        observation: active_time_limit_observation(intent),
+                        observation: not_dispatched(intent, &NotDispatched::ActiveTime),
                         stop: None,
                         active_time: Some(ActiveTime {
                             segment: None,
@@ -1495,9 +1434,12 @@ impl RunLoop<'_> {
                         false,
                         None,
                     ),
-                    Err(EngineError::GoalBudgetExhausted) => {
-                        (active_time_limit_observation(intent), None, true, None)
-                    }
+                    Err(EngineError::GoalBudgetExhausted) => (
+                        not_dispatched(intent, &NotDispatched::ActiveTime),
+                        None,
+                        true,
+                        None,
+                    ),
                     Err(error) => return Err(error),
                 }
             };
@@ -1596,7 +1538,7 @@ impl RunLoop<'_> {
             self.settle_active_pause(pause, None)?;
         }
         if active_time_exhausted && observation.disposition != ToolDisposition::Limit {
-            observation = active_time_limit_observation(observation.intent);
+            observation = not_dispatched(observation.intent, &NotDispatched::ActiveTime);
         }
         let reached_go = observation.attestation.is_some()
             || matches!(observation.disposition, ToolDisposition::Uncertain);
@@ -1707,78 +1649,6 @@ impl RunLoop<'_> {
         if let Some(hints) = self.hints {
             hints.tool_queue().send_replace(None);
         }
-    }
-
-    async fn approve_researcher(
-        &self,
-        intent: EffectIntent,
-        deadline: Instant,
-        permission: Permission,
-    ) -> Result<(Verdict, PermissionSource), EngineError> {
-        let (approved, source) = if let Some(mode) = permission.approval {
-            self.researcher_approval(&intent, deadline, mode).await?
-        } else {
-            (true, permission.basis)
-        };
-        let verdict = if approved {
-            Verdict::Dispatch {
-                intent,
-                queue_pause: None,
-            }
-        } else {
-            Verdict::Deny(Answer {
-                checkpoint: None,
-                observation: not_dispatched(
-                    intent,
-                    ToolDisposition::Denied,
-                    "Approval was not granted; no operation was dispatched",
-                ),
-                stop: Some(refusal_cause(
-                    false,
-                    self.pause_requested(),
-                    self.controls.cancellation.is_cancelled(),
-                    Instant::now() >= deadline,
-                )),
-                active_time: None,
-            })
-        };
-        Ok((verdict, source))
-    }
-
-    async fn researcher_approval(
-        &self,
-        intent: &EffectIntent,
-        deadline: Instant,
-        mode: ApprovalMode,
-    ) -> Result<(bool, PermissionSource), EngineError> {
-        let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
-        if !runtime.allows(&intent.call) || !self.ledger().can_start_provider_call() {
-            return Ok((false, PermissionSource::UnavailableApproval));
-        }
-        let objective = if mode == ApprovalMode::Auto && self.ledger().admits(Action::Review) {
-            Some(
-                self.ledger()
-                    .view(|view| {
-                        self.goal_id
-                            .and_then(|id| view.goal(id))
-                            .map(|goal| goal.objective.clone())
-                    })?
-                    .ok_or(EngineError::InvalidHistory)?,
-            )
-        } else {
-            None
-        };
-        let resolvers;
-        let chain = if let Some(objective) = &objective {
-            resolvers = [Resolver::AiReview { objective }, Resolver::Human];
-            &resolvers[..]
-        } else {
-            &[Resolver::Human]
-        };
-        let resolution = self
-            .resolve_ask(runtime, intent, chain, AskSite::Delegated { deadline })
-            .await?;
-        Ok((resolution.approved, resolution.source))
     }
 
     async fn resolve_ask(
@@ -2100,21 +1970,499 @@ async fn execute_cancellable(
     }
 }
 
-fn command_timeout_limit_observation(
-    intent: EffectIntent,
-    requested: u32,
-    maximum: u32,
-) -> ToolObservation {
-    let mut observation = not_dispatched(
-        intent,
-        ToolDisposition::Limit,
-        crate::tools::types::command_timeout_limit_message(requested, maximum),
-    );
-    observation.limit_cause = Some(crate::tools::LimitCause::RequestedTime);
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum DispatchSite {
+    Primary,
+    Researcher,
+}
+
+pub(super) enum AdmissionRefusal {
+    RemainingCalls,
+    StoreCapacity,
+}
+
+impl From<AdmissionRefusal> for StopCause {
+    fn from(refusal: AdmissionRefusal) -> Self {
+        match refusal {
+            AdmissionRefusal::RemainingCalls => Self::Budget,
+            AdmissionRefusal::StoreCapacity => Self::Capacity,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum HookDenial {
+    ActiveTime,
+    DelegationDeadline,
+    Uncertain,
+    Requested,
+    Narrowed(String),
+    Denied(String),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum UnguardedRefusal {
+    NoPriorFailure,
+    GuardAlias,
+    ProtectedPath,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(super) enum NotDispatched {
+    TimeoutLimit { requested: u32, maximum: u32 },
+    HookDenied(HookDenial),
+    DelegationDeadline,
+    DenyRule,
+    OutsideGrant,
+    ModeDenied,
+    HumanOnlyUnavailable,
+    HookFailureAfterClassify,
+    UnguardedNotOffered(UnguardedRefusal),
+    OutsidePlan,
+    ActiveTime,
+    Paused,
+    TokenBudget,
+    UnsavedRule,
+    UnguardedNeedsHuman,
+    ApprovalRefused,
+}
+
+#[derive(Clone, Copy)]
+enum ActiveTimeEffect {
+    Untouched,
+    Recheck,
+    Exhausted,
+}
+
+impl NotDispatched {
+    fn active_time_effect(&self) -> ActiveTimeEffect {
+        match self {
+            Self::HookDenied(HookDenial::ActiveTime) | Self::ActiveTime => {
+                ActiveTimeEffect::Exhausted
+            }
+            Self::HookFailureAfterClassify
+            | Self::UnguardedNotOffered(_)
+            | Self::OutsidePlan
+            | Self::Paused
+            | Self::TokenBudget
+            | Self::UnsavedRule
+            | Self::UnguardedNeedsHuman
+            | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
+            Self::TimeoutLimit { .. }
+            | Self::HookDenied(
+                HookDenial::DelegationDeadline
+                | HookDenial::Uncertain
+                | HookDenial::Requested
+                | HookDenial::Narrowed(_)
+                | HookDenial::Denied(_),
+            )
+            | Self::DelegationDeadline
+            | Self::DenyRule
+            | Self::OutsideGrant
+            | Self::ModeDenied
+            | Self::HumanOnlyUnavailable => ActiveTimeEffect::Untouched,
+        }
+    }
+
+    // The primary decides these after its gates, where it clears the queue hint and re-reads active time.
+    fn decided_at_approval(&self) -> bool {
+        match self {
+            Self::HookFailureAfterClassify
+            | Self::UnguardedNotOffered(_)
+            | Self::OutsidePlan
+            | Self::ActiveTime
+            | Self::Paused
+            | Self::TokenBudget
+            | Self::UnsavedRule
+            | Self::UnguardedNeedsHuman
+            | Self::ApprovalRefused => true,
+            Self::TimeoutLimit { .. }
+            | Self::HookDenied(_)
+            | Self::DelegationDeadline
+            | Self::DenyRule
+            | Self::OutsideGrant
+            | Self::ModeDenied
+            | Self::HumanOnlyUnavailable => false,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct Refusal<'a> {
+    reason: NotDispatched,
+    stop: Option<StopCause>,
+    narrowed: Option<&'a ToolCall>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum Dispatch {
+    Direct,
+    QueuePause,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct DispatchDecision<'a> {
+    outcome: Result<Dispatch, Refusal<'a>>,
+    decision: Decision,
+    source: PermissionSource,
+}
+
+struct Unguarded {
+    late_hook_failure: bool,
+    gate: Result<UnguardedPrompt, UnguardedRefusal>,
+}
+
+// Read after the PreToolUse hooks, before the Ask.
+struct DispatchFacts<'a> {
+    site: DispatchSite,
+    permission: Permission,
+    hooks: &'a HookFold,
+    timeout_limit: Option<(u32, u32)>,
+    human_only_unavailable: bool,
+    unguarded: Option<Unguarded>,
+    goal_allows: bool,
+    runtime_allows: bool,
+    can_start_provider_call: bool,
+    guard_site: bool,
+    interactive: bool,
+}
+
+// Read after the Ask, or where it would have been.
+struct AfterAsk {
+    approval: Option<Resolution>,
+    paused: bool,
+    can_start_provider_call: bool,
+    cancelled: bool,
+    deadline_reached: bool,
+}
+
+fn refuse<'a>(reason: NotDispatched, stop: Option<StopCause>) -> Refusal<'a> {
+    Refusal {
+        reason,
+        stop,
+        narrowed: None,
+    }
+}
+
+impl<'a> DispatchFacts<'a> {
+    fn gate(&self) -> Result<(), Refusal<'a>> {
+        let Permission {
+            decision, basis, ..
+        } = self.permission;
+        if let Some((requested, maximum)) = self.timeout_limit {
+            return Err(refuse(
+                NotDispatched::TimeoutLimit { requested, maximum },
+                None,
+            ));
+        }
+        if decision == Decision::Deny || self.hooks.exhausted() {
+            let (reason, stop) = if self.hooks.exhausted() || basis == PermissionSource::Hook {
+                self.hooks.refusal(self.site)
+            } else {
+                let reason = match basis {
+                    PermissionSource::Rule => NotDispatched::DenyRule,
+                    PermissionSource::PinnedGrant => NotDispatched::OutsideGrant,
+                    PermissionSource::Mode
+                    | PermissionSource::Human
+                    | PermissionSource::AiReview
+                    | PermissionSource::UnavailableApproval
+                    | PermissionSource::ExactCommandRule
+                    | PermissionSource::Hook => NotDispatched::ModeDenied,
+                };
+                (reason, None)
+            };
+            return Err(Refusal {
+                reason,
+                stop,
+                narrowed: self.hooks.narrowed.as_ref(),
+            });
+        }
+        if self.human_only_unavailable {
+            return Err(refuse(
+                NotDispatched::HumanOnlyUnavailable,
+                Some(StopCause::ToolStopped),
+            ));
+        }
+        if let Some(unguarded) = &self.unguarded {
+            if unguarded.late_hook_failure
+                && (decision != Decision::Ask || basis == PermissionSource::ExactCommandRule)
+            {
+                return Err(refuse(NotDispatched::HookFailureAfterClassify, None));
+            }
+            if let Err(refusal) = &unguarded.gate {
+                return Err(refuse(NotDispatched::UnguardedNotOffered(*refusal), None));
+            }
+        }
+        if !self.goal_allows {
+            return Err(refuse(NotDispatched::OutsidePlan, None));
+        }
+        Ok(())
+    }
+
+    fn ask(&self) -> Option<ApprovalMode> {
+        self.gate().ok()?;
+        self.permission
+            .approval
+            .filter(|_| self.runtime_allows && self.can_start_provider_call)
+    }
+
+    fn unguarded_prompt(&self) -> Option<UnguardedPrompt> {
+        self.unguarded
+            .as_ref()
+            .and_then(|unguarded| unguarded.gate.as_ref().ok())
+            .cloned()
+    }
+
+    fn unresolved_source(&self) -> PermissionSource {
+        if self.permission.decision == Decision::Ask {
+            PermissionSource::UnavailableApproval
+        } else {
+            self.permission.basis
+        }
+    }
+}
+
+fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchDecision<'a> {
+    if let Err(refusal) = facts.gate() {
+        let (decision, source) = match refusal.reason {
+            NotDispatched::HumanOnlyUnavailable => {
+                (Decision::Ask, PermissionSource::UnavailableApproval)
+            }
+            NotDispatched::TimeoutLimit { .. }
+            | NotDispatched::HookDenied(_)
+            | NotDispatched::DelegationDeadline
+            | NotDispatched::DenyRule
+            | NotDispatched::OutsideGrant
+            | NotDispatched::ModeDenied
+            | NotDispatched::HookFailureAfterClassify
+            | NotDispatched::UnguardedNotOffered(_)
+            | NotDispatched::OutsidePlan
+            | NotDispatched::ActiveTime
+            | NotDispatched::Paused
+            | NotDispatched::TokenBudget
+            | NotDispatched::UnsavedRule
+            | NotDispatched::UnguardedNeedsHuman
+            | NotDispatched::ApprovalRefused => {
+                (facts.permission.decision, facts.unresolved_source())
+            }
+        };
+        return DispatchDecision {
+            outcome: Err(refusal),
+            decision,
+            source,
+        };
+    }
+    let (approved, source, active_time_exhausted, unsaved_rule) =
+        match (&after.approval, facts.site) {
+            (Some(resolution), _) => (
+                resolution.approved,
+                resolution.source,
+                resolution.active_time_exhausted,
+                resolution.unsaved_rule,
+            ),
+            (None, DispatchSite::Primary) => (true, facts.unresolved_source(), false, false),
+            (None, DispatchSite::Researcher) if facts.permission.approval.is_some() => {
+                (false, PermissionSource::UnavailableApproval, false, false)
+            }
+            (None, DispatchSite::Researcher) => (true, facts.permission.basis, false, false),
+        };
+    let refused = |reason| {
+        Err(refuse(
+            reason,
+            Some(refusal_cause(
+                after.paused,
+                after.cancelled,
+                after.deadline_reached,
+            )),
+        ))
+    };
+    let outcome = match facts.site {
+        DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
+        DispatchSite::Researcher => refused(NotDispatched::ApprovalRefused),
+        DispatchSite::Primary if active_time_exhausted => Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        )),
+        // The Guard path reserves its queue wait first, then reads the pause.
+        DispatchSite::Primary if approved && after.can_start_provider_call && facts.guard_site => {
+            Ok(Dispatch::QueuePause)
+        }
+        DispatchSite::Primary if after.paused => {
+            Err(refuse(NotDispatched::Paused, Some(StopCause::Paused)))
+        }
+        DispatchSite::Primary if approved && !after.can_start_provider_call => {
+            Err(refuse(NotDispatched::TokenBudget, None))
+        }
+        DispatchSite::Primary if approved => Ok(Dispatch::Direct),
+        DispatchSite::Primary if unsaved_rule => refused(NotDispatched::UnsavedRule),
+        DispatchSite::Primary
+            if !facts.interactive
+                && facts
+                    .unguarded
+                    .as_ref()
+                    .is_some_and(|unguarded| unguarded.gate.is_ok()) =>
+        {
+            refused(NotDispatched::UnguardedNeedsHuman)
+        }
+        DispatchSite::Primary => refused(NotDispatched::ApprovalRefused),
+    };
+    DispatchDecision {
+        outcome,
+        decision: facts.permission.decision,
+        source,
+    }
+}
+
+fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Refusal<'static>> {
+    if !reserved {
+        Err(refuse(
+            NotDispatched::ActiveTime,
+            Some(StopCause::ActiveTime),
+        ))
+    } else if paused {
+        Err(refuse(NotDispatched::Paused, Some(StopCause::Paused)))
+    } else {
+        Ok(())
+    }
+}
+
+fn refusal_cause(paused: bool, cancelled: bool, deadline_reached: bool) -> StopCause {
+    if paused {
+        StopCause::Paused
+    } else if cancelled {
+        StopCause::Cancelled
+    } else if deadline_reached {
+        StopCause::DelegationDeadline
+    } else {
+        StopCause::ToolStopped
+    }
+}
+
+fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservation {
+    // Every other Limit here, including a hook's delegation deadline, stays a Resource limit.
+    let timed = match reason {
+        NotDispatched::TimeoutLimit { .. } => Some(crate::tools::LimitCause::RequestedTime),
+        NotDispatched::DelegationDeadline => Some(crate::tools::LimitCause::Timeout),
+        NotDispatched::HookDenied(_)
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::ModeDenied
+        | NotDispatched::HumanOnlyUnavailable
+        | NotDispatched::HookFailureAfterClassify
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::UnguardedNeedsHuman
+        | NotDispatched::ApprovalRefused => None,
+    };
+    let (disposition, output) = match reason {
+        NotDispatched::TimeoutLimit { requested, maximum } => (
+            ToolDisposition::Limit,
+            crate::tools::types::command_timeout_limit_message(*requested, *maximum),
+        ),
+        NotDispatched::ActiveTime => (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
+        NotDispatched::DelegationDeadline => (ToolDisposition::Limit, DELEGATION_DEADLINE.into()),
+        NotDispatched::TokenBudget => (
+            ToolDisposition::Limit,
+            "Goal token budget exhausted; no operation was dispatched".into(),
+        ),
+        NotDispatched::HookDenied(denial) => hook_denial(&intent, denial),
+        NotDispatched::DenyRule => (
+            ToolDisposition::Denied,
+            "Permission deny rule blocked this Tool".into(),
+        ),
+        NotDispatched::OutsideGrant => (
+            ToolDisposition::Denied,
+            "Tool operation is outside the pinned grant".into(),
+        ),
+        NotDispatched::ModeDenied => (
+            ToolDisposition::Denied,
+            "Permission mode denied this Tool".into(),
+        ),
+        NotDispatched::HumanOnlyUnavailable => (
+            ToolDisposition::Denied,
+            "Human-only approval is unavailable on this channel; no operation was dispatched".into(),
+        ),
+        NotDispatched::HookFailureAfterClassify => (
+            ToolDisposition::Denied,
+            "A hook failure arrived after this re-run was classified; propose it again; no operation was dispatched".into(),
+        ),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::NoPriorFailure) => (
+            ToolDisposition::Denied,
+            "No identical command failed under the Guard in this Run; no operation was dispatched".into(),
+        ),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::GuardAlias) => (
+            ToolDisposition::Denied,
+            "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched".into(),
+        ),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::ProtectedPath) => (
+            ToolDisposition::Denied,
+            "The Guard denied a protected path or set-ID entry; an unguarded re-run is not offered; no operation was dispatched".into(),
+        ),
+        NotDispatched::OutsidePlan => (
+            ToolDisposition::Denied,
+            "The effect is outside the active Goal plan; no operation was dispatched".into(),
+        ),
+        NotDispatched::Paused => (
+            ToolDisposition::Denied,
+            "Goal paused before this operation; no operation was dispatched".into(),
+        ),
+        NotDispatched::UnsavedRule => (
+            ToolDisposition::Denied,
+            "The always-allow rule could not be saved; no operation was dispatched".into(),
+        ),
+        NotDispatched::UnguardedNeedsHuman => (
+            ToolDisposition::Denied,
+            "Unguarded re-run needs interactive approval or an exact-command rule for this project; no operation was dispatched".into(),
+        ),
+        NotDispatched::ApprovalRefused => (
+            ToolDisposition::Denied,
+            "Approval was not granted; no operation was dispatched".into(),
+        ),
+    };
+    let mut observation = undispatched(intent, disposition, output);
+    if timed.is_some() {
+        observation.limit_cause = timed;
+    }
     observation
 }
 
-fn not_dispatched(
+const DELEGATION_DEADLINE: &str = "Delegation deadline reached; no operation was dispatched";
+const ACTIVE_TIME_EXHAUSTED: &str =
+    "Goal active-time budget exhausted; no operation was dispatched";
+
+fn hook_denial(intent: &EffectIntent, denial: &HookDenial) -> (ToolDisposition, String) {
+    let output = match denial {
+        HookDenial::ActiveTime => return (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
+        HookDenial::DelegationDeadline => {
+            return (ToolDisposition::Limit, DELEGATION_DEADLINE.into());
+        }
+        HookDenial::Uncertain => "Hook outcome uncertain; no operation was dispatched".into(),
+        HookDenial::Requested => "Hook stopped this Run; no operation was dispatched".into(),
+        HookDenial::Narrowed(name) => format!("Hook narrowed this Tool to: {name}"),
+        HookDenial::Denied(reason) => {
+            let room = (intent.limits.result_bytes as usize).saturating_sub(32);
+            let reason: String = reason
+                .chars()
+                .scan(0, |bytes, ch| {
+                    *bytes += ch.len_utf8();
+                    (*bytes <= room).then_some(ch)
+                })
+                .collect();
+            if reason.is_empty() {
+                "Hook denied this Tool".to_owned()
+            } else {
+                format!("Hook denied this Tool: {reason}")
+            }
+        }
+    };
+    (ToolDisposition::Denied, output)
+}
+
+fn undispatched(
     intent: EffectIntent,
     disposition: ToolDisposition,
     output: impl Into<String>,
@@ -2131,52 +2479,17 @@ fn not_dispatched(
     }
 }
 
-fn refusal_cause(
-    active_time_exhausted: bool,
-    paused: bool,
-    cancelled: bool,
-    deadline_reached: bool,
-) -> StopCause {
-    if active_time_exhausted {
-        StopCause::ActiveTime
-    } else if paused {
-        StopCause::Paused
-    } else if cancelled {
-        StopCause::Cancelled
-    } else if deadline_reached {
-        StopCause::DelegationDeadline
-    } else {
-        StopCause::ToolStopped
-    }
-}
-
-fn unavailable_human_approval(intent: EffectIntent) -> (Verdict, PermissionSource) {
-    (
-        Verdict::Deny(Answer {
-            checkpoint: None,
-            observation: not_dispatched(
-                intent,
-                ToolDisposition::Denied,
-                "Human-only approval is unavailable on this channel; no operation was dispatched",
-            ),
-            stop: Some(StopCause::ToolStopped),
-            active_time: None,
-        }),
-        PermissionSource::UnavailableApproval,
-    )
-}
-
 fn unguarded_gate(
     runtime: &ToolRuntime,
     request: &ProviderRequest,
     intent: &EffectIntent,
     hook_failure: Option<&ToolObservation>,
-) -> Result<UnguardedPrompt, &'static str> {
+) -> Result<UnguardedPrompt, UnguardedRefusal> {
     let ToolCall::CommandUnguarded {
         program, args, cwd, ..
     } = &intent.call
     else {
-        return Err(NO_PRIOR_FAILURE);
+        return Err(UnguardedRefusal::NoPriorFailure);
     };
     let observed = request
         .input
@@ -2185,9 +2498,7 @@ fn unguarded_gate(
         .map(ToolContext::observations)
         .unwrap_or_default();
     if crate::tools::types::uses_guard_alias(args) {
-        return Err(
-            "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched",
-        );
+        return Err(UnguardedRefusal::GuardAlias);
     }
     let Some(prior) = hook_failure.or_else(|| {
         crate::tools::types::qualifying_guard_failure(&intent.call, observed.iter().copied())
@@ -2198,38 +2509,19 @@ fn unguarded_gate(
                     ToolCall::Command { program: p, args: a, cwd: c } if p == program && a == args && c == cwd)
         });
         return Err(if denied_path {
-            "The Guard denied a protected path or set-ID entry; an unguarded re-run is not offered; no operation was dispatched"
+            UnguardedRefusal::ProtectedPath
         } else {
-            NO_PRIOR_FAILURE
+            UnguardedRefusal::NoPriorFailure
         });
     };
     Ok(UnguardedPrompt {
         executable: runtime
             .command_executable(program)
-            .ok_or(NO_PRIOR_FAILURE)?
+            .ok_or(UnguardedRefusal::NoPriorFailure)?
             .to_owned(),
         attribution: prior.enforcement_cause,
         remember: hook_failure.is_none(),
     })
-}
-
-const NO_PRIOR_FAILURE: &str =
-    "No identical command failed under the Guard in this Run; no operation was dispatched";
-
-fn outside_plan(intent: EffectIntent) -> ToolObservation {
-    not_dispatched(
-        intent,
-        ToolDisposition::Denied,
-        "The effect is outside the active Goal plan; no operation was dispatched",
-    )
-}
-
-fn active_time_limit_observation(intent: EffectIntent) -> ToolObservation {
-    not_dispatched(
-        intent,
-        ToolDisposition::Limit,
-        "Goal active-time budget exhausted; no operation was dispatched",
-    )
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -2657,14 +2949,233 @@ mod tests {
     #[test]
     fn refusals_keep_their_own_cause() {
         for (flags, expected) in [
-            ([true, true, true, true], StopCause::ActiveTime),
-            ([false, true, true, true], StopCause::Paused),
-            ([false, false, true, true], StopCause::Cancelled),
-            ([false, false, false, true], StopCause::DelegationDeadline),
-            ([false, false, false, false], StopCause::ToolStopped),
+            ([true, true, true], StopCause::Paused),
+            ([false, true, true], StopCause::Cancelled),
+            ([false, false, true], StopCause::DelegationDeadline),
+            ([false, false, false], StopCause::ToolStopped),
         ] {
-            let [active, paused, cancelled, deadline] = flags;
-            assert_eq!(refusal_cause(active, paused, cancelled, deadline), expected);
+            let [paused, cancelled, deadline] = flags;
+            assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
         }
+    }
+
+    fn allow(basis: PermissionSource) -> Permission {
+        Permission {
+            decision: Decision::Allow,
+            basis,
+            approval: None,
+        }
+    }
+
+    fn asks(mode: ApprovalMode) -> Permission {
+        Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Rule,
+            approval: Some(mode),
+        }
+    }
+
+    fn deny(basis: PermissionSource) -> Permission {
+        Permission {
+            decision: Decision::Deny,
+            basis,
+            approval: None,
+        }
+    }
+
+    fn hook(stop: hooks::HookStop, narrowed: Option<ToolCall>) -> HookFold {
+        HookFold {
+            restriction: Some(Decision::Deny),
+            count: 1,
+            narrowed,
+            reason: Some("no".into()),
+            stop,
+        }
+    }
+
+    fn resolution(approved: bool, source: PermissionSource) -> Resolution {
+        Resolution {
+            approved,
+            source,
+            active_time_exhausted: false,
+            unsaved_rule: false,
+        }
+    }
+
+    fn prompt() -> Result<UnguardedPrompt, UnguardedRefusal> {
+        Ok(UnguardedPrompt {
+            executable: "/bin/make".into(),
+            attribution: None,
+            remember: true,
+        })
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Fact {
+        Timeout,
+        HumanOnly,
+        LateHookFailure,
+        NotOffered,
+        Offered,
+        OutsidePlan,
+        Blocked,
+        TokensSpent,
+        TokensSpentAfterAsk,
+        InProcess,
+        Batch,
+        Paused,
+        Cancelled,
+        Deadline,
+    }
+
+    fn decide<'a>(
+        site: DispatchSite,
+        permission: Permission,
+        hooks: &'a HookFold,
+        facts: &[Fact],
+        approval: Option<Resolution>,
+    ) -> (Option<ApprovalMode>, DispatchDecision<'a>) {
+        let has = |fact| facts.contains(&fact);
+        let gate = if has(Fact::NotOffered) {
+            Some(Err(UnguardedRefusal::GuardAlias))
+        } else if has(Fact::Offered) || has(Fact::LateHookFailure) {
+            Some(prompt())
+        } else {
+            None
+        };
+        let facts = DispatchFacts {
+            site,
+            permission,
+            hooks,
+            timeout_limit: has(Fact::Timeout).then_some((9_000, 5_000)),
+            human_only_unavailable: has(Fact::HumanOnly),
+            unguarded: gate.map(|gate| Unguarded {
+                late_hook_failure: has(Fact::LateHookFailure),
+                gate,
+            }),
+            goal_allows: !has(Fact::OutsidePlan),
+            runtime_allows: !has(Fact::Blocked),
+            can_start_provider_call: !has(Fact::TokensSpent),
+            guard_site: !has(Fact::InProcess),
+            interactive: !has(Fact::Batch),
+        };
+        let after = AfterAsk {
+            approval,
+            paused: has(Fact::Paused),
+            can_start_provider_call: !has(Fact::TokensSpent) && !has(Fact::TokensSpentAfterAsk),
+            cancelled: has(Fact::Cancelled),
+            deadline_reached: has(Fact::Deadline),
+        };
+        (facts.ask(), decide_dispatch(&facts, &after))
+    }
+
+    #[test]
+    fn dispatch_decisions_cover_every_reason_verdict_and_site() {
+        use ApprovalMode::{Auto, Request};
+        use DispatchSite::{Primary, Researcher};
+        use Fact::*;
+        use NotDispatched as N;
+        use PermissionSource as S;
+        use hooks::HookStop;
+        let call = || ToolCall::Read {
+            path: "file".into(),
+            offset: None,
+            limit: Some(1),
+        };
+        let none = HookFold::none();
+        let denied = hook(HookStop::None, None);
+        let narrowing = hook(HookStop::None, Some(call()));
+        let stopped = hook(HookStop::Requested, None);
+        let uncertain = hook(HookStop::Uncertain, None);
+        let exhausted = hook(HookStop::ActiveTime, None);
+        let no = |reason, stop| Err(refuse(reason, stop));
+        let narrow = |reason| {
+            Err(Refusal {
+                reason,
+                stop: None,
+                narrowed: narrowing.narrowed.as_ref(),
+            })
+        };
+        let ok = |approved, source| Some(resolution(approved, source));
+        let exhausted_ask = Some(Resolution {
+            active_time_exhausted: true,
+            ..resolution(false, S::Human)
+        });
+        let unsaved = Some(Resolution {
+            unsaved_rule: true,
+            ..resolution(false, S::Human)
+        });
+        let timeout = || N::TimeoutLimit {
+            requested: 9_000,
+            maximum: 5_000,
+        };
+        let (allow_, ask_, deny_) = (Decision::Allow, Decision::Ask, Decision::Deny);
+        #[rustfmt::skip]
+        let rows = [
+            // Gate refusals, decided before any Ask.
+            (decide(Primary, allow(S::Rule), &none, &[Timeout], None), None, no(timeout(), None), allow_, S::Rule),
+            (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
+            (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),
+            (decide(Researcher, deny(S::PinnedGrant), &none, &[], None), None, no(N::OutsideGrant, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::Mode), &none, &[], None), None, no(N::ModeDenied, None), deny_, S::Mode),
+            (decide(Primary, deny(S::Hook), &denied, &[], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
+            (decide(Primary, deny(S::Hook), &narrowing, &[], None), None, narrow(N::HookDenied(HookDenial::Narrowed("Read".into()))), deny_, S::Hook),
+            (decide(Primary, deny(S::Rule), &narrowing, &[], None), None, narrow(N::DenyRule), deny_, S::Rule),
+            (decide(Primary, deny(S::Hook), &stopped, &[], None), None, no(N::HookDenied(HookDenial::Requested), Some(StopCause::HookStop)), deny_, S::Hook),
+            (decide(Researcher, deny(S::Hook), &uncertain, &[], None), None, no(N::HookDenied(HookDenial::Uncertain), Some(StopCause::Uncertain)), deny_, S::Hook),
+            (decide(Primary, asks(Request), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), ask_, S::UnavailableApproval),
+            (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::DelegationDeadline), Some(StopCause::DelegationDeadline)), allow_, S::Rule),
+            (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, allow(S::ExactCommandRule), &none, &[LateHookFailure], None), None, no(N::HookFailureAfterClassify, None), allow_, S::ExactCommandRule),
+            (decide(Primary, asks(Request), &none, &[NotOffered], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::GuardAlias), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
+            (decide(Researcher, allow(S::Mode), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), allow_, S::Mode),
+            // The primary after its Ask, or where it would have been.
+            (decide(Primary, asks(Request), &none, &[LateHookFailure], ok(true, S::Human)), Some(Request), Ok(Dispatch::QueuePause), ask_, S::Human),
+            (decide(Primary, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::QueuePause), allow_, S::Rule),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
+            (decide(Primary, asks(Auto), &none, &[Blocked], None), None, Ok(Dispatch::QueuePause), ask_, S::UnavailableApproval),
+            (decide(Primary, allow(S::Rule), &none, &[InProcess, Paused], None), None, no(N::Paused, Some(StopCause::Paused)), allow_, S::Rule),
+            (decide(Primary, asks(Request), &none, &[TokensSpent, Paused], None), None, no(N::Paused, Some(StopCause::Paused)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[TokensSpent], None), None, no(N::TokenBudget, None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Auto), &none, &[TokensSpentAfterAsk], ok(true, S::AiReview)), Some(Auto), no(N::TokenBudget, None), ask_, S::AiReview),
+            (decide(Primary, asks(Request), &none, &[Paused], exhausted_ask), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
+            (decide(Primary, asks(Request), &none, &[Offered], unsaved), Some(Request), no(N::UnsavedRule, Some(StopCause::ToolStopped)), ask_, S::Human),
+            (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::Cancelled)), ask_, S::Human),
+            (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            // A researcher after its Ask, or where it would have been.
+            (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
+            (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
+            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalRefused, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::ApprovalRefused, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::Paused)), ask_, S::Human),
+        ];
+        for (index, ((asked, decided), asks, outcome, decision, source)) in
+            rows.into_iter().enumerate()
+        {
+            assert_eq!(asked, asks, "row {index}");
+            assert_eq!(
+                decided,
+                DispatchDecision {
+                    outcome,
+                    decision,
+                    source,
+                },
+                "row {index}"
+            );
+        }
+        for (reserved, paused, reason, stop) in [
+            (true, true, N::Paused, StopCause::Paused),
+            (false, true, N::ActiveTime, StopCause::ActiveTime),
+            (false, false, N::ActiveTime, StopCause::ActiveTime),
+        ] {
+            assert_eq!(
+                decide_queue_pause(reserved, paused),
+                Err(refuse(reason, Some(stop)))
+            );
+        }
+        assert_eq!(decide_queue_pause(true, false), Ok(()));
     }
 }
