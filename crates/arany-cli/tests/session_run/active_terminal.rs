@@ -1030,7 +1030,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
     if expect_typo {
         assert!(
-            transcript.contains("/model is unavailable while a Run is active; Ctrl+C cancels\r\n")
+            transcript.contains(
+                "/model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
+            )
         );
         assert_eq!(
             view.defaults,
