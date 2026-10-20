@@ -38,6 +38,12 @@ fn rewind_registry_has_twenty_one_commands_and_refuses_arguments_without_state_a
     ));
 }
 
+// Each step waits only on bytes after this point, so a fresh window keeps this long corpus under the capture bound.
+fn fresh_capture(transcript: &mut Vec<u8>, answered: &mut crate::session_picker::PtyResponses) {
+    transcript.clear();
+    *answered = crate::session_picker::PtyResponses::default();
+}
+
 #[track_caller]
 fn wait_for(
     output: &mut impl Read,
@@ -914,9 +920,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         clear_at,
         3,
     );
-    // Each 21-command menu frame is large; a fresh window keeps the capture under its bound.
-    transcript.clear();
-    answered = crate::session_picker::PtyResponses::default();
+    fresh_capture(&mut transcript, &mut answered);
     let tabs_at = transcript.len();
     input.write_all(b"/").expect("open default Commands tab");
     wait_for_after(
@@ -1035,9 +1039,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         saved_ui_preferences("combined", "fullscreen"),
         "--classic must not leak into the saved chat view"
     );
-    // Each 21-command menu frame is large; a fresh window keeps the capture under its bound.
-    transcript.clear();
-    answered = crate::session_picker::PtyResponses::default();
+    fresh_capture(&mut transcript, &mut answered);
     let menu_at = transcript.len();
     input.write_all(b"/resum").expect("single command prefix");
     wait_for_after(
@@ -1391,6 +1393,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         clear_at,
         3,
     );
+    fresh_capture(&mut transcript, &mut answered);
     std::fs::remove_file(pending).unwrap();
     let tabs_at = transcript.len();
     input
@@ -1415,6 +1418,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let record = |view: &str| saved_ui_preferences("tabs", view);
     for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
+        fresh_capture(&mut transcript, &mut answered);
         let chosen_at = transcript.len();
         input
             .write_all(b"/settings\r\x1b[B\x1b[C\r")
@@ -1457,6 +1461,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             tail(frames)
         );
     }
+    fresh_capture(&mut transcript, &mut answered);
     input
         .write_all(b"/exit\r")
         .expect("exit pinned classic process");
@@ -1498,6 +1503,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         "saved classic starts on the primary screen"
     );
     let _viewed_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    fresh_capture(&mut transcript, &mut answered);
     let switched_at = transcript.len();
     input
         .write_all(b"/settings\r\x1b[B\x1b[C\r")

@@ -124,7 +124,9 @@ pub(super) fn pump(
             Ok(count) => {
                 assert!(
                     transcript.len() + count <= 64 * 1024,
-                    "bounded PTY transcript"
+                    "bounded PTY transcript: {} bytes captured; last bytes: {}",
+                    transcript.len(),
+                    tail(&transcript[transcript.len().saturating_sub(300)..])
                 );
                 transcript.extend_from_slice(&chunk[..count]);
             }
