@@ -4109,19 +4109,20 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn primary_refusal_continuations_validate_phase_and_identical_pair_limit() {
+    fn primary_refusal_continuations_validate_phase_and_retry_limits() {
         use crate::session::{ProposalRefusal, ProposalRefusalCause};
         let same = ProposalRefusal {
             operation: "arany_write".into(),
             cause: ProposalRefusalCause::PlanInvalid,
         };
-        for (middle, limited) in [
-            (same.clone(), true),
+        for (middle, attempts, limited) in [
+            (same.clone(), 3, true),
             (
                 ProposalRefusal {
                     operation: "arany_read".into(),
                     ..same.clone()
                 },
+                3,
                 false,
             ),
             (
@@ -4129,11 +4130,25 @@ mod goal_replay_tests {
                     cause: ProposalRefusalCause::InvalidArguments,
                     ..same.clone()
                 },
+                3,
                 false,
+            ),
+            (
+                ProposalRefusal {
+                    cause: ProposalRefusalCause::InvalidArguments,
+                    ..same.clone()
+                },
+                8,
+                true,
             ),
         ] {
             let (mut view, goal, run, agent) = primary_tool_session(false);
-            for (index, refused) in [same.clone(), middle, same.clone()].into_iter().enumerate() {
+            for index in 0..attempts {
+                let refused = if index % 2 == 0 {
+                    same.clone()
+                } else {
+                    middle.clone()
+                };
                 let mut refusal = record(
                     AgentPhase::RootPlan,
                     ProviderCallDisposition::InvalidResponse,
@@ -4178,6 +4193,165 @@ mod goal_replay_tests {
                 rejected(&view, reserve_child_call(goal, run, agent)),
                 limited
             );
+            if limited {
+                let mut forged = view.clone();
+                forged.goals[0].unobserved_provider_calls.push(agent);
+                assert!(rejected(
+                    &forged,
+                    Event::ProviderCallRecorded {
+                        run_id: run,
+                        agent_run_id: agent,
+                        record: record(
+                            AgentPhase::RootPlan,
+                            ProviderCallDisposition::Finished,
+                            Some(0)
+                        ),
+                    }
+                ));
+                apply(
+                    &mut view,
+                    Event::AgentFinished {
+                        worker: None,
+                        run_id: run,
+                        agent_run_id: agent,
+                        disposition: AgentDisposition::Failed,
+                        summary: None,
+                        result: None,
+                    },
+                )
+                .unwrap();
+                view.goals[0].active_deadline =
+                    Some((run, Some(crate::session::MAX_GOAL_ACTIVE_MS)));
+                apply(
+                    &mut view,
+                    Event::RunFinished {
+                        run_id: run,
+                        disposition: RunDisposition::Failed,
+                        failure: Some(crate::session::RunFailure::RefusalLimit),
+                        active_ms: 0,
+                    },
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn root_synthesis_after_refusal_or_plan_requires_settled_children() {
+        for planned in [false, true] {
+            for settled in [false, true] {
+                let session = SessionId::new();
+                let (goal, run, primary, child) = (
+                    GoalId::new(),
+                    RunId::new(),
+                    AgentRunId::new(),
+                    AgentRunId::new(),
+                );
+                let mut events = vec![
+                    Event::SessionStarted {
+                        title: "Synthesis".into(),
+                        workspace_identity: WorkspaceIdentity {
+                            device: 1,
+                            inode: 2,
+                        },
+                    },
+                    goal_started(goal, GoalBudget::default()),
+                ];
+                events.extend(start_run(
+                    goal,
+                    run,
+                    primary,
+                    config(
+                        CollaborationPolicy::Auto {
+                            max_active_children: 1,
+                        },
+                        true,
+                    ),
+                ));
+                events.push(reserve_child_call(goal, run, primary));
+                let mut first = record(
+                    AgentPhase::RootPlan,
+                    if planned {
+                        ProviderCallDisposition::PlanRecorded
+                    } else {
+                        ProviderCallDisposition::InvalidResponse
+                    },
+                    Some(0),
+                );
+                if !planned {
+                    first.failure_reason =
+                        Some(crate::provider::ProviderFailureReason::ProposalRefused);
+                    first.refusal = Some(crate::session::ProposalRefusal {
+                        operation: "arany_plan".into(),
+                        cause: crate::session::ProposalRefusalCause::PlanInvalid,
+                    });
+                }
+                events.push(Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: first,
+                });
+                if planned {
+                    events.push(Event::GoalPlanContractRecorded {
+                        goal_id: goal,
+                        run_id: run,
+                        contract: delegated_session(0).goals[0].plan_contract.clone().unwrap(),
+                    });
+                }
+                events.push(reserve_child_call(goal, run, primary));
+                events.push(Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: record(
+                        AgentPhase::RootPlan,
+                        ProviderCallDisposition::Delegated,
+                        Some(0),
+                    ),
+                });
+                events.push(Event::AgentSpawned {
+                    profile: None,
+                    assignment: None,
+                    definition: None,
+                    run_id: run,
+                    agent_run_id: child,
+                    role: AgentRole::Child,
+                    ordinal: 1,
+                    objective: Some("Check the child result".into()),
+                    grant: Some(ChildGrant::ReadOnly {
+                        unguarded: crate::tools::UnguardedGrant::Denied,
+                    }),
+                });
+                if settled {
+                    events.push(reserve_child_call(goal, run, child));
+                    events.push(child_record(run, child, ProviderCallDisposition::Finished));
+                    events.push(Event::AgentFinished {
+                        worker: None,
+                        run_id: run,
+                        agent_run_id: child,
+                        disposition: AgentDisposition::Finished,
+                        summary: Some("checked".into()),
+                        result: Some("checked".into()),
+                    });
+                }
+                SessionView::replay_open(session, &journal(session, events.clone()))
+                    .unwrap()
+                    .unwrap();
+                events.push(reserve_child_call(goal, run, primary));
+                events.push(Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: primary,
+                    record: record(
+                        AgentPhase::RootSynthesis,
+                        ProviderCallDisposition::Finished,
+                        Some(0),
+                    ),
+                });
+                assert_eq!(
+                    SessionView::replay_open(session, &journal(session, events)).is_ok(),
+                    settled,
+                    "planned={planned}, settled={settled}"
+                );
+            }
         }
     }
 

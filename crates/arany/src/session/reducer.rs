@@ -220,6 +220,8 @@ pub struct AgentView {
     pub status: AgentStatus,
 }
 
+const MAX_PRIMARY_REFUSALS: usize = 8;
+
 impl AgentView {
     pub(crate) fn refusal_limit_reached(&self) -> bool {
         let Some(refusal) = self
@@ -231,11 +233,17 @@ impl AgentView {
         };
         self.provider_calls
             .iter()
-            .rev()
-            .take(3)
-            .filter(|call| call.refusal.as_ref() == Some(refusal))
+            .filter(|call| call.refusal.is_some())
             .count()
-            == 3
+            >= MAX_PRIMARY_REFUSALS
+            || self
+                .provider_calls
+                .iter()
+                .rev()
+                .take(3)
+                .filter(|call| call.refusal.as_ref() == Some(refusal))
+                .count()
+                == 3
     }
 }
 

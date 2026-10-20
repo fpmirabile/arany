@@ -175,12 +175,7 @@ impl Provider for Journey {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let planned = request.input.goal_plan_contract.is_some()
-            || request
-                .input
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+        let planned = crate::planned(&request);
 
         let mut requests = self.requests.lock().unwrap();
         let step = requests.len().saturating_sub(usize::from(planned));
@@ -1027,12 +1022,7 @@ impl Provider for RuntimeJourney {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        let planned = request.input.goal_plan_contract.is_some()
-            || request
-                .input
-                .tools
-                .as_ref()
-                .is_some_and(|tools| tools.steps.iter().any(|step| step.plan.is_some()));
+        let planned = crate::planned(&request);
 
         let step = {
             let mut requests = self.requests.lock().unwrap();
