@@ -5053,14 +5053,19 @@ async fn a_recorded_plan_cannot_be_replaced_or_restated() {
         )
         .await
         .expect("Run");
-        assert_eq!(outcome.run.status, expected);
+        assert_eq!(outcome.run.status, RunStatus::Finished);
         engine.close().await.expect("engine shutdown");
-        let (events, _) = replayed(&state_path, outcome.session_id).await;
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
         let recorded = events
             .iter()
             .filter(|event| matches!(event.event, Event::GoalPlanContractRecorded { .. }))
             .count();
         assert_eq!(recorded, 1, "the contract is journaled once");
+        let refusal = view.runs[0].agents[0].provider_calls[1].refusal.as_ref();
+        assert_eq!(
+            refusal.map(|refusal| refusal.cause),
+            differs.then_some(arany::ProposalRefusalCause::PlanInvalid)
+        );
     }
 }
 
