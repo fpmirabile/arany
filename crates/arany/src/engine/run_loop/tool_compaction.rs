@@ -135,7 +135,13 @@ impl RunLoop<'_> {
         request: &mut ProviderRequest,
         deadline: Option<Instant>,
     ) -> Result<PrimaryContext, EngineError> {
-        let reserve = crate::tools::types::MAX_TOOL_RESULT_BYTES + 512;
+        let reserve = self.controls.tools.map_or(0, |runtime| {
+            crate::tools::types::MAX_TOOL_RESULT_BYTES
+                + crate::tools::ToolRuntime::step_context_reserve(
+                    true,
+                    Self::maximum_feedback_reserve(runtime),
+                )
+        });
         match self
             .compact_tool_context_if_needed(request, reserve, deadline)
             .await

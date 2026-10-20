@@ -12,6 +12,7 @@ use crate::tools::types::model_observation;
 use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime};
 
 const MIN_HOOK_RUNTIME_MS: u32 = 1_000;
+const FEEDBACK_RESERVE_BYTES: usize = 2 * MAX_HOOK_FEEDBACK_BYTES + 256;
 
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub(in crate::engine::run_loop) enum HookStop {
@@ -301,9 +302,21 @@ impl RunLoop<'_> {
             (Ok(pre), Ok(post)) if !pre.is_empty() || !post.is_empty() =>
             // JSON escaping can double a line of quotes or backslashes.
             {
-                2 * MAX_HOOK_FEEDBACK_BYTES + 256
+                FEEDBACK_RESERVE_BYTES
             }
             _ => 0,
+        }
+    }
+
+    pub(in crate::engine::run_loop) fn maximum_feedback_reserve(runtime: &ToolRuntime) -> usize {
+        if runtime.permissions().is_some_and(|config| {
+            [HookEvent::PreToolUse, HookEvent::PostToolUse]
+                .iter()
+                .any(|event| !config.hooks().groups(*event).is_empty())
+        }) {
+            FEEDBACK_RESERVE_BYTES
+        } else {
+            0
         }
     }
 

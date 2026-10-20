@@ -6476,6 +6476,105 @@ async fn long_run_clears_before_reserving_and_reopens_the_crash_boundary_without
 }
 
 #[tokio::test]
+async fn command_step_clears_old_results_with_a_small_context_allowance() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let page = format!("{}\n", "x".repeat(99)).repeat(130);
+    let workspace = facts_workspace(temp.path(), &page);
+    for name in ["big1.txt", "big2.txt"] {
+        std::fs::write(workspace.join(name), "b".repeat(120 * 1024)).expect("include");
+    }
+    let state_path = temp.path().join("state");
+    let command = arany::ToolCall::Command {
+        program: "unconfigured".into(),
+        args: Vec::new(),
+        cwd: "notes".into(),
+    };
+    let provider = Arc::new(
+        ScriptedProvider::new(
+            (0..4)
+                .map(|_| crate::tool_outcome(facts_read()))
+                .chain([
+                    crate::tool_outcome(command.clone()),
+                    finish_with("Checked the Command refusal"),
+                ])
+                .collect(),
+        )
+        .with_compactions(vec![Err(ProviderError::Unavailable)]),
+    );
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let mut input = request(&workspace, "Inspect four pages then request a Command");
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("Run with room for the complete Command step");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.status, RunStatus::Finished);
+    assert_eq!(run.failure, None);
+    let allowance = run
+        .config
+        .as_ref()
+        .unwrap()
+        .tool_policy
+        .as_ref()
+        .unwrap()
+        .max_context_bytes;
+    assert!((124 * 1024..=128 * 1024).contains(&allowance));
+    assert_eq!(run.tools.len(), 5);
+    assert_eq!(run.tools[4].intent.call, command);
+    assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
+    assert_eq!(
+        run.tools[4].observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Denied
+    );
+    let requests = provider.requests.lock().unwrap();
+    assert_eq!(requests.len(), 6);
+    let context = requests[4].input.tools.as_ref().unwrap();
+    assert_eq!(context.observation_count(), 4);
+    assert!(context.steps[0].cleared);
+    let mut uncleared = context.clone();
+    uncleared.steps[0].cleared = false;
+    let used = arany::test_support::tool_context_bytes(&uncleared);
+    assert!((52 * 1024..=64 * 1024).contains(&used));
+    assert!(used + 64 * 1024 + 512 <= allowance as usize);
+    assert!(used + 80 * 1024 > allowance as usize);
+    let clearing = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event.event,
+                Event::ToolResultsCleared {
+                    covered_tool_count: 1,
+                    ..
+                }
+            )
+        })
+        .expect("older result cleared");
+    assert!(matches!(
+        events[clearing + 1].event,
+        Event::GoalCompactionCallReserved { .. }
+    ));
+    let reservation = events[clearing + 1..]
+        .iter()
+        .position(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+        .expect("next primary reservation")
+        + clearing
+        + 1;
+    assert!(events[..reservation].iter().all(|event| !matches!(
+        &event.event, Event::ToolStarted { intent, .. } if intent.call == command
+    )));
+}
+
+#[tokio::test]
 async fn insufficient_clearing_summarizes_then_stops_context_full_without_a_smaller_call() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "");

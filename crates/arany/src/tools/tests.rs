@@ -2510,15 +2510,16 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     );
     runtime.context_limit_bytes = 1 << 20;
     let limit = runtime.context_limit_bytes();
+    let reserve = super::ToolRuntime::step_context_reserve(false, 0);
     let fitted = |overhead: usize| limit.saturating_sub(overhead + 512);
     let ceiling = |overhead: usize| {
         runtime
-            .result_capacity(overhead, 0)
+            .result_capacity(overhead, reserve)
             .map(|capacity| capacity.min(MAX_TOOL_RESULT_BYTES))
     };
     let below_ceiling = limit - 512 - (MAX_TOOL_RESULT_BYTES / 2);
     assert_eq!(
-        runtime.result_capacity(below_ceiling, 0),
+        runtime.result_capacity(below_ceiling, reserve),
         Some(fitted(below_ceiling))
     );
     assert_eq!(ceiling(below_ceiling), Some(MAX_TOOL_RESULT_BYTES / 2));
@@ -2528,8 +2529,8 @@ fn result_capacity_is_the_context_fit_formula_with_a_floor_and_the_general_ceili
     );
     assert_eq!(ceiling(0), Some(MAX_TOOL_RESULT_BYTES));
     let at_floor = limit - 512 - 128;
-    assert_eq!(runtime.result_capacity(at_floor, 0), Some(128));
-    assert_eq!(runtime.result_capacity(at_floor + 1, 0), None);
+    assert_eq!(runtime.result_capacity(at_floor, reserve), Some(128));
+    assert_eq!(runtime.result_capacity(at_floor + 1, reserve), None);
 }
 
 #[tokio::test]

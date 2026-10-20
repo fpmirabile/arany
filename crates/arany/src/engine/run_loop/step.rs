@@ -13,9 +13,7 @@ use crate::provider::{
 };
 use crate::session::{CollaborationPolicy, Event};
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
-use crate::tools::types::{
-    CommandChangeset, CommandResult, MAX_TOOL_ARGUMENT_BYTES, MAX_TOOL_RESULT_BYTES,
-};
+use crate::tools::types::{CommandChangeset, CommandResult, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
     ActiveActionRequest, ActiveToolWindow, ApprovalMode, ApprovalReply, CacheUpdate, EffectIntent,
     ToolCall, ToolContext, ToolDisposition, ToolError, ToolObservation, ToolRequest,
@@ -461,12 +459,11 @@ impl RunLoop<'_> {
         });
         let reserved: Vec<_> = std::iter::once(&intent.call).chain(&integration).collect();
         let overhead = grant.context()?.reserved_len(step, &reserved);
-        let integration_capacity = if integration.is_some() {
-            MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
-        } else {
-            0
-        } + self.feedback_reserve(runtime, post_call);
-        let Some(capacity) = runtime.result_capacity(overhead, integration_capacity) else {
+        let reserve = ToolRuntime::step_context_reserve(
+            integration.is_some(),
+            self.feedback_reserve(runtime, post_call),
+        );
+        let Some(capacity) = runtime.result_capacity(overhead, reserve) else {
             return Ok(Err(SizingRefusal::ContextFull));
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
