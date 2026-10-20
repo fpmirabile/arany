@@ -5567,7 +5567,10 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
         previews: false,
         steering: true,
     };
-    let steered_bound = steered_bound.max_events() + steered_bound.verdict_slots();
+    // The call's bound includes its three same-route retry facts.
+    let steered_bound = steered_bound.max_events()
+        + usize::from(arany::MAX_PROVIDER_RETRIES)
+        + steered_bound.verdict_slots();
     for free in steered_bound - 3..=steered_bound + 2 {
         let case = steered_run(temp.path(), &format!("free-{free}"), Some(free), run_offset).await;
         let count = |matches: fn(&Event) -> bool| {
@@ -5724,7 +5727,11 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
     };
     let run_start = index_of(1, |event| matches!(event, Event::GoalStarted { .. }));
     let tool_start = index_of(1, |event| matches!(event, Event::ToolStarted { .. }));
-    let free = arany::Action::Tool.max_events() + arany::Action::Tool.verdict_slots() - 1;
+    // The Tool step's bound includes its review call's three same-route retry facts.
+    let free = arany::Action::Tool.max_events()
+        + usize::from(arany::MAX_PROVIDER_RETRIES)
+        + arany::Action::Tool.verdict_slots()
+        - 1;
     let (events, view) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         reviewed_write_run(temp.path(), "capped", Some(free), tool_start - run_start),
@@ -6057,6 +6064,8 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
 
 #[tokio::test]
 async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
+    // The continuation tail includes its call's three same-route retry facts.
+    const REFUSED: usize = 10 + arany::MAX_PROVIDER_RETRIES as usize;
     async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
         use std::os::unix::fs::PermissionsExt;
         let workspace = facts_workspace(root, "stable");
@@ -6102,7 +6111,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             },
         )
         .await;
-        if free.is_some_and(|(_, free)| free == 10) {
+        if free.is_some_and(|(_, free)| free == REFUSED) {
             assert!(matches!(
                 result,
                 Err(EngineError::Store(arany::StoreError::ReplayLimit))
@@ -6124,7 +6133,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         .position(|e| matches!(e.event, Event::GoalStarted { .. }))
         .unwrap();
     let offset = last_hook - initial;
-    for free in [10, 11] {
+    for free in [REFUSED, REFUSED + 1] {
         let events = run(
             &temp.path().join(format!("free-{free}")),
             Some((offset, free)),
@@ -6135,7 +6144,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .iter()
                 .filter(|e| matches!(e.event, Event::HookStarted { .. }))
                 .count(),
-            if free == 10 { 7 } else { 8 },
+            if free == REFUSED { 7 } else { 8 },
             "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
         );
         assert!(

@@ -1347,12 +1347,8 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     .with_profile("scripted", "primary");
     primary.identity.limits.concurrency = 1;
     let primary = route(primary);
-    // One child at a time, so the clock pauses only for each child's backoff and resumes before
-    // its Guard Read: A's attempts are calls 0-3 and B's are calls 4-7.
-    let mut first = ScriptedProvider::new(vec![])
-        .with_profile("scripted", "shared-first")
-        .with_before_call(0, tokio::time::pause)
-        .with_before_call(4, tokio::time::pause);
+    // Each researcher's first call and its three same-route retries on the shared first route.
+    let mut first = ScriptedProvider::new(vec![]).with_profile("scripted", "shared-first");
     first.responses = unavailable_attempts(2);
     let first = route(first);
     let fallback = |model| {
@@ -1365,8 +1361,7 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
                 }),
                 finish("read facts"),
             ])
-            .with_profile("scripted", model)
-            .with_before_call(0, tokio::time::resume),
+            .with_profile("scripted", model),
         )
     };
     let default = fallback("default-fallback");
@@ -1375,9 +1370,17 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     bindings.roles.child = vec![first.clone(), default.clone()];
     pin_roster(&mut bindings, Some(vec![first.clone(), spare.clone()]));
     let engine = super::goals::facts_engine(StateRoot::admit(&state).unwrap(), &state);
+    let session = engine
+        .create_session(workspace.clone(), Some("Assigned".into()))
+        .await
+        .unwrap();
+    // The journaled retry delays stay; only the waits end at once.
+    arany::FaultPlan::skip_retry_backoff(session);
     let mut request = input(&workspace);
+    request.session_id = Some(session);
+    request.title = None;
     request.policy = CollaborationPolicy::Team {
-        max_active_children: 1,
+        max_active_children: 2,
     };
     let result = run_routed(&engine, bindings, request, configured())
         .await
@@ -1385,8 +1388,20 @@ async fn assigned_fallback_stays_with_its_researcher_while_the_sibling_starts_at
     assert_eq!(result.run.status, RunStatus::Finished);
     engine.close().await.unwrap();
     let (_, view) = reopen(&state, result.session_id).await;
+    // Exactly three retries per researcher's call before its own switch: nothing retries unbounded.
     assert_eq!(first.requests.lock().unwrap().len(), 8);
     assert_eq!(view.runs[0].provider_retries.len(), 6);
+    for child in view.runs[0].agents.iter().skip(1) {
+        assert_eq!(
+            view.runs[0]
+                .provider_retries
+                .iter()
+                .filter(|(actor, _)| *actor == child.id)
+                .map(|(_, retry)| retry.attempt)
+                .collect::<Vec<_>>(),
+            [1, 2, 3]
+        );
+    }
     for provider in [&default, &spare] {
         let calls = provider.requests.lock().unwrap();
         assert_eq!(calls.len(), 2);
