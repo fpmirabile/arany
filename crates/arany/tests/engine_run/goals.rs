@@ -3093,6 +3093,94 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
     );
 }
 
+// A cancellation or active-time expiry that lands while the call record commits still stops that call.
+#[tokio::test]
+async fn interruption_while_the_call_record_commits_stops_that_call() {
+    // The cancellation case runs first: the active-time case pauses the clock for the rest of the test.
+    for cancel in [true, false] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .expect("Session");
+        let budget = arany::GoalBudget {
+            max_active_ms: Some(120_000),
+            ..arany::GoalBudget::default()
+        };
+        let mut plan = facts_plan(facts_digest("v2"));
+        plan.budget = budget;
+        let provider = Arc::new(ScriptedProvider::new(vec![if cancel {
+            arany::test_support::scenario::plan_outcome(plan)
+        } else {
+            finish_with("Answered while time ran out")
+        }]));
+        let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+        let cancellation = RunCancellation::new();
+        let (entered, release) =
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::ProviderCallRecorded { .. })
+            });
+        let outcome = {
+            let run = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => panic!("cancel={cancel}: Run ended before its call record committed: {:?}", result.map(|outcome| outcome.run.status)),
+                entered = entered => entered.expect("call record reached its acknowledgment"),
+            }
+            if cancel {
+                assert!(cancellation.cancel());
+            } else {
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(121)).await;
+            }
+            release.send(()).expect("release the call record");
+            run.await.expect("settled Run")
+        };
+        engine.close().await.expect("engine shutdown");
+
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+        assert!(run.assistant_message.is_none(), "cancel={cancel}");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|envelope| matches!(envelope.event, Event::GoalProviderCallReserved { .. }))
+                .count(),
+            1,
+            "cancel={cancel}: no further Provider call is reserved"
+        );
+        assert!(
+            events
+                .iter()
+                .all(|envelope| !matches!(envelope.event, Event::GoalPlanContractRecorded { .. })),
+            "cancel={cancel}: the decided plan is not applied"
+        );
+        if cancel {
+            assert_eq!(run.status, RunStatus::Cancelled);
+        } else {
+            assert_eq!(run.status, RunStatus::Failed);
+            assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+        }
+    }
+}
+
 #[tokio::test]
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
