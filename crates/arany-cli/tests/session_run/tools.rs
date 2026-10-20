@@ -2244,7 +2244,7 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
     .unwrap();
     let cancellation = arany::RunCancellation::new();
     let mut events = engine.subscribe();
-    let outcome = tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         let running = run_with(&engine, &provider, proposal_request(&workspace), RunControls { tools: ToolGrant::Configured, cancellation: cancellation.clone(), ..Default::default() });
         tokio::pin!(running);
         let intent = loop {
@@ -2282,21 +2282,36 @@ async fn cancellation_owns_the_actual_descendant_unit_and_never_retries_it() {
             group = payload_gate => group,
         };
         assert!(cancellation.cancel());
-        let outcome = running.await.unwrap();
+        let outcome = running.await;
         if let Ok(events) = std::fs::read_to_string(group.join("cgroup.events")) {
             assert!(events.lines().any(|line| line == "populated 0"));
         } else { assert!(!group.exists()); }
-        assert_eq!(outcome.run.status, RunStatus::Cancelled);
-        assert_eq!(outcome.run.tools.len(), 1);
+        // An Uncertain outcome outranks the cancellation: the Run journals no terminal Event.
+        assert!(
+            matches!(outcome, Err(arany::EngineError::Tool(arany::ToolError::Uncertain))),
+            "a cancelled in-flight command is reported unknown"
+        );
         assert_seed_retired(intent.id);
-        assert!(outcome.run.assistant_message.is_none());
-        outcome
     }).await.expect("complete cancellation parent deadline");
     engine.close().await.unwrap();
     assert_proposal_requests(&requests.lock().unwrap(), 1);
+    let listed = arany::list_sessions(
+        StateRoot::open_existing(&state_path).unwrap(),
+        workspace.clone(),
+    )
+    .await
+    .unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-    let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
-    assert_eq!(view.runs[0], outcome.run);
+    let events = store.load_session(listed[0].id).await.unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|envelope| !matches!(envelope.event, arany::Event::RunFinished { .. }))
+    );
+    let view = store.load_view(listed[0].id).await.unwrap().unwrap();
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    assert_eq!(view.runs[0].tools.len(), 1);
+    assert!(view.runs[0].assistant_message.is_none());
     assert_eq!(
         view.runs[0].tools[0]
             .observation
@@ -2502,20 +2517,57 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                 }).await.expect("payload started but no exact-invocation OOM evidence was observed");
             }
             running.await
-        }).await.unwrap().unwrap();
+        }).await.unwrap();
         engine.close().await.unwrap();
-        let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+        // An OOM-killed payload's effect is unknown: the Run journals no terminal Event (D3).
+        let (session_id, run) = match outcome {
+            Ok(outcome) => {
+                assert_eq!(mode, "pids", "an OOM-killed payload never settles its Run");
+                (outcome.session_id, outcome.run)
+            }
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain)) if mode == "memory" => {
+                let listed = arany::list_sessions(
+                    StateRoot::open_existing(&state_path).unwrap(),
+                    workspace.clone(),
+                )
+                .await
+                .unwrap();
+                assert_eq!(listed.len(), 1);
+                let store =
+                    Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+                let events = store.load_session(listed[0].id).await.unwrap();
+                assert!(
+                    events.iter().all(|envelope| !matches!(
+                        envelope.event,
+                        arany::Event::RunFinished { .. }
+                    )),
+                    "an unknown outcome journals no terminal Event"
+                );
+                let run = store
+                    .load_view(listed[0].id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .runs
+                    .remove(0);
+                store.close().await.unwrap();
+                assert_eq!(run.status, RunStatus::Interrupted);
+                (listed[0].id, run)
+            }
+            Err(error) => panic!("{mode}: unexpected Run error {error}"),
+        };
+        let observation = run.tools[0].observation.as_ref().unwrap();
         if mode == "pids" {
             assert_eq!(
                 observation.disposition,
                 ToolDisposition::Succeeded,
-                "quota admission/observation: {}",
-                observation.output
+                "quota admission observation of {} bytes",
+                observation.output.len()
             );
             let output: Value = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(output["exit_code"], 0);
             assert_eq!(output["stdout"], "descendant quota enforced\n");
-            assert_eq!(outcome.run.status, RunStatus::Finished);
+            assert_eq!(run.status, RunStatus::Finished);
             assert_proposal_requests(&requests.lock().unwrap(), 3);
         } else {
             assert_eq!(
@@ -2523,8 +2575,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
                 ToolDisposition::Uncertain,
                 "OOM is not a no-effect failure"
             );
-            assert_eq!(outcome.run.status, RunStatus::Failed);
-            assert!(outcome.run.assistant_message.is_none());
+            assert!(run.assistant_message.is_none());
             assert_proposal_requests(&requests.lock().unwrap(), 1);
         }
         assert!(
@@ -2534,13 +2585,8 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
         );
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(
-            store
-                .load_view(outcome.session_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .runs[0],
-            outcome.run
+            store.load_view(session_id).await.unwrap().unwrap().runs[0],
+            run
         );
         store.close().await.unwrap();
         if mode == "memory" {
@@ -2558,7 +2604,7 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             )
             .unwrap();
             let mut next = proposal_request(&workspace);
-            next.session_id = Some(outcome.session_id);
+            next.session_id = Some(session_id);
             next.title = None;
             next.include_paths = vec!["src/current.txt".into()];
             next.policy = CollaborationPolicy::Team {
@@ -2615,8 +2661,8 @@ async fn resource_quotas_apply_to_payload_descendants_and_oom_is_uncertain() {
             }
             let store =
                 Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-            let view = store.load_view(outcome.session_id).await.unwrap().unwrap();
-            assert_eq!(view.runs, vec![outcome.run, fresh.run]);
+            let view = store.load_view(session_id).await.unwrap().unwrap();
+            assert_eq!(view.runs, vec![run, fresh.run]);
             store.close().await.unwrap();
         }
     }

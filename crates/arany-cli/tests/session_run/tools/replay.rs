@@ -1501,10 +1501,46 @@ pub(super) async fn native_command_changeset_corpus(
         })
         .await
         .unwrap_or_else(|_| panic!("{case}: native changeset deadline"));
-        let outcome = outcome.unwrap_or_else(|error| {
-            panic!("{case}: native changeset Engine run failed: {error:?}")
-        });
+        // An unknown publication journals no terminal Event; the reopened Run is interrupted.
+        let outcome = match outcome {
+            Ok(outcome) => {
+                assert_ne!(
+                    case, "partial",
+                    "an unknown publication never settles its Run"
+                );
+                Some(outcome)
+            }
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain)) if case == "partial" => None,
+            Err(error) => panic!("{case}: native changeset Engine run failed: {error:?}"),
+        };
         engine.close().await.unwrap();
+        let session_id = match &outcome {
+            Some(outcome) => outcome.session_id,
+            None => {
+                arany::list_sessions(
+                    StateRoot::open_existing(&state_path).unwrap(),
+                    workspace.clone(),
+                )
+                .await
+                .unwrap()[0]
+                    .id
+            }
+        };
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let events = store.load_session(session_id).await.unwrap();
+        store.close().await.unwrap();
+        let view = SessionView::replay(session_id, &events).unwrap().unwrap();
+        let run = outcome
+            .as_ref()
+            .map_or_else(|| view.runs[0].clone(), |outcome| outcome.run.clone());
+        assert_eq!(view.runs[0], run, "{case}: closed replay");
+        assert_eq!(
+            events
+                .iter()
+                .any(|envelope| matches!(envelope.event, arany::Event::RunFinished { .. })),
+            case != "partial",
+            "{case}: terminal Event"
+        );
         let human_denied = matches!(case, "deny" | "drop" | "cancel");
         let stopped = human_denied || case == "partial";
         let criterion_unmet = matches!(
@@ -1522,16 +1558,18 @@ pub(super) async fn native_command_changeset_corpus(
                 | "directory-conversion"
         );
         assert_eq!(
-            outcome.run.status,
+            run.status,
             if case == "cancel" {
                 RunStatus::Cancelled
+            } else if case == "partial" {
+                RunStatus::Interrupted
             } else if stopped || criterion_unmet {
                 RunStatus::Failed
             } else {
                 RunStatus::Finished
             },
-            "{case}: {:?}",
-            outcome.run.tools
+            "{case}: {} Tools",
+            run.tools.len()
         );
         let requests = requests.lock().unwrap().clone();
         if case == "scope" {
@@ -1593,13 +1631,6 @@ pub(super) async fn native_command_changeset_corpus(
             );
             assert_eq!(request.max_output_tokens, 4096);
         }
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        let events = store.load_session(outcome.session_id).await.unwrap();
-        store.close().await.unwrap();
-        let view = SessionView::replay(outcome.session_id, &events)
-            .unwrap()
-            .unwrap();
-        assert_eq!(view.runs[0], outcome.run, "{case}: closed replay");
         assert!(
             requests
                 .iter()
@@ -1611,7 +1642,11 @@ pub(super) async fn native_command_changeset_corpus(
             let goal = view
                 .goals
                 .iter()
-                .find(|goal| goal.id == outcome.goal_id)
+                .find(|goal| {
+                    outcome
+                        .as_ref()
+                        .is_some_and(|outcome| goal.id == outcome.goal_id)
+                })
                 .expect("out-of-plan Goal replay");
             assert_eq!(
                 goal.status,

@@ -2664,51 +2664,54 @@ async fn hook_post_tool_use_timeout_reports_the_limit_and_keeps_the_effect() {
 async fn hook_post_tool_use_uncertain_outcome_stops_the_run_after_the_effect() {
     let fixture = Fixture::new(Some(&post_settings(shell_hook("kill -9 $PPID"))), true);
     let write = call("edit");
-    let (result, requests, _) = fixture
-        .run(
-            vec![
-                arany::test_support::scenario::plan_outcome(plan(&write)),
-                tool_outcome(write.clone()),
-            ],
-            None,
-            false,
-        )
-        .await;
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        arany::test_support::scenario::plan_outcome(plan(&write)),
+        tool_outcome(write.clone()),
+    ]));
+    let mut input = request(&fixture.workspace, "Inspect and complete the task");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Single;
+    input.goal.budget = Some(budget());
+    let outcome = run_with(
+        &fixture.engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ),
+        "an unknown hook outcome is reported unknown, never as a failure: {outcome:?}"
+    );
     assert_eq!(
-        requests.len(),
+        provider.requests.lock().unwrap().len(),
         2,
         "no Provider call follows an unknown hook"
     );
-    assert_ne!(result.run.status, RunStatus::Finished);
-    let report = || {
-        result
-            .run
-            .tools
+    assert_eq!(
+        std::fs::read_to_string(fixture.workspace.join("notes/new.txt")).unwrap(),
+        "done"
+    );
+    let listed = arany::list_sessions(
+        StateRoot::open_existing(&fixture.state).unwrap(),
+        fixture.workspace.clone(),
+    )
+    .await
+    .unwrap();
+    let (events, view) = fixture.reopen(listed[0].id).await;
+    assert!(
+        events
             .iter()
-            .map(|tool| {
-                let hooks: Vec<_> = tool
-                    .hooks
-                    .iter()
-                    .map(|hook| {
-                        hook.outcome
-                            .as_ref()
-                            .map(|o| tool_report(Some(&o.observation)))
-                    })
-                    .collect();
-                (tool_report(tool.observation.as_ref()), hooks)
-            })
-            .collect::<Vec<_>>()
-    };
-    let host_file = std::fs::read_to_string(fixture.workspace.join("notes/new.txt"))
-        .unwrap_or_else(|error| {
-            panic!(
-                "notes/new.txt: {error}; run {:?}; {:?}",
-                result.run.status,
-                report()
-            )
-        });
-    assert_eq!(host_file, "done");
-    let (_, view) = fixture.reopen(result.session_id).await;
+            .all(|envelope| !matches!(envelope.event, arany::Event::RunFinished { .. })),
+        "an Uncertain stop journals no terminal Event"
+    );
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
     let tool = &view.runs[0].tools[0];
     assert_eq!(
         tool.observation.as_ref().unwrap().disposition,

@@ -2410,7 +2410,22 @@ int main(void) {
                 );
             }
         };
-        let outcome = outcome.unwrap();
+        // A lost receipt leaves the command's effect unknown: the Run journals no terminal Event.
+        let outcome = match outcome {
+            Ok(outcome) => {
+                assert_ne!(
+                    case, "receipt-loss",
+                    "an unknown outcome never settles its Run"
+                );
+                Some(outcome)
+            }
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+                if case == "receipt-loss" =>
+            {
+                None
+            }
+            Err(error) => panic!("{case}: unexpected Run error {error}"),
+        };
         engine.close().await.unwrap();
         if cfg!(debug_assertions) {
             let trace = trace_snapshot(root);
@@ -2445,33 +2460,55 @@ int main(void) {
             usize::from(case != "mcp-version") + if attested { 2 } else { 1 },
             "no automatic retry: {case}"
         );
+        let session_id = match &outcome {
+            Some(outcome) => outcome.session_id,
+            None => {
+                arany::list_sessions(
+                    StateRoot::open_existing(&state_path).unwrap(),
+                    workspace.to_path_buf(),
+                )
+                .await
+                .unwrap()[0]
+                    .id
+            }
+        };
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
+        let events = store.load_session(session_id).await.unwrap();
+        store.close().await.unwrap();
+        let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
+        let run = outcome
+            .as_ref()
+            .map_or_else(|| replay.runs[0].clone(), |outcome| outcome.run.clone());
+        assert_eq!(replay.runs[0], run, "closed replay: {case}");
+        assert_eq!(
+            events
+                .iter()
+                .any(|envelope| matches!(envelope.event, arany::Event::RunFinished { .. })),
+            case != "receipt-loss",
+            "{case}: terminal Event"
+        );
         let expected_run_status = match case {
             "cancelled" => RunStatus::Cancelled,
             "mcp-version" | "overflow" => RunStatus::Finished,
+            "receipt-loss" => RunStatus::Interrupted,
             _ => RunStatus::Failed,
         };
         assert_eq!(
-            outcome.run.status, expected_run_status,
-            "{case}: {:?}",
-            outcome.run.tools
+            run.status,
+            expected_run_status,
+            "{case}: {} Tools",
+            run.tools.len()
         );
         assert_eq!(
-            outcome.run.assistant_message.is_some(),
+            run.assistant_message.is_some(),
             matches!(case, "mcp-version" | "overflow"),
             "{case} assistant answer"
         );
         assert!(!workspace.join("src/approval-output.txt").exists());
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
-        let events = store.load_session(outcome.session_id).await.unwrap();
-        store.close().await.unwrap();
-        let replay = SessionView::replay(outcome.session_id, &events)
-            .unwrap()
-            .unwrap();
-        assert_eq!(replay.runs[0], outcome.run, "closed replay: {case}");
         assert_eq!(
             replay.goals[0].status,
             match case {
-                "cancelled" => arany::GoalStatus::Interrupted,
+                "cancelled" | "receipt-loss" => arany::GoalStatus::Interrupted,
                 "mcp-version" | "overflow" => arany::GoalStatus::Completed,
                 _ => arany::GoalStatus::Failed,
             },
@@ -2523,18 +2560,9 @@ int main(void) {
                 arany::CacheUpdate::NotAttempted,
                 "lost receipt leaves selected cache publication unattempted"
             );
-            let unresolved = &replay.goals[0].report.as_ref().unwrap().unresolved;
             assert!(
-                unresolved
-                    .iter()
-                    .any(|item| item.contains("inspect Workspace state")),
-                "uncertain command outcome directs recovery to Workspace state: {unresolved:?}"
-            );
-            assert!(
-                unresolved
-                    .iter()
-                    .all(|item| !item.contains("build cache publication")),
-                "no cache publication was attempted: {unresolved:?}"
+                replay.goals[0].report.is_none(),
+                "an interrupted Goal has no closing report"
             );
         }
         let observation = replay.runs[0].tools[0].observation.as_ref().unwrap();
