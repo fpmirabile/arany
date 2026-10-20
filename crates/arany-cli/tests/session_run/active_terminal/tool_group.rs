@@ -202,7 +202,7 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
                 if c.is_ascii_alphanumeric() || " _=:,.-()".contains(c) {
                     c
                 } else {
-                    '/'
+                    '.'
                 }
             })
             .collect();
