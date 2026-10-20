@@ -3096,7 +3096,8 @@ async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context
 // A cancellation or active-time expiry that lands while the call record commits still stops that call.
 #[tokio::test]
 async fn interruption_while_the_call_record_commits_stops_that_call() {
-    for cancel in [false, true] {
+    // The cancellation case runs first: the active-time case pauses the clock for the rest of the test.
+    for cancel in [true, false] {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");

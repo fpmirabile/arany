@@ -1397,12 +1397,17 @@ fn decide_primary_call(
                 turn,
                 ..
             }) if admitted => PrimaryDecision::ToolStep(requests, turn),
+            CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled
+                if facts.cancel_requested =>
+            {
+                PrimaryDecision::Stop(StopCause::Cancelled)
+            }
+            // The token budget refused the next action.
+            CallResult::Response(_) if !facts.tokens_within_limit => {
+                PrimaryDecision::Stop(StopCause::Budget)
+            }
             CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
-                PrimaryDecision::Stop(if facts.cancel_requested {
-                    StopCause::Cancelled
-                } else {
-                    StopCause::ToolStopped
-                })
+                PrimaryDecision::Stop(StopCause::ToolStopped)
             }
         },
     }
@@ -1698,6 +1703,25 @@ mod decision_tests {
             (
                 wave,
                 tools(1),
+                ok,
+                over_tokens,
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                wave,
+                tools(1),
+                ok,
+                with(|facts| {
+                    facts.tokens_within_limit = false;
+                    facts.cancel_requested = true;
+                }),
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
+            (
+                wave,
+                timeout(),
                 ok,
                 over_tokens,
                 Kind::Stop(StopCause::ToolStopped),
