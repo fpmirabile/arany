@@ -6,6 +6,7 @@ use crossterm::event::{
 };
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 use std::{
+    collections::VecDeque,
     fs::File,
     io::{self, Read},
     os::fd::AsRawFd,
@@ -16,10 +17,12 @@ use std::{
     thread::JoinHandle,
     time::{Duration, Instant},
 };
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
 
 const MAX_KEY_SEQUENCE_BYTES: usize = 64;
 const RECORD_DEADLINE: Duration = Duration::from_secs(10);
+const OUTBOX_LIMIT: usize = 256;
+const OUTBOX_RETRY: Duration = Duration::from_millis(2);
 const PASTE_END: &[u8; 6] = b"\x1b[201~";
 
 pub(super) fn start(
@@ -42,6 +45,33 @@ pub(super) fn start(
         })
 }
 
+// A cursor reply must not wait behind a full event queue while the owner waits for that reply.
+struct Outbox<'a> {
+    sender: &'a mpsc::Sender<io::Result<ReaderEvent>>,
+    backlog: VecDeque<ReaderEvent>,
+}
+
+impl Outbox<'_> {
+    fn push(&mut self, event: ReaderEvent) -> bool {
+        self.backlog.push_back(event);
+        self.flush()
+    }
+
+    fn flush(&mut self) -> bool {
+        while let Some(event) = self.backlog.pop_front() {
+            match self.sender.try_send(Ok(event)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(Ok(event))) => {
+                    self.backlog.push_front(event);
+                    break;
+                }
+                Err(_) => return false,
+            }
+        }
+        true
+    }
+}
+
 fn read(
     poll: &mut Poll,
     input: &mut File,
@@ -53,11 +83,22 @@ fn read(
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; 4096];
     let mut decoder = Decoder::default();
+    let mut outbox = Outbox {
+        sender,
+        backlog: VecDeque::new(),
+    };
     let mut geometry = crossterm::terminal::size().ok();
     while !shutdown.load(Ordering::Acquire) {
+        if !outbox.flush() {
+            return Ok(());
+        }
+        if outbox.backlog.len() >= OUTBOX_LIMIT {
+            std::thread::sleep(OUTBOX_RETRY);
+            continue;
+        }
         let now = Instant::now();
         if let Some(event) = decoder.expire(now)?
-            && sender.blocking_send(Ok(event)).is_err()
+            && !outbox.push(event)
         {
             return Ok(());
         }
@@ -65,14 +106,17 @@ fn read(
         if resized != geometry {
             geometry = resized;
             if let Some((width, height)) = resized
-                && sender
-                    .blocking_send(Ok(ReaderEvent::Event(Event::Resize(width, height))))
-                    .is_err()
+                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)))
             {
                 return Ok(());
             }
         }
-        match poll.poll(&mut events, Some(INPUT_POLL_INTERVAL)) {
+        let timeout = if outbox.backlog.is_empty() {
+            INPUT_POLL_INTERVAL
+        } else {
+            OUTBOX_RETRY
+        };
+        match poll.poll(&mut events, Some(timeout)) {
             Ok(()) if events.is_empty() => continue,
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
@@ -94,7 +138,7 @@ fn read(
                     if let Some(event) = decoder.feed(byte, now) {
                         if let ReaderEvent::CursorPosition(column, row) = event {
                             cursor.respond(column, row);
-                        } else if sender.blocking_send(Ok(event)).is_err() {
+                        } else if !outbox.push(event) {
                             return Ok(());
                         }
                     }

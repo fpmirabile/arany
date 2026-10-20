@@ -109,20 +109,6 @@ fn wait_for_caret(
     }
 }
 
-fn caret_row(transcript: &[u8]) -> String {
-    let marker = b"\x1b[?25h\x1b[";
-    let start = transcript
-        .windows(marker.len())
-        .rposition(|part| part == marker)
-        .expect("drawn caret")
-        + marker.len();
-    transcript[start..]
-        .iter()
-        .take_while(|byte| byte.is_ascii_digit())
-        .map(|byte| char::from(*byte))
-        .collect()
-}
-
 pub(super) fn saved_conversation(
     state: &std::path::Path,
     workspace: &std::path::Path,
@@ -1118,17 +1104,24 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         newline_at,
         3,
     );
-    let clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear multiline draft");
-    wait_for_caret(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        clear_at,
-        3,
-    );
-    let idle_row = caret_row(&transcript);
+    // The viewport shrinks with the draft, so the idle caret row is read from the settled screen.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let idle_row = loop {
+        let rows = crate::session_picker::screen_rows(&transcript, 40, 24);
+        if let Some(row) = rows.iter().rposition(|row| row.starts_with('>'))
+            && !rows.iter().any(|row| row.contains("alpha"))
+        {
+            break row + 1;
+        }
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "cleared draft: {}",
+            tail(&transcript)
+        );
+        thread::yield_now();
+    };
     let model_menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous Session prefix");
     wait_for_caret(
