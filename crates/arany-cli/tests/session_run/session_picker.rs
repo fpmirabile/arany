@@ -215,14 +215,14 @@ fn run_picker_case(
     let mut transcript = Vec::new();
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"\x1b[?1000h".len())
-        .any(|part| part == b"\x1b[?1000h")
+    while !screen_rows(&transcript, width.into(), 24)
+        .iter()
+        .any(|line| line.contains("Newer"))
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
-            "mouse capture not enabled in {name}: {}",
+            "picker not visible in {name}: {}",
             tail(&transcript)
         );
         thread::yield_now();
@@ -258,16 +258,13 @@ fn run_picker_case(
     input.write_all(selection).expect("picker selection");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript[selected_at..]
-        .windows(b"\x1b[?1000l".len())
-        .any(|part| part == b"\x1b[?1000l")
-        || !transcript[selected_at..]
-            .windows(b"\x1b[?25h".len())
-            .any(|part| part == b"\x1b[?25h")
+        .windows(b"\x1b[?25h".len())
+        .any(|part| part == b"\x1b[?25h")
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
-            "mouse capture not disabled in {name}: {}",
+            "picker did not close in {name}: {}",
             tail(&transcript)
         );
         thread::yield_now();
@@ -314,9 +311,7 @@ fn run_picker_case(
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             let recent = &transcript[open_at..];
-            if recent.windows(8).any(|part| part == b"\x1b[?1000h")
-                && recent.windows(6).any(|part| part == b"\x1b[?25l")
-            {
+            if recent.windows(6).any(|part| part == b"\x1b[?25l") {
                 break;
             }
             assert!(
@@ -406,9 +401,7 @@ fn run_picker_case(
         .expect("restored terminal settings")
         .trim_end_matches('\r');
     assert_eq!(before, after, "terminal restored after {name}");
-    let capture_count = if stale_activation { 2 } else { 1 };
-    assert_eq!(output_text.matches("\x1b[?1000h").count(), capture_count);
-    assert_eq!(output_text.matches("\x1b[?1000l").count(), capture_count);
+    assert!(!output_text.contains("\x1b[?1000h"));
     assert!(!output_text.contains("\x1b[?1049h"));
 
     let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
@@ -431,18 +424,10 @@ fn run_picker_case(
 }
 
 #[test]
-fn session_picker_selects_visible_rows_and_restores_capture() {
-    // The Classic viewport starts at the answered cursor row 2: Newer is row 3, Older row 4.
-    run_picker_case(
-        "hover and stale activation",
-        80,
-        b"\x1b[<35;1;4M\r",
-        true,
-        true,
-    );
-    run_picker_case("wheel", 80, b"\x1b[<65;1;3M\r", true, false);
-    run_picker_case("click", 80, b"\x1b[<0;1;4M", true, false);
-    run_picker_case("off-surface wheel", 80, b"\x1b[<65;1;1M\r", false, false);
+fn session_picker_selects_rows_by_keyboard_without_mouse_capture() {
+    run_picker_case("keyboard and stale activation", 80, b"\x1b[B\r", true, true);
+    run_picker_case("keyboard", 80, b"\x1b[B\r", true, false);
+    run_picker_case("newest", 80, b"\r", false, false);
     run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false);
 }
 

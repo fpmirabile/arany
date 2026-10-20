@@ -19,6 +19,7 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    crate::seed_fullscreen(&state);
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -118,6 +119,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     std::fs::write(workspace.join("private.txt"), b"OMITTED_CANARY")
         .expect("omitted Workspace input");
     let state = temp.path().join("state");
+    crate::seed_fullscreen(&state);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     write_profile(&state, port);
@@ -423,108 +425,29 @@ fn inline_inspector(
         &mut transcript,
         &mut answered,
         0,
-        b"\x1b[?1000h",
+        b"current",
     );
-    let checkpoint = if width < 20 {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !crate::session_picker::screen_rows(&transcript, width.into(), 24)
-            .iter()
-            .any(|line| line.starts_with("Esc Up/Dn P"))
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "narrow inspector cues missing: {}",
-                tail(&transcript)
-            );
-            thread::yield_now();
-        }
-        let checkpoint = transcript.len();
-        input.write_all(b"\x1b[B").expect("select prior AgentRun");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"prior",
-        );
-        let checkpoint = transcript.len();
-        input.write_all(b"\x1b").expect("close inspector");
-        checkpoint
-    } else {
-        // The bottom Classic viewport lists Run 2 on row 14 and Run 1 on row 15.
-        let checkpoint = transcript.len();
-        input
-            .write_all(b"\x1b[<35;1;15M")
-            .expect("hover older AgentRun");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"prior",
-        );
-        let checkpoint = transcript.len();
-        input
-            .write_all(b"\x1b[<64;1;15M")
-            .expect("wheel to newest AgentRun");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"current",
-        );
-        let checkpoint = transcript.len();
-        input
-            .write_all(b"\x1b[<0;1;15M")
-            .expect("click older AgentRun");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"prior",
-        );
-        let checkpoint = transcript.len();
-        input
-            .write_all(b"\x1b[<65;1;2M\x1b[<35;1;14M")
-            .expect("off-list wheel then hover newest AgentRun");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"current",
-        );
-        let checkpoint = transcript.len();
-        input
-            .write_all(b"\x1b[<35;1;15M")
-            .expect("hover older AgentRun again");
-        wait_for_pty(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            checkpoint,
-            b"prior",
-        );
-        input.write_all(b"\r").expect("close inspector");
-        checkpoint
-    };
+    let checkpoint = transcript.len();
+    input.write_all(b"\x1b[B").expect("select prior AgentRun");
     wait_for_pty(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         checkpoint,
-        b"\x1b[?1000l",
+        b"prior",
     );
+    let checkpoint = transcript.len();
+    input.write_all(b"\x1b").expect("close inspector");
+    wait_for_pty(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        checkpoint,
+        b"\x1b[?25h",
+    );
+    thread::sleep(Duration::from_millis(250));
     input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -537,7 +460,11 @@ fn inline_inspector(
         {
             break;
         }
-        assert!(Instant::now() < deadline, "inline inspector did not exit");
+        assert!(
+            Instant::now() < deadline,
+            "inline inspector did not exit: {}",
+            tail(&transcript)
+        );
         thread::yield_now();
     }
     let result = wait_product(attached.take());
@@ -559,8 +486,7 @@ fn inline_inspector(
         .expect("restored terminal settings")
         .trim_end_matches('\r');
     assert_eq!(before, after, "terminal restored after inspector");
-    assert_eq!(transcript.matches("\x1b[?1000h").count(), 1);
-    assert_eq!(transcript.matches("\x1b[?1000l").count(), 1);
+    assert!(!transcript.contains("\x1b[?1000h"));
     assert!(!transcript.contains("\x1b[?1049h"));
     assert!(!transcript.contains("OMITTED_CANARY"));
     assert!(!transcript.contains("test-key"));

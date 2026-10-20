@@ -192,7 +192,7 @@ Focused details show creation, last committed activity in UTC, access route and 
 
 Credentials and the saved-source preference belong to the OS user. A configured conversation retains its selection. With no selection, resume recovers its latest pinned Run tuple; otherwise it uses the current selection or saved preference, and account-only defaults can recover the same account's remembered tuple. Persist inheritance before switching, preserving collaboration policy. Missing or replaced pinned credentials never select another account or billing route; Run admission still validates credentials and consent. In chat, an empty list gives ordinary guidance and an unavailable list gives error feedback; before Session entry either fails. Rendering, input and cleanup errors propagate to restoration and exit.
 
-Mouse reporting is disabled in ordinary chat and history. It is enabled transiently only for visible Session-picker or agent-inspector rows; off-list input is inert, and every action has a keyboard equivalent. Close, suspension, cancellation, failure and loss of ownership disable it before control returns.
+Mouse reporting is disabled in ordinary chat and history. Classic never enables it. Fullscreen enables it transiently only for visible Session-picker or agent-inspector rows; off-list input is inert, and every action has a keyboard equivalent. Close, suspension, cancellation, failure and loss of ownership disable it before control returns.
 
 ## Setup and account choices
 
