@@ -159,10 +159,19 @@ pub(super) fn draw_permission_frame(
         frame.render_widget(Clear, full);
         Rect::new(full.x + gutter, full.y, width, full.height)
     };
-    let choice_rows = u16::try_from(choices.len().max(3))
+    let mut choice_rows = u16::try_from(choices.len().max(3))
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(3));
-    let body_height = usize::from(area.height - choice_rows - 2);
+    let mut body_height = usize::from(area.height - choice_rows - 2);
+    // Dropping the spare choice row and spacer keeps a dialog that is two rows over on one page.
+    let compact_rows = u16::try_from(choices.len()).unwrap_or(u16::MAX);
+    if rows.len() > body_height
+        && area.height > compact_rows + 1
+        && rows.len() <= usize::from(area.height - compact_rows - 1)
+    {
+        choice_rows = compact_rows;
+        body_height = usize::from(area.height - choice_rows - 1);
+    }
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()
@@ -309,6 +318,12 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
     (rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
         .saturating_add(2)
         .min(area.height.saturating_sub(1))
+}
+
+pub(super) const CLASSIC_FLOOR_ROWS: u16 = 24;
+
+pub(super) fn classic_floor(screen_height: u16) -> u16 {
+    screen_height.min(CLASSIC_FLOOR_ROWS.max(screen_height.saturating_mul(3) / 5))
 }
 
 pub(super) fn classic_height(

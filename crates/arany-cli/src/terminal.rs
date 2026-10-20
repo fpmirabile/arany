@@ -2174,7 +2174,10 @@ fn resize_classic<B: Backend>(
 ) -> Result<(), B::Error> {
     let size = terminal.size()?;
     let area = terminal.get_frame().area();
-    let height = height.max(1).min(size.height);
+    let height = height
+        .max(view::classic_floor(size.height))
+        .max(1)
+        .min(size.height);
     if area.width == size.width && area.height == height && area.bottom() == size.height {
         return Ok(());
     }
@@ -2385,7 +2388,7 @@ mod insert_rows_tests {
         assert_eq!(short.get_frame().area().height, 8);
         short.backend_mut().resize(80, 24);
         resize_classic(&mut short, 2, 12, || TestBackend::new(1, 1)).unwrap();
-        assert_eq!(short.get_frame().area().height, 12);
+        assert_eq!(short.get_frame().area().height, 24);
         let rows = text_rows(short.backend().scrollback())
             .into_iter()
             .chain(text_rows(short.backend().buffer()))
@@ -2404,7 +2407,7 @@ mod insert_rows_tests {
     #[test]
     fn classic_grow_and_shrink_clear_only_transient_rows() {
         use ratatui::widgets::{Paragraph, Widget};
-        for height in [8, 12, 24, 50] {
+        for height in [8, 12, 24, 40, 50, 60] {
             let mut backend = TestBackend::new(80, height);
             let mut settled = Buffer::empty(Rect::new(0, height - 5, 80, 1));
             Paragraph::new("settled history").render(settled.area, &mut settled);
@@ -2432,7 +2435,8 @@ mod insert_rows_tests {
                     })
                     .unwrap();
                 let area = terminal.get_frame().area();
-                assert_eq!(area, Rect::new(0, height - needed, 80, needed));
+                let rows_needed = needed.max(super::view::classic_floor(height));
+                assert_eq!(area, Rect::new(0, height - rows_needed, 80, rows_needed));
                 let rows = text_rows(terminal.backend().buffer());
                 assert!(
                     rows[..usize::from(area.y)]

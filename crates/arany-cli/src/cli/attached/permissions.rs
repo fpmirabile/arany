@@ -205,6 +205,9 @@ pub(super) async fn choose(
                 let index = focused_profile.expect("matched selected profile");
                 focused_profile = Some((index + 1).min(options.len().saturating_sub(1)));
             }
+            TerminalInput::Up if more || (selected == 0 && page > 0) => {
+                page = page.saturating_sub(1);
+            }
             TerminalInput::Up if !more => selected = selected.saturating_sub(1),
             TerminalInput::Down if !more => selected = (selected + 1).min(1),
             TerminalInput::PageUp => {

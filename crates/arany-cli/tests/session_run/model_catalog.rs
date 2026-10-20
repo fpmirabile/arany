@@ -657,7 +657,21 @@ fn inline_model_catalog_at_width(width: u16) {
     }
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     let output = String::from_utf8(transcript).expect("UTF-8 PTY transcript");
-    assert!(output.contains("Models · exact"));
+    // A diff frame skips unchanged blank cells, so words are separated by cursor controls.
+    let mut visible = String::new();
+    let mut chars = output.chars();
+    while let Some(character) = chars.next() {
+        if character == '\x1b' {
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) && next != '[' {
+                    break;
+                }
+            }
+        } else {
+            visible.push(character);
+        }
+    }
+    assert!(visible.contains("Models·exact"));
     let before = output
         .lines()
         .find_map(|line| line.strip_prefix("TTY_BEFORE:"))

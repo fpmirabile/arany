@@ -3197,3 +3197,10 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
         }
     }
 }
+
+#[test]
+fn classic_floor_is_the_larger_of_24_rows_and_sixty_percent_within_the_screen() {
+    for (screen, floor) in [(8, 8), (12, 12), (24, 24), (40, 24), (60, 36), (100, 60)] {
+        assert_eq!(classic_floor(screen), floor, "{screen} rows");
+    }
+}
