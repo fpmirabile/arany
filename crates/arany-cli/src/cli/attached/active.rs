@@ -184,6 +184,16 @@ fn settle_recorded_note(
     true
 }
 
+fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
+    view.runs.last().is_some_and(|run| {
+        run.accepted_sequence > starting_sequence
+            && !matches!(
+                run.status,
+                arany::RunStatus::Pending | arany::RunStatus::Active
+            )
+    })
+}
+
 fn active_escape(
     input: TerminalInput,
     menu_open: bool,
@@ -913,6 +923,11 @@ pub(super) async fn submit_objective(
                     TerminalInput::EndOfInput if !composer.is_empty() || held.is_some() => {
                         Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
                     }
+                    // The screen already shows the outcome, so exit once the Run returns.
+                    TerminalInput::EndOfInput if run_settled(view, starting_sequence) => {
+                        terminal.defer_input(TerminalInput::EndOfInput);
+                        None
+                    }
                     _ => None,
                 };
                 if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
@@ -1431,6 +1446,56 @@ mod goal_request_tests {
             goal_request(&view, GoalStart::Resume),
             Err("No interrupted Goal is available to resume".into())
         );
+    }
+
+    #[test]
+    fn end_of_input_waits_for_only_the_current_run_to_settle() {
+        let mut view = session_with_goal(false);
+        let starting_sequence = view.last_sequence;
+        assert!(!run_settled(&view, starting_sequence), "no current Run");
+        let mut run = arany::RunView {
+            skill: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Finished,
+            accepted_sequence: starting_sequence,
+            finished_sequence: Some(starting_sequence),
+            failure: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+        };
+        view.runs.push(run.clone());
+        assert!(
+            !run_settled(&view, starting_sequence),
+            "an earlier Run cannot defer exit"
+        );
+        run.accepted_sequence = starting_sequence + 1;
+        for (status, settled) in [
+            (arany::RunStatus::Pending, false),
+            (arany::RunStatus::Active, false),
+            (arany::RunStatus::Finished, true),
+            (arany::RunStatus::Failed, true),
+            (arany::RunStatus::Cancelled, true),
+        ] {
+            run.status = status;
+            *view.runs.last_mut().unwrap() = run.clone();
+            assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
+        }
     }
 
     #[test]

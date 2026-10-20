@@ -389,6 +389,7 @@ pub struct AttachedTerminal {
     help_selected: Option<usize>,
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
+    deferred_input: Option<TerminalInput>,
     clipboard_preview: bool,
     shutdown_clipboard_on_drop: bool,
     requested_screen_reader: bool,
@@ -698,6 +699,7 @@ impl AttachedTerminal {
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,
+            deferred_input: None,
             clipboard_preview: false,
             shutdown_clipboard_on_drop: true,
             requested_screen_reader: screen_reader,
@@ -713,8 +715,15 @@ impl AttachedTerminal {
         })
     }
 
+    pub fn defer_input(&mut self, input: TerminalInput) {
+        self.deferred_input = Some(input);
+    }
+
     pub async fn next_input(&mut self) -> Result<TerminalInput, TerminalError> {
         self.clipboard_paste = None;
+        if let Some(input) = self.deferred_input.take() {
+            return Ok(input);
+        }
         let clipboard_ready = self.input.as_ref().is_some_and(TerminalReader::paste_ready);
         #[cfg(unix)]
         let input = tokio::select! {
