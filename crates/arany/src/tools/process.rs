@@ -231,6 +231,9 @@ pub(super) fn fit_command(
             if stdout.total().bytes > budget as u64 || stderr.total().bytes > budget as u64 {
                 return Err(ToolError::Limit);
             }
+            if !stdout.is_utf8() || !stderr.is_utf8() {
+                return Err(ToolError::Operation);
+            }
             let output = render(&stdout.preview(budget), &stderr.preview(budget))?;
             if output.len() > budget {
                 return Err(ToolError::Limit);

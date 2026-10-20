@@ -52,6 +52,11 @@ impl Window {
         }
     }
 
+    pub(super) fn is_utf8(&self) -> bool {
+        let bytes: Vec<u8> = self.head.iter().chain(&self.tail).copied().collect();
+        std::str::from_utf8(&bytes).is_ok()
+    }
+
     pub(super) fn preview(&self, keep: usize) -> String {
         let tail: Vec<u8> = self.tail.iter().copied().collect();
         if self.total.bytes <= keep as u64 {

@@ -354,7 +354,7 @@
       "type": "function"
     },
     {
-      "description": "Run an admitted command in an offline project snapshot. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
+      "description": "Run an admitted command in an offline project snapshot. Large output keeps a head and tail with byte and line totals; narrow it with grep, sed -n or tail. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
       "name": "arany_command",
       "parameters": {
         "additionalProperties": false,

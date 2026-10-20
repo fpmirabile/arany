@@ -890,7 +890,7 @@ fn command_output_truncation_continues_integrates_and_replays_without_execution(
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
-    for case in ["large", "grouped", "invalid-utf8"] {
+    for case in ["large", "grouped", "invalid-utf8", "lines"] {
         let host = Host::new(None);
         let config_path = host.state.join("tools.json");
         let mut config: Value =
@@ -910,6 +910,7 @@ fn command_output_truncation_continues_integrates_and_replays_without_execution(
             }
             "grouped" => "cat notes/a notes/b notes/c notes/d notes/e notes/f",
             "invalid-utf8" => "printf '\\377\\n'",
+            "lines" => "for i in $(seq 1 20000); do echo line $i; done",
             _ => unreachable!(),
         };
         let call = guarded(script);
@@ -960,6 +961,17 @@ fn command_output_truncation_continues_integrates_and_replays_without_execution(
             "grouped" => {
                 assert_eq!(result["stdout_total"], json!({"bytes":72000,"lines":14400}));
                 assert!(stdout.starts_with("line\n") && stdout.ends_with("line\n"));
+            }
+            "lines" => {
+                assert_eq!(result["stdout_total"], json!({"bytes":208894,"lines":20000}));
+                assert!(stdout.starts_with("line 1\nline 2\n"));
+                assert!(stdout.ends_with("line 19999\nline 20000\n"));
+                assert!(stdout.contains("\n…["));
+                assert!(
+                    observation.output.len() < 64 * 1024,
+                    "{}",
+                    observation.output.len()
+                );
             }
             "invalid-utf8" => {
                 assert_eq!(stdout, "\u{fffd}\n");
