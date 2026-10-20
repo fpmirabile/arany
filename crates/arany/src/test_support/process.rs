@@ -57,7 +57,8 @@ pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
             if line.len() > MAX_LINE_BYTES
                 || !message.is_ascii()
                 || !(message.starts_with(b"fixture=shipped_exec;")
-                    || message.starts_with(b"fixture=direct_cancellation;"))
+                    || message.starts_with(b"fixture=direct_cancellation;")
+                    || message.starts_with(b"fixture=tool_group;"))
                 || !message.iter().all(|byte| {
                     byte.is_ascii_alphanumeric()
                         || matches!(
@@ -94,7 +95,11 @@ pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
     const MAX_LINE_BYTES: usize = 256;
     if !matches!(
         expected_case,
-        "shipped_exec" | "goal_token_cap" | "workspace_lease" | "native_account_test"
+        "shipped_exec"
+            | "goal_token_cap"
+            | "workspace_lease"
+            | "tool_group"
+            | "native_account_test"
     ) {
         return false;
     }

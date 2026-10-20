@@ -184,23 +184,38 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     }
     let result = wait_product(attached.take());
     let transcript = String::from_utf8_lossy(&reader.join().unwrap()).replace("\r\n", "\n");
-    assert!(waited.is_ok(), "final answer missing: {transcript}");
-    println!("{transcript}");
-    assert_eq!(
-        transcript
-            .matches("Read 1 file, listed 1 directory\nResult: ")
-            .count(),
-        1,
-        "{transcript}"
-    );
-    assert_eq!(
-        transcript
-            .matches("Read(private.txt)\nResult: denied")
-            .count(),
-        1
-    );
+    let group = transcript
+        .matches("Read 1 file, listed 1 directory\nResult: ")
+        .count();
+    let denied = transcript
+        .matches("Read(private.txt)\nResult: denied")
+        .count();
+    if waited.is_err() || group != 1 || denied != 1 {
+        let tail: String = transcript
+            .chars()
+            .rev()
+            .take(700)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || " _=:,.-()".contains(c) {
+                    c
+                } else {
+                    '/'
+                }
+            })
+            .collect();
+        crate::process::annotate_native_fixture(&format!(
+            "fixture=tool_group; stage=transcript; answered={}; group={group}; denied={denied}; tail={tail}",
+            waited.is_ok()
+        ));
+    }
+    assert!(waited.is_ok(), "final answer missing");
+    assert_eq!(group, 1);
+    assert_eq!(denied, 1);
     assert!(!transcript.contains("Tool ·") && !transcript.contains("succeeded"));
     assert!(!transcript.contains(['⏺', '⎿']));
     assert!(!transcript.contains("OMITTED_CANARY"));
-    assert!(result.status.success() || waited.is_ok(), "{transcript}");
+    assert!(result.status.success() || waited.is_ok());
 }
