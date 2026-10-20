@@ -152,7 +152,14 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
         "Synthetic objective"
     );
     assert!(value.get("text").is_none());
-    for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
+    for forbidden in [
+        "max_output_tokens",
+        "truncation",
+        "previous_response_id",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+    ] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
     let mut coding = request();
@@ -1312,9 +1319,9 @@ fn chatgpt_uses_auto_with_phase_specific_functions() {
         assert_eq!(value[field], active[field], "{field}");
     }
     assert_eq!(value["prompt_cache_key"], researcher.session_id.to_string());
-    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
-        assert!(value.get(field).is_none(), "{field}");
-    }
+    assert_eq!(value["tools"], active["tools"]);
+    assert_eq!(value["tool_choice"], "none");
+    assert_eq!(value["parallel_tool_calls"], false);
     let names = |body: &Value| {
         body["tools"]
             .as_array()
@@ -1324,7 +1331,6 @@ fn chatgpt_uses_auto_with_phase_specific_functions() {
             .collect::<Vec<_>>()
     };
     assert!(names(&active).contains(&"arany_read".into()));
-    assert!(names(&value).is_empty());
     let mut primary = crate::provider::test_support::primary_request("model-a");
     for policy in [
         crate::session::CollaborationPolicy::Auto {

@@ -1485,9 +1485,9 @@ pub(super) fn draw_quick_actions_frame(
             if area.width < 20 {
                 "Draft first Esc"
             } else if area.width < 24 {
-                "Answer draft · Esc"
+                "Submit draft · Esc"
             } else if narrow {
-                "Answer draft · Esc back"
+                "Submit draft · Esc back"
             } else {
                 "Submit or clear draft · Esc return"
             }

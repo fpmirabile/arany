@@ -791,11 +791,6 @@ pub(super) fn accept_check_and_run(
             arany::ProviderFailureReason::ResponseContract,
             2,
         ),
-        (
-            "OutcomeFields",
-            arany::ProviderFailureReason::OutcomeContract,
-            2,
-        ),
     ]
     .into_iter()
     .chain(

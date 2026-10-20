@@ -527,7 +527,7 @@ fn subscription_body(
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
-    if request.input.role != PromptRole::ToolReview {
+    if request.input.role != PromptRole::ToolReview && body["tool_choice"] != "none" {
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
         if let Some(functions) = body.get_mut("tools").and_then(Value::as_array_mut) {
