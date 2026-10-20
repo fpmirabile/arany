@@ -260,9 +260,8 @@ async fn session(
 
 fn scripted() -> Arc<ScriptedProvider> {
     Arc::new(
-        ScriptedProvider::new(vec![arany::ProviderOutcome::Finish(arany::Finish {
-            summary: "Answer".into(),
-            result: "Hello".into(),
+        ScriptedProvider::new(vec![arany::ProviderOutcome::Answer(arany::Answer {
+            text: "Hello".into(),
         })])
         .with_profile("openai", "gpt-5.4"),
     )
@@ -719,9 +718,8 @@ async fn oversized_load_and_resume_refuse_without_history_or_a_loaded_session() 
         .unwrap();
     let source = Arc::new(
         ScriptedProvider::new(vec![
-            arany::ProviderOutcome::Finish(arany::Finish {
-                summary: "Answer".into(),
-                result: "Hello".into()
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Hello".into()
             });
             3
         ])
@@ -813,9 +811,8 @@ async fn load_replays_tool_results_and_interrupted_intents_without_execution() {
                 offset: 0,
                 limit: 32,
             }),
-            arany::ProviderOutcome::Finish(arany::Finish {
-                summary: "Answer".into(),
-                result: "Fact".into(),
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Fact".into(),
             }),
         ])
         .with_profile("openai", "gpt-5.4"),
@@ -1941,9 +1938,8 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
         std::fs::set_permissions(&tools, std::fs::Permissions::from_mode(0o600)).unwrap();
         let provider = Arc::new(
             ScriptedProvider::new(vec![if finish {
-                arany::ProviderOutcome::Finish(arany::Finish {
-                    summary: "Done".into(),
-                    result: "Answer".into(),
+                arany::ProviderOutcome::Answer(arany::Answer {
+                    text: "Answer".into(),
                 })
             } else {
                 tool_outcome(arany::ToolCall::Read {
@@ -2759,9 +2755,8 @@ async fn permission_scenario(allow: bool, guard: Option<PathBuf>, case: Permissi
         outcomes.push(tool_outcome(second));
     }
     if allow {
-        outcomes.push(arany::ProviderOutcome::Finish(arany::Finish {
-            summary: "Answer".into(),
-            result: "Finished".into(),
+        outcomes.push(arany::ProviderOutcome::Answer(arany::Answer {
+            text: "Finished".into(),
         }));
     }
     let provider = Arc::new(ScriptedProvider::new(outcomes).with_profile("openai", "gpt-5.4"));

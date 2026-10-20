@@ -2,7 +2,7 @@ use crate::engine_support::run_with;
 use crate::process::BoundedOutput;
 use crate::{hash, private_file};
 use arany::{
-    CollaborationPolicy, CompactionRequest, CompactionResponse, Finish, Provider, ProviderError,
+    Answer, CollaborationPolicy, CompactionRequest, CompactionResponse, Provider, ProviderError,
     ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView,
     StateRoot, Store, ToolCall, ToolDisposition, ToolResourceProfile,
 };
@@ -211,9 +211,8 @@ impl Provider for Journey {
         }
         let outcome = self.calls.get(step).cloned().map_or_else(
             || {
-                ProviderOutcome::Finish(Finish {
-                    summary: "Completed native file journey".into(),
-                    result: "Created and edited synthetic files.".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "Created and edited synthetic files.".into(),
                 })
             },
             |call| {
@@ -1070,10 +1069,7 @@ impl Provider for RuntimeJourney {
                 crate::tool_outcome(call)
             }
         } else {
-            ProviderOutcome::Finish(Finish {
-                summary: "Runtime profile checked".into(),
-                result: "The selected runtime command completed under Guard, and its private build cache persisted between commands.".into(),
-            })
+            ProviderOutcome::Answer(Answer { text: "The selected runtime command completed under Guard, and its private build cache persisted between commands.".into() })
         };
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),

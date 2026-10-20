@@ -116,9 +116,8 @@ fn engine(state: &std::path::Path) -> Engine {
 }
 fn scripted() -> Arc<ScriptedProvider> {
     Arc::new(
-        ScriptedProvider::new(vec![arany::ProviderOutcome::Finish(arany::Finish {
-            summary: "Answer".into(),
-            result: "Hello".into(),
+        ScriptedProvider::new(vec![arany::ProviderOutcome::Answer(arany::Answer {
+            text: "Hello".into(),
         })])
         .with_profile("openai", "gpt-5.4"),
     )
@@ -1571,9 +1570,8 @@ async fn approval_scenario(case: ApprovalCase) {
         offset: 0,
         limit: 32,
     });
-    let finish = arany::ProviderOutcome::Finish(arany::Finish {
-        summary: "Answer".into(),
-        result: "Finished".into(),
+    let finish = arany::ProviderOutcome::Answer(arany::Answer {
+        text: "Finished".into(),
     });
     let outcomes = if case == ApprovalCase::Duplicate {
         vec![read.clone(), read, finish]
@@ -1946,9 +1944,8 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
                 offset: 0,
                 limit: 32,
             }),
-            arany::ProviderOutcome::Finish(arany::Finish {
-                summary: "Answer".into(),
-                result: "Fact".into(),
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Fact".into(),
             }),
         ])
         .with_profile("openai", "gpt-5.4"),
@@ -2250,9 +2247,8 @@ async fn oversized_resume_does_not_load_the_thread() {
         .unwrap();
     let provider = Arc::new(
         ScriptedProvider::new(vec![
-            arany::ProviderOutcome::Finish(arany::Finish {
-                summary: "Answer".into(),
-                result: "Hello".into()
+            arany::ProviderOutcome::Answer(arany::Answer {
+                text: "Hello".into()
             });
             3
         ])

@@ -191,7 +191,7 @@ async fn probe_model_at(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let response = invoke_at(client, endpoint.clone(), access_token, &direct, effort).await?;
-    if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !value.summary.trim().is_empty() && !value.result.trim().is_empty() && value.summary.len() <= 8 * 1024 && value.result.len() <= 8 * 1024)
+    if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !value.text.trim().is_empty() && value.text.len() <= 8 * 1024)
     {
         return Err(ProviderError::InvalidOutcome);
     }
@@ -527,18 +527,24 @@ fn subscription_body(
 ) -> Result<Vec<u8>, ProviderError> {
     super::super::image::validate_images(request)?;
     let mut body = wire::run_body_with_effort(request, conversation, effort)?;
-    if let Some(tools) = &conversation.tools {
+    if request.input.role != PromptRole::ToolReview && body["tool_choice"] != "none" {
+        let tools = conversation.tools.as_deref().unwrap_or_default();
         let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
-        let functions = body
-            .get_mut("tools")
-            .and_then(Value::as_array_mut)
-            .ok_or(ProviderError::Rejected)?;
-        functions.retain(|function| {
-            function["name"]
-                .as_str()
-                .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
-        });
-        body["tool_choice"] = json!("required");
+        if let Some(functions) = body.get_mut("tools").and_then(Value::as_array_mut) {
+            functions.retain(|function| {
+                function["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+            });
+            if functions.is_empty() {
+                let fields = body.as_object_mut().ok_or(ProviderError::Rejected)?;
+                for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+                    fields.remove(key);
+                }
+            } else {
+                body["tool_choice"] = json!("auto");
+            }
+        }
     }
     // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
     for item in body["input"].as_array_mut().into_iter().flatten() {

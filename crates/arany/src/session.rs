@@ -79,6 +79,20 @@ pub(crate) fn placeholder_title(title: &str) -> bool {
     matches!(title, "New Session" | "Forked Session")
 }
 
+const MAX_ANSWER_SUMMARY_BYTES: usize = 2 * 1024;
+
+pub(crate) fn answer_summary(text: &str) -> String {
+    let line = text
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_default();
+    let mut end = line.len().min(MAX_ANSWER_SUMMARY_BYTES);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    line[..end].to_owned()
+}
+
 pub(crate) fn title_preview(text: &str) -> String {
     use unicode_segmentation::UnicodeSegmentation;
     let mut title = String::new();

@@ -7,29 +7,6 @@
           {
             "additionalProperties": false,
             "properties": {
-              "result": {
-                "type": "string"
-              },
-              "summary": {
-                "type": "string"
-              },
-              "type": {
-                "enum": [
-                  "finish"
-                ],
-                "type": "string"
-              }
-            },
-            "required": [
-              "type",
-              "summary",
-              "result"
-            ],
-            "type": "object"
-          },
-          {
-            "additionalProperties": false,
-            "properties": {
               "agent": {
                 "description": "Admitted agent definition name, or null. An editor assignment selects its own exact admitted definition.",
                 "type": [
@@ -461,25 +438,19 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling.",
-                "type": [
-                  "integer",
-                  "null"
-                ]
+                "description": "Positive integer of milliseconds of active time, at most 1800000; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
+                "type": "integer"
               },
               "max_provider_calls": {
-                "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling.",
-                "type": [
-                  "integer",
-                  "null"
-                ]
+                "description": "Positive integer of Provider calls, at most 64; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
+                "type": "integer"
               },
               "max_runs": {
-                "description": "Integer 1 through goal_budget.max_runs inclusive.",
+                "description": "Integer 1 through 16 inclusive; the Goal pins this ceiling.",
                 "type": "integer"
               },
               "max_tokens": {
-                "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling.",
+                "description": "Positive integer of tokens, or null because the Goal sets no ceiling here.",
                 "type": [
                   "integer",
                   "null"
@@ -951,25 +922,19 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling.",
-                "type": [
-                  "integer",
-                  "null"
-                ]
+                "description": "Positive integer of milliseconds of active time, at most 1800000; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
+                "type": "integer"
               },
               "max_provider_calls": {
-                "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling.",
-                "type": [
-                  "integer",
-                  "null"
-                ]
+                "description": "Positive integer of Provider calls, at most 64; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
+                "type": "integer"
               },
               "max_runs": {
-                "description": "Integer 1 through goal_budget.max_runs inclusive.",
+                "description": "Integer 1 through 16 inclusive; the Goal pins this ceiling.",
                 "type": "integer"
               },
               "max_tokens": {
-                "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling.",
+                "description": "Positive integer of tokens, or null because the Goal sets no ceiling here.",
                 "type": [
                   "integer",
                   "null"

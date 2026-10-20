@@ -172,7 +172,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("synthetic JSON");
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body["text"]["format"]["strict"], true);
+            assert_eq!(body.get("text").is_some(), index == 2);
             assert_eq!(
                 body["max_output_tokens"],
                 if index == 0 || index >= 3 { 4096 } else { 128 }
@@ -221,41 +221,36 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 3 => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"verified summary","result":"verified answer"}})
+                    serde_json::json!("verified answer")
                 }
                 4 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
                 5 => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"child summary","result":"child result"}})
+                    serde_json::json!("child result")
                 }
                 6 => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"team summary","result":"team answer"}})
+                    serde_json::json!("team answer")
                 }
                 7 => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"unsafe summary","result":"test-key"}})
+                    serde_json::json!("test-key")
                 }
                 8 => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"roster summary","result":"roster answer"}})
+                    serde_json::json!("roster answer")
                 }
                 _ => unreachable!(),
-            };
-            let wire_text = if index == 7 {
-                text.to_string().replace("test-key", "\\u0074est-key")
-            } else {
-                text.to_string()
             };
             let response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
                 "model": "model-1",
-                "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":wire_text}]}],
+                "output": arany::semantic::responses_output(&text),
                 "usage": {"input_tokens":20,"output_tokens":10}
             });
             let (content_type, response) = if body["stream"] == true {
@@ -265,6 +260,11 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 )
             } else {
                 ("application/json", response.to_string())
+            };
+            let response = if index == 7 {
+                response.replace("test-key", "\\u0074est-key")
+            } else {
+                response
             };
             write!(
                 stream,
@@ -992,7 +992,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             let body: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).unwrap();
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body["text"]["format"]["strict"], true);
+            assert_eq!(body.get("text").is_some(), index == 2);
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
@@ -1006,9 +1006,9 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"answer"}})
+                    serde_json::json!("answer")
                 }
             };
             super::loopback::send_response_for(&mut stream, index, outcome, body["stream"] == true);

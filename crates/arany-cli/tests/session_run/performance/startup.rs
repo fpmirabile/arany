@@ -108,12 +108,12 @@ fn startup_upper_bound_two_files_on_named_host() {
             let text = if index < 3 {
                 match index {
                     0 => {
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                        serde_json::json!("ok")
                     }
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                     }
-                    _ => serde_json::json!({"summary":"synthetic summary"}),
+                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 }
             } else {
                 assert_eq!(input["phase"], "root_plan");
@@ -135,7 +135,7 @@ fn startup_upper_bound_two_files_on_named_host() {
                         )
                     );
                 }
-                serde_json::json!({"outcome":{"type":"finish","summary":"done","result":"startup answer"}})
+                serde_json::json!("startup answer")
             };
             send_response(&mut stream, index, text);
         }

@@ -1,4 +1,4 @@
-use super::{ChildAssignment, Delegate, Finish, ProviderError, ProviderOutcome, ToolUseId};
+use super::{ChildAssignment, Delegate, ProviderError, ProviderOutcome, ToolUseId};
 use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use crate::tools::{ToolCall, ToolRequest};
 use serde::Deserialize;
@@ -13,10 +13,6 @@ struct OutcomeEnvelope {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum StructuredOutcome {
-    Finish {
-        summary: String,
-        result: String,
-    },
     Delegate {
         children: Vec<ChildAssignment>,
         agent: Option<String>,
@@ -26,9 +22,6 @@ enum StructuredOutcome {
 impl From<StructuredOutcome> for ProviderOutcome {
     fn from(outcome: StructuredOutcome) -> Self {
         match outcome {
-            StructuredOutcome::Finish { summary, result } => {
-                Self::Finish(Finish { summary, result })
-            }
             StructuredOutcome::Delegate { children, agent } => {
                 Self::Delegate(Delegate { children, agent })
             }
@@ -65,6 +58,13 @@ pub(crate) fn tool_function(
     operation: &str,
     input: Value,
 ) -> Result<ProviderOutcome, ProviderError> {
+    if operation == "delegate" {
+        let fields = input
+            .as_object()
+            .cloned()
+            .ok_or(ProviderError::InvalidOutcome)?;
+        return function_outcome(operation, fields);
+    }
     if operation == "plan" {
         if !serde_json::to_vec(&input).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
             return Err(ProviderError::InvalidOutcome);
@@ -124,6 +124,21 @@ pub(crate) fn tools_outcome(requests: Vec<ToolRequest>) -> Result<ProviderOutcom
         return Err(ProviderError::InvalidOutcome);
     }
     Ok(ProviderOutcome::Tools(requests))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Review {
+    verdict: super::ReviewVerdict,
+}
+
+pub(crate) fn review_outcome(text: &str) -> Result<ProviderOutcome, ProviderError> {
+    let review: Review = serde_json::from_str(text).map_err(|_| ProviderError::InvalidOutcome)?;
+    Ok(ProviderOutcome::Review(review.verdict))
+}
+
+pub(crate) fn review_schema() -> Value {
+    json!({"type":"object", "properties":{"verdict":{"type":"string","enum":["approve","ask"]}}, "required":["verdict"], "additionalProperties":false})
 }
 
 #[cfg(test)]
@@ -275,7 +290,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            1
+            0
         );
     }
 }

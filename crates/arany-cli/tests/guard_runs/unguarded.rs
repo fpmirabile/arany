@@ -235,10 +235,7 @@ fn script(
 }
 
 fn finish(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 fn denied(seen: &Seen, needle: &str) {
@@ -396,7 +393,7 @@ async fn unguarded_rerun_is_never_ai_reviewed_and_dont_ask_or_deny_rules_refuse_
                 .fold(Vec::new(), |mut all, outcome| {
                     all.push(outcome);
                     if all.len() == 2 {
-                        all.push(finish("approve"));
+                        all.push(ProviderOutcome::Review(arany::ReviewVerdict::Approve));
                     }
                     all
                 }),

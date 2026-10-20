@@ -12,11 +12,11 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
 
 fn answer_check(stream: &mut std::net::TcpStream, index: usize) {
     let outcome = match index {
-        0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+        0 => serde_json::json!("ok"),
         1 => {
             serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
         }
-        _ => serde_json::json!({"summary":"synthetic summary"}),
+        _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
     };
     send_response(stream, index, outcome);
 }
@@ -116,19 +116,11 @@ fn run_native(note_delivery: bool, classic: bool) {
                     4 => {
                         ready_sender.send(()).unwrap();
                         release.recv_timeout(Duration::from_secs(10)).unwrap();
-                        send_response(
-                            &mut stream,
-                            index,
-                            serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
-                        );
+                        send_response(&mut stream, index, serde_json::json!("child result"));
                     }
                     _ => {
                         assert_eq!(input["steering_notes"], serde_json::json!([NOTE]));
-                        send_response(
-                            &mut stream,
-                            index,
-                            serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
-                        );
+                        send_response(&mut stream, index, serde_json::json!("synthesized"));
                     }
                 }
             } else {

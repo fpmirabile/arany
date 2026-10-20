@@ -108,7 +108,7 @@ pub(super) fn send_response_for(
         "id": format!("resp_{}", index + 1),
         "status": "completed",
         "model": "model-1",
-        "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string()}]}],
+        "output": arany::semantic::responses_output(&text),
         "usage": {"input_tokens":20,"output_tokens":10}
     });
     let (content_type, response) = if streaming {
@@ -127,11 +127,21 @@ pub(super) fn send_response_for(
 pub(super) fn responses_stream(mut response: serde_json::Value) -> String {
     let id = "msg_stream";
     response["output"][0]["id"] = serde_json::json!(id);
+    let item = response["output"][0].clone();
+    let mut added = item.clone();
+    added["status"] = serde_json::json!("in_progress");
+    let delta = if item["type"] == "function_call" {
+        added["arguments"] = serde_json::json!("");
+        serde_json::json!({"type":"response.function_call_arguments.delta", "item_id":id,"output_index":0,"delta":item["arguments"]})
+    } else {
+        added["content"] = serde_json::json!([]);
+        serde_json::json!({"type":"response.output_text.delta","item_id":id,"output_index":0,"content_index":0,"delta":item["content"][0]["text"]})
+    };
     let events = [
         serde_json::json!({"type":"response.created","response":{"id":response["id"],"model":response["model"]}}),
-        serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"id":id,"type":"message","role":"assistant","status":"in_progress","content":[]}}),
-        serde_json::json!({"type":"response.output_text.delta","item_id":id,"output_index":0,"content_index":0,"delta":response["output"][0]["content"][0]["text"]}),
-        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":response["output"][0]}),
+        serde_json::json!({"type":"response.output_item.added","output_index":0,"item":added}),
+        delta,
+        serde_json::json!({"type":"response.output_item.done","output_index":0,"item":item}),
         serde_json::json!({"type":"response.completed","response":response}),
     ];
     events

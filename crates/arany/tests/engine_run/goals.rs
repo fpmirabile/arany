@@ -9,9 +9,8 @@ async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
     // Control characters escape to six JSON bytes each, so the serialized report budget shortens this summary.
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "\u{1}".repeat(2000),
-        result: "accepted result".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "\u{1}".repeat(2000),
     })]);
     let provider = Arc::new(provider);
     let engine = engine_support::open(
@@ -83,9 +82,8 @@ async fn goal_report_counts_cached_input_tokens() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: "accepted result".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "accepted result".into(),
     })])
     .with_cached_input_tokens(7);
     let provider = Arc::new(provider);
@@ -115,45 +113,48 @@ async fn goal_report_counts_cached_input_tokens() {
 }
 
 #[tokio::test]
-async fn summary_within_the_serialized_report_budget_is_kept_whole() {
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("workspace");
-    let state_path = temp.path().join("state");
-    let summary = "ࠀ".repeat(620);
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: summary.clone(),
-        result: "accepted result".into(),
-    })]);
-    let provider = Arc::new(provider);
-    let engine = engine_support::open(
-        StateRoot::admit(&state_path).expect("state"),
-        EngineConfig::default(),
-    )
-    .expect("engine");
-    let mut input = request(&workspace, "Complete a Goal");
-    input.include_paths.clear();
-    let outcome = run_to_end(&engine, &provider, input)
-        .await
-        .expect("Goal Run");
-    engine.close().await.expect("engine shutdown");
+async fn answer_summary_uses_the_first_nonempty_line_and_a_character_boundary() {
+    for (summary, expected) in [
+        ("ࠀ".repeat(620), "ࠀ".repeat(620)),
+        ("🚀".repeat(600), "🚀".repeat(512)),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: format!("\n \n{summary}\naccepted result"),
+        })]);
+        let provider = Arc::new(provider);
+        let engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("engine");
+        let mut input = request(&workspace, "Complete a Goal");
+        input.include_paths.clear();
+        let outcome = run_to_end(&engine, &provider, input)
+            .await
+            .expect("Goal Run");
+        engine.close().await.expect("engine shutdown");
 
-    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
-        .expect("read-only Store");
-    let view = store
-        .load_view(outcome.session_id)
-        .await
-        .expect("replayed Session")
-        .expect("Session");
-    let report = view.goals[0].report.as_ref().expect("durable report");
-    assert_eq!(report.summary, summary);
-    assert!(
-        !report
-            .unresolved
-            .iter()
-            .any(|item| item.contains("summary was shortened"))
-    );
-    store.close().await.expect("Store shutdown");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only Store");
+        let view = store
+            .load_view(outcome.session_id)
+            .await
+            .expect("replayed Session")
+            .expect("Session");
+        let report = view.goals[0].report.as_ref().expect("durable report");
+        assert_eq!(report.summary, expected);
+        assert!(
+            !report
+                .unresolved
+                .iter()
+                .any(|item| item.contains("summary was shortened"))
+        );
+        store.close().await.expect("Store shutdown");
+    }
 }
 
 #[tokio::test]
@@ -192,9 +193,8 @@ fn paged_read_outcomes() -> Vec<ProviderOutcome> {
             })
         })
         .collect::<Vec<_>>();
-    outcomes.push(ProviderOutcome::Finish(Finish {
-        summary: "Read-only inspection completed".into(),
-        result: "The bounded pages were inspected".into(),
+    outcomes.push(ProviderOutcome::Answer(Answer {
+        text: "The bounded pages were inspected".into(),
     }));
     outcomes
 }
@@ -482,17 +482,15 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
         let state_path = temp.path().join("state");
         let cancellation = RunCancellation::new();
         let mut provider = if cancel {
-            ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "answer".into(),
+            ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+                text: "answer".into(),
             })])
         } else {
             ScriptedProvider::new(
                 (0..3)
                     .map(|_| {
-                        ProviderOutcome::Finish(Finish {
-                            summary: String::new(),
-                            result: "invalid finish".into(),
+                        ProviderOutcome::Answer(Answer {
+                            text: " \n ".into(),
                         })
                     })
                     .collect(),
@@ -507,7 +505,7 @@ async fn goal_failure_and_cancellation_have_distinct_terminal_receipts() {
             EngineConfig::default(),
         )
         .expect("engine");
-        let mut input = request(&workspace, "Finish or cancel");
+        let mut input = request(&workspace, "Answer or cancel");
         input.include_paths.clear();
         let outcome = run_with(
             &engine,
@@ -559,9 +557,8 @@ async fn goal_call_budget_blocks_a_later_run_before_provider_dispatch() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "first Run complete".into(),
-        result: "continue later".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "continue later".into(),
     })])
     .with_compactions(vec![Ok(CompactionResponse {
         summary: "The completed Run remains in the canonical history.".into(),
@@ -723,9 +720,8 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "must not run".into(),
-        result: "must not run".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "must not run".into(),
     })]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
@@ -771,9 +767,8 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "first Run complete".into(),
-        result: "continue later".into(),
+    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "continue later".into(),
     })]);
     let first_engine_provider = Arc::new(first_provider);
     let first_engine = engine_support::open(
@@ -876,10 +871,9 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let first_provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-        Finish {
-            summary: "first Run complete".into(),
-            result: "continue later".into(),
+    let first_provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: "continue later".into(),
         },
     )]));
     let first_engine = engine_support::open(
@@ -907,10 +901,9 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         EngineConfig::default(),
     )
     .expect("second engine");
-    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-        Finish {
-            summary: "second Run complete".into(),
-            result: "done".into(),
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: "done".into(),
         },
     )]));
     let continue_request = |source| {
@@ -999,10 +992,9 @@ async fn refused_answer_on_the_last_allowed_call_is_a_budget_close() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Finish(
-        Finish {
-            summary: String::new(),
-            result: "invalid finish".into(),
+    let provider = Arc::new(ScriptedProvider::new(vec![ProviderOutcome::Answer(
+        Answer {
+            text: " \n ".into(),
         },
     )]));
     let engine = engine_support::open(
@@ -1176,9 +1168,8 @@ impl Provider for FiniteTokenTeam {
                 1,
             ),
             AgentPhase::ChildWork => (
-                ProviderOutcome::Finish(Finish {
-                    summary: "Review complete".into(),
-                    result: "No issues found".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "No issues found".into(),
                 }),
                 1,
                 2,
@@ -1271,9 +1262,8 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "first Run complete".into(),
-        result: "continue after review".into(),
+    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "continue after review".into(),
     })]);
     let first_requests = Arc::clone(&first_provider.requests);
     let first_engine_provider = Arc::new(first_provider);
@@ -1298,9 +1288,8 @@ async fn interrupted_goal_resumes_only_by_exact_id_without_replaying_the_old_cal
     assert_eq!(first_requests.lock().expect("Provider requests").len(), 1);
     first_engine.close().await.expect("first engine shutdown");
 
-    let second_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "resumed Run complete".into(),
-        result: "the Goal is complete".into(),
+    let second_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "the Goal is complete".into(),
     })]);
     let second_requests = Arc::clone(&second_provider.requests);
     let second_engine_provider = Arc::new(second_provider);
@@ -1438,9 +1427,8 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
         }
         store.close().await.expect("seed Store shutdown");
 
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "Completed after explicit recovery".into(),
-            result: "Only the new Run was dispatched".into(),
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Only the new Run was dispatched".into(),
         })]);
         let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
@@ -1756,9 +1744,8 @@ async fn resumed_goal_keeps_its_stored_phase() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
-    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "first Run complete".into(),
-        result: "continue after review".into(),
+    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "continue after review".into(),
     })]);
     let first_engine_provider = Arc::new(first_provider);
     let first_engine = engine_support::open(
@@ -1781,9 +1768,8 @@ async fn resumed_goal_keeps_its_stored_phase() {
         .expect("first Goal Run");
     first_engine.close().await.expect("first engine shutdown");
 
-    let second_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "resumed Run complete".into(),
-        result: "the Goal is complete".into(),
+    let second_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "the Goal is complete".into(),
     })]);
     let second_engine_provider = Arc::new(second_provider);
     let second_engine = engine_support::open(
@@ -1995,7 +1981,7 @@ async fn autonomous_goal_iterates_until_its_success_criterion_is_satisfied() {
         assert_eq!(
             calls.len(),
             5,
-            "one plan call and two Runs with a Read then Finish"
+            "one plan call and two Runs with a Read then Answer"
         );
         assert_eq!(
             calls[3].input.objective, AUTONOMOUS_OBJECTIVE,
@@ -2125,7 +2111,7 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
         4,
-        "the second Run's Finish is refused, and no third Run dispatches"
+        "the second Run's Answer is refused, and no third Run dispatches"
     );
     engine.close().await.expect("engine shutdown");
 
@@ -2167,7 +2153,7 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
     let mut input = autonomous_input(&workspace);
     input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    // The second Run's Finish is the fourth and last admissible call.
+    // The second Run's Answer is the fourth and last admissible call.
     let outcome = run_with(
         &engine,
         &provider,
@@ -2257,7 +2243,7 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
     };
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget = budget;
-    // Five input tokens per call: Plan, Read and Finish reach the 15-token cap exactly.
+    // Five input tokens per call: Plan, Read and Answer reach the 15-token cap exactly.
     let provider = MeteredProvider {
         tokens: 5,
         responses: std::sync::Mutex::new(VecDeque::from([
@@ -2500,7 +2486,7 @@ async fn autonomous_goal_cancelled_after_a_finished_run_keeps_that_outcome_and_s
     assert_eq!(
         requests.lock().expect("Provider requests").len(),
         3,
-        "cancellation after the first Finish starts no second Run"
+        "cancellation after the first Answer starts no second Run"
     );
     engine.close().await.expect("engine shutdown");
 
@@ -2534,7 +2520,7 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
         finish_with("first pass"),
         finish_with("never requested"),
     ])
-    // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
+    // Advanced in the Answer call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
     .with_clock_advance_before_call(2, Duration::from_secs(60));
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
@@ -2554,7 +2540,7 @@ async fn autonomous_goal_active_time_spent_by_a_finish_fails_the_goal_with_its_r
     .await;
     assert!(
         matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
-        "the exhausted Finish fails its Run: {:?}",
+        "the exhausted Answer fails its Run: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
     assert_eq!(
@@ -2699,7 +2685,7 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
         finish_with("first pass"),
         finish_with("never requested"),
     ])
-    // Advanced in the Finish call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
+    // Advanced in the Answer call, after the Read Tool's Guard I/O (a paused clock would auto-advance that I/O's timeouts).
     .with_clock_advance_before_call(2, Duration::from_secs(60));
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Collector listener");
     let endpoint = format!(
@@ -2730,7 +2716,7 @@ async fn exhausted_autonomous_segment_exports_its_failed_status() {
     .await;
     assert!(
         matches!(&result, Ok(outcome) if outcome.run.status == RunStatus::Failed),
-        "the exhausted Finish fails its Run: {:?}",
+        "the exhausted Answer fails its Run: {:?}",
         result.as_ref().map(|outcome| outcome.run.status)
     );
     engine.close().await.expect("engine shutdown");
@@ -2755,6 +2741,7 @@ async fn run_hints_carry_only_display_text_for_the_committed_run() {
             answer: "x".repeat(2300),
             commentary: Vec::new(),
             commentary_limited: false,
+            tentative: false,
         },
         completion: None,
     });
@@ -3268,9 +3255,8 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     std::fs::create_dir(&workspace).expect("workspace");
     let state_path = temp.path().join("state");
     let cancellation = RunCancellation::new();
-    let mut paused_provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "done".into(),
-        result: "cancelled answer".into(),
+    let mut paused_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "cancelled answer".into(),
     })]);
     paused_provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
     let provider = Arc::new(paused_provider);
@@ -3311,13 +3297,11 @@ async fn paused_goal_coexists_with_a_new_goal_and_resumes_with_its_pinned_object
     }
 
     let provider = ScriptedProvider::new(vec![
-        ProviderOutcome::Finish(Finish {
-            summary: "second".into(),
-            result: "second answer".into(),
+        ProviderOutcome::Answer(Answer {
+            text: "second answer".into(),
         }),
-        ProviderOutcome::Finish(Finish {
-            summary: "resumed".into(),
-            result: "resumed answer".into(),
+        ProviderOutcome::Answer(Answer {
+            text: "resumed answer".into(),
         }),
     ]);
     let requests = Arc::clone(&provider.requests);
@@ -3389,9 +3373,8 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     let mut paused_goals = Vec::new();
     for objective in ["First paused objective", "Second paused objective"] {
         let cancellation = RunCancellation::new();
-        let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: "cancelled answer".into(),
+        let mut provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "cancelled answer".into(),
         })]);
         provider.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
         let provider = Arc::new(provider);
@@ -3424,9 +3407,8 @@ async fn older_paused_goal_is_refused_once_a_newer_goal_is_paused() {
     let (first, second) = (paused_goals[0], paused_goals[1]);
     let session_id = session_id.expect("Session");
 
-    let provider = ScriptedProvider::new(vec![ProviderOutcome::Finish(Finish {
-        summary: "resumed".into(),
-        result: "resumed answer".into(),
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "resumed answer".into(),
     })]);
     let requests = Arc::clone(&provider.requests);
     let provider = Arc::new(provider);
@@ -3882,7 +3864,7 @@ async fn pause_between_autonomous_runs_starts_no_next_run() {
     let state_path = temp.path().join("state");
     let steering = RunSteering::new();
     let pause = steering.clone();
-    // The first Run's Finish is unsatisfied against the planned digest, so the Goal would continue.
+    // The first Run's Answer is unsatisfied against the planned digest, so the Goal would continue.
     let provider = ScriptedProvider::new(vec![
         arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
         crate::tool_outcome(facts_read()),
@@ -4042,8 +4024,8 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
     let state_path = temp.path().join("state");
     let steering = RunSteering::new();
     let offer = steering.clone();
-    // The first Run's Finish is unsatisfied against the planned digest, so the Goal starts a second Run.
-    // The note is offered while the first Run's Finish is in flight: it has no primary call left in
+    // The first Run's Answer is unsatisfied against the planned digest, so the Goal starts a second Run.
+    // The note is offered while the first Run's Answer is in flight: it has no primary call left in
     // that Run, so it waits for the second Run's first primary call.
     let mut plan = facts_plan(facts_digest("v2"));
     plan.budget.max_runs = 2;
@@ -5302,11 +5284,9 @@ async fn previews_chunk_a_finishing_call_within_its_bound() {
             answer: answer.clone(),
             commentary: vec!["commentary".into()],
             commentary_limited: false,
+            tentative: false,
         },
-        completion: Some(ProviderOutcome::Finish(Finish {
-            summary: "done".into(),
-            result: answer,
-        })),
+        completion: Some(ProviderOutcome::Answer(Answer { text: answer })),
     };
     let provider = Arc::new(provider);
     let engine = engine_support::open(
@@ -5608,7 +5588,7 @@ async fn reviewed_write_run(
             expected_digest: None,
             content: "v2".into(),
         }),
-        finish_with("ask"),
+        ProviderOutcome::Review(arany::ReviewVerdict::Ask),
         finish_with("done"),
     ]));
     let engine = engine_support::open(
@@ -5717,7 +5697,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
                 expected_digest: None,
                 content: "v2".into(),
             }),
-            finish_with("approve"),
+            ProviderOutcome::Review(arany::ReviewVerdict::Approve),
             finish_with("never reached"),
         ])
         .with_before_call(3, move || assert!(pause.pause(), "first pause")),
@@ -5943,7 +5923,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         }
         let engine = facts_engine(StateRoot::open_existing(&state_path).unwrap(), &state_path);
         let provider = Arc::new(ScriptedProvider::new(vec![finish_with("candidate"); 9]));
-        let mut input = request(&workspace, "Finish after the Stop continuations");
+        let mut input = request(&workspace, "Answer after the Stop continuations");
         input.include_paths.clear();
         input.session_id = Some(session);
         input.title = None;

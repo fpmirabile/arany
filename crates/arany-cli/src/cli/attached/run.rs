@@ -240,7 +240,7 @@ mod tests {
     use arany::RecordKind;
     #[cfg(target_os = "macos")]
     use arany::{
-        AgentPhase, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy, Finish,
+        AgentPhase, Answer, ApprovalMode, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
         OutputTokenBound, Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome,
         ProviderRequest, ProviderResponse, RunStatus,
     };
@@ -1131,9 +1131,8 @@ mod tests {
             self.observed.lock().unwrap().push(request);
             Ok(ProviderResponse {
                 turn: arany::ProviderTurn::scripted(),
-                outcome: ProviderOutcome::Finish(Finish {
-                    summary: "Greeting complete".into(),
-                    result: "Hola".into(),
+                outcome: ProviderOutcome::Answer(Answer {
+                    text: "Hola".into(),
                 }),
                 response_id: None,
                 usage: arany::Usage {

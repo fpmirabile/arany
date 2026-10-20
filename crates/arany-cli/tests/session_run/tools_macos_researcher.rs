@@ -17,10 +17,10 @@ mod journey {
     use crate::engine_support::run_with;
     use crate::{hash, private_file};
     use arany::{
-        AgentPhase, Attestation, ChildGrant, CollaborationPolicy, CompactionRequest,
-        CompactionResponse, Event, Finish, Provider, ProviderError, ProviderOutcome,
-        ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView, StateRoot, Store,
-        ToolCall, ToolDisposition, ToolResourceProfile,
+        AgentPhase, Answer, Attestation, ChildGrant, CollaborationPolicy, CompactionRequest,
+        CompactionResponse, Event, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+        ProviderResponse, RunRequest, RunStatus, SessionView, StateRoot, Store, ToolCall,
+        ToolDisposition, ToolResourceProfile,
     };
     use arany::{EngineConfig, RunControls, ToolGrant};
     use serde_json::{Value, json};
@@ -238,9 +238,8 @@ done
             outcomes.extend(calls.iter().cloned().map(crate::tool_outcome));
             outcomes.extend(
                 ["Native research report", "Synthesized native facts"].map(|result| {
-                    ProviderOutcome::Finish(Finish {
-                        summary: result.into(),
-                        result: result.into(),
+                    ProviderOutcome::Answer(Answer {
+                        text: result.into(),
                     })
                 }),
             );

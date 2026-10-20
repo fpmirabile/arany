@@ -1,9 +1,8 @@
 use crate::{
-    AgentPhase, CallLimits, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
-    CompactionRequest, CompactionResponse, Delegate, Effort, Finish, ImageAttachment,
-    OutputTokenBound, Provenance, Provider, ProviderCallDisposition, ProviderError,
-    ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation,
-    RunRequest,
+    AgentPhase, Answer, CallLimits, ChatGptAdmission, ChatGptProvenance, CollaborationPolicy,
+    CompactionRequest, CompactionResponse, Delegate, Effort, ImageAttachment, OutputTokenBound,
+    Provenance, Provider, ProviderCallDisposition, ProviderError, ProviderIdentity,
+    ProviderOutcome, ProviderRequest, ProviderResponse, RunCancellation, RunRequest,
 };
 use sha2::{Digest, Sha256};
 use std::collections::VecDeque;
@@ -34,6 +33,7 @@ pub fn plan_outcome(contract: crate::GoalPlanContract) -> crate::ProviderOutcome
 pub struct ScriptedProvider {
     pub identity: ProviderIdentity,
     pub preview: Option<crate::PreviewText>,
+    pub preview_gate: Option<Arc<tokio::sync::Notify>>,
     pub responses: Mutex<VecDeque<Result<ProviderOutcome, ProviderError>>>,
     pub cancel_at_completion: Option<(AgentPhase, RunCancellation)>,
     pub cancel_at_compaction: Option<RunCancellation>,
@@ -58,6 +58,7 @@ impl ScriptedProvider {
                 ..ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
             },
             preview: None,
+            preview_gate: None,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
             cancel_at_completion: None,
             cancel_at_compaction: None,
@@ -208,6 +209,9 @@ impl Provider for ScriptedProvider {
     ) -> Result<ProviderResponse, ProviderError> {
         if let Some(text) = &self.preview {
             preview.publish(text.clone())?;
+            if let Some(gate) = &self.preview_gate {
+                gate.notified().await;
+            }
         }
         self.invoke(request).await
     }
@@ -302,14 +306,12 @@ impl Provider for GatedProvider {
                 if self.fail_child == Some(request.input.objective.as_str()) {
                     return Err(ProviderError::RemoteHttp(403));
                 }
-                ProviderOutcome::Finish(Finish {
-                    summary: "done".into(),
-                    result: format!("result:{}", request.input.objective),
+                ProviderOutcome::Answer(Answer {
+                    text: format!("result:{}", request.input.objective),
                 })
             }
-            AgentPhase::RootSynthesis => ProviderOutcome::Finish(Finish {
-                summary: "synthesized".into(),
-                result: "A B C".into(),
+            AgentPhase::RootSynthesis => ProviderOutcome::Answer(Answer {
+                text: "A B C".into(),
             }),
         };
         Ok(ProviderResponse {
@@ -568,19 +570,15 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 11] {
             Some(crate::ProviderFailureReason::LocalOutputLimit),
         ),
         (
-            "invalid finish",
-            Ok(ProviderOutcome::Finish(Finish {
-                summary: String::new(),
-                result: "Unaccepted result".into(),
-            })),
+            "invalid answer",
+            Ok(ProviderOutcome::Answer(Answer { text: "".into() })),
             ProviderCallDisposition::InvalidResponse,
             Some(crate::ProviderFailureReason::ProposalRefused),
         ),
         (
-            "accepted finish",
-            Ok(ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "Accepted result".into(),
+            "accepted answer",
+            Ok(ProviderOutcome::Answer(Answer {
+                text: "Accepted result".into(),
             })),
             ProviderCallDisposition::Finished,
             None,

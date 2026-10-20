@@ -109,13 +109,13 @@ fn run_broken_stderr_case(compaction: bool) {
                 return;
             }
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"committed summary","result":"committed answer"}})
+                    serde_json::json!("committed answer")
                 }
             };
             // The attached Classic Run requests a streamed answer preview.

@@ -248,7 +248,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             );
             let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
             assert_eq!(wire["model"], "model-1");
-            assert_eq!(wire["text"]["format"]["strict"], true);
+            assert_eq!(wire.get("text").is_some(), index == 2);
             let input: serde_json::Value = crate::semantic::input(&wire);
             if index == 3 {
                 assert_eq!(input["objective"], "cancel");
@@ -276,11 +276,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     .is_none_or(serde_json::Value::is_null)
             );
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                _ => serde_json::json!({"summary":"synthetic summary"}),
+                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
             };
             send_response(&mut stream, index, text);
         }

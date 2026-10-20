@@ -349,8 +349,8 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     calls
 }
 
-pub(crate) fn plan_schema(calls: &[Value]) -> Value {
-    plan_contract_schema(goal_success_call_schema(calls).as_ref())
+pub(crate) fn plan_schema(calls: &[Value], pinned: &crate::session::GoalBudget) -> Value {
+    plan_contract_schema(goal_success_call_schema(calls).as_ref(), pinned)
 }
 
 // None because JSON Schema anyOf must not be empty.
@@ -363,11 +363,26 @@ fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
     (!calls.is_empty()).then(|| json!({"anyOf": calls}))
 }
 
-fn plan_contract_schema(call_schema: Option<&Value>) -> Value {
+fn plan_contract_schema(call_schema: Option<&Value>, pinned: &crate::session::GoalBudget) -> Value {
     let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
-    let calls = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling."});
-    let tokens = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling."});
-    let active_ms = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling."});
+    let ceiling = |limit: Option<u64>, unit: &str| match limit {
+        Some(limit) => {
+            json!({"type":"integer", "description": format!("Positive integer {unit}, at most {limit}; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.")})
+        }
+        None => {
+            json!({"type":["integer","null"], "description": format!("Positive integer {unit}, or null because the Goal sets no ceiling here.")})
+        }
+    };
+    let calls = ceiling(
+        pinned.max_provider_calls.map(u64::from),
+        "of Provider calls",
+    );
+    let tokens = ceiling(pinned.max_tokens, "of tokens");
+    let active_ms = ceiling(pinned.max_active_ms, "of milliseconds of active time");
+    let runs = format!(
+        "Integer 1 through {} inclusive; the Goal pins this ceiling.",
+        pinned.max_runs
+    );
     let mut criteria = Vec::with_capacity(3);
     if let Some(call_schema) = call_schema {
         criteria.push(json!({
@@ -433,7 +448,7 @@ fn plan_contract_schema(call_schema: Option<&Value>) -> Value {
                     "max_provider_calls": calls,
                     "max_tokens": tokens,
                     "max_active_ms": active_ms,
-                    "max_runs": {"type":"integer", "description": "Integer 1 through goal_budget.max_runs inclusive."}
+                    "max_runs": {"type":"integer", "description": runs}
                 },
                 "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
                 "additionalProperties":false

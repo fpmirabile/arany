@@ -49,11 +49,11 @@ fn interrupted_exec_leaves_its_goal_resumable(
                     .expect("request JSON");
             let streaming = body["stream"] == true;
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                _ => serde_json::json!({"summary":"synthetic summary"}),
+                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
             };
             super::loopback::send_response_for(&mut stream, index, text, streaming);
         }

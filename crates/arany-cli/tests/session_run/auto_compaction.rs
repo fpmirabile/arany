@@ -110,7 +110,7 @@ fn synthetic_server(
         );
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
         assert_eq!(wire["model"], "model-1");
-        assert_eq!(wire["text"]["format"]["strict"], true);
+        assert_eq!(wire.get("text").is_some(), index == 2 || index >= 5);
         assert_eq!(
             wire["max_output_tokens"],
             match index {
@@ -210,13 +210,13 @@ fn synthetic_server(
             continue;
         }
         let text = match index {
-            0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+            0 => serde_json::json!("ok"),
             1 => {
                 serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
             }
-            2 => serde_json::json!({"summary":"synthetic summary"}),
+            2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
             3 => {
-                serde_json::json!({"outcome":{"type":"finish","summary":"first summary","result":"A".repeat(24 * 1024)}})
+                serde_json::json!("A".repeat(24 * 1024))
             }
             4 => {
                 let result = if matches!(case, CompactionCase::Success) {
@@ -227,9 +227,9 @@ fn synthetic_server(
                 } else {
                     "second answer".into()
                 };
-                serde_json::json!({"outcome":{"type":"finish","summary":"second summary","result":result}})
+                serde_json::json!(result)
             }
-            _ => serde_json::json!({"summary":"derived summary"}),
+            _ => serde_json::json!(r#"{"summary":"derived summary"}"#),
         };
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }

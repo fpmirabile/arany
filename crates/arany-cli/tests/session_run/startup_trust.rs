@@ -103,13 +103,13 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
                 assert!(input["workspace_guidance"].is_null());
             }
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
-                    serde_json::json!({"outcome":{"type":"finish","summary":"verified summary","result":"verified answer"}})
+                    serde_json::json!("verified answer")
                 }
             };
             loopback::send_response(&mut stream, index, text);

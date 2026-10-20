@@ -118,11 +118,6 @@ fn outcome_schema() -> Value {
         "type": "object",
         "properties": {"outcome": {"anyOf": [
             {"type": "object", "properties": {
-                "type": {"type": "string", "enum": ["finish"]},
-                "summary": {"type": "string"},
-                "result": {"type": "string"}
-            }, "required": ["type", "summary", "result"], "additionalProperties": false},
-            {"type": "object", "properties": {
                 "type": {"type": "string", "enum": ["delegate"]},
                 "children": {"type": "array", "items": {
                     "type": "object", "properties": {
@@ -549,7 +544,7 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
         .map(|name| json!(name))
         .collect();
     profiles.push(Value::Null);
-    schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"]["properties"]
+    schema["properties"]["outcome"]["anyOf"][0]["properties"]["children"]["items"]["properties"]
         ["profile"]["enum"] = json!(profiles);
     if request.input.role == PromptRole::Primary
         && let Some(tools) = &request.input.tools
@@ -557,10 +552,11 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
         && let Some(agents) = catalog["agents"].as_array()
     {
         let calls = crate::tools::catalog::catalog_call_schemas(&catalog);
-        let contract = crate::tools::catalog::plan_schema(&calls);
+        let contract =
+            crate::tools::catalog::plan_schema(&calls, &crate::session::GoalBudget::default());
         let criterion = contract["properties"]["success_criterion"].clone();
         let items =
-            &mut schema["properties"]["outcome"]["anyOf"][1]["properties"]["children"]["items"];
+            &mut schema["properties"]["outcome"]["anyOf"][0]["properties"]["children"]["items"];
         let mut branches = vec![items.clone()];
         for agent in agents
             .iter()
@@ -608,10 +604,6 @@ fn outcome_schema_for_phases(
     branches.retain(|branch| {
         phases.iter().any(
             |phase| match branch["properties"]["type"]["enum"][0].as_str() {
-                Some("finish") => {
-                    *phase != AgentPhase::RootPlan
-                        || !matches!(collaboration, CollaborationPolicy::Team { .. })
-                }
                 Some("delegate") => {
                     *phase == AgentPhase::RootPlan && collaboration.max_children() > 0
                 }
@@ -693,9 +685,8 @@ impl CompactionResponse {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Finish {
-    pub summary: String,
-    pub result: String,
+pub struct Answer {
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -759,10 +750,18 @@ impl PlanRequest {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewVerdict {
+    Approve,
+    Ask,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProviderOutcome {
     Plan(Box<PlanRequest>),
-    Finish(Finish),
+    Answer(Answer),
+    Review(ReviewVerdict),
     Delegate(Delegate),
     /// Non-empty, in model order; the Engine accepts exactly one per step.
     Tools(Vec<crate::tools::ToolRequest>),
@@ -809,9 +808,8 @@ impl ProviderResponse {
                 .is_some_and(|id| id.contains(secret))
             || self.turn.reflects_secret(secret)
             || match &self.outcome {
-                ProviderOutcome::Finish(value) => {
-                    value.summary.contains(secret) || value.result.contains(secret)
-                }
+                ProviderOutcome::Answer(value) => value.text.contains(secret),
+                ProviderOutcome::Review(_) => false,
                 ProviderOutcome::Delegate(value) => {
                     value
                         .agent
@@ -903,7 +901,7 @@ pub enum ProviderFailureReason {
     ResponseContract,
     OutcomeContract,
     LocalOutputLimit,
-    WorkerFinishDeferred,
+    WorkerAnswerDeferred,
     WorkerDelegateRefused,
     WorkerToolRefused,
     CriterionNotMetInView,
@@ -1270,9 +1268,8 @@ stop_bytes: 0,
         assert!(raw_reflects_secret(b"anything", ""));
 
         let mut response = ProviderResponse {
-            outcome: ProviderOutcome::Finish(Finish {
-                summary: "safe".into(),
-                result: "safe".into(),
+            outcome: ProviderOutcome::Answer(Answer {
+                text: "safe".into(),
             }),
             turn: ProviderTurn::scripted(),
             response_id: Some("safe-id".into()),
@@ -1287,14 +1284,12 @@ stop_bytes: 0,
         response.response_id = Some(format!("id-{secret}"));
         assert!(response.reflects_secret(secret));
         response.response_id = None;
-        response.outcome = ProviderOutcome::Finish(Finish {
-            summary: secret.into(),
-            result: "safe".into(),
+        response.outcome = ProviderOutcome::Answer(Answer {
+            text: "safe".into(),
         });
-        assert!(response.reflects_secret(secret));
-        response.outcome = ProviderOutcome::Finish(Finish {
-            summary: "safe".into(),
-            result: secret.into(),
+        assert!(!response.reflects_secret(secret));
+        response.outcome = ProviderOutcome::Answer(Answer {
+            text: secret.into(),
         });
         assert!(response.reflects_secret(secret));
         response.outcome = ProviderOutcome::Delegate(Delegate {
@@ -1362,9 +1357,8 @@ stop_bytes: 0,
             response.reflects_secret(secret),
             "a Tool call id carries the secret"
         );
-        response.outcome = ProviderOutcome::Finish(Finish {
-            summary: "safe".into(),
-            result: "safe".into(),
+        response.outcome = ProviderOutcome::Answer(Answer {
+            text: "safe".into(),
         });
         response.turn = ProviderTurn::new(
             "openai",
@@ -1498,27 +1492,23 @@ stop_bytes: 0,
     }
 
     #[test]
-    fn outcome_schema_offers_only_finish_and_delegate_by_phase_and_policy() {
+    fn delegation_schema_follows_phase_and_policy() {
         let mut request = request(PromptRole::Primary, AgentPhase::RootPlan, Some(context()));
         for (collaboration, phase, expected) in [
-            (
-                CollaborationPolicy::Single,
-                AgentPhase::RootPlan,
-                vec!["finish"],
-            ),
+            (CollaborationPolicy::Single, AgentPhase::RootPlan, vec![]),
             (
                 CollaborationPolicy::Auto {
                     max_active_children: 0,
                 },
                 AgentPhase::RootPlan,
-                vec!["finish"],
+                vec![],
             ),
             (
                 CollaborationPolicy::Auto {
                     max_active_children: 3,
                 },
                 AgentPhase::RootPlan,
-                vec!["finish", "delegate"],
+                vec!["delegate"],
             ),
             (
                 CollaborationPolicy::Team {
@@ -1532,7 +1522,7 @@ stop_bytes: 0,
                     max_active_children: 3,
                 },
                 AgentPhase::RootSynthesis,
-                vec!["finish"],
+                vec![],
             ),
         ] {
             request.collaboration = collaboration;

@@ -4,7 +4,7 @@ use arany::test_support::{
     scenario::*,
 };
 use arany::{
-    AgentPhase, CollaborationPolicy, Delegate, Engine, EngineConfig, Finish,
+    AgentPhase, Answer, CollaborationPolicy, Delegate, Engine, EngineConfig,
     ProviderCallDisposition, ProviderError, ProviderOutcome, Providers, RunCancellation,
     RunControls, RunHints, StateRoot, Store,
 };
@@ -35,10 +35,7 @@ async fn committed(root: &Path, session: arany::SessionId) -> (SessionView, Vec<
 }
 
 fn finish(text: &str) -> ProviderOutcome {
-    ProviderOutcome::Finish(Finish {
-        summary: text.into(),
-        result: text.into(),
-    })
+    ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
 #[tokio::test]
@@ -65,7 +62,7 @@ async fn fork_title_uses_the_inherited_committed_prefix() {
     run_to_end(&engine, &provider, later).await.unwrap();
     engine.close().await.unwrap();
     let (nested, _) = committed(root.path(), nested_id).await;
-    assert!(render_session(&nested, &[], Output::Text).contains("\nTitle: first\n"));
+    assert!(render_session(&nested, &[], Output::Text).contains("\nTitle: First question\n"));
 }
 
 #[tokio::test]
@@ -122,17 +119,15 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                             profile: None,
                         }],
                     })));
-                    responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                        summary: "child done".into(),
-                        result: "Child result".into(),
+                    responses.push_back(Ok(ProviderOutcome::Answer(Answer {
+                        text: "Child result".into(),
                     })));
                 }
                 responses.push_back(response);
-                if case == "invalid finish" && !cancel {
+                if case == "invalid answer" && !cancel {
                     for _ in 0..2 {
-                        responses.push_back(Ok(ProviderOutcome::Finish(Finish {
-                            summary: String::new(),
-                            result: "Unaccepted result".into(),
+                        responses.push_back(Ok(ProviderOutcome::Answer(Answer {
+                            text: String::new(),
                         })));
                     }
                 }
@@ -186,7 +181,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], 11);
+                        assert_eq!(document["event_version"], 12);
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }
@@ -203,6 +198,7 @@ async fn cancelled_preview_jsonl_includes_committed_checkpoints_and_commentary()
             answer: format!("INCOMPLETE_CANARY:{}", "x".repeat(2300)),
             commentary: vec!["PUBLIC_COMMENTARY_CANARY".into()],
             commentary_limited: false,
+            tentative: false,
         },
         completion: None,
     });

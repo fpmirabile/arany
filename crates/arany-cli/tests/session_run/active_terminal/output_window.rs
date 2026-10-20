@@ -33,17 +33,17 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
                     .any(|part| part == b"OMITTED_CANARY")
             );
             let text = match index {
-                0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+                0 => serde_json::json!("ok"),
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!({"summary":"synthetic summary"}),
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     request_sender.send(()).expect("active Provider gate");
                     response_ready
                         .recv_timeout(Duration::from_secs(10))
                         .expect("response release");
-                    serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"A".repeat(32 * 1024)}})
+                    serde_json::json!("A".repeat(32 * 1024))
                 }
             };
             super::super::loopback::send_response_for(&mut stream, index, text, index != 2);

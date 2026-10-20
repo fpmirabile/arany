@@ -1630,7 +1630,7 @@ fn goal_success_criterion_offers_only_admitted_calls() {
         "skills": [],
         "mcp_servers": []
     }));
-    let property = plan_schema(&calls);
+    let property = plan_schema(&calls, &Default::default());
     let success_calls =
         property["properties"]["success_criterion"]["anyOf"][0]["properties"]["call"]["anyOf"]
             .as_array()
@@ -1671,7 +1671,7 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
         "skills": [],
         "mcp_servers": []
     }));
-    let property = plan_schema(&calls);
+    let property = plan_schema(&calls, &Default::default());
     assert_no_empty_any_of(&property);
     let kinds: Vec<&str> = property["properties"]["success_criterion"]["anyOf"]
         .as_array()

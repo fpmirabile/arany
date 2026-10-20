@@ -6,7 +6,7 @@ use crate::git::{host_git, tree_snapshot};
 use crate::{hash, private_file};
 #[cfg(any(debug_assertions, arany_ci))]
 use arany::{
-    CollaborationPolicy, CompactionRequest, CompactionResponse, Finish, Provider, ProviderError,
+    Answer, CollaborationPolicy, CompactionRequest, CompactionResponse, Provider, ProviderError,
     ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest, RunStatus, SessionView,
     StateRoot, Store, ToolCall, ToolDisposition,
 };
@@ -62,9 +62,8 @@ impl Provider for GitJourney {
                 revision: Some("missing-branch".into()),
                 max_count: 1,
             }),
-            4 => ProviderOutcome::Finish(Finish {
-                summary: "Inspected".into(),
-                result: "Git state observed".into(),
+            4 => ProviderOutcome::Answer(Answer {
+                text: "Git state observed".into(),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
         };

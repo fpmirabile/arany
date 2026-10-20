@@ -226,7 +226,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             run_id: run,
             agent_run_id: primary,
             disposition: AgentDisposition::Finished,
-            summary: Some("Past summary".into()),
+            summary: Some("Past result".into()),
             result: Some("Past result".into()),
         },
         Event::MessageCommitted {
@@ -1069,7 +1069,7 @@ pub(super) async fn native_command_changeset_corpus(
     program: &str,
 ) {
     use arany::{
-        ApprovalMode, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+        Answer, ApprovalMode, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse, RunCancellation, RunHints, RunRequest, StateRoot, Store, ToolApprovals,
     };
     use serde_json::json;
@@ -1123,16 +1123,12 @@ pub(super) async fn native_command_changeset_corpus(
                 return Err(ProviderError::InvalidOutcome);
             }
             let outcome = if review {
-                ProviderOutcome::Finish(Finish {
-                    summary: "Approved exact action".into(),
-                    result: "approve".into(),
-                })
+                ProviderOutcome::Review(arany::ReviewVerdict::Approve)
             } else {
                 self.calls.get(step).cloned().map_or_else(
                     || {
-                        ProviderOutcome::Finish(Finish {
-                            summary: "Observed changeset".into(),
-                            result: "Observed both effect stages.".into(),
+                        ProviderOutcome::Answer(Answer {
+                            text: "Observed both effect stages.".into(),
                         })
                     },
                     |call| {

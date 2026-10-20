@@ -2370,7 +2370,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     disposition: arany::AgentDisposition::Finished,
-                    summary: Some("Observed summary".into()),
+                    summary: Some("Observed answer".into()),
                     result: Some("Observed answer".into()),
                 },
                 Event::MessageCommitted {
@@ -2413,7 +2413,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 .unwrap();
                 assert_eq!(
                     listed[0].title, "Question",
-                    "unfinished primary summary must not supply an AI title"
+                    "an unfinished Run must not change the objective title"
                 );
             }
             let interrupted = view.runs[0].clone();

@@ -729,7 +729,7 @@ mod tests {
         view.runs.last_mut().unwrap().agents[0].summary = Some("Recognizable conversation".into());
         let after = PresentationModel::from_session(&view, 120);
         assert!(after.status_line.starts_with("ready · "));
-        assert!(after.status_line.contains("Recognizable conversation"));
+        assert!(after.status_line.contains("task"));
         assert!(!after.status_line.contains("New Session"));
         assert_eq!(after.draft_action, DraftAction::Submit);
         assert!(after.status_line.contains("openai/gpt-5.4"));
@@ -751,7 +751,7 @@ mod tests {
             assert_eq!(
                 view.conversation_title(),
                 "task",
-                "unaccepted summaries cannot name a conversation"
+                "the first objective names every Run disposition"
             );
         }
         view.runs.last_mut().unwrap().status = RunStatus::Finished;
@@ -946,8 +946,8 @@ mod tests {
                 "Arany refused an operation that was not offered. The proposed action did not run.",
             ),
             (
-                arany::ProposalRefusalCause::FinishInvalid,
-                "Arany refused an invalid Finish answer.",
+                arany::ProposalRefusalCause::AnswerInvalid,
+                "Arany refused an invalid text answer.",
             ),
             (
                 arany::ProposalRefusalCause::DelegateInvalid,
@@ -1014,7 +1014,7 @@ mod tests {
         }
         view.runs[0].failure = None;
         for reason in [
-            arany::ProviderFailureReason::WorkerFinishDeferred,
+            arany::ProviderFailureReason::WorkerAnswerDeferred,
             arany::ProviderFailureReason::WorkerDelegateRefused,
             arany::ProviderFailureReason::WorkerToolRefused,
             arany::ProviderFailureReason::CriterionNotMetInView,

@@ -1,10 +1,11 @@
 use super::*;
+use crate::provider::decode::structured_outcome;
 use crate::provider::test_support::{
     catalog, goal_plan_contract, observed_step, primary_request, read_only_request,
     researcher_request, tool_context,
 };
 use crate::provider::{
-    AgentPhase, CompactionItem, Delegate, Finish, HistoryTurn, UnansweredStatus, render,
+    AgentPhase, Answer, CompactionItem, Delegate, HistoryTurn, UnansweredStatus, render,
 };
 use crate::session::{CollaborationPolicy, RunId, SessionId};
 
@@ -66,8 +67,8 @@ fn reasoning() -> Value {
     json!({"type": "reasoning", "id": "rs_1", "summary": [], "encrypted_content": "CIPHERTEXT=="})
 }
 
-fn finish_text() -> &'static str {
-    r#"{"outcome":{"type":"finish","summary":"done","result":"answer"}}"#
+fn answer_text() -> &'static str {
+    r#"answer"#
 }
 
 fn read_arguments() -> Value {
@@ -77,7 +78,7 @@ fn read_arguments() -> Value {
 fn function_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
-        .unwrap()
+        .map_or(&[][..], Vec::as_slice)
         .iter()
         .map(|function| function["name"].as_str().unwrap().to_owned())
         .collect()
@@ -110,6 +111,28 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
             role_request.input.goal_context_facts = None;
         }
         assert_eq!(body(&role_request)["model"], model);
+        if role == crate::provider::PromptRole::ToolReview {
+            assert_eq!(body(&role_request)["text"]["format"]["type"], "json_schema");
+            role_request.model = MODEL.into();
+            let valid = response("completed", json!([message(r#"{"verdict":"approve"}"#)]));
+            assert!(matches!(
+                decode(&role_request, &valid).unwrap().outcome,
+                ProviderOutcome::Review(crate::provider::ReviewVerdict::Approve)
+            ));
+            for text in [
+                "approve",
+                r#"{"verdict":"allow"}"#,
+                r#"{"verdict":"approve","extra":true}"#,
+            ] {
+                assert!(
+                    decode(
+                        &role_request,
+                        &response("completed", json!([message(text)]))
+                    )
+                    .is_err()
+                );
+            }
+        }
     }
     let request = read_only_request(MODEL);
     let rendered = body(&request);
@@ -130,16 +153,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["truncation"], "disabled");
     assert_eq!(rendered["max_output_tokens"], 4096);
-    assert_eq!(rendered["tools"], json!([]));
-    assert_eq!(rendered["tool_choice"], "none");
-    assert!(rendered.get("include").is_none() && rendered.get("parallel_tool_calls").is_none());
-    assert_eq!(rendered["text"]["format"]["type"], "json_schema");
-    assert_eq!(rendered["text"]["format"]["strict"], true);
-    assert_eq!(rendered["text"]["format"]["schema"]["type"], "object");
-    assert_eq!(
-        rendered["text"]["format"]["schema"]["additionalProperties"],
-        false
-    );
+    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+        assert!(rendered.get(field).is_none(), "{field}");
+    }
+    assert!(rendered.get("text").is_none());
     let instructions = rendered["instructions"].as_str().unwrap();
     assert!(instructions.starts_with(crate::provider::prompts::READ_ONLY_INSTRUCTIONS));
     assert!(instructions.contains("Pinned collaboration policy"));
@@ -165,24 +182,24 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert!(encode_request(&rendered).is_ok());
 
     for (collaboration, planning) in [
-        (CollaborationPolicy::Single, vec!["finish"]),
+        (CollaborationPolicy::Single, vec![]),
         (
             CollaborationPolicy::Auto {
                 max_active_children: 0,
             },
-            vec!["finish"],
+            vec![],
         ),
         (
             CollaborationPolicy::Auto {
                 max_active_children: 3,
             },
-            vec!["finish", "delegate"],
+            vec!["arany_delegate"],
         ),
         (
             CollaborationPolicy::Team {
                 max_active_children: 3,
             },
-            vec!["delegate"],
+            vec!["arany_delegate"],
         ),
     ] {
         for phase in [AgentPhase::RootPlan, AgentPhase::RootSynthesis] {
@@ -190,19 +207,13 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
             scoped.phase = phase;
             scoped.collaboration = collaboration;
             let scoped_body = body(&scoped);
-            let branches: Vec<_> = scoped_body["text"]["format"]["schema"]["properties"]["outcome"]
-                ["anyOf"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|branch| branch["properties"]["type"]["enum"][0].as_str().unwrap())
-                .collect();
+            let branches = function_names(&scoped_body);
             assert_eq!(
                 branches,
                 if phase == AgentPhase::RootPlan {
                     planning.clone()
                 } else {
-                    vec!["finish"]
+                    vec![]
                 }
             );
         }
@@ -210,13 +221,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     let mut child = request.clone();
     child.phase = AgentPhase::ChildWork;
     child.collaboration = CollaborationPolicy::Single;
-    assert_eq!(
-        body(&child)["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
-            .as_array()
-            .unwrap()
-            .len(),
-        1
-    );
+    assert_eq!(function_names(&body(&child)).len(), 0);
 
     let native_body = run_body_for(&request, Some(Effort::Xhigh));
     assert_eq!(native_body["reasoning"]["effort"], "xhigh");
@@ -435,7 +440,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
     assert_eq!(rendered["include"], json!(["reasoning.encrypted_content"]));
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
-    assert_eq!(rendered["tool_choice"]["mode"], "required");
+    assert_eq!(rendered["tool_choice"]["mode"], "auto");
     assert_eq!(rendered["parallel_tool_calls"], false);
     let input = rendered["input"].as_array().unwrap();
     let at = input
@@ -457,7 +462,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 16);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 15);
 }
 
 #[test]
@@ -613,7 +618,7 @@ fn reconcile_keeps_raw_output_items_and_checks_the_typed_view() {
 #[test]
 fn openai_usage_maps_cached_tokens() {
     let request = read_only_request(MODEL);
-    let mut finish = response("completed", json!([message(finish_text())]));
+    let mut finish = response("completed", json!([message(answer_text())]));
     finish["usage"] = json!({
         "input_tokens": 12,
         "output_tokens": 8,
@@ -652,20 +657,14 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
     ));
     let rendered = run_body_for(&request, Some(Effort::Low));
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
-    assert_eq!(rendered["tool_choice"]["mode"], "required");
+    assert_eq!(rendered["tool_choice"]["mode"], "auto");
     assert_eq!(rendered["parallel_tool_calls"], false);
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["max_output_tokens"], 4096);
     assert!(rendered.get("text").is_none());
     assert_eq!(
         function_names(&rendered),
-        [
-            "arany_list",
-            "arany_read",
-            "arany_search",
-            "arany_plan",
-            "arany_finish"
-        ]
+        ["arany_list", "arany_read", "arany_search", "arany_plan"]
     );
     assert!(
         rendered["tools"]
@@ -687,7 +686,6 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "arany_read",
             "arany_search",
             "arany_plan",
-            "arany_finish",
             "arany_delegate"
         ]
     );
@@ -724,14 +722,9 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
                 .any(|tool| tool["name"] == name)
         };
         assert_eq!(
-            allowed(&planning, "arany_finish"),
-            !matches!(policy, CollaborationPolicy::Team { .. })
-        );
-        assert_eq!(
             allowed(&planning, "arany_delegate"),
             policy.max_children() > 0
         );
-        assert!(allowed(&synthesis, "arany_finish"));
         assert!(!allowed(&synthesis, "arany_delegate"));
         let delegate = response(
             "completed",
@@ -745,16 +738,9 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "synthesis cannot delegate from the cached catalog"
         );
         request.phase = AgentPhase::RootPlan;
-        let finish = response(
-            "completed",
-            json!([function_call(
-                "arany_finish",
-                &json!({"summary": "done", "result": "answer"})
-            )]),
-        );
-        assert_eq!(
-            decode(&request, &finish).is_ok(),
-            !matches!(policy, CollaborationPolicy::Team { .. })
+        let answer = response("completed", json!([message("hola!")]));
+        assert!(
+            matches!(decode(&request, &answer).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "hola!")
         );
     }
 
@@ -890,26 +876,30 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
         );
     }
 
-    for (name, arguments) in [
-        ("arany_finish", json!({"summary":"done","result":"applied"})),
-        (
-            "arany_finish",
-            json!({"summary":"done","result":"\"".repeat(12 * 1024)}),
-        ),
-        (
+    let fixture = response(
+        "completed",
+        json!([function_call(
             "arany_delegate",
-            json!({"children":[{"objective":"review supplied data","profile":null}]}),
-        ),
-    ] {
-        let fixture = response("completed", json!([function_call(name, &arguments)]));
-        let decoded = decode(&request, &fixture).unwrap();
-        assert!(!matches!(decoded.outcome, ProviderOutcome::Tools(_)));
-        assert!(decode_streamed(&request, &fixture).is_ok());
-        assert!(
-            decode(&read_only_request(MODEL), &fixture).is_err(),
-            "read-only encoding must not accept functions"
-        );
-    }
+            &json!({"children":[{"objective":"review supplied data","profile":null}]})
+        )]),
+    );
+    assert!(matches!(
+        decode(&request, &fixture).unwrap().outcome,
+        ProviderOutcome::Delegate(_)
+    ));
+    assert!(decode_streamed(&request, &fixture).is_ok());
+    assert!(decode(&read_only_request(MODEL), &fixture).is_err());
+    let commentary = response(
+        "completed",
+        json!([
+            message("Checking the file."),
+            function_call("arany_read", &read_arguments())
+        ]),
+    );
+    assert!(matches!(
+        decode(&request, &commentary).unwrap().outcome,
+        ProviderOutcome::Tools(_)
+    ));
     let read = function_call("arany_read", &read_arguments());
     for (case, output) in [
         ("no output", json!([])),
@@ -1076,21 +1066,10 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
             );
         }
     }
-    for (text, expected) in [
-        ("Pending read result", Stage::OutcomeEncoding),
-        (
-            r#"{"outcome":{"type":"tool","call":{"operation":"read","path":"README.md","limit":4096}}}"#,
-            Stage::OutcomeFields,
-        ),
-    ] {
-        let fixture = json!({"type":"response.completed","response":response("completed", json!([message(text)]))});
-        let bytes = serde_json::to_vec(&fixture).unwrap();
-        assert_eq!(
-            decode_streamed(&read_only_request(MODEL), &fixture["response"]).unwrap_err(),
-            ResponseError::Outcome
-        );
-        assert_eq!(outcome_failure_stage(&bytes, MODEL), expected);
-    }
+    let fixture = response("completed", json!([message("Pending read result")]));
+    assert!(
+        matches!(decode(&read_only_request(MODEL), &fixture).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "Pending read result")
+    );
 }
 
 #[test]
@@ -1098,17 +1077,17 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     let request = read_only_request(MODEL);
     let finish = response(
         "completed",
-        json!([{"type": "reasoning"}, message(finish_text())]),
+        json!([{"type": "reasoning"}, message(answer_text())]),
     );
     let parsed: WireResponse = serde_json::from_value(finish).unwrap();
     let (id, usage, text) = parsed.completed_text(MODEL).unwrap();
     assert_eq!(id, "resp_example");
     assert_eq!(usage.unwrap().output_tokens, 8);
     assert!(matches!(
-        structured_outcome(&text).unwrap(),
-        ProviderOutcome::Finish(Finish { summary, result }) if summary == "done" && result == "answer"
+        ProviderOutcome::Answer(Answer { text }),
+        ProviderOutcome::Answer(Answer { text: result }) if result == "answer"
     ));
-    let finish_response = response("completed", json!([message(finish_text())]));
+    let finish_response = response("completed", json!([message(answer_text())]));
     let accepted = decode(&request, &finish_response).expect("completed Responses result");
     assert_eq!(
         accepted.wire_provenance,
@@ -1120,7 +1099,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         let text = if compaction {
             r#"{"summary":"short"}"#
         } else {
-            finish_text()
+            answer_text()
         };
         let mut final_message = message(text);
         final_message["phase"] = json!("final_answer");
@@ -1128,8 +1107,8 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         commentary["phase"] = json!("commentary");
         let mut segmented = final_message.clone();
         segmented["content"] = json!([
-            {"type":"output_text","text":&text[..10]},
-            {"type":"output_text","text":&text[10..]}
+            {"type":"output_text","text":&text[..text.len()/2]},
+            {"type":"output_text","text":&text[text.len()/2..]}
         ]);
         let mut legacy_segmented = segmented.clone();
         legacy_segmented["phase"] = Value::Null;
@@ -1158,7 +1137,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
                     decode_streamed(&request, &fixture).unwrap(),
                 ] {
                     assert!(
-                        matches!(accepted.outcome, ProviderOutcome::Finish(Finish { result, .. }) if result == "answer")
+                        matches!(accepted.outcome, ProviderOutcome::Answer(Answer { text: result }) if result == "answer")
                     );
                 }
             }
@@ -1229,7 +1208,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         json!({"type":"output_text"}),
         json!({"type":"output_text","text":null}),
     ] {
-        for (compaction, valid) in [(false, finish_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
             let fixture = response(
                 "completed",
                 json!([
@@ -1257,14 +1236,14 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
     );
     for model in ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna"] {
-        let mut fixture = response("completed", json!([message(finish_text())]));
+        let mut fixture = response("completed", json!([message(answer_text())]));
         fixture["model"] = json!(model);
         let mut scoped = request.clone();
         scoped.model = model.into();
         assert!(matches!(
             decode(&scoped, &fixture),
             Ok(ProviderResponse {
-                outcome: ProviderOutcome::Finish(_),
+                outcome: ProviderOutcome::Answer(_),
                 ..
             })
         ));
@@ -1297,7 +1276,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             json!(false),
             json!("invalid"),
         ] {
-            let mut fixture = response("completed", json!([message(finish_text())]));
+            let mut fixture = response("completed", json!([message(answer_text())]));
             fixture[field] = value;
             assert_eq!(
                 decode_streamed(&request, &fixture).unwrap_err(),
@@ -1307,8 +1286,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
         }
     }
     for text in [
-        r#"{"outcome":{"type":"finish","summary":"x"}}"#,
-        r#"{"outcome":{"type":"finish","summary":"x","result":"y","extra":1}}"#,
+        r#"y"#,
         r#"{"outcome":{"type":"delegate","children":[],"result":"x"}}"#,
         r#"{"outcome":{"type":"unknown"}}"#,
         r#"{"outcome":{"type":"tool","call":{"operation":"list","path":"."}}}"#,
@@ -1383,11 +1361,11 @@ fn steering_notes_are_user_input_data_never_instructions() {
 }
 
 #[test]
-fn child_research_request_offers_only_read_only_functions_and_finish() {
+fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion() {
     let request = researcher_request(MODEL);
     let rendered = body(&request);
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
-    assert_eq!(rendered["tool_choice"]["mode"], "required");
+    assert_eq!(rendered["tool_choice"]["mode"], "auto");
     assert_eq!(rendered["parallel_tool_calls"], false);
     assert!(
         rendered["instructions"]
@@ -1402,8 +1380,7 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
             "arany_read",
             "arany_search",
             "arany_skill",
-            "arany_mcp_list",
-            "arany_finish"
+            "arany_mcp_list"
         ]
     );
     assert!(
@@ -1438,12 +1415,9 @@ fn child_research_request_offers_only_read_only_functions_and_finish() {
     assert_eq!(spent_body["instructions"], rendered["instructions"]);
     assert_eq!(spent_body["prompt_cache_key"], rendered["prompt_cache_key"]);
     assert!(decode(&exhausted, &read).is_err());
-    assert_eq!(
-        spent_body["tool_choice"],
-        json!({"type": "allowed_tools", "mode": "required", "tools": [{"type": "function", "name": "arany_finish"}]})
-    );
+    assert_eq!(spent_body["tool_choice"], json!("none"));
     assert_eq!(rendered["tool_choice"]["type"], "allowed_tools");
-    assert_eq!(rendered["tool_choice"]["mode"], "required");
+    assert_eq!(rendered["tool_choice"]["mode"], "auto");
 }
 
 #[test]
@@ -1610,7 +1584,7 @@ fn tool_surface_matches_the_checked_in_snapshot() {
 }
 
 #[test]
-fn assignment_objects_are_shared_by_structured_text_and_native_functions() {
+fn assignment_objects_use_native_functions_with_or_without_effect_tools() {
     let mut request = primary_request(MODEL);
     request.collaboration = CollaborationPolicy::Team {
         max_active_children: 2,
@@ -1643,9 +1617,7 @@ fn assignment_objects_are_shared_by_structured_text_and_native_functions() {
         let mut text_request = request.clone();
         text_request.input.role = crate::PromptRole::ReadOnly;
         text_request.input.tools = None;
-        let outcome = json!({"outcome": {"type": "delegate", "children": arguments["children"]}});
-        let text = response("completed", json!([message(&outcome.to_string())]));
-        assert_eq!(decode(&text_request, &text).is_ok(), valid);
+        assert_eq!(decode(&text_request, &function).is_ok(), valid);
     }
     for field in ["objective", "profile"] {
         let mut child = json!({"objective": "Inspect", "profile": "inspect"});
@@ -1659,4 +1631,21 @@ fn assignment_objects_are_shared_by_structured_text_and_native_functions() {
         );
         assert!(decode(&request, &fixture).is_err());
     }
+}
+
+#[test]
+fn final_answer_message_followed_by_a_call_is_a_contract_failure() {
+    let request = primary_request(MODEL);
+    let mut final_message = message("done");
+    final_message["phase"] = json!("final_answer");
+    let call = function_call("arany_read", &read_arguments());
+    assert!(
+        decode(
+            &request,
+            &response("completed", json!([final_message, call.clone()]))
+        )
+        .is_err()
+    );
+    let phase_less = message("working");
+    assert!(decode(&request, &response("completed", json!([phase_less, call]))).is_ok());
 }

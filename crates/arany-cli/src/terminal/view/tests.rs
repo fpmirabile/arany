@@ -2248,6 +2248,9 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                         assert!(footer.contains("Esc"));
                         if selected == 2 && has_draft {
                             assert!(footer.contains("draft") || footer.contains("Draft"));
+                            if (20..40).contains(&width) {
+                                assert!(footer.contains("Submit draft"));
+                            }
                         } else {
                             assert!(footer.contains("Enter"));
                         }

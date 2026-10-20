@@ -23,7 +23,7 @@ fn final_message_failure_stream(phases: &[Option<&str>]) -> String {
         .map(|phase| {
             serde_json::json!({
                 "type": "message", "role": "assistant", "status": "completed", "phase": phase,
-                "content": [{"type": "output_text", "text": serde_json::json!({"outcome": {"type": "finish", "summary": "safe", "result": FAILURE_BODY_CANARY}}).to_string()}]
+                "content": [{"type": "output_text", "text": serde_json::json!(FAILURE_BODY_CANARY).to_string()}]
             })
         })
         .collect::<Vec<_>>();
@@ -110,16 +110,11 @@ fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
         "id": id,
         "status": "completed",
         "model": "gpt-6.1-sol",
-        "output": [{
-            "type": "message",
-            "role": "assistant",
-            "status": "completed",
-            "content": [{"type": "output_text", "text": text.to_string()}]
-        }],
+        "output": arany::semantic::responses_output(&text),
         "usage": {"input_tokens": 12, "output_tokens": 8}
     });
     if id == "resp_without_check" {
-        let text = text.to_string();
+        let text = text.as_str().expect("plain answer").to_owned();
         let split = text.find(ANSWER).expect("unchecked direct answer") + ANSWER.len() / 2;
         let (first, last) = text.split_at(split);
         response["output"] = serde_json::json!([
@@ -149,7 +144,7 @@ fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
     let output = response["output"].take().as_array().unwrap().clone();
     for (index, mut item) in output.into_iter().enumerate() {
         item["id"] = serde_json::json!(format!("msg_{index}"));
-        if item["phase"].is_null() {
+        if item["type"] == "message" && item["phase"].is_null() {
             item["phase"] = serde_json::json!("final_answer");
         }
         stream.push_str(&format!("event: response.output_item.done\r\ndata: {}\r\n\r\n",
@@ -210,8 +205,8 @@ pub(super) fn respond_after_catalog(
     assert_eq!(direct["stream"], true);
     assert!(direct.get("max_output_tokens").is_none());
     assert!(direct.get("previous_response_id").is_none());
-    assert_eq!(direct["text"]["format"]["name"], "arany_outcome");
-    assert_eq!(direct["text"]["format"]["strict"], true);
+    assert!(direct.get("text").is_none());
+    assert!(direct.get("tool_choice").is_none() && direct.get("tools").is_none());
     let context: serde_json::Value = crate::semantic::input(&direct);
     assert_eq!(
         context,
@@ -226,13 +221,7 @@ pub(super) fn respond_after_catalog(
             "child_results": []
         })
     );
-    send_sse(
-        input,
-        "resp_without_check",
-        serde_json::json!({
-            "outcome": {"type": "finish", "summary": "direct summary", "result": ANSWER}
-        }),
-    );
+    send_sse(input, "resp_without_check", serde_json::json!(ANSWER));
     assert!(checked_request(output, "GET /v1/models").is_none());
     send_json(input, catalog);
     let probes = [
@@ -240,7 +229,7 @@ pub(super) fn respond_after_catalog(
             "resp_check_direct",
             "Synthetic conformance check: finish directly",
             "arany_outcome",
-            serde_json::json!({"outcome": {"type": "finish", "summary": "safe", "result": "done"}}),
+            serde_json::json!("done"),
         ),
         (
             "resp_check_delegate",
@@ -252,19 +241,19 @@ pub(super) fn respond_after_catalog(
             "resp_check_compact",
             "Synthetic conformance question",
             "arany_compaction",
-            serde_json::json!({"summary": "Condensed"}),
+            serde_json::json!(r#"{"summary":"Condensed"}"#),
         ),
         (
             "resp_offline_chatgpt",
             OBJECTIVE,
             "arany_outcome",
-            serde_json::json!({"outcome": {"type": "finish", "summary": "offline summary", "result": ANSWER}}),
+            serde_json::json!(ANSWER),
         ),
         (
             "resp_offline_chatgpt_followup",
             FOLLOWUP_OBJECTIVE,
             "arany_outcome",
-            serde_json::json!({"outcome": {"type": "finish", "summary": "follow-up summary", "result": FOLLOWUP_ANSWER}}),
+            serde_json::json!(FOLLOWUP_ANSWER),
         ),
     ];
     for (index, (id, expected_input, format, outcome)) in probes.into_iter().enumerate() {
@@ -275,7 +264,11 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
-        assert_eq!(body["text"]["format"]["name"], format);
+        if format == "arany_compaction" {
+            assert_eq!(body["text"]["format"]["name"], format);
+        } else {
+            assert!(body.get("text").is_none());
+        }
         let rendered_input = body["input"].to_string();
         let content = rendered_input.as_str();
         assert!(content.contains(expected_input), "wrong probe or Run input");
@@ -283,8 +276,7 @@ pub(super) fn respond_after_catalog(
         assert_eq!(content.contains(FOLLOWUP_OBJECTIVE), index == 4);
         if index >= 3 {
             assert!(!content.contains("Synthetic conformance"));
-            let structured: serde_json::Value =
-                serde_json::from_str(content).expect("structured Run context");
+            let structured = crate::semantic::input(&body);
             assert_eq!(structured["objective"], expected_input);
             assert_eq!(
                 structured["history"],
@@ -308,13 +300,13 @@ pub(super) fn respond_after_catalog(
             "resp_team_child",
             "child_work",
             TEAM_CHILD,
-            serde_json::json!({"outcome": {"type": "finish", "summary": "child summary", "result": TEAM_CHILD_ANSWER}}),
+            serde_json::json!(TEAM_CHILD_ANSWER),
         ),
         (
             "resp_team_synthesis",
             "root_synthesis",
             TEAM_OBJECTIVE,
-            serde_json::json!({"outcome": {"type": "finish", "summary": "team summary", "result": TEAM_ANSWER}}),
+            serde_json::json!(TEAM_ANSWER),
         ),
     ] {
         let body = checked_request(output, "POST /v1/responses").expect("team Responses body");
@@ -324,7 +316,7 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
-        assert_eq!(body["text"]["format"]["name"], "arany_outcome");
+        assert!(body.get("text").is_none());
         let content = body["input"].to_string();
         assert!(!content.contains("Synthetic conformance"));
         let context: serde_json::Value = crate::semantic::input(&body);
@@ -407,23 +399,12 @@ pub(super) fn respond_after_catalog(
         ),
         (
             "ResponseModel",
-            completed(
-                "gpt-6-astra",
-                serde_json::json!({"outcome": {"type": "finish", "summary": "safe", "result": "done"}}),
-            ),
-        ),
-        (
-            "OutcomeFields",
-            completed(
-                "gpt-6.1-sol",
-                serde_json::json!({"outcome": {"type": "finish", "summary": "missing result"}}),
-            ),
+            completed("gpt-6-astra", serde_json::json!("done")),
         ),
     ]
     .into_iter()
     .chain(
-        FINAL_MESSAGE_FAILURES
-            .map(|(stage, phases)| (stage, final_message_failure_stream(phases))),
+        FINAL_MESSAGE_FAILURES.map(|(stage, phases)| (stage, final_message_failure_stream(phases))),
     ) {
         let body =
             checked_request(output, "POST /v1/responses").expect("diagnostic failure request");
@@ -433,10 +414,8 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
-        assert_eq!(body["text"]["format"]["name"], "arany_outcome");
-        assert_eq!(body["text"]["format"]["strict"], true);
-        let context: serde_json::Value =
-            crate::semantic::input(&body);
+        assert!(body.get("text").is_none());
+        let context: serde_json::Value = crate::semantic::input(&body);
         assert_eq!(
             context,
             serde_json::json!({
@@ -810,11 +789,6 @@ pub(super) fn accept_check_and_run(
         (
             "ResponseModel",
             arany::ProviderFailureReason::ResponseContract,
-            2,
-        ),
-        (
-            "OutcomeFields",
-            arany::ProviderFailureReason::OutcomeContract,
             2,
         ),
     ]

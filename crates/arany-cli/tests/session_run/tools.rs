@@ -1,7 +1,7 @@
 use crate::git::{host_git, tree_snapshot};
 use crate::{hash, private_file};
 use arany::{
-    AgentPhase, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse, Finish,
+    AgentPhase, Answer, CollaborationPolicy, CompactionItem, CompactionRequest, CompactionResponse,
     Provider, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, RunRequest,
     RunStatus, SessionView, StateRoot, Store, ToolCall, ToolDisposition,
 };
@@ -155,10 +155,7 @@ impl Provider for Journey {
             13 => {
                 requests.push(request);
                 return Ok(ProviderResponse { turn: arany::ProviderTurn::scripted(),
-                    outcome: ProviderOutcome::Finish(Finish {
-                        summary: "Completed actual tool journey".into(),
-                        result: "Built, tested, loaded Skill and called local MCP.".into(),
-                    }),
+                    outcome: ProviderOutcome::Answer(Answer { text: "Built, tested, loaded Skill and called local MCP.".into() }),
                     response_id: None,
                     usage: arany::Usage {
                         input_tokens: None,
@@ -540,9 +537,8 @@ impl Provider for Proposal {
         let outcome = match (step, &self.call) {
             (0, call) => crate::tool_outcome(call.clone()),
             (1, ToolCall::McpList { .. } | ToolCall::McpCall { .. }) | (2, _) => {
-                ProviderOutcome::Finish(Finish {
-                    summary: "Observed result".into(),
-                    result: "Observed the Tool result without retrying.".into(),
+                ProviderOutcome::Answer(Answer {
+                    text: "Observed the Tool result without retrying.".into(),
                 })
             }
             (1, _) => crate::tool_outcome(ToolCall::Read {
@@ -627,9 +623,8 @@ impl Provider for OverTimeoutCommand {
                 crate::tool_outcome(call)
             }
         } else {
-            ProviderOutcome::Finish(arany::Finish {
-                summary: "The requested command exceeded the pinned timeout".into(),
-                result: "The command was not dispatched".into(),
+            ProviderOutcome::Answer(arany::Answer {
+                text: "The command was not dispatched".into(),
             })
         };
         Ok(ProviderResponse {
@@ -770,9 +765,8 @@ impl Provider for InProcessReads {
             .ok_or(ProviderError::InvalidOutcome)?
             .observation_count();
         let outcome = match step % 3 {
-            _ if step == IN_PROCESS_READS => ProviderOutcome::Finish(Finish {
-                summary: "Inspected the Workspace".into(),
-                result: "Read, listed and searched in process.".into(),
+            _ if step == IN_PROCESS_READS => ProviderOutcome::Answer(Answer {
+                text: "Read, listed and searched in process.".into(),
             }),
             0 => crate::tool_outcome(ToolCall::Read {
                 path: "src/main.c".into(),
@@ -894,7 +888,11 @@ fn assert_goal_provider_request(request: &ProviderRequest, expected_budget: &ara
     assert_eq!(request.phase, AgentPhase::RootPlan);
     assert_eq!(request.collaboration, CollaborationPolicy::Single);
     assert_eq!(request.input.objective, "Guard corpus");
-    assert_eq!(request.input.goal_budget.as_ref(), Some(expected_budget));
+    assert!(
+        request.input.goal_budget.is_none(),
+        "a plain turn sends no budget block"
+    );
+    assert_eq!(&request.input.pinned_budget, expected_budget);
     assert!(request.input.goal_plan_contract.is_none());
     assert!(request.input.tools.is_some());
 }
@@ -1050,9 +1048,8 @@ impl Provider for GoalWorkspaceLease {
         self.requests.lock().unwrap().push(request);
         Ok(ProviderResponse {
             turn: arany::ProviderTurn::scripted(),
-            outcome: ProviderOutcome::Finish(Finish {
-                summary: "The selected task is complete".into(),
-                result: "No Workspace mutation was needed".into(),
+            outcome: ProviderOutcome::Answer(Answer {
+                text: "No Workspace mutation was needed".into(),
             }),
             response_id: None,
             usage: arany::Usage {
@@ -1415,9 +1412,8 @@ impl Provider for BoundedLoop {
                         profile: None,
                     }],
                 }),
-                1 => ProviderOutcome::Finish(Finish {
-                    summary: "Child reasoning".into(),
-                    result: "Read-only child result".into(),
+                1 => ProviderOutcome::Answer(Answer {
+                    text: "Read-only child result".into(),
                 }),
                 2 => crate::tool_outcome(ToolCall::Edit {
                     path: "src/current.txt".into(),
@@ -1438,9 +1434,8 @@ impl Provider for BoundedLoop {
                             .disposition,
                         ToolDisposition::Succeeded
                     );
-                    ProviderOutcome::Finish(Finish {
-                        summary: "Finished team".into(),
-                        result: "Appended 2026-10-06 after the attested Edit; child only reasoned."
+                    ProviderOutcome::Answer(Answer {
+                        text: "Appended 2026-10-06 after the attested Edit; child only reasoned."
                             .into(),
                     })
                 }
@@ -2653,19 +2648,13 @@ impl Provider for ApprovalJourney {
             outcome: if first {
                 crate::tool_outcome(self.call.clone())
             } else {
-                ProviderOutcome::Finish(Finish {
-                    summary: "Synthetic decision".into(),
-                    result: if review {
-                        if self.review == "over-cap" {
-                            "approve"
-                        } else {
-                            self.review
-                        }
-                        .into()
-                    } else {
-                        "Action completed".into()
-                    },
-                })
+                match (review, self.review) {
+                    (true, "ask") => ProviderOutcome::Review(arany::ReviewVerdict::Ask),
+                    (true, _) => ProviderOutcome::Review(arany::ReviewVerdict::Approve),
+                    (false, _) => ProviderOutcome::Answer(Answer {
+                        text: "Action completed".into(),
+                    }),
+                }
             },
             response_id: None,
             usage: arany::Usage {
@@ -2960,9 +2949,8 @@ impl Provider for GitJourney {
                 revision: Some("missing-branch".into()),
                 max_count: 1,
             }),
-            4 => ProviderOutcome::Finish(Finish {
-                summary: "Inspected".into(),
-                result: "Git state observed".into(),
+            4 => ProviderOutcome::Answer(Answer {
+                text: "Git state observed".into(),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
         };

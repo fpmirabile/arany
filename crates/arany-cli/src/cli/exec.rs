@@ -602,7 +602,7 @@ async fn run_signalled(
 mod tests {
     use super::*;
     use arany::{
-        AgentPhase, Finish, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
+        AgentPhase, Answer, ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse,
         RunId, SessionView, Tapped,
     };
     use std::{
@@ -611,7 +611,7 @@ mod tests {
     };
 
     struct Scripted {
-        answers: Arc<Mutex<VecDeque<Result<Finish, ProviderError>>>>,
+        answers: Arc<Mutex<VecDeque<Result<Answer, ProviderError>>>>,
         observed: Arc<Mutex<Vec<ProviderRequest>>>,
     }
 
@@ -638,7 +638,7 @@ mod tests {
                 .expect("one scripted call")?;
             Ok(ProviderResponse {
                 turn: arany::ProviderTurn::scripted(),
-                outcome: ProviderOutcome::Finish(answer),
+                outcome: ProviderOutcome::Answer(answer),
                 response_id: Some("resp_test".into()),
                 usage: arany::Usage {
                     input_tokens: Some(20),
@@ -876,7 +876,7 @@ mod tests {
     }
 
     fn scripted(
-        answer: Result<Finish, ProviderError>,
+        answer: Result<Answer, ProviderError>,
         observed: &Arc<Mutex<Vec<ProviderRequest>>>,
     ) -> Scripted {
         Scripted {
@@ -898,9 +898,8 @@ mod tests {
         )
         .expect("engine");
         let provider = Arc::new(scripted(
-            Ok(Finish {
-                summary: "first summary".into(),
-                result: "first".into(),
+            Ok(Answer {
+                text: "first".into(),
             }),
             &observed,
         ));
@@ -980,9 +979,8 @@ mod tests {
         )
         .expect("engine");
         let provider = Arc::new(scripted(
-            Ok(Finish {
-                summary: "stream summary".into(),
-                result: "stream answer".into(),
+            Ok(Answer {
+                text: "stream answer".into(),
             }),
             &observed,
         ));
@@ -1062,9 +1060,8 @@ mod tests {
             first,
             first_admission,
             Arc::new(scripted(
-                Ok(Finish {
-                    summary: "first summary".into(),
-                    result: "first\u{1b}[31m\nSession: forged".into(),
+                Ok(Answer {
+                    text: "first\u{1b}[31m\nSession: forged".into(),
                 }),
                 &observed,
             )),
@@ -1112,9 +1109,8 @@ mod tests {
             second,
             second_admission,
             Arc::new(scripted(
-                Ok(Finish {
-                    summary: "second summary".into(),
-                    result: "second answer".into(),
+                Ok(Answer {
+                    text: "second answer".into(),
                 }),
                 &observed,
             )),
@@ -1178,7 +1174,7 @@ mod tests {
         );
         assert!(lines[0]["run_id"].is_null());
         assert!(lines[10]["run_id"].is_null());
-        assert!(!second_report.stdout.contains("first summary"));
+        assert!(!second_report.stdout.contains("Session: forged"));
 
         let store = Store::open_read_only(StateRoot::open_existing(&state_dir).expect("state"))
             .expect("second read-only reopen");
@@ -1206,7 +1202,7 @@ mod tests {
                 Some("RunStarted") => 16,
                 Some("AgentSpawned") => 11,
                 Some("AgentFinished") => 10,
-                Some("ProviderCallRecorded") => 11,
+                Some("ProviderCallRecorded") => 12,
                 Some("RunFinished") => 9,
                 Some("GoalProviderCallReserved") => 7,
                 _ => 6,
@@ -1291,9 +1287,8 @@ mod tests {
             new_jsonl,
             jsonl_admission,
             Arc::new(scripted(
-                Ok(Finish {
-                    summary: "JSONL summary".into(),
-                    result: "JSONL answer".into(),
+                Ok(Answer {
+                    text: "JSONL answer".into(),
                 }),
                 &separate_observed,
             )),

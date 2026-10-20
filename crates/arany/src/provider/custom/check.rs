@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v21";
+const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v23";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -92,7 +92,7 @@ async fn probe(
         .run_streamed(&direct, None, Some(preview))
         .await
         .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if !matches!(&direct_response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer))
+    if !matches!(&direct_response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
     {
         return Err(CustomProfileError::ConformanceFailed);
     }
@@ -162,7 +162,7 @@ async fn probe(
             .run_streamed(&selected, Some(*effort), Some(preview))
             .await
             .map_err(|_| CustomProfileError::ConformanceFailed)?;
-        if !matches!(&response.outcome, ProviderOutcome::Finish(value) if !observed.borrow().answer.is_empty() && value.result.starts_with(&observed.borrow().answer))
+        if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
         {
             return Err(CustomProfileError::ConformanceFailed);
         }
@@ -298,7 +298,7 @@ mod tests {
             assert_eq!(body["model"], "model-1");
             assert_eq!(body["store"], false);
             assert_eq!(body["truncation"], "disabled");
-            assert_eq!(body["text"]["format"]["strict"], true);
+            assert_eq!(body.get("text").is_some(), compaction);
             if let Some(delegate) =
                 body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
                     .as_array()
@@ -369,23 +369,23 @@ mod tests {
                 | ProbeReply::InputAtLimit
                 | ProbeReply::InputAboveLimit => {
                     let text = match index {
-                        0 if compaction => json!({"summary":"synthetic summary"}),
+                        0 if compaction => json!(r#"{"summary":"synthetic summary"}"#),
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
-                            json!({"outcome":{"type":"finish","summary":"ok","result":"test-key"}})
+                            json!("test-key")
                         }
                         1 if streaming => {
                             json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
                         _ if streaming && index != 0 => {
-                            json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                            json!("ok")
                         }
                         0 | 3 | 4 => {
-                            json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}})
+                            json!("ok")
                         }
                         1 => {
                             json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
-                        _ => json!({"summary":"synthetic summary"}),
+                        _ => json!(r#"{"summary":"synthetic summary"}"#),
                     };
                     let model = if matches!(reply, ProbeReply::WrongModel) {
                         "drifted-model"
@@ -396,7 +396,7 @@ mod tests {
                         "id": format!("resp_{}", index + 1),
                         "status": "completed",
                         "model": model,
-                        "output": [{"type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text.to_string().replace("test-key", "\\u0074est-key") }]}],
+                        "output": crate::provider::render::semantic::responses_output(&text),
                         "usage": {"input_tokens":20,"output_tokens":10}
                     });
                     if matches!(reply, ProbeReply::MissingUsage) {
@@ -442,11 +442,20 @@ mod tests {
             if streaming && !response_body.is_empty() {
                 let mut response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
                 response["output"][0]["id"] = json!("msg_stream");
-                let text = response["output"][0]["content"][0]["text"].clone();
+                let item = response["output"][0].clone();
+                let mut added = item.clone();
+                added["status"] = json!("in_progress");
+                let delta = if item["type"] == "function_call" {
+                    added["arguments"] = json!("");
+                    json!({"type":"response.function_call_arguments.delta", "item_id":"msg_stream", "output_index":0, "delta":item["arguments"]})
+                } else {
+                    added["content"] = json!([]);
+                    json!({"type":"response.output_text.delta", "item_id":"msg_stream", "output_index":0, "content_index":0, "delta":item["content"][0]["text"]})
+                };
                 let events = [
                     json!({"type":"response.created","response":{"id":response["id"],"model":"model-1"}}),
-                    json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_stream","type":"message","role":"assistant","status":"in_progress","content":[]}}),
-                    json!({"type":"response.output_text.delta","item_id":"msg_stream","output_index":0,"content_index":0,"delta":text}),
+                    json!({"type":"response.output_item.added","output_index":0,"item":added}),
+                    delta,
                     json!({"type":"response.output_item.done","output_index":0,"item":response["output"][0]}),
                     json!({"type":"response.completed","response":response}),
                 ];

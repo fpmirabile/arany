@@ -730,7 +730,7 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
         Cause::NotOffered => {
             "Arany refused an operation that was not offered. The proposed action did not run."
         }
-        Cause::FinishInvalid => "Arany refused an invalid Finish answer.",
+        Cause::AnswerInvalid => "Arany refused an invalid text answer.",
         Cause::DelegateInvalid => {
             "Arany refused an invalid delegation. No children were started for it."
         }
@@ -752,7 +752,7 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
         (
             ProviderCallDisposition::InvalidResponse,
             Some(
-                ProviderFailureReason::WorkerFinishDeferred
+                ProviderFailureReason::WorkerAnswerDeferred
                 | ProviderFailureReason::WorkerDelegateRefused
                 | ProviderFailureReason::WorkerToolRefused
                 | ProviderFailureReason::CriterionNotMetInView,

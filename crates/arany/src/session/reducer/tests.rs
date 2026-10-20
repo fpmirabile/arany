@@ -2288,8 +2288,16 @@ mod goal_replay_tests {
             result: Some("done".into()),
         });
 
+        let mut forged = events.clone();
+        if let Some(Event::AgentFinished { summary, .. }) = forged.last_mut() {
+            *summary = Some("another summary".into());
+        }
+        assert!(
+            SessionView::replay_open(session_id, &journal(session_id, forged)).is_err(),
+            "the summary must be derived from the result"
+        );
         let view = SessionView::replay_open(session_id, &journal(session_id, events))
-            .expect("unknown usage does not block a Finish")
+            .expect("unknown usage does not block an Answer")
             .expect("Session exists");
         assert_eq!(view.runs[0].agents[0].status, AgentStatus::Finished);
     }

@@ -621,7 +621,7 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         ArgumentBytes,
         LeaseOverlap,
         NotOffered,
-        FinishInvalid,
+        AnswerInvalid,
         DelegateInvalid,
     ] {
         for tools_enabled in [false, true] {

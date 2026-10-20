@@ -28,9 +28,8 @@ impl Provider for Gated {
 }
 
 fn finish(result: &str) -> arany::ProviderOutcome {
-    arany::ProviderOutcome::Finish(arany::Finish {
-        summary: "Answer".into(),
-        result: result.into(),
+    arany::ProviderOutcome::Answer(arany::Answer {
+        text: result.into(),
     })
 }
 
@@ -274,7 +273,7 @@ async fn steer_pause_and_resume_without_a_running_turn_or_goal_are_refused() {
             .await;
         assert_eq!(reason(&unloaded), (&json!(-32600), &json!("threadNotLoaded")));
 
-        let turn = wire.start_turn(&thread, "Finish").await;
+        let turn = wire.start_turn(&thread, "Answer").await;
         wire.notification("turn/completed").await;
         for (id, method, params, expected) in [
             (20, "turn/steer", json!({"threadId":thread,"turnId":turn["id"],"input":[{"type":"text","text":"late"}]}), "turnNotActive"),

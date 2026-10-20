@@ -131,9 +131,9 @@ fn semantic_input(stream: &mut std::net::TcpStream) -> serde_json::Value {
 // The provider check consumes three requests: finish, delegate and summary.
 fn answer_provider_check(stream: &mut std::net::TcpStream, index: usize) {
     let text = match index {
-        0 => serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"ok"}}),
+        0 => serde_json::json!("ok"),
         1 => serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-        _ => serde_json::json!({"summary":"synthetic summary"}),
+        _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
     };
     send_response_for(stream, index, text, index < 2);
 }
@@ -208,21 +208,11 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
                     release_child
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release held child");
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
-                        false,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("child result"), false);
                 }
                 _ => {
                     assert_eq!(input["steering_notes"], serde_json::json!([NOTE]));
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
-                        false,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("synthesized"), false);
                 }
             }
         }
@@ -448,24 +438,14 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
                     release_child
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release held child");
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"child result"}}),
-                        false,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("child result"), false);
                 }
                 _ => {
                     assert_eq!(input["steering_notes"], serde_json::json!([expected_note]));
                     release_synthesis
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release held synthesis");
-                    send_response_for(
-                        &mut stream,
-                        index,
-                        serde_json::json!({"outcome":{"type":"finish","summary":"ok","result":"synthesized"}}),
-                        false,
-                    );
+                    send_response_for(&mut stream, index, serde_json::json!("synthesized"), false);
                 }
             }
         }

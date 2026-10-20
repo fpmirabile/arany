@@ -7,7 +7,7 @@ use crate::session::{Event, RunDisposition};
 use crate::{
     engine::{Engine, EngineConfig, RunControls, RunRequest},
     provider::{
-        AgentPhase, Finish, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+        AgentPhase, Answer, Provider, ProviderError, ProviderOutcome, ProviderRequest,
         ProviderResponse,
     },
     session::{CollaborationPolicy, RunStatus, SessionView},
@@ -174,9 +174,8 @@ impl Provider for FastProvider {
         assert!(matches!(request.phase, AgentPhase::RootPlan));
         Ok(ProviderResponse {
             turn: crate::provider::ProviderTurn::scripted(),
-            outcome: ProviderOutcome::Finish(Finish {
-                summary: "done".into(),
-                result: "synthetic answer".into(),
+            outcome: ProviderOutcome::Answer(Answer {
+                text: "synthetic answer".into(),
             }),
             response_id: None,
             usage: crate::provider::Usage {
