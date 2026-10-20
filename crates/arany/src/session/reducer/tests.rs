@@ -6112,6 +6112,60 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn goal_compaction_snapshot_binds_its_primary_tool_across_child_tool_finishes() {
+        let (view, goal, run) = compacting_session();
+        let (primary, child) = (view.runs[0].agents[0].id, AgentRunId::new());
+        let finished =
+            |agent, path| tool_finished(run, agent, &read_intent(run, agent, path), b"x");
+        let mut events = journal(
+            view.id,
+            vec![
+                finished(primary, "src/lib.rs"),
+                finished(child, "notes/a"),
+                finished(primary, "src/main.rs"),
+            ],
+        );
+        let compacted = |digest_through, events: &[EventEnvelope]| {
+            let Event::GoalContextCompacted { mut record, .. } =
+                covering_compaction(&view, goal, run, 2)
+            else {
+                unreachable!()
+            };
+            // The second primary Tool is the Run's third ToolFinished.
+            record.covered_sequence = 3;
+            record.source_digest =
+                crate::session::lineage::prefix_digest(events, digest_through).unwrap();
+            EventEnvelope {
+                sequence: 4,
+                session_id: view.id,
+                run_id: Some(run),
+                agent_run_id: None,
+                event: Event::GoalContextCompacted {
+                    goal_id: goal,
+                    run_id: run,
+                    covered_tool_count: 2,
+                    record,
+                },
+                created_at_ms: 0,
+            }
+        };
+        let valid = compacted(3, &events);
+        let stale = compacted(2, &events);
+        events.push(valid);
+        crate::session::compaction::validate_goal_context_compactions(&events)
+            .expect("a child Tool finish does not shift the covered primary Tool");
+        events.pop();
+        events.push(stale);
+        assert!(
+            matches!(
+                crate::session::compaction::validate_goal_context_compactions(&events),
+                Err(ReplayError::InvalidSnapshot)
+            ),
+            "the digest must cover the journal through the covered Tool"
+        );
+    }
+
+    #[test]
     fn goal_report_cached_tokens_must_match_the_goal_total() {
         let session_id = SessionId::new();
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
