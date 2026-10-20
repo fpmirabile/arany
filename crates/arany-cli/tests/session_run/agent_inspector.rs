@@ -445,9 +445,8 @@ fn inline_inspector(
         &mut transcript,
         &mut answered,
         checkpoint,
-        b"\x1b[?25h",
+        b"Agent ins",
     );
-    thread::sleep(Duration::from_millis(250));
     input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
