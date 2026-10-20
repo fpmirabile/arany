@@ -579,6 +579,71 @@ mod cleanup_tests {
     use std::{sync::mpsc, time::Duration};
 
     #[cfg(unix)]
+    pub(in crate::terminal) fn released_terminal(
+        linear: Option<crate::terminal::linear::LinearState>,
+    ) -> super::super::AttachedTerminal {
+        super::super::AttachedTerminal {
+            waiting_tool: None,
+            terminal: None,
+            parked_terminal: None,
+            mode: super::super::TerminalMode::Classic,
+            classic_pinned: false,
+            alternate: None,
+            transcript_open: false,
+            native: Default::default(),
+            active_run: None,
+            history: Default::default(),
+            classic_history: Default::default(),
+            input: None,
+            _raw_mode: None,
+            mouse_capture: None,
+            bracketed_paste: None,
+            session_picker_area: None,
+            agent_picker_area: None,
+            linear,
+            kept_tools: None,
+            secret_echo: None,
+            agent_panel: None,
+            help_selected: None,
+            clipboard: None,
+            clipboard_paste: None,
+            clipboard_preview: false,
+            shutdown_clipboard_on_drop: true,
+            requested_screen_reader: false,
+            color_enabled: false,
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .unwrap(),
+            suspend: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::from_raw(
+                nix::libc::SIGTSTP,
+            ))
+            .unwrap(),
+            hangup: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).unwrap(),
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .unwrap(),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn written_tool_rows_survive_release_and_reacquisition() {
+        use crate::terminal::linear::LinearState;
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let written = Some((arany::RunId::new(), 3));
+                let mut linear = LinearState::new("screen-reader");
+                linear.keep_written_tools(written);
+                let mut terminal = released_terminal(Some(linear));
+                terminal.release_for_output().unwrap();
+                terminal
+                    .replace_released(released_terminal(Some(LinearState::new("screen-reader"))));
+                assert_eq!(terminal.linear.as_ref().unwrap().written_tools(), written);
+            });
+    }
+
+    #[cfg(unix)]
     struct WarningWriteGate {
         ready: mpsc::SyncSender<()>,
         release: mpsc::Receiver<()>,
@@ -675,51 +740,7 @@ mod cleanup_tests {
                 .build()
                 .unwrap()
                 .block_on(async {
-                    let released = || super::super::AttachedTerminal {
-                        waiting_tool: None,
-                        terminal: None,
-                        parked_terminal: None,
-                        mode: super::super::TerminalMode::Classic,
-                        classic_pinned: false,
-                        alternate: None,
-                        transcript_open: false,
-                        native: Default::default(),
-                        active_run: None,
-                        history: Default::default(),
-                        classic_history: Default::default(),
-                        input: None,
-                        _raw_mode: None,
-                        mouse_capture: None,
-                        bracketed_paste: None,
-                        session_picker_area: None,
-                        agent_picker_area: None,
-                        linear: None,
-                        secret_echo: None,
-                        agent_panel: None,
-                        help_selected: None,
-                        clipboard: None,
-                        clipboard_paste: None,
-                        clipboard_preview: false,
-                        shutdown_clipboard_on_drop: true,
-                        requested_screen_reader: false,
-                        color_enabled: false,
-                        interrupt: tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::interrupt(),
-                        )
-                        .unwrap(),
-                        suspend: tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::from_raw(nix::libc::SIGTSTP),
-                        )
-                        .unwrap(),
-                        hangup: tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::hangup(),
-                        )
-                        .unwrap(),
-                        terminate: tokio::signal::unix::signal(
-                            tokio::signal::unix::SignalKind::terminate(),
-                        )
-                        .unwrap(),
-                    };
+                    let released = || released_terminal(None);
                     let _worker_lock = WORKER.task.lock().unwrap();
                     let mut terminal = released();
                     terminal.release_for_output().unwrap();

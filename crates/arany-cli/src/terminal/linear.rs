@@ -14,6 +14,7 @@ pub(super) struct LinearState {
     mode_label: &'static str,
     announced: bool,
     last_view: Option<(SessionId, u64)>,
+    tools_written: Option<(arany::RunId, usize)>,
     last_unsaved: Option<(SessionDefaults, String)>,
     pub(super) prompt_needed: bool,
     pub(super) last_picker_page: Option<usize>,
@@ -80,6 +81,7 @@ impl LinearState {
             mode_label,
             announced: false,
             last_view: None,
+            tools_written: None,
             last_unsaved: None,
             prompt_needed: true,
             last_picker_page: None,
@@ -150,7 +152,11 @@ impl LinearState {
             }
             let parts = parts
                 .into_iter()
-                .chain(run.tools.iter().map(crate::presentation::tool_detail_text))
+                .chain(run.tools.iter().map(|tool| {
+                    crate::presentation::plain_tool_summary(&crate::presentation::tool_detail_text(
+                        tool,
+                    ))
+                }))
                 .chain(crate::presentation::supervisor_lines(run));
             for text in parts {
                 let text = crate::presentation::escape_terminal(&text);
@@ -239,6 +245,41 @@ impl LinearState {
         }
         for line in user_message_lines(objective, 80) {
             writeln!(writer, "{line}")?;
+        }
+        writer.flush()
+    }
+
+    pub(super) fn written_tools(&self) -> Option<(arany::RunId, usize)> {
+        self.tools_written
+    }
+
+    pub(super) fn keep_written_tools(&mut self, written: Option<(arany::RunId, usize)>) {
+        self.tools_written = written;
+    }
+
+    pub(super) fn write_tools(
+        &mut self,
+        writer: &mut impl Write,
+        run: &arany::RunView,
+    ) -> io::Result<()> {
+        let written = self
+            .tools_written
+            .filter(|(id, _)| *id == run.id)
+            .map_or(0, |(_, count)| count);
+        for (range, summary) in crate::presentation::settled_tool_groups(run) {
+            if range.start >= written {
+                if self.newline_pending || self.line_open {
+                    writeln!(writer)?;
+                    self.newline_pending = false;
+                    self.line_open = false;
+                }
+                writeln!(
+                    writer,
+                    "{}",
+                    crate::presentation::plain_tool_summary(&summary)
+                )?;
+                self.tools_written = Some((run.id, range.end));
+            }
         }
         writer.flush()
     }
@@ -392,6 +433,9 @@ impl LinearState {
                 } else {
                     writeln!(writer, "{line}")?;
                 }
+            }
+            if let Some(run) = view.runs.last() {
+                self.write_tools(writer, run)?;
             }
             self.last_view = Some(identity);
             self.last_unsaved = unsaved;
@@ -779,11 +823,7 @@ mod tests {
         });
         let mut progress = Vec::new();
         linear
-            .write_view(
-                &mut progress,
-                &view,
-                Some("Run in progress... Ctrl+C cancels"),
-            )
+            .write_view(&mut progress, &view, Some("Run is active; Ctrl+C cancels"))
             .expect("committed progress");
         assert_eq!(
             String::from_utf8(progress.clone()).expect("UTF-8 progress"),
@@ -797,7 +837,7 @@ mod tests {
                  Collaboration: auto; max children: 3\n\
                  Run: {run_id}\n\
                  Agent: primary; state: active\n\
-                 Notice: Run in progress... Ctrl+C cancels\n",
+                 Notice: Run is active; Ctrl+C cancels\n",
                 view.id
             )
         );
@@ -910,6 +950,41 @@ mod tests {
             .expect("progress redraw after partial choice");
         assert!(refreshed.starts_with(b"\nCurrent Run:"));
 
+        let read = crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: "a".into(),
+                offset: 0,
+                limit: 100,
+            },
+            r#"{"text":"a\nb\n"}"#,
+        );
+        let mut pending = read.clone();
+        pending.observation = None;
+        view.runs[0].tools = vec![read.clone(), pending];
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        assert!(!String::from_utf8(rows).unwrap().contains("Read("));
+        view.runs[0].tools[1] = read;
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        assert!(!String::from_utf8(rows).unwrap().contains("Read("));
+        view.runs[0].status = RunStatus::Cancelled;
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        let rows = String::from_utf8(rows).unwrap();
+        assert!(rows.ends_with("Read 2 files\nResult: 4 lines\n"));
+        assert!(!rows.contains(['⏺', '⎿', '\r', '\u{1b}']));
+        view.last_sequence += 1;
+        let mut redraw = Vec::new();
+        linear.write_view(&mut redraw, &view, None).unwrap();
+        let redraw = String::from_utf8(redraw).unwrap();
+        assert!(!redraw.contains("Read("));
+        assert!(!redraw.contains(['⏺', '⎿', '\r', '\u{1b}']));
+        view.runs[0].tools.clear();
+        view.runs[0].status = RunStatus::Active;
         view.runs[0].supervisor =
             crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
         let mut linear = LinearState::new("screen-reader");
@@ -928,6 +1003,41 @@ mod tests {
         assert_eq!(inspected.matches("; no action taken").count(), 256);
         assert!(inspected.contains("Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached\n"));
         assert!(!inspected.contains(['\u{1b}', '\r']));
+        let read = crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: "a".into(),
+                offset: 0,
+                limit: 100,
+            },
+            r#"{"text":"a\nb\n"}"#,
+        );
+        let mut pending = read.clone();
+        pending.observation = None;
+        view.runs[0].tools = vec![read.clone(), pending];
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        assert!(!String::from_utf8(rows).unwrap().contains("Read("));
+        view.runs[0].tools[1] = read;
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        assert!(!String::from_utf8(rows).unwrap().contains("Read("));
+        view.runs[0].status = RunStatus::Cancelled;
+        view.last_sequence += 1;
+        let mut rows = Vec::new();
+        linear.write_view(&mut rows, &view, None).unwrap();
+        let rows = String::from_utf8(rows).unwrap();
+        assert!(rows.ends_with("Read 2 files\nResult: 4 lines\n"));
+        assert!(!rows.contains(['⏺', '⎿', '\r', '\u{1b}']));
+        view.last_sequence += 1;
+        let mut redraw = Vec::new();
+        linear.write_view(&mut redraw, &view, None).unwrap();
+        let redraw = String::from_utf8(redraw).unwrap();
+        assert!(!redraw.contains("Read("));
+        assert!(!redraw.contains(['⏺', '⎿', '\r', '\u{1b}']));
+        view.runs[0].tools.clear();
+        view.runs[0].status = RunStatus::Active;
         view.runs[0].supervisor =
             crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 1);
         view.runs = vec![view.runs[0].clone(); 17];

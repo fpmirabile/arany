@@ -36,6 +36,14 @@ pub enum CommandAvailability {
 }
 
 impl InteractiveCommand {
+    pub fn name(self) -> &'static str {
+        COMMANDS
+            .iter()
+            .find(|spec| spec.command == self)
+            .expect("compiled command")
+            .name
+    }
+
     pub fn availability(self, run_active: bool) -> CommandAvailability {
         if !run_active {
             return CommandAvailability::Available;

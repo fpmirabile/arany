@@ -2381,6 +2381,11 @@ fn print_run_answer(
     show: &str,
 ) -> Result<(), String> {
     if terminal.is_linear() {
+        if confirmed.is_some() {
+            terminal
+                .record_tool_rows(&outcome.run)
+                .map_err(|error| error.to_string())?;
+        }
         terminal
             .release_for_output()
             .map_err(|error| error.to_string())?;

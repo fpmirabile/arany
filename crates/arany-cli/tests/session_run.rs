@@ -217,6 +217,10 @@ mod setup;
 #[path = "session_run/loopback.rs"]
 mod loopback;
 
+#[cfg(target_os = "linux")]
+#[path = "session_run/tls_fixture.rs"]
+mod tls_fixture;
+
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 #[path = "session_run/startup_trust.rs"]
 mod startup_trust;

@@ -371,7 +371,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"Notice: Error: Usage: /status\r\n");
             patterns.push(b"Notice: Error: Usage: /help\r\n");
             patterns.push(b"Notice: Error: Usage: /exit\r\n");
-            patterns.push(b"Notice: Provider: custom:local; locked for this run\r\n");
+            patterns.push(b"Notice: Model: model-1");
             patterns.push(b"Notice: Working \xc2\xb7 request ");
             patterns.push(b"\r\n");
         }
@@ -538,7 +538,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     expected
                 );
             }
-            write_input(&input, b"/provider\n");
+            write_input(&input, b"/model\n");
             assert_eq!(
                 stages
                     .recv_timeout(Duration::from_secs(10))
@@ -1028,6 +1028,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(view.runs[0].agents.len(), 1);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
     if expect_typo {
+        assert!(
+            transcript.contains(
+                "/model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
+            )
+        );
         assert_eq!(
             view.defaults,
             arany::SessionDefaults {
@@ -1155,6 +1160,9 @@ mod output_window;
 
 #[path = "active_terminal/broken_stderr.rs"]
 mod broken_stderr;
+
+#[path = "active_terminal/tool_group.rs"]
+mod tool_group;
 
 #[path = "active_terminal/acquisition.rs"]
 mod acquisition;

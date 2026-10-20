@@ -383,6 +383,7 @@ pub struct AttachedTerminal {
     session_picker_area: Option<Rect>,
     agent_picker_area: Option<Rect>,
     linear: Option<LinearState>,
+    kept_tools: Option<(arany::RunId, usize)>,
     #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
@@ -696,6 +697,7 @@ impl AttachedTerminal {
             session_picker_area: None,
             agent_picker_area: None,
             linear: mode_label.map(LinearState::new),
+            kept_tools: None,
             #[cfg(unix)]
             secret_echo: None,
             agent_panel: None,
@@ -908,13 +910,12 @@ impl AttachedTerminal {
                 )?;
                 self.native.objectives.insert(run.id);
             }
-            for (index, tool) in run.tools.iter().enumerate() {
-                if tool.observation.is_some() && !self.native.tools.contains(&(run.id, index)) {
-                    self.insert_native(
-                        history::MessageKind::Tool,
-                        &crate::presentation::tool_summary(tool),
-                    )?;
-                    self.native.tools.insert((run.id, index));
+            for (range, summary) in crate::presentation::settled_tool_groups(run) {
+                if !self.native.tools.contains(&(run.id, range.start)) {
+                    self.insert_native(history::MessageKind::Tool, &summary)?;
+                    for index in range {
+                        self.native.tools.insert((run.id, index));
+                    }
                 }
             }
             if !matches!(
@@ -1400,6 +1401,13 @@ impl AttachedTerminal {
 
     pub fn draw_progress(&mut self, view: &SessionView, notice: &str) -> Result<(), TerminalError> {
         self.draw_progress_with_draft(view, &Composer::default(), notice)
+    }
+
+    pub fn record_tool_rows(&mut self, run: &arany::RunView) -> Result<(), TerminalError> {
+        if let Some(linear) = &mut self.linear {
+            linear.write_tools(&mut io::stderr(), run)?;
+        }
+        Ok(())
     }
 
     pub fn record_user_message(&mut self, objective: &str) -> Result<(), TerminalError> {
@@ -2055,7 +2063,9 @@ impl AttachedTerminal {
         {
             first_error.get_or_insert(error);
         }
-        if self.linear.take().is_some_and(|linear| linear.line_open)
+        let linear = self.linear.take();
+        self.kept_tools = linear.as_ref().and_then(LinearState::written_tools);
+        if linear.is_some_and(|linear| linear.line_open)
             && let Err(error) = writeln!(io::stderr())
         {
             first_error.get_or_insert(error);
@@ -2073,6 +2083,9 @@ impl AttachedTerminal {
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
+        if let Some(new) = &mut replacement.linear {
+            new.keep_written_tools(self.kept_tools);
+        }
         replacement.classic_pinned = self.classic_pinned;
         #[cfg(unix)]
         {
