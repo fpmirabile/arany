@@ -652,6 +652,70 @@ pub(super) fn apply(
             current.reserve_goal_compaction_call(goal_id, run_id)?;
             record_active_ceiling(current_goal_mut(current, *goal_id)?, *active_ceiling_ms);
         }
+        Event::ToolResultsCleared {
+            run_id,
+            covered_tool_count,
+            cleared_bytes,
+        } => {
+            let run = current
+                .runs
+                .last()
+                .filter(|run| run.id == *run_id)
+                .ok_or(ReplayError::InvalidTransition)?;
+            let goal = current
+                .goals
+                .iter()
+                .find(|goal| goal.active_run == Some(*run_id))
+                .ok_or(ReplayError::InvalidTransition)?;
+            let count = *covered_tool_count as usize;
+            let start = run
+                .tool_results_cleared_count
+                .max(run.tool_compaction_covered_count) as usize;
+            let start = start.max(run.initial_tool_count());
+            if run.status != RunStatus::Active
+                || run
+                    .primary()
+                    .is_none_or(|primary| primary.status != AgentStatus::Active)
+                || goal.status != GoalStatus::Running
+                || !goal.unobserved_provider_calls.is_empty()
+                || goal.compaction_call_reserved.is_some()
+                || !run.hooks_settled()
+                || pending_tool_requests(run) != Some(0)
+                || run.tools.iter().any(|tool| tool.observation.is_none())
+                || count <= start
+                || count > run.tools.len().saturating_sub(3)
+                || !ends_whole_step(run, count)
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let mut before = 0_usize;
+            let mut after = 0_usize;
+            for tool in &run.tools[start..count] {
+                let observation = tool
+                    .observation
+                    .as_ref()
+                    .ok_or(ReplayError::InvalidTransition)?;
+                let mut feedback = tool.hook_feedback();
+                for proposal in run.hook_rerun_proposals(Some(tool.intent.digest())) {
+                    if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
+                        <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
+                    {
+                        feedback.push(proposal);
+                    }
+                }
+                before += crate::tools::types::model_result(observation, &feedback)
+                    .to_string()
+                    .len();
+                after += crate::tools::types::cleared_model_result(observation)
+                    .to_string()
+                    .len();
+            }
+            let savings = before.saturating_sub(after);
+            if savings != *cleared_bytes as usize {
+                return Err(ReplayError::InvalidTransition);
+            }
+            active_run(current, *run_id)?.tool_results_cleared_count = *covered_tool_count;
+        }
         Event::GoalContextCompacted {
             goal_id,
             run_id,
@@ -737,9 +801,22 @@ fn ends_whole_step(run: &RunView, covered_count: usize) -> bool {
     let Some(primary) = run.primary() else {
         return false;
     };
+    if covered_count > run.tools.len()
+        || covered_count <= run.initial_tool_count()
+        || run
+            .tools
+            .get(covered_count)
+            .is_some_and(is_integration_tool)
+        || run
+            .tools
+            .get(covered_count - 1)
+            .is_some_and(|tool| tool.narrowed_call().is_some())
+    {
+        return false;
+    }
     let covered = run.tools[run.initial_tool_count()..covered_count]
         .iter()
-        .filter(|tool| !is_integration_tool(tool))
+        .filter(|tool| !is_integration_tool(tool) && tool.narrowed_call().is_none())
         .count();
     let step_ends = primary
         .provider_calls

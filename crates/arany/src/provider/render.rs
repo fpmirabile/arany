@@ -6,7 +6,9 @@ use super::{
     restrict_outcome_schema,
 };
 use crate::session::RunView;
-use crate::tools::types::{MAX_TOOL_CATALOG_BYTES, model_call, model_observation, model_result};
+use crate::tools::types::{
+    MAX_TOOL_CATALOG_BYTES, cleared_model_result, model_call, model_observation, model_result,
+};
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
 use serde_json::{Value, json};
 
@@ -257,18 +259,20 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         if narrowed {
             integrations.push(data_block(
                 "hook_narrowing (untrusted result data)",
-                model_observation(observation),
+                step.model_result(index, observation),
             ));
         } else if matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) {
             integrations.push(data_block(
                 "engine_integration (untrusted result data)",
-                model_observation(observation),
+                step.model_result(index, observation),
             ));
         } else {
             let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
             // The replayed turn already carries the call; the result adds only what was observed.
-            let mut output = model_result(observation, step.feedback(index));
-            if let Some(fields) = output.as_object_mut() {
+            let mut output = step.model_result(index, observation);
+            if !step.cleared
+                && let Some(fields) = output.as_object_mut()
+            {
                 fields.remove("call");
             }
             results.push(Block::ToolResult {
@@ -343,8 +347,10 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         .model_tools()
         .iter()
         .skip((run.tool_compaction_covered_count as usize).saturating_sub(run.initial_tool_count()))
-        .filter(|tool| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
-        .map(|tool| match &tool.observation {
+        .enumerate()
+        .filter(|(_, tool)| !matches!(tool.intent.call, ToolCall::PrepareWorker { .. }))
+        .map(|(index, tool)| match &tool.observation {
+            Some(observation) if index + (run.tool_compaction_covered_count.max(run.initial_tool_count() as u32) as usize) < run.tool_results_cleared_count as usize => cleared_model_result(observation),
             Some(observation) => model_result(observation, &tool.hook_feedback()),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })

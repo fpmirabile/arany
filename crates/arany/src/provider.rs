@@ -27,7 +27,7 @@ pub use routing::{
 };
 mod streaming;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod tool_specs;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{

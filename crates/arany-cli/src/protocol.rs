@@ -67,6 +67,7 @@ event_kinds!(
     GoalProviderCallReserved,
     GoalCompactionCallReserved,
     GoalContextCompacted,
+    ToolResultsCleared,
     GoalSteeringNoteRecorded,
     AssistantDisplayRecorded,
     ToolStarted,

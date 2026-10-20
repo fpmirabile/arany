@@ -222,10 +222,6 @@ pub(in crate::engine) type BoxedStep<'a, T> =
 pub(super) type IntentResult = Result<(ToolObservation, Option<ToolCall>), StopCause>;
 
 impl RunLoop<'_> {
-    #[expect(
-        clippy::too_many_lines,
-        reason = "R1 keeps the step pipeline in journal order"
-    )]
     pub(super) async fn execute_step(
         &self,
         mut grant: Grant<'_>,
@@ -248,6 +244,7 @@ impl RunLoop<'_> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining,
+            cleared: false,
             hook_feedback: Default::default(),
         };
         loop {
@@ -373,21 +370,6 @@ impl RunLoop<'_> {
             }
         }
         grant.context_mut()?.steps.push(step);
-        if let Grant::Primary { request, .. } = &mut grant {
-            match self.compact_tool_context_if_needed(request).await {
-                Ok(()) => {}
-                Err(EngineError::GoalBudgetExhausted) => {
-                    return Ok(StepEnd::Stopped(StopCause::ActiveTime));
-                }
-                Err(EngineError::ContextTooLarge) => {
-                    return Ok(StepEnd::Stopped(StopCause::ContextFull));
-                }
-                Err(error) => return Err(error),
-            }
-            if self.controls.cancellation.is_cancelled() {
-                return Ok(StepEnd::Stopped(StopCause::Cancelled));
-            }
-        }
         if self.hook_requested_stop()? {
             return Ok(StepEnd::Stopped(StopCause::HookStop));
         }
@@ -490,7 +472,10 @@ impl RunLoop<'_> {
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
         } else {
-            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
+            if capacity < MAX_TOOL_RESULT_BYTES {
+                return Ok(Err(SizingRefusal::ContextFull));
+            }
+            MAX_TOOL_RESULT_BYTES as u32
         };
         Ok(Ok(intent))
     }

@@ -1057,6 +1057,7 @@ impl From<&Event> for TraceEventKind {
             | Event::GoalProviderCallReserved { .. }
             | Event::GoalCompactionCallReserved { .. }
             | Event::GoalContextCompacted { .. } => Self::Goal(kind),
+            Event::ToolResultsCleared { .. } => Self::Run(kind),
             Event::MessageAccepted { .. }
             | Event::RunStarted { .. }
             | Event::AgentSpawned { .. }

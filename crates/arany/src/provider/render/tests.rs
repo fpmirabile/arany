@@ -48,6 +48,7 @@ fn step(id: &str, path: &str) -> ToolStep {
         facts: Some(GoalContextFacts::maximum()),
         steering_notes: Vec::new(),
         calls_remaining: None,
+        cleared: false,
         hook_feedback: Default::default(),
     }
 }
@@ -311,6 +312,7 @@ fn delegate_step_carries_child_results_once() {
         facts: None,
         steering_notes: Vec::new(),
         calls_remaining: None,
+        cleared: false,
         hook_feedback: Default::default(),
     }]);
     delegated.phase = AgentPhase::RootSynthesis;
@@ -418,6 +420,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         ],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        tool_results_cleared_count: 0,
         definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
@@ -488,6 +491,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         tools: vec![parse()],
         tool_compaction_summary: None,
         tool_compaction_covered_count: 0,
+        tool_results_cleared_count: 0,
         definitions: Default::default(),
         display: Vec::new(),
         steering_notes: Vec::new(),
@@ -756,4 +760,94 @@ fn invoked_skill_is_untrusted_current_turn_data() {
             .iter()
             .all(|block| !block.text().contains("pinned Skill body"))
     );
+}
+
+#[test]
+fn clearing_keeps_the_pinned_prefix_plan_skill_facts_and_uncertainty() {
+    let mut first = step("first", "old.rs");
+    first.hook_feedback.insert(0, vec!["old hook body".into()]);
+    let mut input = request(vec![first, step("recent", "new.rs")]);
+    input.input.tools.as_mut().unwrap().invoked_skill = Some(observation(
+        ToolCall::Skill {
+            name: "guide".into(),
+            resource: None,
+        },
+        "invoked Skill stays pinned",
+    ));
+    let mut plan_step = step("unused", "unused.rs");
+    plan_step.requests.clear();
+    plan_step.observations.clear();
+    plan_step.plan = Some(crate::provider::PlanRequest {
+        id: ToolUseId::new("plan").unwrap(),
+        contract: crate::provider::test_support::goal_plan_contract(),
+    });
+    input
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .insert(0, plan_step);
+    let before = conversation(&input).unwrap();
+    let tools = input.input.tools.as_mut().unwrap();
+    tools.steps[0].cleared = true;
+    tools.steps[1].cleared = true;
+    let after = conversation(&input).unwrap();
+    assert_eq!(
+        before
+            .system
+            .iter()
+            .map(SystemBlock::text)
+            .collect::<Vec<_>>(),
+        after
+            .system
+            .iter()
+            .map(SystemBlock::text)
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        before.messages[..2],
+        after.messages[..2],
+        "pinned prefix is byte stable"
+    );
+    assert_eq!(
+        before.messages[2..4],
+        after.messages[2..4],
+        "plan stays intact"
+    );
+    assert_eq!(
+        before.messages[6..],
+        after.messages[6..],
+        "recent tail stays intact"
+    );
+    let blocks = step_results(&input.input.tools.as_ref().unwrap().steps[1], &input).unwrap();
+    let Block::ToolResult { output, .. } = &blocks[0] else {
+        panic!("paired result");
+    };
+    assert_eq!(
+        *output,
+        json!({
+            "operation": "Result cleared to save context; call the Tool again for current content",
+            "call": { "operation": "read", "path": "old.rs", "offset": null, "limit": null },
+            "disposition": "succeeded", "effect": "none", "cleared": true,
+        })
+    );
+    let serialized = serde_json::to_string(output).unwrap();
+    assert!(!serialized.contains("result canary"));
+    assert!(!serialized.contains("old hook body"));
+    let mut uncertain = observation(read("uncertain.rs"), "unknown old body");
+    uncertain.disposition = ToolDisposition::Uncertain;
+    let cleared = cleared_model_result(&uncertain);
+    assert_eq!(cleared["execution"], "uncertain; never replay");
+    assert!(!cleared.to_string().contains("unknown old body"));
+    let stable = conversation(&input).unwrap();
+    input
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(step("next", "next.rs"));
+    let next = conversation(&input).unwrap();
+    assert_eq!(stable.messages, next.messages[..stable.messages.len()]);
 }

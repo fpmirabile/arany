@@ -79,6 +79,7 @@ mod goal_recovery_tests {
                 tools: vec![tool],
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -2816,6 +2817,7 @@ mod goal_replay_tests {
                 tools: Vec::new(),
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -3856,6 +3858,7 @@ mod goal_replay_tests {
                 }],
                 tool_compaction_summary: None,
                 tool_compaction_covered_count: 0,
+                tool_results_cleared_count: 0,
                 definitions: Default::default(),
                 display: Vec::new(),
                 steering_notes: Vec::new(),
@@ -4000,6 +4003,7 @@ mod goal_replay_tests {
                     }],
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
+                    tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
@@ -4043,6 +4047,7 @@ mod goal_replay_tests {
                     tools: Vec::new(),
                     tool_compaction_summary: None,
                     tool_compaction_covered_count: 0,
+                    tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
                     steering_notes: Vec::new(),
@@ -5885,6 +5890,69 @@ mod goal_replay_tests {
             view.runs[0].tools.last().unwrap().observation.as_ref(),
             Some(&observation)
         );
+    }
+
+    #[test]
+    fn clearing_rejects_nonmonotone_partial_recent_open_and_forged_boundaries() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        for size in [2, 1, 1, 1, 1] {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, size)).unwrap();
+            for _ in 0..size {
+                let intent = read_intent(run, agent, "src/lib.rs");
+                apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+                apply(
+                    &mut view,
+                    tool_finished(run, agent, &intent, &vec![b'x'; 2048]),
+                )
+                .unwrap();
+            }
+        }
+        let cleared = |count: u32, bytes: u32| Event::ToolResultsCleared {
+            run_id: run,
+            covered_tool_count: count,
+            cleared_bytes: bytes,
+        };
+        let savings = |view: &SessionView, start: usize, end: usize| {
+            let mut before = 0_usize;
+            let mut after = 0_usize;
+            for tool in &view.runs[0].tools[start..end] {
+                let observation = tool.observation.as_ref().unwrap();
+                before += crate::tools::types::model_result(observation, &tool.hook_feedback())
+                    .to_string()
+                    .len();
+                after += crate::tools::types::cleared_model_result(observation)
+                    .to_string()
+                    .len();
+            }
+            u32::try_from(before.saturating_sub(after)).unwrap()
+        };
+        for count in [0, 1, 4, 7] {
+            assert!(
+                rejected(&view, cleared(count, 0)),
+                "invalid clearing boundary {count}"
+            );
+        }
+        let bytes = savings(&view, 0, 2);
+        assert!(
+            rejected(&view, cleared(2, bytes + 1)),
+            "forged byte savings"
+        );
+        let event = cleared(2, bytes);
+        apply(&mut view, event.clone()).expect("whole step leaving at least three recent results");
+        assert_eq!(view.runs[0].tool_results_cleared_count, 2);
+        assert!(rejected(&view, event), "duplicate boundary");
+        assert!(rejected(&view, cleared(1, 0)), "regression");
+        let bytes = savings(&view, 2, 3);
+        apply(&mut view, cleared(3, bytes)).unwrap();
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        assert!(rejected(&view, cleared(4, 0)), "open Provider reservation");
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        let intent = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+        assert!(rejected(&view, cleared(4, 0)), "open Tool");
+        view.runs[0].status = RunStatus::Finished;
+        assert!(rejected(&view, cleared(4, 0)), "closed Run");
     }
 
     #[test]

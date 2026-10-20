@@ -160,6 +160,7 @@ pub(crate) fn observed_step(
         facts: Some(super::GoalContextFacts::maximum()),
         steering_notes: Vec::new(),
         calls_remaining: None,
+        cleared: false,
         hook_feedback: Default::default(),
     }
 }

@@ -385,6 +385,43 @@ impl<'a> RunLoop<'a> {
             if self.pause_at_boundary() {
                 break PrimaryEnd::Stopped(StopCause::Paused);
             }
+            if self.controls.cancellation.is_cancelled() {
+                break PrimaryEnd::Stopped(StopCause::Cancelled);
+            }
+            let reserve = crate::tools::types::MAX_TOOL_RESULT_BYTES + 512;
+            match self
+                .compact_tool_context_if_needed(root_request, reserve)
+                .await
+            {
+                Ok(()) => {}
+                Err(EngineError::GoalBudgetExhausted) => {
+                    break PrimaryEnd::Stopped(StopCause::Budget);
+                }
+                Err(EngineError::ContextTooLarge) => {
+                    break PrimaryEnd::Stopped(StopCause::ContextFull);
+                }
+                Err(error) => return Err(error),
+            }
+            if self.controls.cancellation.is_cancelled() {
+                break PrimaryEnd::Stopped(StopCause::Cancelled);
+            }
+            if self.hook_requested_stop()? {
+                break PrimaryEnd::Stopped(StopCause::HookStop);
+            }
+            if let Some((context, runtime)) =
+                root_request.input.tools.as_ref().zip(self.controls.tools)
+            {
+                match tool_compaction::context_capacity(
+                    context.rendered_len(),
+                    runtime.context_limit_bytes(),
+                    reserve,
+                ) {
+                    tool_compaction::ContextCapacity::Fits => {}
+                    tool_compaction::ContextCapacity::Full => {
+                        break PrimaryEnd::Stopped(StopCause::ContextFull);
+                    }
+                }
+            }
             let (first, active_segment) = match self.invoke_primary(root_request).await {
                 Ok(result) => result,
                 Err(EngineError::GoalBudgetExhausted) => {
@@ -951,9 +988,10 @@ impl<'a> RunLoop<'a> {
             facts: None,
             steering_notes: Vec::new(),
             calls_remaining: None,
+            cleared: false,
             hook_feedback: Default::default(),
         });
-        self.compact_tool_context_if_needed(root).await?;
+
         if root.input.tools.as_ref().is_none_or(|tools| {
             tools.rendered_len()
                 > self

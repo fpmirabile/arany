@@ -2257,3 +2257,37 @@ fn accepted_message_requires_current_nullable_skill() {
         assert!(Event::decode("MessageAccepted", 7, &payload.to_string(), run_id, None).is_err());
     }
 }
+
+#[test]
+fn clearing_event_has_one_strict_current_payload() {
+    let run = RunId::new();
+    let event = Event::ToolResultsCleared {
+        run_id: run,
+        covered_tool_count: 4,
+        cleared_bytes: 1234,
+    };
+    assert_eq!(payload_version(event.kind()), Some(1));
+    let payload = event.payload().unwrap();
+    assert_eq!(
+        Event::decode(event.kind(), 1, &payload, Some(run), None).unwrap(),
+        event
+    );
+    for (version, body, agent) in [
+        (0, payload.clone(), None),
+        (2, payload.clone(), None),
+        (1, payload.clone(), Some(AgentRunId::new())),
+        (1, r#"{"covered_tool_count":4}"#.into(), None),
+        (
+            1,
+            r#"{"covered_tool_count":0,"cleared_bytes":1}"#.into(),
+            None,
+        ),
+        (
+            1,
+            r#"{"covered_tool_count":4,"cleared_bytes":1,"extra":true}"#.into(),
+            None,
+        ),
+    ] {
+        assert!(Event::decode(event.kind(), version, &body, Some(run), agent).is_err());
+    }
+}

@@ -25,7 +25,7 @@ const CANCELLATION_DRAIN: Duration = Duration::from_secs(2);
 const MAX_DELEGATION_DEADLINE: Duration = Duration::from_secs(20 * 60);
 const CHILD_INTENT_RESERVE_BYTES: usize = 4 * 1024;
 // Keep enough room for a full Read page and its metadata before offering child Tools.
-const MIN_CHILD_RESULT_BYTES: usize = 4096 + 512;
+const MIN_CHILD_RESULT_BYTES: usize = crate::tools::types::MAX_TOOL_RESULT_BYTES;
 
 pub(super) struct ChildWork {
     pub(super) agent_run_id: AgentRunId,
@@ -620,6 +620,7 @@ impl RunLoop<'_> {
                 facts: None,
                 steering_notes: Vec::new(),
                 calls_remaining: None,
+                cleared: false,
                 hook_feedback: Default::default(),
             });
         }

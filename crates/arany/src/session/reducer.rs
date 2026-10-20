@@ -266,6 +266,7 @@ pub struct RunView {
     pub tools: Vec<ToolView>,
     pub tool_compaction_summary: Option<String>,
     pub tool_compaction_covered_count: u32,
+    pub tool_results_cleared_count: u32,
     pub definitions: DefinitionCache,
     pub display: Vec<super::events::DisplayChunk>,
     pub steering_notes: Vec<String>,
@@ -1076,6 +1077,7 @@ impl SessionView {
             | Event::GoalProviderCallReserved { .. }
             | Event::GoalCompactionCallReserved { .. }
             | Event::GoalContextCompacted { .. }
+            | Event::ToolResultsCleared { .. }
             | Event::GoalFinished { .. }
             | Event::GoalSteeringNoteRecorded { .. } => {
                 goal::apply(current, &envelope.event, prior)?

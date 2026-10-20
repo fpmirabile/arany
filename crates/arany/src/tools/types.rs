@@ -1065,6 +1065,7 @@ pub struct ToolRequest {
 /// One Provider turn and the observations of the requests it declared, in request order.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolStep {
+    pub cleared: bool,
     pub plan: Option<crate::provider::PlanRequest>,
     pub turn: crate::provider::ProviderTurn,
     /// Empty for a Delegate step.
@@ -1092,6 +1093,14 @@ pub struct ToolContext {
 }
 
 impl ToolStep {
+    pub(crate) fn model_result(&self, index: usize, observation: &ToolObservation) -> Value {
+        if self.cleared {
+            cleared_model_result(observation)
+        } else {
+            model_result(observation, self.feedback(index))
+        }
+    }
+
     pub(crate) fn feedback(&self, index: usize) -> &[String] {
         self.hook_feedback.get(&index).map_or(&[], Vec::as_slice)
     }
@@ -1118,10 +1127,7 @@ impl ToolStep {
                 .iter()
                 .enumerate()
                 .map(|(index, observation)| {
-                    model_result(observation, self.feedback(index))
-                        .to_string()
-                        .len()
-                        + RESULT_ENVELOPE_BYTES
+                    self.model_result(index, observation).to_string().len() + RESULT_ENVELOPE_BYTES
                 })
                 .sum::<usize>()
             + self
@@ -1233,7 +1239,7 @@ impl ToolContext {
                 step.observations
                     .iter()
                     .enumerate()
-                    .map(|(index, observation)| model_result(observation, step.feedback(index)))
+                    .map(|(index, observation)| step.model_result(index, observation))
             })
             .collect()
     }
@@ -1246,6 +1252,29 @@ pub(crate) fn model_call(call: &ToolCall) -> Value {
         } => json!({"operation":"apply_changeset", "changeset": changeset}),
         _ => json!(call),
     }
+}
+
+pub(crate) fn cleared_model_result(observation: &ToolObservation) -> Value {
+    let original = model_observation(observation);
+    let mut value = json!({
+        "operation": "Result cleared to save context; call the Tool again for current content",
+        "call": model_call(&observation.intent.call),
+        "disposition": observation.disposition,
+        "effect": original["workspace_effect"],
+        "cleared": true,
+    });
+    if observation.disposition == ToolDisposition::Uncertain
+        || original["workspace_effect"] == "uncertain"
+    {
+        value["execution"] = json!("uncertain; never replay");
+    }
+    if let Some(target) = original.get("target") {
+        value["target"] = target.clone();
+    }
+    if let Some(effect) = original.get("private_effect") {
+        value["private_effect"] = effect.clone();
+    }
+    value
 }
 
 pub(crate) fn model_result(observation: &ToolObservation, feedback: &[String]) -> Value {
