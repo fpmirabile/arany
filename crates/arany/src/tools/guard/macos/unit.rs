@@ -1255,10 +1255,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         && let Ok(command) =
                             serde_json::from_str::<CommandResult>(&observation.output)
                     {
-                        let captured = crate::tools::fs::command_changeset(
-                            &path.parent().ok_or(ToolError::Path)?.join("workspace"),
-                            before,
-                        )
+                        let captured = if observation.disposition == ToolDisposition::Limit {
+                            Ok(crate::tools::CommandChangeset::default())
+                        } else {
+                            crate::tools::fs::command_changeset(
+                                &path.parent().ok_or(ToolError::Path)?.join("workspace"),
+                                before,
+                            )
+                        }
                         .and_then(|changeset| {
                             let windows = windows.ok_or(ToolError::Operation)?;
                             crate::tools::process::fit_command(
@@ -1279,18 +1283,22 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                                 observation.output = output;
                                 if !observation.valid() {
                                     observation.disposition = ToolDisposition::Limit;
+                                    observation.limit_cause =
+                                        Some(crate::tools::LimitCause::Resource);
                                     observation.enforcement_cause = None;
                                     observation.output =
                                         "Command changeset exceeded its reserved capacity".into();
                                 }
                             }
                             Err(error) => {
-                                let (disposition, _, cause) = crate::tools::dispatch::outcome(
-                                    &observation.intent,
-                                    Err(error),
-                                );
+                                let (disposition, _, cause, limit_cause) =
+                                    crate::tools::dispatch::outcome(
+                                        &observation.intent,
+                                        Err(error),
+                                    );
                                 observation.disposition = disposition;
                                 observation.enforcement_cause = cause;
+                                observation.limit_cause = limit_cause;
                                 observation.output =
                                     "Command changeset could not be captured".into();
                             }

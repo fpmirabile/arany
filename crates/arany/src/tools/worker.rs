@@ -235,6 +235,7 @@ impl Image {
 fn denied(intent: EffectIntent) -> ToolObservation {
     let mut observation = super::unstarted_observation(intent, ToolError::Configuration);
     observation.disposition = ToolDisposition::Denied;
+    observation.limit_cause = None;
     observation
 }
 
@@ -434,7 +435,8 @@ impl View {
             &intent.call,
             intent.limits.result_bytes as usize,
         );
-        let (disposition, output, enforcement_cause) = super::dispatch::outcome(&intent, result);
+        let (disposition, output, enforcement_cause, limit_cause) =
+            super::dispatch::outcome(&intent, result);
         let attestation =
             (disposition == ToolDisposition::Succeeded).then(|| Attestation::WorkerRead {
                 intent_digest: intent.digest(),
@@ -445,6 +447,7 @@ impl View {
             disposition,
             output,
             enforcement_cause,
+            limit_cause,
             attestation,
             cache_update: super::CacheUpdate::NotApplicable,
         }
@@ -1303,6 +1306,8 @@ pub(super) fn capture_paths(grant: &WorkerGrant) -> Vec<String> {
 
 pub(super) fn wire_valid(observation: &ToolObservation, intent: &EffectIntent) -> bool {
     observation.intent == *intent
+        && (observation.limit_cause.is_some()
+            == (observation.disposition == ToolDisposition::Limit))
         && observation.output.len() <= intent.limits.result_bytes as usize
         && (!matches!(intent.call, ToolCall::Command { .. })
             || serde_json::from_str::<WorkerCommandResult>(&observation.output).is_ok_and(
@@ -1539,6 +1544,7 @@ mod tests {
             disposition: ToolDisposition::Succeeded,
             output,
             enforcement_cause: None,
+            limit_cause: None,
             cache_update: super::super::CacheUpdate::NotApplicable,
         };
         view.pending = Some(observation.intent.id);
@@ -1972,6 +1978,7 @@ mod tests {
                     limits: intent.limits.clone(),
                 })),
                 enforcement_cause: None,
+                limit_cause: None,
                 cache_update: super::super::CacheUpdate::Discarded,
             };
             let action = Action {
@@ -2083,6 +2090,7 @@ mod tests {
                     limits: intent.limits.clone(),
                 })),
                 enforcement_cause: None,
+                limit_cause: None,
                 cache_update: super::super::CacheUpdate::Discarded,
             };
             let action = Action {
@@ -2361,8 +2369,17 @@ mod tests {
                 limits: intent.limits.clone(),
             })),
             enforcement_cause: None,
+            limit_cause: None,
             cache_update: super::super::CacheUpdate::NotApplicable,
         };
+        assert!(wire_valid(&observation, &intent));
+        let mut malformed = observation.clone();
+        malformed.limit_cause = Some(super::super::LimitCause::Resource);
+        assert!(!wire_valid(&malformed, &intent));
+        malformed.disposition = ToolDisposition::Limit;
+        assert!(wire_valid(&malformed, &intent));
+        malformed.limit_cause = None;
+        assert!(!wire_valid(&malformed, &intent));
         let mut response = serde_json::to_vec(&observation).unwrap();
         response.push(b'\n');
         write_frame(

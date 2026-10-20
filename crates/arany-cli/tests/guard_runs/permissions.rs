@@ -604,6 +604,10 @@ async fn permission_dispatch_over_maximum_command_timeout_limits_before_deny() {
             arany::ToolDisposition::Limit,
             "{settings}"
         );
+        assert_eq!(
+            tool.observation.as_ref().unwrap().limit_cause,
+            Some(arany::LimitCause::RequestedTime)
+        );
     }
 }
 
@@ -613,7 +617,7 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
     fixture.command_maximum = Some(1_000);
     let call = arany::ToolCall::Command {
         program: "sh".into(),
-        args: vec!["-c".into(), "sleep 20".into()],
+        args: vec!["-c".into(), "printf 'head\\n'; printf '%100000s' ''; printf 'tail\\n'; printf 'partial error\\n' >&2; printf changed > notes/new.txt; sleep 20".into()],
         cwd: "".into(),
     };
     let mut plan = plan(&call);
@@ -640,6 +644,29 @@ async fn a_one_second_command_timeout_is_admitted_and_ends_as_a_limit() {
         observation.attestation,
         Some(arany::Attestation::Guard(_))
     ));
+    assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+    let command: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+    assert_eq!(command["exit_code"], Value::Null);
+    assert!(command["changeset"]["files"].as_array().unwrap().is_empty());
+    assert!(
+        command["stdout"].as_str().unwrap().starts_with("head\n")
+            && command["stdout"].as_str().unwrap().ends_with("tail\n")
+    );
+    assert!(
+        command["stdout"]
+            .as_str()
+            .unwrap()
+            .contains(" lines omitted; ")
+    );
+    assert_eq!(command["stdout_total"]["bytes"], 100010);
+    assert_eq!(command["stderr"], "partial error\n");
+    assert!(observation.output.len() <= observation.intent.limits.result_bytes as usize);
+    assert!(!fixture.workspace.join("notes/new.txt").exists());
+    let expected = observation.clone();
+    let (events, view) = fixture.reopen(result.session_id).await;
+    assert_eq!(view.runs[0].tools[0].observation.as_ref(), Some(&expected));
+    assert!(events.iter().any(|envelope| matches!(&envelope.event,
+        Event::ToolFinished { observation, .. } if observation == &expected)));
 }
 
 #[tokio::test]
@@ -693,13 +720,10 @@ async fn guarded_command_over_its_timeout_with_a_background_child_is_a_limit_and
     );
     let tool = &result.run.tools[0];
     let observation = tool.observation.as_ref().unwrap();
-    assert_eq!(
-        (observation.disposition, observation.output.as_str()),
-        (
-            arany::ToolDisposition::Limit,
-            "Tool result or resource limit reached"
-        )
-    );
+    assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
+    let partial: Value = serde_json::from_str(&observation.output).unwrap();
+    assert!(partial["changeset"]["files"].as_array().unwrap().is_empty());
     assert!(matches!(
         observation.attestation,
         Some(arany::Attestation::Guard(_))

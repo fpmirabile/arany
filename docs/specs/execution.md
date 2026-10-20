@@ -159,7 +159,7 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 16 |
-| `ToolFinished` | 18 |
+| `ToolFinished` | 19 |
 | `ToolStarted` | 13 |
 | `AgentSpawned` | 11 |
 | `AgentFinished` | 10 |
@@ -171,7 +171,7 @@ Persist only SQLite schema 4, compaction compiler version 3 and one current payl
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `WorkerHandoverRecorded` | 2 |
 | `HookStarted` | 3 |
-| `HookFinished` | 7 |
+| `HookFinished` | 8 |
 | All other supported Event kinds | 6 |
 
 The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.

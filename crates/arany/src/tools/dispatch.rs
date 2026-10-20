@@ -1,6 +1,6 @@
 use super::catalog::Family;
 use super::guard::GuardContext;
-use super::types::{EffectIntent, EnforcementCause, ToolCall, ToolDisposition};
+use super::types::{EffectIntent, EnforcementCause, LimitCause, ToolCall, ToolDisposition};
 use super::{ToolError, fs, git, mcp, process, skills};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
@@ -49,7 +49,21 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
 pub(super) fn outcome(
     intent: &EffectIntent,
     result: Result<String, ToolError>,
-) -> (ToolDisposition, String, Option<EnforcementCause>) {
+) -> (
+    ToolDisposition,
+    String,
+    Option<EnforcementCause>,
+    Option<LimitCause>,
+) {
+    let limit_cause = match &result {
+        Ok(output) if output.len() > intent.limits.result_bytes as usize => {
+            Some(LimitCause::Resource)
+        }
+        Err(ToolError::Limit) => Some(LimitCause::Resource),
+        Err(ToolError::OutputCeiling) => Some(LimitCause::OutputCeiling),
+        Err(ToolError::Timeout(_)) => Some(LimitCause::Timeout),
+        _ => None,
+    };
     let cause = match &result {
         Err(ToolError::FilesystemDenied) => Some(EnforcementCause::FilesystemDenied),
         _ => None,
@@ -66,6 +80,14 @@ pub(super) fn outcome(
         Ok(_) | Err(ToolError::Limit) => (
             ToolDisposition::Limit,
             "Tool result or resource limit reached".into(),
+        ),
+        Err(ToolError::Timeout(output)) => (
+            ToolDisposition::Limit,
+            if output.is_empty() {
+                "Tool runtime expired".into()
+            } else {
+                output
+            },
         ),
         Err(ToolError::OutputCeiling) => (
             ToolDisposition::Limit,
@@ -110,5 +132,5 @@ pub(super) fn outcome(
             "Tool operation failed; no automatic retry".into(),
         ),
     };
-    (disposition, output, cause)
+    (disposition, output, cause, limit_cause)
 }

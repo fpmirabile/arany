@@ -84,7 +84,7 @@ impl HookFold {
                 (NotDispatched::HookDenied(HookDenial::ActiveTime), None)
             }
             (HookStop::ActiveTime, DispatchSite::Researcher) => (
-                NotDispatched::DelegationDeadline,
+                NotDispatched::HookDenied(HookDenial::DelegationDeadline),
                 Some(StopCause::DelegationDeadline),
             ),
             (HookStop::Uncertain, _) => (

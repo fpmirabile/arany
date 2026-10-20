@@ -573,6 +573,7 @@ mod tests {
             agent_run_id: Default::default(),
             observation: crate::tools::ToolObservation {
                 enforcement_cause: None,
+                limit_cause: None,
                 intent: crate::tools::EffectIntent {
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),

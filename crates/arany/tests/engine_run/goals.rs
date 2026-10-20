@@ -4750,6 +4750,7 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     let tool = &view.runs[0].agents[1].tools[0];
     let observation = tool.observation.as_ref().expect("deadline observation");
     assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
     assert_eq!(
         observation.output,
         "Delegation deadline reached; no operation was dispatched"

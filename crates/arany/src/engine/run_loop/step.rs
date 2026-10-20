@@ -794,6 +794,7 @@ impl RunLoop<'_> {
                     };
                     if timed_out && observation.disposition == ToolDisposition::Cancelled {
                         observation.disposition = ToolDisposition::Limit;
+                        observation.limit_cause = Some(crate::tools::LimitCause::Timeout);
                     }
                     Answer {
                         checkpoint: None,
@@ -1984,6 +1985,7 @@ impl From<AdmissionRefusal> for StopCause {
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum HookDenial {
     ActiveTime,
+    DelegationDeadline,
     Uncertain,
     Requested,
     Narrowed(String),
@@ -2293,16 +2295,32 @@ fn refusal_cause(paused: bool, cancelled: bool, deadline_reached: bool) -> StopC
 }
 
 fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservation {
+    // Every other Limit here, including a hook's delegation deadline, stays a Resource limit.
+    let timed = match reason {
+        NotDispatched::TimeoutLimit { .. } => Some(crate::tools::LimitCause::RequestedTime),
+        NotDispatched::DelegationDeadline => Some(crate::tools::LimitCause::Timeout),
+        NotDispatched::HookDenied(_)
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::ModeDenied
+        | NotDispatched::HumanOnlyUnavailable
+        | NotDispatched::HookFailureAfterClassify
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::UnguardedNeedsHuman
+        | NotDispatched::ApprovalRefused => None,
+    };
     let (disposition, output) = match reason {
         NotDispatched::TimeoutLimit { requested, maximum } => (
             ToolDisposition::Limit,
             crate::tools::types::command_timeout_limit_message(*requested, *maximum),
         ),
         NotDispatched::ActiveTime => (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
-        NotDispatched::DelegationDeadline => (
-            ToolDisposition::Limit,
-            "Delegation deadline reached; no operation was dispatched".into(),
-        ),
+        NotDispatched::DelegationDeadline => (ToolDisposition::Limit, DELEGATION_DEADLINE.into()),
         NotDispatched::TokenBudget => (
             ToolDisposition::Limit,
             "Goal token budget exhausted; no operation was dispatched".into(),
@@ -2361,15 +2379,23 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             "Approval was not granted; no operation was dispatched".into(),
         ),
     };
-    undispatched(intent, disposition, output)
+    let mut observation = undispatched(intent, disposition, output);
+    if timed.is_some() {
+        observation.limit_cause = timed;
+    }
+    observation
 }
 
+const DELEGATION_DEADLINE: &str = "Delegation deadline reached; no operation was dispatched";
 const ACTIVE_TIME_EXHAUSTED: &str =
     "Goal active-time budget exhausted; no operation was dispatched";
 
 fn hook_denial(intent: &EffectIntent, denial: &HookDenial) -> (ToolDisposition, String) {
     let output = match denial {
         HookDenial::ActiveTime => return (ToolDisposition::Limit, ACTIVE_TIME_EXHAUSTED.into()),
+        HookDenial::DelegationDeadline => {
+            return (ToolDisposition::Limit, DELEGATION_DEADLINE.into());
+        }
         HookDenial::Uncertain => "Hook outcome uncertain; no operation was dispatched".into(),
         HookDenial::Requested => "Hook stopped this Run; no operation was dispatched".into(),
         HookDenial::Narrowed(name) => format!("Hook narrowed this Tool to: {name}"),
@@ -2399,6 +2425,8 @@ fn undispatched(
 ) -> ToolObservation {
     ToolObservation {
         enforcement_cause: None,
+        limit_cause: (disposition == ToolDisposition::Limit)
+            .then_some(crate::tools::LimitCause::Resource),
         intent,
         disposition,
         output: output.into(),
@@ -3052,7 +3080,7 @@ mod tests {
             (decide(Primary, deny(S::Hook), &stopped, &[], None), None, no(N::HookDenied(HookDenial::Requested), Some(StopCause::HookStop)), deny_, S::Hook),
             (decide(Researcher, deny(S::Hook), &uncertain, &[], None), None, no(N::HookDenied(HookDenial::Uncertain), Some(StopCause::Uncertain)), deny_, S::Hook),
             (decide(Primary, asks(Request), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), ask_, S::UnavailableApproval),
-            (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::DelegationDeadline, Some(StopCause::DelegationDeadline)), allow_, S::Rule),
+            (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::DelegationDeadline), Some(StopCause::DelegationDeadline)), allow_, S::Rule),
             (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Primary, allow(S::ExactCommandRule), &none, &[LateHookFailure], None), None, no(N::HookFailureAfterClassify, None), allow_, S::ExactCommandRule),
