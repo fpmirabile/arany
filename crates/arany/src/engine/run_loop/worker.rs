@@ -1,5 +1,6 @@
 use super::children::ChildWork;
 use super::step::{BoxedStep, Grant, intent_observation};
+use super::stop::StopCause;
 use super::{Action, RunLoop};
 use crate::engine::EngineError;
 use crate::provider::{ChildAssignment, ProviderRequest};
@@ -29,13 +30,13 @@ pub(super) struct WorkerFacts {
     pub(super) worker_stop: bool,
     // A settled hook stop requested by this editor.
     pub(super) actor_hook_stop: bool,
-    // A hook stop by this editor is journaled, settled or not.
-    pub(super) actor_hook_journaled: bool,
     // The wave is torn down by an abort.
     pub(super) torn_down: bool,
     pub(super) cancel_requested: bool,
     pub(super) paused: bool,
     pub(super) hook_stop: bool,
+    // The stop the editor's last private Tool step returned.
+    pub(super) step_stop: Option<StopCause>,
 }
 
 #[must_use]
@@ -64,18 +65,24 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         )
     } else if facts.actor_hook_stop {
         (WorkerDisposition::Failed, WorkerCause::StoppedByHook)
-    } else if facts.torn_down || facts.cancel_requested || facts.paused || facts.hook_stop {
-        (WorkerDisposition::Cancelled, WorkerCause::Cancelled)
     } else {
+        let cause = if facts.torn_down || facts.cancel_requested || facts.paused || facts.hook_stop
+        {
+            WorkerCause::Cancelled
+        } else if facts.criterion_unverified {
+            WorkerCause::CriterionUnverified
+        } else if facts.worker_stop {
+            WorkerCause::Budget
+        } else {
+            facts.step_stop.map_or(failure, step_cause)
+        };
         (
-            WorkerDisposition::Failed,
-            if facts.criterion_unverified {
-                WorkerCause::CriterionUnverified
-            } else if facts.worker_stop {
-                WorkerCause::Budget
+            if cause == WorkerCause::Cancelled {
+                WorkerDisposition::Cancelled
             } else {
-                failure
+                WorkerDisposition::Failed
             },
+            cause,
         )
     };
     let agent = if facts.actor_hook_stop {
@@ -84,8 +91,6 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         AgentDisposition::Finished
     } else if worker == WorkerDisposition::Cancelled {
         AgentDisposition::Cancelled
-    } else if facts.actor_hook_journaled {
-        AgentDisposition::StoppedByHook
     } else {
         AgentDisposition::Failed
     };
@@ -93,6 +98,21 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         agent,
         worker,
         cause,
+    }
+}
+
+fn step_cause(stop: StopCause) -> WorkerCause {
+    match stop {
+        StopCause::Cancelled | StopCause::Paused | StopCause::HookStop => WorkerCause::Cancelled,
+        StopCause::ActiveTime | StopCause::Budget => WorkerCause::Budget,
+        StopCause::InvalidCommandResult => WorkerCause::InvalidOutcome,
+        // Context overflow and a delegation-deadline Limit keep `tool_failed` (execution spec).
+        StopCause::Uncertain
+        | StopCause::Capacity
+        | StopCause::ContextFull
+        | StopCause::DelegationDeadline
+        | StopCause::Refused(_)
+        | StopCause::ToolStopped => WorkerCause::ToolFailed,
     }
 }
 
@@ -836,8 +856,9 @@ impl RunLoop<'_> {
         deadline: tokio::time::Instant,
         torn_down: bool,
         failure: WorkerCause,
+        step_stop: Option<StopCause>,
     ) -> BoxedStep<'a, CompletedWorker> {
-        Box::pin(self.complete_worker_inner(child, answer, deadline, torn_down, failure))
+        Box::pin(self.complete_worker_inner(child, answer, deadline, torn_down, failure, step_stop))
     }
 
     pub(super) fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
@@ -863,6 +884,7 @@ impl RunLoop<'_> {
         deadline: tokio::time::Instant,
         torn_down: bool,
         failure: WorkerCause,
+        step_stop: Option<StopCause>,
     ) -> Result<CompletedWorker, EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
@@ -939,13 +961,11 @@ impl RunLoop<'_> {
                 criterion_unverified,
                 worker_stop: stopped,
                 actor_hook_stop: self.actor_hook_requested_stop(id)?,
-                actor_hook_journaled: self
-                    .ledger()
-                    .view(|v| v.runs.last().is_some_and(|r| r.actor_stopped_by_hook(id)))?,
                 torn_down,
                 cancel_requested: self.controls.cancellation.is_cancelled(),
                 paused: self.pause_requested(),
                 hook_stop: self.hook_requested_stop()?,
+                step_stop,
             },
         );
         let disposition = terminal.worker;
@@ -1524,10 +1544,7 @@ mod terminal_tests {
             ),
             (
                 C::ToolFailed,
-                with(|f| {
-                    f.hook_stop = true;
-                    f.actor_hook_journaled = true;
-                }),
+                with(|f| f.hook_stop = true),
                 A::Cancelled,
                 W::Cancelled,
                 C::Cancelled,
@@ -1551,10 +1568,133 @@ mod terminal_tests {
             ),
             (
                 C::InvalidOutcome,
-                with(|f| f.actor_hook_journaled = true),
-                A::StoppedByHook,
+                WorkerFacts::default(),
+                A::Failed,
                 W::Failed,
                 C::InvalidOutcome,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::Cancelled)),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::Paused)),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::HookStop)),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.step_stop = Some(StopCause::HookStop);
+                    f.actor_hook_stop = true;
+                }),
+                A::StoppedByHook,
+                W::Failed,
+                C::StoppedByHook,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::InvalidCommandResult)),
+                A::Failed,
+                W::Failed,
+                C::InvalidOutcome,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::ActiveTime)),
+                A::Failed,
+                W::Failed,
+                C::Budget,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::Budget)),
+                A::Failed,
+                W::Failed,
+                C::Budget,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::DelegationDeadline)),
+                A::Failed,
+                W::Failed,
+                C::ToolFailed,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::ContextFull)),
+                A::Failed,
+                W::Failed,
+                C::ToolFailed,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::ToolStopped)),
+                A::Failed,
+                W::Failed,
+                C::ToolFailed,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| f.step_stop = Some(StopCause::Capacity)),
+                A::Failed,
+                W::Failed,
+                C::ToolFailed,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.step_stop = Some(StopCause::InvalidCommandResult);
+                    f.worker_stop = true;
+                }),
+                A::Failed,
+                W::Failed,
+                C::Budget,
+            ),
+            (
+                C::ToolFailed,
+                with(|f| {
+                    f.step_stop = Some(StopCause::Uncertain);
+                    f.private_uncertain = true;
+                }),
+                A::Failed,
+                W::PrivateUncertain,
+                C::PrivateUncertain,
+            ),
+            (
+                C::Budget,
+                WorkerFacts::default(),
+                A::Failed,
+                W::Failed,
+                C::Budget,
+            ),
+            (
+                C::TurnLimit,
+                with(|f| f.hook_stop = true),
+                A::Cancelled,
+                W::Cancelled,
+                C::Cancelled,
+            ),
+            (
+                C::TurnLimit,
+                with(|f| {
+                    f.actor_hook_stop = true;
+                }),
+                A::StoppedByHook,
+                W::Failed,
+                C::StoppedByHook,
             ),
         ];
         for (index, (failure, facts, agent, worker, cause)) in rows.into_iter().enumerate() {
