@@ -6587,7 +6587,9 @@ async fn window_run(window: Option<u32>, reads: usize, reports: &[(usize, u32)])
         provider = provider.with_input_tokens_at(index, tokens);
     }
     if let Some(window) = window {
-        provider = provider.with_context_window(window);
+        provider = provider
+            .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+            .with_context_window(window);
     }
     let provider = Arc::new(provider);
     let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
@@ -6705,6 +6707,17 @@ async fn catalog_window_resizes_the_allowance_and_reported_pressure_clears_befor
         store.close().await.unwrap();
         let provider = Arc::new(
             ScriptedProvider::new(vec![finish_with("Checked the saved facts")])
+                .with_chatgpt_account(
+                    pressure.view.runs[0]
+                        .config
+                        .as_ref()
+                        .unwrap()
+                        .chatgpt_provenance
+                        .as_ref()
+                        .unwrap()
+                        .account_id,
+                    [7; 32],
+                )
                 .with_context_window(272_000),
         );
         let engine = facts_engine(StateRoot::open_existing(&crash_path).unwrap(), &crash_path);
@@ -6789,11 +6802,15 @@ async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "facts\n");
         let state_path = temp.path().join("state");
+        let account = Uuid::now_v7();
         let primary = Arc::new(
-            ScriptedProvider::new(vec![finish_with("Answered")]).with_context_window(272_000),
+            ScriptedProvider::new(vec![finish_with("Answered")])
+                .with_chatgpt_account(account, [7; 32])
+                .with_context_window(272_000),
         );
-        let mut backup =
-            ScriptedProvider::new(Vec::new()).with_profile("scripted", "fallback-model");
+        let mut backup = ScriptedProvider::new(Vec::new())
+            .with_chatgpt_account(account, [8; 32])
+            .with_profile("chatgpt", "fallback-model");
         if let Some(window) = fallback {
             backup = backup.with_context_window(window);
         }

@@ -772,32 +772,6 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        for (provider, window, budget, valid) in [
-            ("chatgpt-like", None, 376 * 1024, true),
-            ("chatgpt-like", None, 376 * 1024 + 1, false),
-            ("chatgpt-like", Some(272_000), 734_400, true),
-            ("chatgpt-like", Some(272_000), 734_401, false),
-            ("chatgpt-like", Some(2_000_000), 1024 * 1024, true),
-            ("chatgpt-like", Some(2_000_001), 64 * 1024, false),
-            ("chatgpt-like", Some(32_767), 64 * 1024, false),
-            ("openai", Some(272_000), 64 * 1024, false),
-            ("anthropic", Some(272_000), 64 * 1024, false),
-        ] {
-            let mut pinned = ordinary.clone();
-            pinned.provider = provider.into();
-            pinned.context_window_tokens = window;
-            pinned.context_usage = Some(ContextUsage {
-                used_bytes: 0,
-                budget_bytes: budget,
-                compactable_bytes: 0,
-                tool_history_bytes: 0,
-            });
-            assert_eq!(
-                pinned.validate().is_ok(),
-                valid,
-                "{provider} {window:?} {budget}"
-            );
-        }
         assert_eq!(payload_version("RunStarted"), Some(17));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(13));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
@@ -868,6 +842,61 @@ mod account_default_tests {
         assert!(config.validate().is_err());
         config.provider_concurrency = 1;
         assert!(config.validate().is_ok());
+        for (provider, window, budget, valid) in [
+            ("chatgpt-like", None, 376 * 1024, true),
+            ("chatgpt-like", None, 376 * 1024 + 1, false),
+            ("chatgpt", Some(272_000), 734_400, true),
+            ("chatgpt", Some(272_000), 734_401, false),
+            ("chatgpt", Some(2_000_000), 1024 * 1024, true),
+            ("chatgpt", Some(2_000_001), 64 * 1024, false),
+            ("chatgpt", Some(32_767), 64 * 1024, false),
+            ("chatgpt-like", Some(272_000), 64 * 1024, false),
+            ("openai", Some(272_000), 64 * 1024, false),
+            ("anthropic", Some(272_000), 64 * 1024, false),
+        ] {
+            let mut pinned = if provider == "chatgpt" {
+                config.clone()
+            } else {
+                ordinary.clone()
+            };
+            pinned.provider = provider.into();
+            pinned.context_window_tokens = window;
+            pinned.context_usage = Some(ContextUsage {
+                used_bytes: 0,
+                budget_bytes: budget,
+                compactable_bytes: 0,
+                tool_history_bytes: 0,
+            });
+            assert_eq!(
+                pinned.validate().is_ok(),
+                valid,
+                "{provider} {window:?} {budget}"
+            );
+        }
+        let mut fallback = config.identity().unwrap();
+        fallback.model = "fallback-model".into();
+        let mut custom = ordinary.identity().unwrap();
+        custom.profile = "custom:fallback".into();
+        custom.provenance =
+            crate::provider::Provenance::Custom(crate::provider::CustomProfileProvenance {
+                endpoint: "https://example.invalid/v1".into(),
+                evidence_digest: [1; 32],
+                capability_evidence_version: 2,
+            });
+        for (fallback, window_valid) in [
+            (fallback, true),
+            (ordinary.identity().unwrap(), false),
+            (custom, false),
+        ] {
+            let mut pinned = config.clone();
+            pinned.providers = Some(crate::provider::Providers::all(vec![
+                config.identity().unwrap(),
+                fallback,
+            ]));
+            assert!(pinned.validate().is_ok(), "no window: {pinned:?}");
+            pinned.context_window_tokens = Some(272_000);
+            assert_eq!(pinned.validate().is_ok(), window_valid, "{pinned:?}");
+        }
         let encoded = serde_json::to_value(&config).unwrap();
         assert_eq!(encoded["output_token_bound"], "local_acceptance_only");
         assert_eq!(encoded["chatgpt_provenance"]["evidence_fingerprint"][0], 7);

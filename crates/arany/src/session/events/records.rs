@@ -172,7 +172,13 @@ impl RunConfig {
         self.context_window_tokens.is_none_or(|tokens| {
             crate::provider::admitted_context_window(u64::from(tokens)).is_some()
                 && self.custom_profile_provenance.is_none()
-                && !matches!(self.provider.as_str(), "openai" | "anthropic")
+                && self.chatgpt_provenance.is_some()
+                && self.providers.as_ref().is_none_or(|providers| {
+                    providers
+                        .primary
+                        .iter()
+                        .all(|identity| identity.chatgpt_provenance().is_some())
+                })
         }) && self
             .context_usage
             .as_ref()
