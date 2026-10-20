@@ -530,20 +530,21 @@ fn subscription_body(
     if request.input.role != PromptRole::ToolReview {
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let allowed = wire::allowed_functions(request, tools, &conversation.outcome);
-        let functions = body
-            .get_mut("tools")
-            .and_then(Value::as_array_mut)
-            .ok_or(ProviderError::Rejected)?;
-        functions.retain(|function| {
-            function["name"]
-                .as_str()
-                .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
-        });
-        body["tool_choice"] = if allowed.is_empty() {
-            json!("none")
-        } else {
-            json!("auto")
-        };
+        if let Some(functions) = body.get_mut("tools").and_then(Value::as_array_mut) {
+            functions.retain(|function| {
+                function["name"]
+                    .as_str()
+                    .is_some_and(|name| allowed.iter().any(|allowed| allowed == name))
+            });
+            if functions.is_empty() {
+                let fields = body.as_object_mut().ok_or(ProviderError::Rejected)?;
+                for key in ["tools", "tool_choice", "parallel_tool_calls"] {
+                    fields.remove(key);
+                }
+            } else {
+                body["tool_choice"] = json!("auto");
+            }
+        }
     }
     // The ChatGPT route is stateless, so replayed items drop their server ids and keep their content.
     for item in body["input"].as_array_mut().into_iter().flatten() {

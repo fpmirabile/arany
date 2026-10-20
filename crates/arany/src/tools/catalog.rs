@@ -365,9 +365,9 @@ fn goal_success_call_schema(calls: &[Value]) -> Option<Value> {
 
 fn plan_contract_schema(call_schema: Option<&Value>) -> Value {
     let path = "Workspace-relative file path, at most 512 bytes; paths must cover it.";
-    let calls = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling."});
-    let tokens = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling."});
-    let active_ms = json!({"type":["integer","null"], "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling."});
+    let calls = json!({"type":["integer","null"], "description": "Positive integer, at most 64 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no provider-call ceiling."});
+    let tokens = json!({"type":["integer","null"], "description": "Positive integer within the Goal token ceiling; null when the Goal sets none, which is the default."});
+    let active_ms = json!({"type":["integer","null"], "description": "Positive integer of milliseconds, at most 1800000 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no active-time ceiling."});
     let mut criteria = Vec::with_capacity(3);
     if let Some(call_schema) = call_schema {
         criteria.push(json!({
@@ -433,7 +433,7 @@ fn plan_contract_schema(call_schema: Option<&Value>) -> Value {
                     "max_provider_calls": calls,
                     "max_tokens": tokens,
                     "max_active_ms": active_ms,
-                    "max_runs": {"type":"integer", "description": "Integer 1 through goal_budget.max_runs inclusive."}
+                    "max_runs": {"type":"integer", "description": "Integer 1 through 16 unless the user raised the ceiling in settings."}
                 },
                 "required":["max_provider_calls","max_tokens","max_active_ms","max_runs"],
                 "additionalProperties":false

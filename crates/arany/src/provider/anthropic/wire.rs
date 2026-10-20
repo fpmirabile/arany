@@ -16,6 +16,7 @@ use serde_json::{Value, json};
 const ADAPTER: &str = "anthropic";
 const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const MAX_CONTENT_BLOCKS: usize = 16;
+const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
 pub(super) struct MessageStream<'a> {
     framer: crate::provider::streaming::SseFramer,
@@ -65,9 +66,19 @@ impl<'a> MessageStream<'a> {
     }
 
     fn publish_preview(&mut self, fragment: &str) {
-        if !self.preview_failed {
-            self.preview_failed = self.result.feed(fragment, self.secret).is_err();
+        if self.preview_failed {
+            return;
         }
+        self.preview_failed = match self.result.feed(fragment, self.secret) {
+            Ok(visible) => self
+                .preview
+                .publish(crate::provider::PreviewText {
+                    answer: visible.to_owned(),
+                    ..Default::default()
+                })
+                .is_err(),
+            Err(_) => true,
+        };
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
@@ -434,14 +445,17 @@ pub(crate) fn run_body(
         .is_some_and(ToolContext::answer_only);
     if request.input.role != crate::provider::PromptRole::ToolReview {
         let tools = conversation.tools.as_deref().unwrap_or_default();
-        body["tools"] = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
+        let specs: Vec<Value> = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
             .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
             .collect();
-        body["tool_choice"] = if exhausted || body["tools"].as_array().is_none_or(Vec::is_empty) {
-            json!({"type": "none"})
-        } else {
-            json!({"type": "auto", "disable_parallel_tool_use": true})
-        };
+        if !specs.is_empty() {
+            body["tools"] = Value::Array(specs);
+            body["tool_choice"] = if exhausted {
+                json!({"type": "none"})
+            } else {
+                json!({"type": "auto", "disable_parallel_tool_use": true})
+            };
+        }
     }
     cache_breakpoints(&mut body, conversation.tools.is_some() && !exhausted);
     Ok(body)
@@ -469,22 +483,37 @@ fn cache_breakpoints(body: &mut Value, cache_tail: bool) {
 }
 
 fn messages(conversation: &Conversation) -> Result<Vec<Value>, ProviderError> {
+    let mut unanswered: Vec<String> = Vec::new();
     conversation
         .messages
         .iter()
         .map(|message| match message.role {
-            Role::User => Ok(json!({
-                "role": "user",
-                "content": message.blocks.iter().map(user_blocks).collect::<Result<Vec<_>, _>>()?.concat(),
-            })),
+            Role::User => {
+                let mut content = Vec::new();
+                for id in std::mem::take(&mut unanswered) {
+                    let answered = message.blocks.iter().any(
+                        |block| matches!(block, Block::ToolResult { id: result, .. } if result.as_str() == id),
+                    );
+                    if !answered {
+                        content.push(json!({"type": "tool_result", "tool_use_id": id, "content": DELEGATED_OUTPUT}));
+                    }
+                }
+                for block in &message.blocks {
+                    content.extend(user_blocks(block)?);
+                }
+                Ok(json!({"role": "user", "content": content}))
+            }
             Role::Assistant => {
                 let [Block::AssistantTurn(turn)] = message.blocks.as_slice() else {
                     return Err(ProviderError::Rejected);
                 };
-                Ok(json!({
-                    "role": "assistant",
-                    "content": turn.items(ADAPTER).ok_or(ProviderError::Rejected)?,
-                }))
+                let items = turn.items(ADAPTER).ok_or(ProviderError::Rejected)?;
+                unanswered = items
+                    .iter()
+                    .filter(|item| item["type"] == "tool_use")
+                    .filter_map(|item| item["id"].as_str().map(str::to_owned))
+                    .collect();
+                Ok(json!({"role": "assistant", "content": items}))
             }
         })
         .collect()

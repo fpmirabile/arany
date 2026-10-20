@@ -464,25 +464,25 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling.",
+                "description": "Positive integer of milliseconds, at most 1800000 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no active-time ceiling.",
                 "type": [
                   "integer",
                   "null"
                 ]
               },
               "max_provider_calls": {
-                "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling.",
+                "description": "Positive integer, at most 64 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no provider-call ceiling.",
                 "type": [
                   "integer",
                   "null"
                 ]
               },
               "max_runs": {
-                "description": "Integer 1 through goal_budget.max_runs inclusive.",
+                "description": "Integer 1 through 16 unless the user raised the ceiling in settings.",
                 "type": "integer"
               },
               "max_tokens": {
-                "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling.",
+                "description": "Positive integer within the Goal token ceiling; null when the Goal sets none, which is the default.",
                 "type": [
                   "integer",
                   "null"
@@ -959,25 +959,25 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer within goal_budget.max_active_ms; null only when the pinned Goal budget sets no active-time ceiling.",
+                "description": "Positive integer of milliseconds, at most 1800000 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no active-time ceiling.",
                 "type": [
                   "integer",
                   "null"
                 ]
               },
               "max_provider_calls": {
-                "description": "Positive integer within goal_budget.max_provider_calls; null only when the pinned Goal budget sets no provider-call ceiling.",
+                "description": "Positive integer, at most 64 unless the user raised the ceiling in settings; prefer a lower value that fits the task. null only when the Goal has no provider-call ceiling.",
                 "type": [
                   "integer",
                   "null"
                 ]
               },
               "max_runs": {
-                "description": "Integer 1 through goal_budget.max_runs inclusive.",
+                "description": "Integer 1 through 16 unless the user raised the ceiling in settings.",
                 "type": "integer"
               },
               "max_tokens": {
-                "description": "Positive integer within goal_budget.max_tokens; null only when the pinned Goal budget sets no token ceiling.",
+                "description": "Positive integer within the Goal token ceiling; null when the Goal sets none, which is the default.",
                 "type": [
                   "integer",
                   "null"

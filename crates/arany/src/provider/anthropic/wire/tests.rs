@@ -69,7 +69,7 @@ fn read_input() -> Value {
 fn tool_names(body: &Value) -> Vec<&str> {
     body["tools"]
         .as_array()
-        .unwrap()
+        .map_or(&[][..], Vec::as_slice)
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect()
@@ -194,7 +194,9 @@ fn outbound_tool_choice_is_auto_without_parallel() {
     assert_eq!(tool_body["output_config"]["effort"], "low");
     assert_eq!(outcome_types(&tool_body), [] as [&str; 0]);
     let plain = body(&read_only_request(MODEL), Effort::Low);
-    assert!(plain["tools"] == json!([]) && plain["tool_choice"]["type"] == "none");
+    for field in ["tools", "tool_choice"] {
+        assert!(plain.get(field).is_none(), "{field}");
+    }
     assert_eq!(plain.to_string().matches("\"cache_control\":").count(), 1);
 }
 
@@ -656,9 +658,10 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
             );
             role_request.model = MODEL.into();
             let valid = response("end_turn", json!([text_block(r#"{"verdict":"approve"}"#)]));
-            assert!(
-                matches!(decode(&role_request, &valid).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "approve")
-            );
+            assert!(matches!(
+                decode(&role_request, &valid).unwrap().outcome,
+                ProviderOutcome::Review(crate::provider::ReviewVerdict::Approve)
+            ));
             for text in [
                 "approve",
                 r#"{"verdict":"allow"}"#,
@@ -1530,5 +1533,99 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
             )
             .is_err()
         );
+    }
+}
+
+#[test]
+fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
+    let mut request = primary_request(MODEL);
+    request.collaboration = CollaborationPolicy::Auto {
+        max_active_children: 2,
+    };
+    let reply = response(
+        "tool_use",
+        json!([tool_use(
+            "delegate_1",
+            "arany_delegate",
+            json!({"children":[{"objective":"inspect","profile":null}], "agent":null})
+        )]),
+    );
+    let delegated = decode(&request, &reply).unwrap();
+    request.phase = AgentPhase::RootSynthesis;
+    request.input.child_results = vec![crate::provider::ChildResult {
+        objective: "inspect".into(),
+        summary: "s".into(),
+        result: "child canary".into(),
+    }];
+    request
+        .input
+        .tools
+        .as_mut()
+        .unwrap()
+        .steps
+        .push(crate::tools::ToolStep {
+            plan: None,
+            turn: delegated.turn,
+            requests: Vec::new(),
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+            hook_feedback: Default::default(),
+        });
+    let messages = body(&request, Effort::Low)["messages"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let call = messages
+        .iter()
+        .position(|message| message["content"][0]["type"] == "tool_use")
+        .expect("replayed delegate");
+    assert_eq!(
+        messages[call + 1]["content"][0],
+        json!({"type": "tool_result", "tool_use_id": "delegate_1", "content": DELEGATED_OUTPUT})
+    );
+    assert!(
+        messages[call + 1]["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("child canary")
+    );
+}
+
+#[test]
+fn answer_text_streams_and_is_withdrawn_when_a_call_follows() {
+    use crate::provider::ResponsePreview;
+    for (stop_reason, block, answer, commentary) in [
+        ("end_turn", None, "Hola there", Vec::<String>::new()),
+        (
+            "tool_use",
+            Some(json!({"type":"tool_use","id":"toolu_1","name":"arany_read","input":{}})),
+            "",
+            vec!["Hola there".to_owned()],
+        ),
+    ] {
+        let mut events = vec![
+            message_start(),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hola "}}),
+        ];
+        let (publisher, observed) = ResponsePreview::new();
+        let mut decoder = MessageStream::new(KEY, "model-1", publisher);
+        decoder.feed(sse(&events).as_bytes()).unwrap();
+        assert_eq!(observed.borrow().answer, "Hola ");
+        events = vec![
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"there"}}),
+            json!({"type":"content_block_stop","index":0}),
+        ];
+        if let Some(block) = block {
+            events.push(json!({"type":"content_block_start","index":1,"content_block":block}));
+            events.push(json!({"type":"content_block_stop","index":1}));
+        }
+        events.push(json!({"type":"message_delta","delta":{"stop_reason":stop_reason,"stop_sequence":null},"usage":{"output_tokens":8}}));
+        events.push(json!({"type":"message_stop"}));
+        decoder.feed(sse(&events).as_bytes()).unwrap();
+        assert_eq!(observed.borrow().answer, answer);
+        assert_eq!(observed.borrow().commentary, commentary);
     }
 }

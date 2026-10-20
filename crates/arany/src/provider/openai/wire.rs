@@ -349,22 +349,25 @@ fn run_body_inner(
     if request.input.role != crate::provider::PromptRole::ToolReview {
         body.as_object_mut().expect("request object").remove("text");
         let tools = conversation.tools.as_deref().unwrap_or_default();
-        body["tools"] = tools
+        let functions: Vec<Value> = tools
             .iter()
             .cloned()
             .chain(outcome_specs(&crate::provider::run_outcome_schema(request)))
             .map(function_json)
             .collect();
-        let allowed = allowed_functions(request, tools, &conversation.outcome);
-        body["tool_choice"] = if allowed.is_empty() {
-            json!("none")
-        } else {
-            json!({
-                "type": "allowed_tools", "mode": "auto",
-                "tools": allowed.into_iter().map(|name| json!({"type":"function", "name":name})).collect::<Vec<_>>()
-            })
-        };
-        body["parallel_tool_calls"] = json!(false);
+        if !functions.is_empty() {
+            body["tools"] = Value::Array(functions);
+            let allowed = allowed_functions(request, tools, &conversation.outcome);
+            body["tool_choice"] = if allowed.is_empty() {
+                json!("none")
+            } else {
+                json!({
+                    "type": "allowed_tools", "mode": "auto",
+                    "tools": allowed.into_iter().map(|name| json!({"type":"function", "name":name})).collect::<Vec<_>>()
+                })
+            };
+            body["parallel_tool_calls"] = json!(false);
+        }
         body["include"] = json!(["reasoning.encrypted_content"]);
     }
     Ok(body)
@@ -476,8 +479,6 @@ fn response_body(
         "max_output_tokens": max_output_tokens,
         "store": false,
         "truncation": "disabled",
-        "tools": [],
-        "tool_choice": "none",
         "text": {"format": {"type": "json_schema", "name": schema_name, "strict": true, "schema": schema}},
     });
     if let Some(effort) = effort {

@@ -29,8 +29,9 @@ impl ResponsePreview {
 
     pub fn publish(&self, text: PreviewText) -> Result<(), ProviderError> {
         let prior = self.sender.borrow();
+        let withdrawn = text.answer.is_empty() && !prior.answer.is_empty();
         if text.answer.len() > MAX_DISPLAY_TEXT_BYTES
-            || !text.answer.starts_with(&prior.answer)
+            || !(withdrawn || text.answer.starts_with(&prior.answer))
             || text.commentary.len() > MAX_DISPLAY_COMMENTARY_ITEMS
             || text.commentary.iter().map(String::len).sum::<usize>() > MAX_DISPLAY_TEXT_BYTES
             || text.commentary.len() < prior.commentary.len()
@@ -239,6 +240,15 @@ pub(super) struct ResponsesPreview<'a> {
     publisher: ResponsePreview,
     done: std::collections::BTreeMap<usize, Value>,
     started: std::collections::HashMap<String, (usize, String, bool)>,
+    live: Option<LiveAnswer>,
+}
+
+// Text that may precede a function call streams as the answer candidate and is withdrawn at completion if a call follows.
+struct LiveAnswer {
+    item_id: String,
+    decoder: TextDecoder,
+    visible: String,
+    failed: bool,
 }
 
 impl<'a> ResponsesPreview<'a> {
@@ -249,6 +259,7 @@ impl<'a> ResponsesPreview<'a> {
             publisher,
             done: Default::default(),
             started: Default::default(),
+            live: None,
         }
     }
 
@@ -290,6 +301,14 @@ impl<'a> ResponsesPreview<'a> {
                 }
                 self.started
                     .insert(id.to_owned(), (index, kind.to_owned(), false));
+                if kind == "message" && item["phase"] != "commentary" && self.live.is_none() {
+                    self.live = Some(LiveAnswer {
+                        item_id: id.to_owned(),
+                        decoder: TextDecoder::new(),
+                        visible: String::new(),
+                        failed: false,
+                    });
+                }
             }
             Some("response.output_text.delta" | "response.function_call_arguments.delta") => {
                 let id = value["item_id"]
@@ -306,6 +325,24 @@ impl<'a> ResponsesPreview<'a> {
                     || !value["delta"].is_string()
                 {
                     return Err(ProviderError::InvalidStream);
+                }
+                if !function
+                    && let Some(live) = self.live.as_mut().filter(|live| live.item_id == id)
+                    && !live.failed
+                {
+                    let fragment = value["delta"].as_str().unwrap_or_default();
+                    match live.decoder.feed(fragment, self.secret) {
+                        Ok(visible) if visible.len() > live.visible.len() => {
+                            live.visible = visible.to_owned();
+                            let streamed = PreviewText {
+                                answer: live.visible.clone(),
+                                ..Default::default()
+                            };
+                            live.failed = self.publisher.publish(streamed).is_err();
+                        }
+                        Ok(_) => {}
+                        Err(_) => live.failed = true,
+                    }
                 }
             }
             Some("response.output_item.done") => {
@@ -367,8 +404,10 @@ impl<'a> ResponsesPreview<'a> {
                         } else {
                             preview.commentary_limited = true;
                         }
-                    } else {
+                    } else if text.len() <= MAX_DISPLAY_TEXT_BYTES {
                         preview.answer = text;
+                    } else if let Some(live) = &self.live {
+                        preview.answer.clone_from(&live.visible);
                     }
                 }
                 self.publisher.publish(preview)?;

@@ -1312,11 +1312,13 @@ fn chatgpt_uses_auto_with_phase_specific_functions() {
         assert_eq!(value[field], active[field], "{field}");
     }
     assert_eq!(value["prompt_cache_key"], researcher.session_id.to_string());
-    assert_eq!(value["tool_choice"], "none");
+    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+        assert!(value.get(field).is_none(), "{field}");
+    }
     let names = |body: &Value| {
         body["tools"]
             .as_array()
-            .unwrap()
+            .map_or(&[][..], Vec::as_slice)
             .iter()
             .map(|tool| tool["name"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>()
@@ -1415,4 +1417,64 @@ fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
         serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
     assert_eq!(output["status"], "plan_recorded");
     assert_eq!(output["scope"]["paths"], json!(["src"]));
+}
+
+#[test]
+fn answer_text_streams_before_completion_and_is_withdrawn_when_a_call_follows() {
+    let call = json!({"id":"fc_1","type":"function_call","call_id":"call_1","name":"arany_read","arguments":"{}","status":"completed"});
+    for (with_call, answer, commentary) in [
+        (false, "hello", Vec::<String>::new()),
+        (true, "", vec!["hello".to_owned()]),
+    ] {
+        let message = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]});
+        let mut events = vec![
+            json!({"type":"response.created","response":{"id":"resp_1","model":"model-a"}}),
+            json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+            json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":"hello"}),
+        ];
+        let (publisher, observed) = ResponsePreview::new();
+        let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
+        for event in &events {
+            decoder
+                .feed(format!("data: {event}\n\n").as_bytes())
+                .unwrap();
+        }
+        assert_eq!(observed.borrow().answer, "hello");
+        events = vec![json!({"type":"response.output_item.done","output_index":0,"item":message})];
+        let mut output = vec![message.clone()];
+        if with_call {
+            events.push(json!({"type":"response.output_item.added","output_index":1,"item":{"id":"fc_1","type":"function_call","call_id":"call_1","name":"arany_read","arguments":"","status":"in_progress"}}));
+            events.push(json!({"type":"response.output_item.done","output_index":1,"item":call}));
+            output.push(call.clone());
+        }
+        events.push(json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":output,"usage":{"input_tokens":8,"output_tokens":12}}}));
+        for event in &events {
+            decoder
+                .feed(format!("data: {event}\n\n").as_bytes())
+                .unwrap();
+        }
+        assert_eq!(observed.borrow().answer, answer);
+        assert_eq!(observed.borrow().commentary, commentary);
+    }
+}
+
+#[test]
+fn oversized_streamed_answer_leaves_refusal_to_the_engine_instead_of_failing_the_call() {
+    let text = "x".repeat(crate::session::MAX_DISPLAY_TEXT_BYTES + 1);
+    let message = json!({"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":text}]});
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_1","model":"model-a"}}),
+        json!({"type":"response.output_item.added","output_index":0,"item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]}}),
+        json!({"type":"response.output_text.delta","output_index":0,"content_index":0,"item_id":"msg_1","delta":text}),
+        json!({"type":"response.output_item.done","output_index":0,"item":message}),
+        json!({"type":"response.completed","response":{"id":"resp_1","model":"model-a","status":"completed","output":[message],"usage":{"input_tokens":8,"output_tokens":12}}}),
+    ];
+    let (publisher, observed) = ResponsePreview::new();
+    let mut decoder = StreamDecoder::with_preview(TOKEN, "model-a", Some(publisher));
+    for event in &events {
+        decoder
+            .feed(format!("data: {event}\n\n").as_bytes())
+            .unwrap();
+    }
+    assert!(observed.borrow().answer.len() <= crate::session::MAX_DISPLAY_TEXT_BYTES);
 }

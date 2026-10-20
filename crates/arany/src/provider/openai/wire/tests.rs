@@ -78,7 +78,7 @@ fn read_arguments() -> Value {
 fn function_names(body: &Value) -> Vec<String> {
     body["tools"]
         .as_array()
-        .unwrap()
+        .map_or(&[][..], Vec::as_slice)
         .iter()
         .map(|function| function["name"].as_str().unwrap().to_owned())
         .collect()
@@ -115,9 +115,10 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
             assert_eq!(body(&role_request)["text"]["format"]["type"], "json_schema");
             role_request.model = MODEL.into();
             let valid = response("completed", json!([message(r#"{"verdict":"approve"}"#)]));
-            assert!(
-                matches!(decode(&role_request, &valid).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "approve")
-            );
+            assert!(matches!(
+                decode(&role_request, &valid).unwrap().outcome,
+                ProviderOutcome::Review(crate::provider::ReviewVerdict::Approve)
+            ));
             for text in [
                 "approve",
                 r#"{"verdict":"allow"}"#,
@@ -152,9 +153,9 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert_eq!(rendered["store"], false);
     assert_eq!(rendered["truncation"], "disabled");
     assert_eq!(rendered["max_output_tokens"], 4096);
-    assert_eq!(rendered["tools"], json!([]));
-    assert_eq!(rendered["tool_choice"], "none");
-    assert_eq!(rendered["parallel_tool_calls"], false);
+    for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+        assert!(rendered.get(field).is_none(), "{field}");
+    }
     assert!(rendered.get("text").is_none());
     let instructions = rendered["instructions"].as_str().unwrap();
     assert!(instructions.starts_with(crate::provider::prompts::READ_ONLY_INSTRUCTIONS));

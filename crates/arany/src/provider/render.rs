@@ -296,7 +296,7 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
         ArgumentBytes => "Reduce the function arguments to the argument byte limit.",
         LeaseOverlap => "Wait for worker settlement or choose paths outside active leases.",
         NotOffered => "Choose an offered operation.",
-        AnswerInvalid => "Send a nonempty plain text answer within the answer byte limit.",
+        AnswerInvalid => "Send a nonempty plain text answer of at most 32 KiB.",
         DelegateInvalid => {
             "Send a valid bounded Delegate using the offered assignments and profiles."
         }
