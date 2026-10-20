@@ -146,7 +146,7 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "MessageAccepted" => Some(7),
         "AgentSpawned" => Some(11),
         "AgentFinished" => Some(10),
-        "ProviderCallRecorded" => Some(12),
+        "ProviderCallRecorded" => Some(13),
         "WorkerDataChunk"
         | "WorkerDataSealed"
         | "WorkerStopObserved"
@@ -158,7 +158,10 @@ pub(crate) fn payload_version(kind: &str) -> Option<i64> {
         "ToolResultsCleared" => Some(1),
         "GoalStarted" | "GoalFinished" => Some(7),
         "SupervisorVerdictRecorded" => Some(1),
-        "WorkspaceRewindStarted" | "WorkspaceRewindFinished" | "ProviderFallbackUsed" => Some(1),
+        "WorkspaceRewindStarted"
+        | "WorkspaceRewindFinished"
+        | "ProviderFallbackUsed"
+        | "ProviderRetryScheduled" => Some(1),
         "ToolPermissionDecided" => Some(4),
         "HookStarted" => Some(3),
         "HookFinished" => Some(7),
@@ -301,6 +304,11 @@ pub enum Event {
         run_id: RunId,
         agent_run_id: AgentRunId,
         fallback: crate::provider::ProviderFallback,
+    },
+    ProviderRetryScheduled {
+        run_id: RunId,
+        agent_run_id: AgentRunId,
+        retry: crate::provider::ProviderRetry,
     },
     ProviderCallRecorded {
         run_id: RunId,
@@ -659,6 +667,7 @@ impl Event {
             Self::RunStarted { .. } => "RunStarted",
             Self::AgentSpawned { .. } => "AgentSpawned",
             Self::ProviderFallbackUsed { .. } => "ProviderFallbackUsed",
+            Self::ProviderRetryScheduled { .. } => "ProviderRetryScheduled",
             Self::ProviderCallRecorded { .. } => "ProviderCallRecorded",
             Self::GoalProviderCallReserved { .. } => "GoalProviderCallReserved",
             Self::GoalCompactionCallReserved { .. } => "GoalCompactionCallReserved",
@@ -754,6 +763,11 @@ impl Event {
                 ..
             }
             | Self::ProviderFallbackUsed {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::ProviderRetryScheduled {
                 run_id,
                 agent_run_id,
                 ..
@@ -936,6 +950,7 @@ impl Event {
                 grant: *grant,
             }),
             Self::ProviderFallbackUsed { fallback, .. } => serialize(fallback),
+            Self::ProviderRetryScheduled { retry, .. } => serialize(retry),
             Self::ProviderCallRecorded { record, .. } => serialize(record),
             Self::GoalProviderCallReserved {
                 goal_id,
@@ -1238,6 +1253,13 @@ impl Event {
                     run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
                     agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
                     fallback: parse(payload)?,
+                }
+            }
+            "ProviderRetryScheduled" if run_id.is_some() && agent_run_id.is_some() => {
+                Self::ProviderRetryScheduled {
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    retry: parse(payload)?,
                 }
             }
             "ProviderCallRecorded" if run_id.is_some() && agent_run_id.is_some() => {

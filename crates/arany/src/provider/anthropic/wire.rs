@@ -33,6 +33,10 @@ pub(super) struct MessageStream<'a> {
 }
 
 impl<'a> MessageStream<'a> {
+    pub(super) fn end_error(&self) -> ProviderError {
+        self.framer.end_error()
+    }
+
     pub(super) fn new(
         secret: &'a str,
         model: &'a str,

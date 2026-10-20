@@ -2764,12 +2764,20 @@ mod routing {
             ])
             .with_profile("scripted", "primary"),
         );
-        let mut review = ScriptedProvider::new(vec![]).with_profile("scripted", "review");
-        review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+        // The clock pauses only for the review's backoff; the Guard runs after it resumes.
+        let mut review = ScriptedProvider::new(vec![])
+            .with_profile("scripted", "review")
+            .with_before_call(0, tokio::time::pause);
+        review.responses = Mutex::new(
+            (0..=arany::MAX_PROVIDER_RETRIES)
+                .map(|_| Err(ProviderError::RemoteHttp(503)))
+                .collect(),
+        );
         let review = route(review);
         let fallback = route(
             ScriptedProvider::new(vec![ProviderOutcome::Review(arany::ReviewVerdict::Approve)])
-                .with_profile("scripted", "review-fallback"),
+                .with_profile("scripted", "review-fallback")
+                .with_before_call(0, tokio::time::resume),
         );
         let engine = engine_support::open(
             StateRoot::admit(&state).unwrap(),
@@ -2802,6 +2810,13 @@ mod routing {
         assert_eq!(
             view.runs[0].provider_fallbacks[0].1.role,
             ProviderRole::Review
+        );
+        assert!(
+            view.runs[0]
+                .provider_retries
+                .iter()
+                .map(|(_, retry)| (retry.role, retry.attempt))
+                .eq([1, 2, 3].map(|attempt| (ProviderRole::Review, attempt)))
         );
         assert_eq!(review.requests.lock().unwrap()[0].model, "review");
         assert_eq!(
@@ -2856,21 +2871,24 @@ mod routing {
             ])
             .with_profile("scripted", "primary"),
         );
+        // The clock pauses after the Guard Read, only for the backoff before the switch.
         let mut first = ScriptedProvider::new(vec![tool_outcome(arany::ToolCall::Read {
             path: "notes/facts.txt".into(),
             offset: None,
             limit: None,
         })])
-        .with_profile("scripted", "spare-first");
+        .with_profile("scripted", "spare-first")
+        .with_before_call(1, tokio::time::pause);
         first
             .responses
             .get_mut()
             .unwrap()
-            .push_back(Err(ProviderError::RemoteHttp(503)));
+            .extend((0..=arany::MAX_PROVIDER_RETRIES).map(|_| Err(ProviderError::RemoteHttp(503))));
         let first = route(first);
         let fallback = route(
             ScriptedProvider::new(vec![finish("read facts")])
-                .with_profile("scripted", "spare-fallback"),
+                .with_profile("scripted", "spare-fallback")
+                .with_before_call(0, tokio::time::resume),
         );
         let engine = engine_support::open(
             StateRoot::admit(&state).unwrap(),
@@ -2905,7 +2923,8 @@ mod routing {
         );
         assert_eq!(child.tools.len(), 1);
         assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
-        assert_eq!(first.requests.lock().unwrap().len(), 2);
+        assert_eq!(view.runs[0].provider_retries.len(), 3);
+        assert_eq!(first.requests.lock().unwrap().len(), 5);
         let requests = fallback.requests.lock().unwrap();
         assert_eq!(requests.len(), 1);
         let step = &requests[0].input.tools.as_ref().unwrap().steps[0];
@@ -2936,7 +2955,11 @@ mod routing {
         let first = route(
             ScriptedProvider::new(vec![])
                 .with_profile("scripted", "compaction")
-                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+                .with_compactions(
+                    (0..=arany::MAX_PROVIDER_RETRIES)
+                        .map(|_| Err(ProviderError::RemoteHttp(503)))
+                        .collect(),
+                ),
         );
         let second = route(
             ScriptedProvider::new(vec![])
@@ -2973,6 +2996,8 @@ mod routing {
             .fork_session(outcome.session_id, workspace.clone(), None)
             .await
             .unwrap();
+        // The journaled retry delays stay; only the waits end at once.
+        arany::FaultPlan::skip_retry_backoff(fork);
         let record = engine
             .compact_session(&bindings, fork, workspace.clone())
             .await
@@ -3012,7 +3037,11 @@ mod routing {
         let first = route(
             ScriptedProvider::new(vec![])
                 .with_profile("scripted", "compaction")
-                .with_compactions(vec![Err(ProviderError::RemoteHttp(503))]),
+                .with_compactions(
+                    (0..=arany::MAX_PROVIDER_RETRIES)
+                        .map(|_| Err(ProviderError::RemoteHttp(503)))
+                        .collect(),
+                ),
         );
         let second = route(
             ScriptedProvider::new(vec![])
@@ -3052,6 +3081,7 @@ mod routing {
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
         let before = store.load_view(fork).await.unwrap().unwrap();
         store.close().await.unwrap();
+        arany::FaultPlan::skip_retry_backoff(outcome.session_id);
         engine
             .compact_session(&bindings, outcome.session_id, workspace.clone())
             .await
@@ -3540,4 +3570,101 @@ fn researcher_children_cannot_load_a_model_hidden_skill() {
     );
     store.close().await.unwrap();
     });
+}
+
+#[tokio::test]
+async fn missing_file_targets_fail_with_guard_attestation_and_recover_explicitly() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("notes")).unwrap();
+    let state = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state).unwrap(),
+        EngineConfig {
+            guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let config = state.join("tools.json");
+    std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+    std::fs::set_permissions(config, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let write = || arany::ToolCall::Write {
+        path: "notes/new/file.txt".into(),
+        expected_digest: None,
+        content: "New".into(),
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(write()),
+        tool_outcome(arany::ToolCall::Mkdir {
+            path: "notes/new/deeper".into(),
+        }),
+        tool_outcome(arany::ToolCall::Edit {
+            path: "notes/missing.txt".into(),
+            expected_digest: Sha256::digest(b"old")
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
+            old: "old".into(),
+            new: "new".into(),
+        }),
+        tool_outcome(arany::ToolCall::Mkdir {
+            path: "notes/new".into(),
+        }),
+        tool_outcome(write()),
+        arany::test_support::goals::finish_with("Created the parent and wrote the file"),
+    ]));
+    let mut input = request(&workspace, "Write a note after creating its parent");
+    input.include_paths.clear();
+    let result = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.run.status, RunStatus::Finished);
+    assert!(provider.responses.lock().unwrap().is_empty());
+    assert_eq!(
+        std::fs::read(workspace.join("notes/new/file.txt")).unwrap(),
+        b"New"
+    );
+    assert!(!workspace.join("notes/new/deeper").exists());
+    assert!(!workspace.join("notes/missing.txt").exists());
+    engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+    let events = store.load_session(result.session_id).await.unwrap();
+    let view = SessionView::replay(result.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(view.runs[0], result.run);
+    assert_eq!(view.runs[0].tools.len(), 5);
+    for (index, text) in [
+        (0, "Parent directory not found; create it with Mkdir first"),
+        (1, "Parent directory not found; create it with Mkdir first"),
+        (
+            2,
+            "File or directory not found; List the parent directory to check the path",
+        ),
+    ] {
+        let observation = view.runs[0].tools[index].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
+        assert_eq!(observation.output, text);
+        assert!(matches!(
+            observation.attestation,
+            Some(arany::Attestation::Guard(_))
+        ));
+    }
+    for step in &view.runs[0].tools[3..] {
+        assert_eq!(
+            step.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
+        );
+    }
+    store.close().await.unwrap();
 }

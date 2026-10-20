@@ -139,6 +139,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         lifecycle_hooks: Vec::new(),
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
+        provider_retries: Vec::new(),
         provider_fallbacks: (0..64)
             .map(|_| {
                 (
@@ -733,6 +734,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
         provider_fallbacks: Vec::new(),
+        provider_retries: Vec::new(),
     };
     let goal = GoalView {
         continues: None,

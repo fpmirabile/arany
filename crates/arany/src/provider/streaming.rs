@@ -24,6 +24,17 @@ impl ResponsePreview {
         (Self { sender }, receiver)
     }
 
+    // A same-route retry withdraws the failed attempt's provisional text before it re-dispatches.
+    pub(crate) fn clear(&self) {
+        self.sender.send_if_modified(|text| {
+            let changed = **text != PreviewText::default();
+            if changed {
+                *text = Arc::new(PreviewText::default());
+            }
+            changed
+        });
+    }
+
     pub(crate) fn has_output(&self) -> bool {
         let text = self.sender.borrow();
         !text.answer.is_empty() || !text.commentary.is_empty() || text.commentary_limited
@@ -115,6 +126,16 @@ pub(super) struct SseFramer {
 }
 
 impl SseFramer {
+    // A clean end after a well-formed event is a cut, retried on the same route; a body that
+    // never framed an event is not a stream.
+    pub(super) fn end_error(&self) -> ProviderError {
+        if self.events > 0 {
+            ProviderError::StreamEnded
+        } else {
+            ProviderError::InvalidStream
+        }
+    }
+
     pub(super) fn new() -> Self {
         Self {
             bytes: 0,

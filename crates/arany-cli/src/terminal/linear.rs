@@ -821,6 +821,7 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
         });
         let mut progress = Vec::new();
         linear

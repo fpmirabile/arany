@@ -334,12 +334,17 @@ pub(crate) fn open_absolute(path: &str) -> Result<File, ToolError> {
     .map_err(|_| ToolError::Path)?;
     #[cfg(not(target_os = "macos"))]
     let parent = open_directory(parent)?;
+    // Absolute paths identify pinned resources, not user Tool targets.
     open_file(
         &parent,
         path.file_name()
             .and_then(|name| name.to_str())
             .ok_or(ToolError::Path)?,
     )
+    .map_err(|error| match error {
+        ToolError::NotFound => ToolError::Path,
+        error => error,
+    })
 }
 
 pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
@@ -359,7 +364,11 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
                 | ResolveFlags::NO_MAGICLINKS
                 | ResolveFlags::NO_XDEV,
         )
-        .map_err(|_| ToolError::Path)?;
+        .map_err(|error| match error {
+            rustix::io::Errno::NOENT => ToolError::NotFound,
+            rustix::io::Errno::NOTDIR => not_directory_path(root, path),
+            _ => ToolError::Path,
+        })?;
         Ok(File::from(fd))
     }
     #[cfg(target_os = "macos")]
@@ -373,7 +382,7 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
             .into_std_file();
         for component in path.split('/') {
             if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
-                return Err(ToolError::Path);
+                return Err(non_directory_error(&file));
             }
             file = File::from(
                 openat(
@@ -386,7 +395,10 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
                         | OFlags::NOCTTY,
                     Mode::empty(),
                 )
-                .map_err(|_| ToolError::Path)?,
+                .map_err(|error| match error {
+                    rustix::io::Errno::NOENT => ToolError::NotFound,
+                    _ => ToolError::Path,
+                })?,
             );
             if file.metadata().map_err(|_| ToolError::Path)?.dev() != device {
                 return Err(ToolError::Path);
@@ -399,6 +411,37 @@ pub(super) fn open_file(root: &Dir, path: &str) -> Result<File, ToolError> {
         let _ = (root, path);
         Err(ToolError::ProtectionUnavailable)
     }
+}
+
+fn non_directory_error(file: &File) -> ToolError {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file
+            .metadata()
+            .is_ok_and(|metadata| metadata.is_file() && metadata.nlink() == 1)
+        {
+            return ToolError::NotFound;
+        }
+    }
+    let _ = file;
+    ToolError::Path
+}
+
+#[cfg(target_os = "linux")]
+fn not_directory_path(root: &Dir, path: &str) -> ToolError {
+    // ENOTDIR also covers special-file ancestors; those remain boundary refusals.
+    for (end, _) in path.match_indices('/') {
+        match open_file(root, &path[..end]) {
+            Ok(file) => match file.metadata() {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => return non_directory_error(&file),
+                Err(_) => return ToolError::Path,
+            },
+            Err(_) => return ToolError::Path,
+        }
+    }
+    ToolError::Path
 }
 
 pub(crate) fn read_regular(mut file: File, cap: usize) -> Result<Vec<u8>, ToolError> {
@@ -433,15 +476,18 @@ fn parent(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
     }
     let mut parts: Vec<_> = path.split('/').collect();
     let leaf = parts.pop().ok_or(ToolError::Path)?.to_owned();
-    let dir = if parts.is_empty() {
-        Dir::from_std_file(open_file(root, ".")?)
-    } else {
-        Dir::from_std_file(open_file(root, &parts.join("/"))?)
-    };
-    if !dir.dir_metadata().map_err(|_| ToolError::Path)?.is_dir() {
-        return Err(ToolError::Path);
+    let file = open_file(
+        root,
+        &if parts.is_empty() {
+            ".".into()
+        } else {
+            parts.join("/")
+        },
+    )?;
+    if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
+        return Err(non_directory_error(&file));
     }
-    Ok((dir, leaf))
+    Ok((Dir::from_std_file(file), leaf))
 }
 
 fn create_parents(root: &Dir, path: &str) -> Result<(Dir, String), ToolError> {
@@ -2007,6 +2053,112 @@ mod read_page_tests {
                 read_page(invalid.as_slice(), None, None, MAX_TOOL_RESULT_BYTES),
                 Err(ToolError::Operation)
             ));
+        }
+    }
+}
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod path_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn missing_paths_fail_inside_scope_while_boundary_refusals_stay_denied() {
+        use super::super::types::{Attestation, ToolDisposition};
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("src")).unwrap();
+        std::fs::write(workspace.join("src/file"), "regular").unwrap();
+        std::fs::write(workspace.join("src/aliased"), "alias").unwrap();
+        std::fs::hard_link(
+            workspace.join("src/aliased"),
+            workspace.join("src/hardlink"),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink("missing", workspace.join("src/link")).unwrap();
+        std::os::unix::fs::symlink(".", workspace.join("src/directory-link")).unwrap();
+        nix::unistd::mkfifo(&workspace.join("src/fifo"), nix::sys::stat::Mode::S_IRUSR).unwrap();
+        let runtime = super::super::tests::in_process_runtime(
+            &workspace,
+            json!({
+                "version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]
+            }),
+        );
+        for (path, expected) in [
+            ("src/missing", ToolDisposition::Failed),
+            ("src/missing/child", ToolDisposition::Failed),
+            ("src/file/child", ToolDisposition::Failed),
+            ("src/file/child/deeper", ToolDisposition::Failed),
+            ("src/link", ToolDisposition::Denied),
+            ("src/link/child", ToolDisposition::Denied),
+            ("src/directory-link/missing", ToolDisposition::Denied),
+            ("src/.env", ToolDisposition::Denied),
+            ("src/.env/child", ToolDisposition::Denied),
+            ("src/fifo", ToolDisposition::Denied),
+            ("src/fifo/child", ToolDisposition::Denied),
+            ("src/hardlink", ToolDisposition::Denied),
+            ("src/hardlink/child", ToolDisposition::Denied),
+            ("outside/missing", ToolDisposition::Denied),
+            ("../missing", ToolDisposition::Denied),
+        ] {
+            let intent = runtime.intent(
+                crate::session::RunId::new(),
+                crate::session::AgentRunId::new(),
+                ToolCall::Read {
+                    path: path.into(),
+                    offset: None,
+                    limit: None,
+                },
+            );
+            let observation = runtime
+                .execute(intent, super::super::Cancellation::new())
+                .await;
+            assert_eq!(observation.disposition, expected, "{path}");
+            assert_eq!(
+                observation.output,
+                if expected == ToolDisposition::Failed {
+                    "File or directory not found; List the parent directory to check the path"
+                } else if observation.attestation.is_some() {
+                    "File path is unavailable or outside the admitted regular-file boundary"
+                } else {
+                    "Tool operation is outside the pinned grant"
+                },
+                "{path}"
+            );
+            if expected == ToolDisposition::Failed {
+                assert!(
+                    matches!(observation.attestation, Some(Attestation::InProcess { .. })),
+                    "{path}"
+                );
+            }
+            assert_eq!(observation.valid(), observation.intent.valid(), "{path}");
+        }
+        assert!(open_absolute(workspace.join("src/file").to_str().unwrap()).is_ok());
+        assert!(matches!(
+            open_absolute(workspace.join("src/missing").to_str().unwrap()),
+            Err(ToolError::Path)
+        ));
+        let intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            ToolCall::Skill {
+                name: "review".into(),
+                resource: None,
+            },
+        );
+        assert_eq!(
+            super::super::dispatch::outcome(&intent, Err(ToolError::NotFound)),
+            (
+                ToolDisposition::Denied,
+                "File path is unavailable or outside the admitted regular-file boundary".into(),
+                None,
+            )
+        );
+        #[cfg(target_os = "linux")]
+        {
+            let host_root = open_directory(Path::new("/")).unwrap();
+            for path in ["dev", "dev/arany-missing-path"] {
+                assert!(matches!(open_file(&host_root, path), Err(ToolError::Path)));
+            }
         }
     }
 }

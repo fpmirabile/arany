@@ -749,6 +749,63 @@ fn unconfigured_session_draws_typed_draft_in_the_composer() {
 }
 
 #[test]
+fn classic_content_height_keeps_bottom_controls_and_completion_visible() {
+    for height in [8, 12, 24, 50] {
+        for width in [16, 50, 80, 120] {
+            let screen = ratatui::layout::Rect::new(0, 0, width, height);
+            let model = PresentationModel {
+                status_line: "idle".into(),
+                activity_lines: Vec::new(),
+                setup_required: false,
+                draft_action: DraftAction::Submit,
+                empty_chat: false,
+            };
+            let mut composer = Composer::default();
+            for (draft, expected) in [
+                ("", 4),
+                ("/", height.min(26)),
+                ("e\u{301}\n界\n👩‍💻\nlast\nclipped", 7),
+                ("", 4),
+            ] {
+                composer = Composer::default();
+                composer.insert_paste(draft).unwrap();
+                let needed = classic_height(&model, &composer, screen, 0);
+                assert_eq!(needed, expected, "{width}x{height}: {draft:?}");
+                let backend = TestBackend::new(width, height);
+                let mut terminal = Terminal::with_options(
+                    backend,
+                    ratatui::TerminalOptions {
+                        viewport: ratatui::Viewport::Fixed(bottom_area(screen, needed)),
+                    },
+                )
+                .unwrap();
+                terminal
+                    .draw(|frame| {
+                        draw_frame(frame, &model, &composer, None, Palette { color: false })
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                assert!(!buffer_row(buffer, height - 1).trim().is_empty());
+                let rows = (height - needed..height)
+                    .map(|y| buffer_row(buffer, y))
+                    .collect::<Vec<_>>();
+                assert!(rows.iter().any(|row| row.contains("> ")));
+                if draft == "/" {
+                    assert!(
+                        rows.iter()
+                            .any(|row| row.contains("[Cmd]") || row.contains("[Commands]"))
+                    );
+                }
+            }
+            let mut active = model;
+            active.activity_lines = vec!["primary · working".into()];
+            assert_eq!(classic_height(&active, &composer, screen, 0), 5);
+            assert_eq!(classic_height(&active, &composer, screen, 100), height);
+        }
+    }
+}
+
+#[test]
 fn inline_frame_keeps_composer_and_status_in_the_viewport() {
     for width in [40, 50, 79, 80, 120] {
         let backend = TestBackend::new(width, 5);
@@ -3138,5 +3195,12 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             );
             assert_eq!(buffer_row(buffer, 3).trim_end(), "  ⎿ 2 lines");
         }
+    }
+}
+
+#[test]
+fn classic_floor_is_the_larger_of_24_rows_and_sixty_percent_within_the_screen() {
+    for (screen, floor) in [(8, 8), (12, 12), (24, 24), (40, 24), (60, 36), (100, 60)] {
+        assert_eq!(classic_floor(screen), floor, "{screen} rows");
     }
 }

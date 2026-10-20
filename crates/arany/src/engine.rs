@@ -455,6 +455,7 @@ impl RunTurn {
 pub struct RunSteering {
     state: Arc<Mutex<SteeringState>>,
     pause: Arc<AtomicBool>,
+    pause_signal: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -524,11 +525,25 @@ impl RunSteering {
 
     /// Returns true only for the first pause request.
     pub fn pause(&self) -> bool {
-        !self.pause.swap(true, Ordering::SeqCst)
+        let first = !self.pause.swap(true, Ordering::SeqCst);
+        if first {
+            self.pause_signal.notify_waiters();
+        }
+        first
     }
 
     pub(crate) fn pause_requested(&self) -> bool {
         self.pause.load(Ordering::SeqCst)
+    }
+
+    // Resolves once a pause is requested; the waiter registers before it reads the flag.
+    pub(crate) async fn paused(&self) {
+        let notified = self.pause_signal.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+        if !self.pause_requested() {
+            notified.await;
+        }
     }
 
     pub(crate) fn begin_run(&self) {

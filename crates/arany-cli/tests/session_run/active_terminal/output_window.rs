@@ -100,10 +100,11 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
             );
             let queries = bytes.windows(4).filter(|part| *part == b"\x1b[6n").count();
             assert!(queries <= 32, "bounded cursor-position queries");
-            while answered_queries < queries {
-                write_input(&reader_input, b"\x1b[24;1R");
-                answered_queries += 1;
-            }
+            crate::reply_positioned_cursor_queries(
+                &mut *reader_input.lock().expect("fixture input"),
+                &bytes,
+                &mut answered_queries,
+            );
             if !working_reported
                 && bytes
                     .windows(b"TTY_BEFORE:".len())

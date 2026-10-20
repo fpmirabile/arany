@@ -25,7 +25,7 @@ pub enum Action {
 }
 
 impl Action {
-    /// Base Event bound before configured Provider switches.
+    /// Base Event bound before configured Provider switches and same-route retry facts.
     pub fn max_events(self) -> usize {
         match self {
             // Reserve terminal Events through the Goal receipt even when no further step runs.
@@ -97,28 +97,34 @@ impl Action {
         })
     }
 
+    // Each call in the action may append every switch of its chain and three same-route retry facts.
     fn max_events_with_lengths(self, lengths: Providers<usize>) -> usize {
-        let switches = |role| lengths.get(role).saturating_sub(1);
+        let attempt_facts = |role| {
+            lengths
+                .get(role)
+                .saturating_sub(1)
+                .saturating_add(usize::from(crate::provider::MAX_PROVIDER_RETRIES))
+        };
         self.max_events().saturating_add(match self {
-            Self::ProviderCall { .. } => switches(ProviderRole::Primary),
+            Self::ProviderCall { .. } => attempt_facts(ProviderRole::Primary),
             Self::Child {
                 in_flight,
                 research,
             } => usize::try_from(in_flight)
                 .unwrap_or(usize::MAX)
                 .saturating_add(1)
-                .saturating_mul(switches(ProviderRole::Child))
+                .saturating_mul(attempt_facts(ProviderRole::Child))
                 .saturating_add(if research {
-                    switches(ProviderRole::Review)
+                    attempt_facts(ProviderRole::Review)
                 } else {
                     0
                 }),
-            Self::Tool | Self::Review => switches(ProviderRole::Review),
-            Self::Worker { .. } => switches(ProviderRole::Review)
-                .saturating_add(8 * switches(ProviderRole::Child))
-                .saturating_add(switches(ProviderRole::Primary)),
+            Self::Tool | Self::Review => attempt_facts(ProviderRole::Review),
+            Self::Worker { .. } => attempt_facts(ProviderRole::Review)
+                .saturating_add(8 * attempt_facts(ProviderRole::Child))
+                .saturating_add(attempt_facts(ProviderRole::Primary)),
             Self::Compaction | Self::BoundaryCompaction { .. } => {
-                switches(ProviderRole::Compaction)
+                attempt_facts(ProviderRole::Compaction)
             }
             Self::Delegation { children, research } => children
                 .saturating_mul(if research {
@@ -126,15 +132,15 @@ impl Action {
                 } else {
                     1
                 })
-                .saturating_mul(switches(ProviderRole::Child))
+                .saturating_mul(attempt_facts(ProviderRole::Child))
                 .saturating_add(if research {
                     children
                         .saturating_mul(MAX_CHILD_TOOL_CALLS)
-                        .saturating_mul(switches(ProviderRole::Review))
+                        .saturating_mul(attempt_facts(ProviderRole::Review))
                 } else {
                     0
                 })
-                .saturating_add(switches(ProviderRole::Primary)),
+                .saturating_add(attempt_facts(ProviderRole::Primary)),
         })
     }
 

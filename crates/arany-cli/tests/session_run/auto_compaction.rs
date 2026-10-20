@@ -177,9 +177,10 @@ fn synthetic_server(
                     compaction_release
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release automatic failure");
+                    // A Retry-After past the action deadline skips the same-route retries.
                     write!(
                         stream,
-                        "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 86400\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                     )
                     .expect("synthetic failure response");
                     continue;

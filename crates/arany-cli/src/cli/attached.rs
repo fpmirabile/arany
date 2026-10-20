@@ -1659,7 +1659,7 @@ async fn finish_submission(
         paused_goal,
         outcome.run.status,
         run_feedback,
-        crate::presentation::render_provider_fallbacks(&outcome.run),
+        crate::presentation::render_provider_attempts(&outcome.run),
     );
     if let Some(feedback) = feedback {
         if composer.is_empty() {

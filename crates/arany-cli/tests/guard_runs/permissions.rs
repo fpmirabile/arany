@@ -929,11 +929,20 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
         ScriptedProvider::new(vec![tool_outcome(call("catalog")), finish("report")])
             .with_profile("scripted", "child"),
     );
-    let mut review = ScriptedProvider::new(vec![]).with_profile("scripted", "review");
-    review.responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    // The clock pauses only for the review's backoff; the Guard runs after it resumes.
+    let mut review = ScriptedProvider::new(vec![])
+        .with_profile("scripted", "review")
+        .with_before_call(0, tokio::time::pause);
+    review.responses = Mutex::new(
+        (0..=arany::MAX_PROVIDER_RETRIES)
+            .map(|_| Err(ProviderError::RemoteHttp(503)))
+            .collect(),
+    );
     let review = route(review);
     let fallback = route(
-        ScriptedProvider::new(vec![verdict("approve")]).with_profile("scripted", "review-fallback"),
+        ScriptedProvider::new(vec![verdict("approve")])
+            .with_profile("scripted", "review-fallback")
+            .with_before_call(0, tokio::time::resume),
     );
     let mut bindings = routes(&primary);
     bindings.roles.child = vec![child.clone()];
@@ -963,6 +972,8 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
     assert_eq!(switches.len(), 1);
     assert_eq!(switches[0].0, child_id);
     assert_eq!(switches[0].1.role, arany::ProviderRole::Review);
+    assert_eq!(view.runs[0].provider_retries.len(), 3);
+    assert_eq!(review.requests.lock().unwrap().len(), 4);
     assert_eq!(fallback.requests.lock().unwrap().len(), 1);
     assert_eq!(
         view.runs[0].agents[1].tools[0]

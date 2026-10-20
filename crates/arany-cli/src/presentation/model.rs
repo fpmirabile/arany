@@ -497,6 +497,7 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
         });
         let model = PresentationModel::from_session(&view, 80);
         assert_eq!(model.draft_action, DraftAction::InspectRun);
@@ -1075,6 +1076,11 @@ mod tests {
                 ProviderFailureReason::UsageLimit,
                 ProviderCallDisposition::Rejected,
                 "Provider reported a usage limit. Check the selected account's usage before trying again.",
+            ),
+            (
+                ProviderFailureReason::RateLimited,
+                ProviderCallDisposition::Rejected,
+                "Provider rate limited the request. Wait before trying again.",
             ),
             (
                 ProviderFailureReason::UsageTemporarilyUnavailable,

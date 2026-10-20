@@ -630,7 +630,9 @@ impl ProviderCallRecord {
                     (self.disposition, reason),
                     (
                         ProviderCallDisposition::Rejected,
-                        ProviderFailureReason::AccountAccess | ProviderFailureReason::UsageLimit
+                        ProviderFailureReason::AccountAccess
+                            | ProviderFailureReason::UsageLimit
+                            | ProviderFailureReason::RateLimited
                     ) | (
                         ProviderCallDisposition::Unavailable,
                         ProviderFailureReason::UsageTemporarilyUnavailable

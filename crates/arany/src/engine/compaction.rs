@@ -137,14 +137,17 @@ impl Engine {
             compaction_request(prepared, session_id, covered_run_id, identity, goal)?;
         let active_started = Instant::now();
         let actor = last_run.primary().map(|agent| agent.id);
-        let routing = if providers.compaction.len() > 1 {
-            let (actor, route_goal_id) = compaction_route_ids(actor, &open_view, covered_run_id)?;
-            Some((
-                self.compaction_ledger(session_id, route_goal_id).await?,
-                actor,
-            ))
-        } else {
-            None
+        // Every boundary compaction goes through the router, so a single route still retries.
+        let routing = match actor {
+            Some(_) => {
+                let (actor, route_goal_id) =
+                    compaction_route_ids(actor, &open_view, covered_run_id)?;
+                Some((
+                    self.compaction_ledger(session_id, route_goal_id).await?,
+                    actor,
+                ))
+            }
+            None => None,
         };
         let provider_deadline = self
             .reserve_compaction_call(
@@ -357,6 +360,7 @@ impl Engine {
                     journal: &self.journal,
                     ledger,
                     publisher: None,
+                    steering: None,
                 };
                 // A fresh token is never cancelled, so the router always yields an outcome.
                 let super::routing::CompactionOutcome { response, provider } = router

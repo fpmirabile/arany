@@ -30,6 +30,16 @@ enum Fault {
     ),
     #[cfg_attr(not(test), expect(dead_code, reason = "read only by test fixtures"))]
     CommitMarker(String),
+    // Without a gate the Session's retry backoffs end at once; a gate holds one backoff.
+    RetryBackoff(
+        SessionId,
+        Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
+    ),
+}
+
+pub(crate) enum RetryBackoff {
+    Immediate,
+    Gated(oneshot::Sender<()>, oneshot::Receiver<()>),
 }
 
 // Faults use Session, Tool intent or cache identity to keep fixtures isolated.
@@ -130,6 +140,31 @@ impl FaultPlan {
     #[cfg(test)]
     pub(crate) fn fail_commit_marker(identity: &BuildCacheIdentity) {
         plan().push(Fault::CommitMarker(identity.token()));
+    }
+
+    /// Ends every same-route retry backoff of the Session at once; the journaled delays are unchanged.
+    pub fn skip_retry_backoff(session: SessionId) {
+        plan().push(Fault::RetryBackoff(session, None));
+    }
+
+    /// Holds the Session's next retry backoff until released; the first receiver reports entry.
+    pub fn gate_retry_backoff(session: SessionId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered, wait) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        plan().push(Fault::RetryBackoff(session, Some((entered, released))));
+        (wait, release)
+    }
+
+    pub(crate) fn retry_backoff(session: SessionId) -> Option<RetryBackoff> {
+        if let Some(Fault::RetryBackoff(_, Some((entered, release)))) =
+            take(|fault| matches!(fault, Fault::RetryBackoff(id, Some(_)) if *id == session))
+        {
+            return Some(RetryBackoff::Gated(entered, release));
+        }
+        plan()
+            .iter()
+            .any(|fault| matches!(fault, Fault::RetryBackoff(id, None) if *id == session))
+            .then_some(RetryBackoff::Immediate)
     }
 
     pub fn lose_guard_receipt(intent: uuid::Uuid) {

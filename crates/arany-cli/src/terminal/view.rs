@@ -9,6 +9,7 @@ use arany::ModelEntry;
 use arany::SessionListItem;
 use ratatui::{
     Frame, Terminal, TerminalOptions, Viewport,
+    backend::Backend,
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
@@ -158,10 +159,19 @@ pub(super) fn draw_permission_frame(
         frame.render_widget(Clear, full);
         Rect::new(full.x + gutter, full.y, width, full.height)
     };
-    let choice_rows = u16::try_from(choices.len().max(3))
+    let mut choice_rows = u16::try_from(choices.len().max(3))
         .unwrap_or(u16::MAX)
         .min(area.height.saturating_sub(3));
-    let body_height = usize::from(area.height - choice_rows - 2);
+    let mut body_height = usize::from(area.height - choice_rows - 2);
+    // Dropping the spare choice row and spacer keeps a dialog that is two rows over on one page.
+    let compact_rows = u16::try_from(choices.len()).unwrap_or(u16::MAX);
+    if rows.len() > body_height
+        && area.height > compact_rows + 1
+        && rows.len() <= usize::from(area.height - compact_rows - 1)
+    {
+        choice_rows = compact_rows;
+        body_height = usize::from(area.height - choice_rows - 1);
+    }
     let pages = rows.len().div_ceil(body_height).max(1);
     let page = profile_rows
         .iter()
@@ -310,6 +320,66 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
         .min(area.height.saturating_sub(1))
 }
 
+pub(super) const CLASSIC_FLOOR_ROWS: u16 = 24;
+
+pub(super) fn classic_floor(screen_height: u16) -> u16 {
+    screen_height.min(CLASSIC_FLOOR_ROWS.max(screen_height.saturating_mul(3) / 5))
+}
+
+pub(super) fn classic_height(
+    model: &PresentationModel,
+    composer: &Composer,
+    screen: Rect,
+    live_rows: usize,
+) -> u16 {
+    let draft = composer_height(composer, screen);
+    let menu = completion_height(composer, screen.height);
+    let history = if live_rows > 0 {
+        let rows = u16::try_from(live_rows).unwrap_or(u16::MAX);
+        rows.saturating_add(history_top_padding(rows))
+    } else if model.empty_chat && model.activity_lines.is_empty() && menu == 0 {
+        4
+    } else {
+        u16::from(menu > 0)
+    };
+    draft
+        .saturating_add(1)
+        .saturating_add(menu)
+        .saturating_add(u16::try_from(model.activity_lines.len()).unwrap_or(u16::MAX))
+        .saturating_add(history)
+        .min(screen.height)
+}
+
+pub(super) fn permission_height(
+    lines: &[String],
+    width: u16,
+    boxed: bool,
+    profile_start: Option<usize>,
+) -> u16 {
+    let width = if boxed {
+        width
+            .saturating_sub(if width >= 40 { 4 } else { 0 })
+            .min(76)
+    } else {
+        width.saturating_sub(if width >= 40 { 4 } else { 0 })
+    };
+    let rows = lines
+        .iter()
+        .enumerate()
+        .fold(0usize, |rows, (index, line)| {
+            let indent = if profile_start.is_some_and(|start| index >= start) {
+                PROFILE_HANGING_INDENT
+            } else {
+                0
+            };
+            rows.saturating_add(wrap_cells(line, usize::from(width.max(1)), indent).len())
+        });
+    let height = u16::try_from(rows.saturating_add(5))
+        .unwrap_or(u16::MAX)
+        .max(8);
+    if boxed { height.min(20) } else { height }
+}
+
 pub(super) fn history_top_padding(available_height: u16) -> u16 {
     u16::from(available_height > 4)
 }
@@ -383,11 +453,17 @@ pub(super) fn screen_terminal(
     mode: TerminalMode,
     cursor: Option<CursorQuery>,
 ) -> io::Result<Terminal<TerminalBackend>> {
+    let mut backend = TerminalBackend::new(mode, cursor);
+    let screen = backend.size()?;
+    if mode == TerminalMode::Classic {
+        // Let inline initialization scroll to reserve rows without moving above shell output.
+        backend.set_cursor_position((0, screen.height.saturating_sub(1)))?;
+    }
     let mut terminal = Terminal::with_options(
-        TerminalBackend::new(mode, cursor),
+        backend,
         TerminalOptions {
             viewport: match mode {
-                TerminalMode::Classic => Viewport::Inline(crossterm::terminal::size()?.1.min(12)),
+                TerminalMode::Classic => Viewport::Inline(screen.height.min(4)),
                 TerminalMode::Fullscreen => Viewport::Fullscreen,
             },
         },
@@ -657,6 +733,16 @@ pub(super) fn draw_setup_choices_frame(
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
     }
+}
+
+pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
+    u16::try_from(
+        wrap_ascii_setup_warning(warning, usize::from(width.clamp(1, 72)))
+            .len()
+            .saturating_add(5),
+    )
+    .unwrap_or(u16::MAX)
+    .clamp(8, 16)
 }
 
 pub(super) fn draw_setup_warning_frame(

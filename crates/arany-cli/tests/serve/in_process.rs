@@ -1342,6 +1342,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         images: Vec::new(),
         config: None,
         provider_fallbacks: Vec::new(),
+        provider_retries: Vec::new(),
         agents: Vec::new(),
         assistant_message: None,
         status: arany::RunStatus::Interrupted,

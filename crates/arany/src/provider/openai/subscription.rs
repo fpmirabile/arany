@@ -402,7 +402,7 @@ async fn completed_at_with_preview(
                 } else {
                     Stage::RequestTransport
                 },
-                ProviderError::Unavailable,
+                crate::provider::send_failure(&error),
                 StreamCounts::default(),
             )
         })?;
@@ -419,11 +419,17 @@ async fn completed_at_with_preview(
     }
     let status = response.status();
     if status != reqwest::StatusCode::OK {
-        return Err(failure(
-            Stage::HttpStatus,
-            ProviderError::RemoteHttp(status.as_u16()),
-            counts,
-        ));
+        let error = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            crate::provider::rate_limit_failure(&mut response).await
+        } else if status.is_server_error() {
+            ProviderError::RemoteServerError(
+                status.as_u16(),
+                crate::provider::server_retry_after(&response),
+            )
+        } else {
+            ProviderError::RemoteHttp(status.as_u16())
+        };
+        return Err(failure(Stage::HttpStatus, error, counts));
     }
     if response
         .headers()
@@ -471,7 +477,7 @@ async fn completed_at_with_preview(
     }
     Err(failure(
         Stage::EndBeforeCompleted,
-        ProviderError::InvalidStream,
+        decoder.framer.end_error(),
         decoder.counts(),
     ))
 }
@@ -498,7 +504,7 @@ pub(super) async fn read_completed_response(
             return Ok(completed);
         }
     }
-    Err(ProviderError::InvalidStream)
+    Err(decoder.framer.end_error())
 }
 
 fn response_failure(error: wire::ResponseError, counts: StreamCounts) -> ProviderError {

@@ -1717,7 +1717,12 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
     let first = Arc::new(CompactionRouteProvider {
         identity: identity("openai", "compact-a"),
         calls: Default::default(),
-        responses: std::sync::Mutex::new([Err(ProviderError::RemoteHttp(503))].into()),
+        // The failed compaction call and its three same-route retries.
+        responses: std::sync::Mutex::new(
+            (0..=crate::provider::MAX_PROVIDER_RETRIES)
+                .map(|_| Err(ProviderError::RemoteHttp(503)))
+                .collect(),
+        ),
     });
     let second = Arc::new(CompactionRouteProvider {
         identity: identity("anthropic", "compact-b"),
@@ -1767,6 +1772,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
         .expect("Run")
         .run;
     assert_eq!(outcome.run.status, RunStatus::Finished);
+    crate::fault::FaultPlan::skip_retry_backoff(outcome.session_id);
     let failed = engine
         .compact_session(&providers, outcome.session_id, workspace.clone())
         .await
@@ -1783,10 +1789,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
     assert_eq!(failed.model, "compact-b");
     assert_eq!(succeeded.model, "compact-b");
     engine.close().await.expect("Engine close");
-    assert_eq!(
-        *first.calls.lock().expect("first calls"),
-        ["compact-a", "compact-a"]
-    );
+    assert_eq!(*first.calls.lock().expect("first calls"), ["compact-a"; 5]);
     assert_eq!(
         *second.calls.lock().expect("second calls"),
         ["compact-b", "compact-b"]
@@ -1812,6 +1815,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
         .expect("Session");
     assert_eq!(view.compactions.len(), 2);
     assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+    assert_eq!(view.runs[0].provider_retries.len(), 3);
     store.close().await.expect("Store close");
     let spans = finished_spans(&telemetry, &exporter);
     let compactions = spans

@@ -1062,6 +1062,7 @@ impl From<&Event> for TraceEventKind {
             | Event::RunStarted { .. }
             | Event::AgentSpawned { .. }
             | Event::ProviderFallbackUsed { .. }
+            | Event::ProviderRetryScheduled { .. }
             | Event::ProviderCallRecorded { .. }
             | Event::ToolStarted { .. }
             | Event::ToolPermissionDecided { .. }
