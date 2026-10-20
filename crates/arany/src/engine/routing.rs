@@ -263,42 +263,58 @@ impl CallRouter<'_> {
                 cancellation.is_cancelled() || self.pause_requested(),
                 attempt.visible,
             )?;
-            match decide_attempt(attempt.transient, facts) {
-                AttemptDecision::Accept => return Ok(attempt.result),
-                AttemptDecision::Retry { cause, delay } => {
-                    // Cleared before any await, so no stale text is journaled for the call.
-                    if let Some(preview) = &preview {
-                        preview.clear();
-                    }
-                    if !self
-                        .retry(scope, role, cause, delay, Some(&request))
-                        .await?
-                    {
-                        return Ok(attempt.result);
-                    }
-                    // A pause ends the call unsent, as a pause during an approval does.
-                    match back_off(
-                        scope.session_id,
-                        delay,
-                        &mut cancellation,
-                        self.steering.as_ref(),
-                    )
-                    .await
-                    {
-                        Backoff::Elapsed => {}
-                        Backoff::Paused | Backoff::Cancelled => return Ok(CallResult::Cancelled),
-                    }
-                }
-                AttemptDecision::Switch => {
-                    if !self
-                        .switch(scope, role, provider.identity(), Some(&request))
-                        .await?
-                    {
-                        return Ok(attempt.result);
-                    }
+            let decision = decide_attempt(attempt.transient, facts);
+            if matches!(decision, AttemptDecision::Retry { .. })
+                && let Some(preview) = &preview
+            {
+                // Cleared before any await, so no stale text is journaled for the call.
+                preview.clear();
+            }
+            let Some(delay) = self
+                .continue_attempt(scope, role, decision, &request, || Ok(provider))
+                .await?
+            else {
+                return Ok(attempt.result);
+            };
+            // A pause ends the call unsent, as a pause during an approval does.
+            if matches!(decision, AttemptDecision::Retry { .. }) {
+                match back_off(
+                    scope.session_id,
+                    delay,
+                    &mut cancellation,
+                    self.steering.as_ref(),
+                )
+                .await
+                {
+                    Backoff::Elapsed => {}
+                    Backoff::Paused | Backoff::Cancelled => return Ok(CallResult::Cancelled),
                 }
             }
         }
+    }
+
+    pub(super) async fn continue_attempt(
+        &self,
+        scope: CallScope,
+        role: ProviderRole,
+        decision: AttemptDecision,
+        request: &ProviderRequest,
+        provider: impl FnOnce() -> Result<Arc<dyn Provider>, EngineError>,
+    ) -> Result<Option<Duration>, EngineError> {
+        Ok(match decision {
+            AttemptDecision::Accept => None,
+            AttemptDecision::Retry { cause, delay } => self
+                .retry(scope, role, cause, delay, Some(request))
+                .await?
+                .then_some(delay),
+            AttemptDecision::Switch => {
+                // The wave resolves its provider only after deciding to switch.
+                let provider = provider()?;
+                self.switch(scope, role, provider.identity(), Some(request))
+                    .await?
+                    .then_some(Duration::ZERO)
+            }
+        })
     }
 
     pub(super) fn pause_requested(&self) -> bool {

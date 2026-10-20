@@ -3,7 +3,7 @@ use super::{
     Action, ActiveSegment, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite, RunLoop,
     call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
 };
-use crate::engine::routing::{AttemptDecision, CallScope, decide_attempt};
+use crate::engine::routing::{CallScope, decide_attempt};
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
 use crate::provider::{
     AgentPhase, Answer, ChildAssignment, ChildResult, PromptRole, ProviderFailureReason,
@@ -74,6 +74,26 @@ struct ChildQueue {
     // Once set, the wave starts no call, spawn or primary turn; it ends as a budget stop.
     stop: Option<StopCause>,
     capacity_error: Option<EngineError>,
+}
+
+struct ChildWave<'a> {
+    children: &'a mut Vec<ChildWork>,
+    root_request: &'a mut ProviderRequest,
+    queue: &'a mut ChildQueue,
+    segments: &'a mut Option<ActiveSegment>,
+    deadline: Instant,
+}
+
+#[must_use]
+enum ChildProgress {
+    Refilled,
+    Settled(Option<AgentDisposition>),
+}
+
+struct EditorCompletion {
+    answer: Option<Answer>,
+    failure: WorkerCause,
+    step_stop: Option<StopCause>,
 }
 
 struct ActiveChild {
@@ -258,15 +278,7 @@ pub(super) fn decide_child_call(
     if gate.unmet {
         return match result {
             CallResult::Response(ProviderResponse { turn, .. })
-                if open
-                    && !gate.worker_stopped
-                    && facts.turns_left
-                    && facts.tool_calls_left
-                    && gate.stop_room
-                    && facts.before_deadline
-                    && facts.tokens_open
-                    && facts.calls_left
-                    && gate.continuations_left =>
+                if editor_may_continue_after_gate(gate, abort, facts) =>
             {
                 ChildDecision::Reprompt(RepromptReason::CriterionNotMetInView, turn)
             }
@@ -296,6 +308,22 @@ pub(super) fn decide_child_call(
             facts.turns_left,
         ))),
     }
+}
+
+fn editor_may_continue_after_gate(
+    gate: GateFacts,
+    abort: Option<WaveStop>,
+    facts: &ChildFacts,
+) -> bool {
+    abort.is_none()
+        && !gate.worker_stopped
+        && facts.turns_left
+        && facts.tool_calls_left
+        && gate.stop_room
+        && facts.before_deadline
+        && facts.tokens_open
+        && facts.calls_left
+        && gate.continuations_left
 }
 
 fn editor_failure(result: &CallResult, valid: bool, turns_left: bool) -> WorkerCause {
@@ -1052,10 +1080,6 @@ impl RunLoop<'_> {
         Ok(())
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Keep child retry and settlement ordering together"
-    )]
     async fn drive_children_inner(
         &self,
         children: &mut Vec<ChildWork>,
@@ -1064,448 +1088,77 @@ impl RunLoop<'_> {
         segments: &mut Option<ActiveSegment>,
         deadline: Instant,
     ) -> Result<Drained, EngineError> {
-        if let Err(error) = self
-            .fill_slots(queue, children, root_request, segments, deadline)
-            .await
-        {
-            return Err(queue.abort_with(error).await);
+        let mut wave = ChildWave {
+            children,
+            root_request,
+            queue,
+            segments,
+            deadline,
+        };
+        if let Err(error) = self.refill_wave(&mut wave).await {
+            return Err(wave.queue.abort_with(error).await);
         }
-        let mut abort = self.unstarted_stop(queue);
+        let mut abort = self.unstarted_stop(wave.queue);
         let mut drain_deadline = None;
 
-        while !queue.active.is_empty() {
-            if queue.stop.is_some() && abort.is_none() {
-                abort = Some(WaveStop::BUDGET);
-            }
-            // A pause lets in-flight child calls finish and be recorded; every other stop drains them.
-            if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
-                && drain_deadline.is_none()
-            {
-                queue.calls.abort_all();
-                drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
-            }
-            let joined = match drain_deadline {
-                Some(limit) => tokio::time::timeout_at(limit, queue.calls.join_next_with_id())
-                    .await
-                    .map_err(|_| EngineError::CancellationDrainTimeout)?,
-                None => queue.calls.join_next_with_id().await,
-            }
-            .ok_or(EngineError::CoordinatorFailed)?;
+        while !wave.queue.active.is_empty() {
+            let joined = self
+                .join_child_call(wave.queue, &mut abort, &mut drain_deadline)
+                .await?;
             let (task_id, result) = classify_join(joined);
-            let Some(index) = queue.active.get(&task_id).map(|active| active.index) else {
-                return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
+            let Some(index) = wave.queue.active.get(&task_id).map(|active| active.index) else {
+                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
             };
-            let respawn: Result<Option<Duration>, EngineError> = async {
-                let active = queue
-                    .active
-                    .get(&task_id)
-                    .ok_or(EngineError::CoordinatorFailed)?;
-                let role = if index.is_none() {
-                    crate::provider::ProviderRole::Primary
-                } else {
-                    crate::provider::ProviderRole::Child
-                };
-                let facts = self.routing.attempt_facts(
-                    active.request.agent_run_id,
-                    role,
-                    deadline,
-                    abort.is_some()
-                        || self.controls.cancellation.is_cancelled()
-                        || self.pause_requested(),
-                    result.visible,
-                )?;
-                let scope = CallScope {
-                    session_id: self.session_id,
-                    run_id: self.run_id,
-                    agent_run_id: active.request.agent_run_id,
-                };
-                Ok(match decide_attempt(result.transient, facts) {
-                    AttemptDecision::Accept => None,
-                    AttemptDecision::Retry { cause, delay } => self
-                        .routing
-                        .retry(scope, role, cause, delay, Some(&active.request))
-                        .await?
-                        .then_some(delay),
-                    AttemptDecision::Switch => {
-                        let provider = self.routing.provider(role, active.request.agent_run_id)?;
-                        self.routing
-                            .switch(scope, role, provider.identity(), Some(&active.request))
-                            .await?
-                            .then_some(Duration::ZERO)
-                    }
-                })
-            }
-            .await;
+            let respawn = self
+                .child_attempt_continuation(
+                    wave.queue,
+                    task_id,
+                    index,
+                    &result,
+                    abort,
+                    wave.deadline,
+                )
+                .await;
             match respawn {
                 Ok(Some(delay)) => {
-                    if let Err(error) = self.respawn_attempt(queue, task_id, index, delay, deadline)
+                    if let Err(error) =
+                        self.respawn_attempt(wave.queue, task_id, index, delay, wave.deadline)
                     {
-                        return Err(queue.abort_with(error).await);
+                        return Err(wave.queue.abort_with(error).await);
                     }
                     continue;
                 }
                 Ok(None) => {}
-                Err(error) => return Err(queue.abort_with(error).await),
+                Err(error) => return Err(wave.queue.abort_with(error).await),
             }
-            queue.active.remove(&task_id);
+            wave.queue.active.remove(&task_id);
             let result = result.result;
             self.settle_result(&result)?;
             if index.is_none() {
-                let deferral = RepromptReason::deferral(&result);
-                let validity = self.wave_validity(&result)?;
-                let facts = RunFacts::observe(self)?;
-                let site = PrimarySite::Wave {
-                    queue_stopped: abort.is_some() || queue.stop.is_some(),
-                };
-                let record_admitted = primary_admitted(site, &result, validity, &facts);
-                let mut record = call_record(
-                    AgentPhase::RootSynthesis,
-                    &result,
-                    record_admitted,
-                    None,
-                    None,
-                );
-                if wave_deferred(&result, record_admitted, &facts) {
-                    record.failure_reason = deferral.map(RepromptReason::failure_reason);
-                }
-                self.append(Event::ProviderCallRecorded {
-                    run_id: self.run_id,
-                    agent_run_id: self.primary_id,
-                    record,
-                })
-                .await?;
-                let facts = RunFacts::observe(self)?;
-                match decide_primary_call(site, result, validity, &facts) {
-                    PrimaryDecision::ToolStep(requests, turn) => {
-                        let process = requests.iter().any(|r| r.call.is_process());
-                        if process {
-                            queue.primary_step = Some((requests, turn));
-                        } else {
-                            if let Some(segment) = segments.take() {
-                                self.settle_active_segment(segment)?;
-                            }
-                            // Wave validity admits exactly one request.
-                            let request = self
-                                .begin_tool_step(requests)
-                                .await?
-                                .ok_or(EngineError::CoordinatorFailed)?;
-                            let end = match Box::pin(self.execute_step(
-                                Grant::Primary {
-                                    request: root_request,
-                                    review_allowed: false,
-                                },
-                                request,
-                                turn,
-                            ))
-                            .await?
-                            {
-                                StepEnd::Continue => StepEnd::Continue,
-                                StepEnd::Stopped(StopCause::ActiveTime)
-                                    if self
-                                        .active_time_floor
-                                        .load(std::sync::atomic::Ordering::Relaxed) =>
-                                {
-                                    StepEnd::Stopped(StopCause::ActiveTime)
-                                }
-                                StepEnd::Stopped(
-                                    cause @ (StopCause::ActiveTime | StopCause::Capacity),
-                                ) => {
-                                    queue.stop.get_or_insert(cause);
-                                    self.observe_worker_stop().await?;
-                                    StepEnd::Continue
-                                }
-                                end @ StepEnd::Stopped(
-                                    StopCause::Uncertain
-                                    | StopCause::Cancelled
-                                    | StopCause::HookStop
-                                    | StopCause::Paused
-                                    | StopCause::Budget
-                                    | StopCause::ContextFull
-                                    | StopCause::DelegationDeadline
-                                    | StopCause::Refused(_)
-                                    | StopCause::ToolStopped
-                                    | StopCause::InvalidCommandResult,
-                                ) => end,
-                            };
-                            if let StepEnd::Stopped(cause) = end {
-                                abort = self
-                                    .hook_facts()?
-                                    .stop()
-                                    .or(abort)
-                                    .or(Some(WaveStop::Abort(cause)));
-                            }
-                            if queue.stop.is_none() {
-                                self.verify_workers().await?;
-                            }
-                            *segments = match self.reserve_active_segment(
-                                deadline.saturating_duration_since(Instant::now()),
-                            ) {
-                                Ok(segment) => Some(segment),
-                                Err(EngineError::GoalBudgetExhausted) => {
-                                    queue.stop.get_or_insert(StopCause::ActiveTime);
-                                    None
-                                }
-                                Err(error) => return Err(error),
-                            };
-                            queue.primary_pending = false;
-                        }
-                    }
-                    PrimaryDecision::Defer => {
-                        let settled = self.settled_agents()?;
-                        queue.deferred = deferral.map(|reason| (reason, settled));
-                        queue.primary_pending = false;
-                    }
-                    PrimaryDecision::Stop(cause) => abort = Some(WaveStop::Abort(cause)),
-                    PrimaryDecision::Plan(..)
-                    | PrimaryDecision::Finish(..)
-                    | PrimaryDecision::Delegate(..)
-                    | PrimaryDecision::Refused(_)
-                    | PrimaryDecision::Fail(_) => {
-                        return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
-                    }
-                }
+                let (decision, deferral) = self
+                    .classify_wave_primary(result, wave.queue, abort)
+                    .await?;
+                self.apply_wave_primary(&mut wave, decision, deferral, &mut abort)
+                    .await?;
                 if abort.is_some() {
-                    queue.calls.abort_all();
+                    wave.queue.calls.abort_all();
                     drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
                 } else {
-                    self.fill_slots(queue, children, root_request, segments, deadline)
-                        .await?;
+                    self.refill_wave(&mut wave).await?;
                 }
                 continue;
             }
             let index = index.ok_or(EngineError::CoordinatorFailed)?;
-            let valid_response = self.ledger().tokens_within_limit()
-                && match &result {
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Answer(answer),
-                        ..
-                    }) => valid_answer(answer, MAX_CHILD_RESULT_BYTES),
-                    CallResult::Response(ProviderResponse {
-                        outcome: ProviderOutcome::Tools(requests),
-                        ..
-                    }) => self.valid_child_tools(&children[index], requests),
-                    _ => false,
-                };
-            let step_disposition = if children[index].editor {
-                let gate_failed = valid_response
-                    && matches!(
-                        &result,
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Answer(_),
-                            ..
-                        })
-                    )
-                    && self.criterion_unmet(children[index].agent_run_id)?;
-                let mut record = call_record(
-                    AgentPhase::ChildWork,
-                    &result,
-                    valid_response && !gate_failed,
-                    None,
-                    None,
-                );
-                if gate_failed {
-                    record.failure_reason =
-                        Some(RepromptReason::CriterionNotMetInView.failure_reason());
-                }
-                self.append(Event::ProviderCallRecorded {
-                    run_id: self.run_id,
-                    agent_run_id: children[index].agent_run_id,
-                    record,
-                })
-                .await?;
-                self.ledger().child_call_finished()?;
-                let tools = valid_response
-                    && matches!(
-                        &result,
-                        CallResult::Response(ProviderResponse {
-                            outcome: ProviderOutcome::Tools(_),
-                            ..
-                        })
-                    );
-                // The worker-stop boundary commits before a continuation or private Tool.
-                let worker_stopped =
-                    abort.is_none() && (gate_failed || tools) && self.observe_worker_stop().await?;
-                let child = &children[index];
-                let gate = GateFacts {
-                    unmet: gate_failed,
-                    worker_stopped,
-                    stop_room: self
-                        .controls
-                        .tools
-                        .zip(child.tools.as_ref())
-                        .zip(match &result {
-                            CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
-                            CallResult::Failed(_) | CallResult::Cancelled => None,
-                        })
-                        .is_some_and(|((runtime, tools), turn)| {
-                            tools.has_stop_room(turn, runtime.context_limit_bytes())
-                        }),
-                    continuations_left: gate_failed
-                        && self.ledger().view(|v| {
-                            v.runs
-                                .last()
-                                .expect("active Run")
-                                .agents
-                                .iter()
-                                .find(|a| a.id == child.agent_run_id)
-                                .and_then(|a| a.assignment.as_ref())
-                                .is_some_and(|w| w.gate_continuations < 3)
-                        })?,
-                };
-                let facts = self.child_facts(child, deadline)?;
-                let mut step_stop = None;
-                let (answer, failure) =
-                    match decide_child_call(result, valid_response, Some(gate), abort, &facts) {
-                        ChildDecision::Reprompt(reason, turn) => {
-                            let child = &mut children[index];
-                            let text = reason.text().to_owned();
-                            if let Some(tools) = child.tools.as_mut() {
-                                tools.add_stop_feedback(&turn, &text);
-                            }
-                            child
-                                .stop_hook_feedback
-                                .push(crate::provider::StopHookFeedback {
-                                    after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
-                                    turn,
-                                    text,
-                                    facts: None,
-                                    steering_notes: Vec::new(),
-                                });
-                            queue.pending.push_back(index);
-                            self.fill_slots(queue, children, root_request, segments, deadline)
-                                .await?;
-                            continue;
-                        }
-                        ChildDecision::Finish { answer, turn, .. } => {
-                            match self
-                                .subagent_stop(
-                                    &mut children[index],
-                                    &answer,
-                                    turn,
-                                    &mut abort,
-                                    deadline,
-                                )
-                                .await?
-                            {
-                                ChildStop::Proceed => (Some(answer), WorkerCause::ToolFailed),
-                                ChildStop::Reprompt => {
-                                    queue.pending.push_back(index);
-                                    self.fill_slots(
-                                        queue,
-                                        children,
-                                        root_request,
-                                        segments,
-                                        deadline,
-                                    )
-                                    .await?;
-                                    continue;
-                                }
-                                ChildStop::End { cause, .. } => (None, cause),
-                            }
-                        }
-                        ChildDecision::ToolStep(mut requests, turn) => {
-                            let child = &mut children[index];
-                            step_stop = match Box::pin(self.execute_step(
-                                Grant::Researcher { child, deadline },
-                                requests.pop().ok_or(EngineError::CoordinatorFailed)?,
-                                turn,
-                            ))
-                            .await
-                            {
-                                Ok(StepEnd::Continue) => None,
-                                Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
-                                    queue.stop.get_or_insert(StopCause::ActiveTime);
-                                    self.observe_worker_stop().await?;
-                                    Some(StopCause::ActiveTime)
-                                }
-                                Ok(StepEnd::Stopped(cause)) => Some(cause),
-                                Err(error) => return Err(error),
-                            };
-                            child.tool_calls_remaining =
-                                child.tool_calls_remaining.saturating_sub(1);
-                            let can_continue = self.ledger().view(|v| {
-                                v.runs
-                                    .last()
-                                    .and_then(|r| {
-                                        r.agents.iter().find(|a| a.id == child.agent_run_id)
-                                    })
-                                    .and_then(|a| a.tools.last())
-                                    .is_some_and(|t| {
-                                        t.observation.is_some()
-                                            && !crate::session::private_failure(t)
-                                    })
-                            })?;
-                            if step_stop.is_none() && can_continue {
-                                queue.pending.push_back(index);
-                                if let Err(error) = self
-                                    .fill_slots(queue, children, root_request, segments, deadline)
-                                    .await
-                                {
-                                    return Err(queue.abort_with(error).await);
-                                }
-                                continue;
-                            }
-                            (None, WorkerCause::ToolFailed)
-                        }
-                        ChildDecision::End(ChildEnd::Editor(cause)) => (None, cause),
-                        ChildDecision::End(ChildEnd::Researcher(_) | ChildEnd::Skipped { .. }) => {
-                            return Err(queue.abort_with(EngineError::CoordinatorFailed).await);
-                        }
-                    };
-                let completed = self
-                    .complete_worker(
-                        &mut children[index],
-                        answer,
-                        deadline,
-                        matches!(abort, Some(WaveStop::Abort(_))),
-                        failure,
-                        step_stop,
-                    )
-                    .await?;
-                if let Some(s) = segments.take() {
-                    self.settle_active_segment(s)?;
-                }
-                self.settle_worker_handover(root_request, &children[index], completed)
-                    .await?;
-                *segments = match self
-                    .reserve_active_segment(deadline.saturating_duration_since(Instant::now()))
-                {
-                    Ok(segment) => Some(segment),
-                    Err(EngineError::GoalBudgetExhausted) => {
-                        queue.stop.get_or_insert(StopCause::ActiveTime);
-                        None
-                    }
-                    Err(error) => return Err(error),
-                };
-                Some(
-                    if self.actor_hook_requested_stop(children[index].agent_run_id)? {
-                        AgentDisposition::StoppedByHook
-                    } else {
-                        AgentDisposition::Finished
-                    },
-                )
-            } else {
-                match self
-                    .settle_child_call(
-                        &mut children[index],
-                        result,
-                        valid_response,
-                        &mut abort,
-                        deadline,
-                    )
-                    .await
-                {
-                    Ok(None) => {
-                        queue.pending.push_back(index);
-                        None
-                    }
-                    Ok(Some(disposition)) => Some(disposition),
-                    Err(error) => return Err(queue.abort_with(error).await),
-                }
+            let step_disposition = match self
+                .settle_wave_child(&mut wave, index, result, &mut abort)
+                .await?
+            {
+                ChildProgress::Refilled => continue,
+                ChildProgress::Settled(disposition) => disposition,
             };
             if abort.is_none() {
                 abort = wave_stop_after(
-                    queue.stop.is_some(),
+                    wave.queue.stop.is_some(),
                     self.controls.cancellation.is_cancelled(),
                     self.pause_requested(),
                     step_disposition,
@@ -1513,19 +1166,541 @@ impl RunLoop<'_> {
                 );
             }
             if abort.is_none() {
-                if let Err(error) = self
-                    .fill_slots(queue, children, root_request, segments, deadline)
-                    .await
-                {
-                    return Err(queue.abort_with(error).await);
+                if let Err(error) = self.refill_wave(&mut wave).await {
+                    return Err(wave.queue.abort_with(error).await);
                 }
-                abort = self.unstarted_stop(queue);
+                abort = self.unstarted_stop(wave.queue);
             }
         }
         Ok(Drained {
             abort,
-            pending: std::mem::take(&mut queue.pending),
+            pending: std::mem::take(&mut wave.queue.pending),
         })
+    }
+
+    async fn child_attempt_continuation(
+        &self,
+        queue: &ChildQueue,
+        task_id: Id,
+        index: Option<usize>,
+        result: &crate::engine::routing::AttemptResult,
+        abort: Option<WaveStop>,
+        deadline: Instant,
+    ) -> Result<Option<Duration>, EngineError> {
+        let active = queue
+            .active
+            .get(&task_id)
+            .ok_or(EngineError::CoordinatorFailed)?;
+        let role = if index.is_none() {
+            crate::provider::ProviderRole::Primary
+        } else {
+            crate::provider::ProviderRole::Child
+        };
+        let facts = self.routing.attempt_facts(
+            active.request.agent_run_id,
+            role,
+            deadline,
+            abort.is_some() || self.controls.cancellation.is_cancelled() || self.pause_requested(),
+            result.visible,
+        )?;
+        let scope = CallScope {
+            session_id: self.session_id,
+            run_id: self.run_id,
+            agent_run_id: active.request.agent_run_id,
+        };
+        self.routing
+            .continue_attempt(
+                scope,
+                role,
+                decide_attempt(result.transient, facts),
+                &active.request,
+                || self.routing.provider(role, active.request.agent_run_id),
+            )
+            .await
+    }
+
+    async fn classify_wave_primary(
+        &self,
+        result: CallResult,
+        queue: &ChildQueue,
+        abort: Option<WaveStop>,
+    ) -> Result<(PrimaryDecision, Option<RepromptReason>), EngineError> {
+        let deferral = RepromptReason::deferral(&result);
+        let validity = self.wave_validity(&result)?;
+        let facts = RunFacts::observe(self)?;
+        let site = PrimarySite::Wave {
+            queue_stopped: abort.is_some() || queue.stop.is_some(),
+        };
+        let record_admitted = primary_admitted(site, &result, validity, &facts);
+        let mut record = call_record(
+            AgentPhase::RootSynthesis,
+            &result,
+            record_admitted,
+            None,
+            None,
+        );
+        if wave_deferred(&result, record_admitted, &facts) {
+            record.failure_reason = deferral.map(RepromptReason::failure_reason);
+        }
+        self.append(Event::ProviderCallRecorded {
+            run_id: self.run_id,
+            agent_run_id: self.primary_id,
+            record,
+        })
+        .await?;
+        let facts = RunFacts::observe(self)?;
+        let decision = decide_primary_call(site, result, validity, &facts);
+        Ok((decision, deferral))
+    }
+
+    async fn apply_wave_primary(
+        &self,
+        wave: &mut ChildWave<'_>,
+        decision: PrimaryDecision,
+        deferral: Option<RepromptReason>,
+        abort: &mut Option<WaveStop>,
+    ) -> Result<(), EngineError> {
+        match decision {
+            PrimaryDecision::ToolStep(requests, turn) => {
+                let process = requests.iter().any(|r| r.call.is_process());
+                if process {
+                    wave.queue.primary_step = Some((requests, turn));
+                } else {
+                    self.apply_wave_primary_tool(wave, requests, turn, abort)
+                        .await?;
+                }
+            }
+            PrimaryDecision::Defer => {
+                let settled = self.settled_agents()?;
+                wave.queue.deferred = deferral.map(|reason| (reason, settled));
+                wave.queue.primary_pending = false;
+            }
+            PrimaryDecision::Stop(cause) => *abort = Some(WaveStop::Abort(cause)),
+            PrimaryDecision::Plan(..)
+            | PrimaryDecision::Finish(..)
+            | PrimaryDecision::Delegate(..)
+            | PrimaryDecision::Refused(_)
+            | PrimaryDecision::Fail(_) => {
+                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
+            }
+        }
+        Ok(())
+    }
+
+    async fn apply_wave_primary_tool(
+        &self,
+        wave: &mut ChildWave<'_>,
+        requests: Vec<ToolRequest>,
+        turn: ProviderTurn,
+        abort: &mut Option<WaveStop>,
+    ) -> Result<(), EngineError> {
+        if let Some(segment) = wave.segments.take() {
+            self.settle_active_segment(segment)?;
+        }
+        // Wave validity admits exactly one request.
+        let request = self
+            .begin_tool_step(requests)
+            .await?
+            .ok_or(EngineError::CoordinatorFailed)?;
+        let end = match Box::pin(self.execute_step(
+            Grant::Primary {
+                request: wave.root_request,
+                review_allowed: false,
+            },
+            request,
+            turn,
+        ))
+        .await?
+        {
+            StepEnd::Continue => StepEnd::Continue,
+            StepEnd::Stopped(StopCause::ActiveTime)
+                if self
+                    .active_time_floor
+                    .load(std::sync::atomic::Ordering::Relaxed) =>
+            {
+                StepEnd::Stopped(StopCause::ActiveTime)
+            }
+            StepEnd::Stopped(cause @ (StopCause::ActiveTime | StopCause::Capacity)) => {
+                wave.queue.stop.get_or_insert(cause);
+                self.observe_worker_stop().await?;
+                StepEnd::Continue
+            }
+            end @ StepEnd::Stopped(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            ) => end,
+        };
+        if let StepEnd::Stopped(cause) = end {
+            *abort = self
+                .hook_facts()?
+                .stop()
+                .or(*abort)
+                .or(Some(WaveStop::Abort(cause)));
+        }
+        if wave.queue.stop.is_none() {
+            self.verify_workers().await?;
+        }
+        *wave.segments = match self
+            .reserve_active_segment(wave.deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(segment) => Some(segment),
+            Err(EngineError::GoalBudgetExhausted) => {
+                wave.queue.stop.get_or_insert(StopCause::ActiveTime);
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        wave.queue.primary_pending = false;
+        Ok(())
+    }
+
+    async fn classify_editor_call(
+        &self,
+        child: &ChildWork,
+        result: CallResult,
+        valid_response: bool,
+        abort: Option<WaveStop>,
+        deadline: Instant,
+    ) -> Result<ChildDecision, EngineError> {
+        let gate_failed = valid_response
+            && matches!(
+                &result,
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Answer(_),
+                    ..
+                })
+            )
+            && self.criterion_unmet(child.agent_run_id)?;
+        let mut record = call_record(
+            AgentPhase::ChildWork,
+            &result,
+            valid_response && !gate_failed,
+            None,
+            None,
+        );
+        if gate_failed {
+            record.failure_reason = Some(RepromptReason::CriterionNotMetInView.failure_reason());
+        }
+        self.append(Event::ProviderCallRecorded {
+            run_id: self.run_id,
+            agent_run_id: child.agent_run_id,
+            record,
+        })
+        .await?;
+        self.ledger().child_call_finished()?;
+        let tools = valid_response
+            && matches!(
+                &result,
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Tools(_),
+                    ..
+                })
+            );
+        // The worker-stop boundary commits before a continuation or private Tool.
+        let worker_stopped =
+            abort.is_none() && (gate_failed || tools) && self.observe_worker_stop().await?;
+        let gate = GateFacts {
+            unmet: gate_failed,
+            worker_stopped,
+            stop_room: self
+                .controls
+                .tools
+                .zip(child.tools.as_ref())
+                .zip(match &result {
+                    CallResult::Response(ProviderResponse { turn, .. }) => Some(turn),
+                    CallResult::Failed(_) | CallResult::Cancelled => None,
+                })
+                .is_some_and(|((runtime, tools), turn)| {
+                    tools.has_stop_room(turn, runtime.context_limit_bytes())
+                }),
+            continuations_left: gate_failed
+                && self.ledger().view(|v| {
+                    v.runs
+                        .last()
+                        .expect("active Run")
+                        .agents
+                        .iter()
+                        .find(|a| a.id == child.agent_run_id)
+                        .and_then(|a| a.assignment.as_ref())
+                        .is_some_and(|w| w.gate_continuations < 3)
+                })?,
+        };
+        let facts = self.child_facts(child, deadline)?;
+        Ok(decide_child_call(
+            result,
+            valid_response,
+            Some(gate),
+            abort,
+            &facts,
+        ))
+    }
+
+    async fn run_editor_tool(
+        &self,
+        child: &mut ChildWork,
+        queue: &mut ChildQueue,
+        mut requests: Vec<ToolRequest>,
+        turn: ProviderTurn,
+        deadline: Instant,
+    ) -> Result<(Option<StopCause>, bool), EngineError> {
+        let step_stop = match Box::pin(self.execute_step(
+            Grant::Researcher { child, deadline },
+            requests.pop().ok_or(EngineError::CoordinatorFailed)?,
+            turn,
+        ))
+        .await
+        {
+            Ok(StepEnd::Continue) => None,
+            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
+                queue.stop.get_or_insert(StopCause::ActiveTime);
+                self.observe_worker_stop().await?;
+                Some(StopCause::ActiveTime)
+            }
+            Ok(StepEnd::Stopped(cause)) => Some(cause),
+            Err(error) => return Err(error),
+        };
+        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+        let can_continue = self.ledger().view(|v| {
+            v.runs
+                .last()
+                .and_then(|r| r.agents.iter().find(|a| a.id == child.agent_run_id))
+                .and_then(|a| a.tools.last())
+                .is_some_and(|t| t.observation.is_some() && !crate::session::private_failure(t))
+        })?;
+        Ok((step_stop, can_continue))
+    }
+
+    async fn apply_editor_call(
+        &self,
+        wave: &mut ChildWave<'_>,
+        index: usize,
+        decision: ChildDecision,
+        abort: &mut Option<WaveStop>,
+    ) -> Result<ChildProgress, EngineError> {
+        let mut step_stop = None;
+        let (answer, failure) = match decision {
+            ChildDecision::Reprompt(reason, turn) => {
+                let child = &mut wave.children[index];
+                let text = reason.text().to_owned();
+                if let Some(tools) = child.tools.as_mut() {
+                    tools.add_stop_feedback(&turn, &text);
+                }
+                child
+                    .stop_hook_feedback
+                    .push(crate::provider::StopHookFeedback {
+                        after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
+                        turn,
+                        text,
+                        facts: None,
+                        steering_notes: Vec::new(),
+                    });
+                wave.queue.pending.push_back(index);
+                self.refill_wave(wave).await?;
+                return Ok(ChildProgress::Refilled);
+            }
+            ChildDecision::Finish { answer, turn, .. } => {
+                match self
+                    .subagent_stop(
+                        &mut wave.children[index],
+                        &answer,
+                        turn,
+                        abort,
+                        wave.deadline,
+                    )
+                    .await?
+                {
+                    ChildStop::Proceed => (Some(answer), WorkerCause::ToolFailed),
+                    ChildStop::Reprompt => {
+                        wave.queue.pending.push_back(index);
+                        self.refill_wave(wave).await?;
+                        return Ok(ChildProgress::Refilled);
+                    }
+                    ChildStop::End { cause, .. } => (None, cause),
+                }
+            }
+            ChildDecision::ToolStep(requests, turn) => {
+                let (stop, can_continue) = self
+                    .run_editor_tool(
+                        &mut wave.children[index],
+                        wave.queue,
+                        requests,
+                        turn,
+                        wave.deadline,
+                    )
+                    .await?;
+                step_stop = stop;
+                if step_stop.is_none() && can_continue {
+                    wave.queue.pending.push_back(index);
+                    if let Err(error) = self.refill_wave(wave).await {
+                        return Err(wave.queue.abort_with(error).await);
+                    }
+                    return Ok(ChildProgress::Refilled);
+                }
+                (None, WorkerCause::ToolFailed)
+            }
+            ChildDecision::End(ChildEnd::Editor(cause)) => (None, cause),
+            ChildDecision::End(ChildEnd::Researcher(_) | ChildEnd::Skipped { .. }) => {
+                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
+            }
+        };
+        self.settle_editor_call(
+            wave,
+            index,
+            EditorCompletion {
+                answer,
+                failure,
+                step_stop,
+            },
+            *abort,
+        )
+        .await
+        .map(|disposition| ChildProgress::Settled(Some(disposition)))
+    }
+
+    async fn settle_editor_call(
+        &self,
+        wave: &mut ChildWave<'_>,
+        index: usize,
+        completion: EditorCompletion,
+        abort: Option<WaveStop>,
+    ) -> Result<AgentDisposition, EngineError> {
+        let EditorCompletion {
+            answer,
+            failure,
+            step_stop,
+        } = completion;
+        let completed = self
+            .complete_worker(
+                &mut wave.children[index],
+                answer,
+                wave.deadline,
+                matches!(abort, Some(WaveStop::Abort(_))),
+                failure,
+                step_stop,
+            )
+            .await?;
+        if let Some(s) = wave.segments.take() {
+            self.settle_active_segment(s)?;
+        }
+        self.settle_worker_handover(wave.root_request, &wave.children[index], completed)
+            .await?;
+        *wave.segments = match self
+            .reserve_active_segment(wave.deadline.saturating_duration_since(Instant::now()))
+        {
+            Ok(segment) => Some(segment),
+            Err(EngineError::GoalBudgetExhausted) => {
+                wave.queue.stop.get_or_insert(StopCause::ActiveTime);
+                None
+            }
+            Err(error) => return Err(error),
+        };
+        Ok(
+            if self.actor_hook_requested_stop(wave.children[index].agent_run_id)? {
+                AgentDisposition::StoppedByHook
+            } else {
+                AgentDisposition::Finished
+            },
+        )
+    }
+
+    async fn refill_wave(&self, wave: &mut ChildWave<'_>) -> Result<(), EngineError> {
+        self.fill_slots(
+            wave.queue,
+            wave.children,
+            wave.root_request,
+            wave.segments,
+            wave.deadline,
+        )
+        .await
+    }
+
+    async fn join_child_call(
+        &self,
+        queue: &mut ChildQueue,
+        abort: &mut Option<WaveStop>,
+        drain_deadline: &mut Option<Instant>,
+    ) -> Result<Result<(Id, crate::engine::routing::AttemptResult), JoinError>, EngineError> {
+        if queue.stop.is_some() && abort.is_none() {
+            *abort = Some(WaveStop::BUDGET);
+        }
+        // A pause lets in-flight child calls finish and be recorded; every other stop drains them.
+        if abort.is_some_and(|stop| stop != WaveStop::Boundary(StopCause::Paused))
+            && drain_deadline.is_none()
+        {
+            queue.calls.abort_all();
+            *drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
+        }
+        let joined = match *drain_deadline {
+            Some(limit) => tokio::time::timeout_at(limit, queue.calls.join_next_with_id())
+                .await
+                .map_err(|_| EngineError::CancellationDrainTimeout)?,
+            None => queue.calls.join_next_with_id().await,
+        }
+        .ok_or(EngineError::CoordinatorFailed)?;
+        Ok(joined)
+    }
+
+    async fn settle_wave_child(
+        &self,
+        wave: &mut ChildWave<'_>,
+        index: usize,
+        result: CallResult,
+        abort: &mut Option<WaveStop>,
+    ) -> Result<ChildProgress, EngineError> {
+        let valid_response = self.ledger().tokens_within_limit()
+            && match &result {
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Answer(answer),
+                    ..
+                }) => valid_answer(answer, MAX_CHILD_RESULT_BYTES),
+                CallResult::Response(ProviderResponse {
+                    outcome: ProviderOutcome::Tools(requests),
+                    ..
+                }) => self.valid_child_tools(&wave.children[index], requests),
+                _ => false,
+            };
+        let step_disposition = if wave.children[index].editor {
+            let decision = self
+                .classify_editor_call(
+                    &wave.children[index],
+                    result,
+                    valid_response,
+                    *abort,
+                    wave.deadline,
+                )
+                .await?;
+            match self.apply_editor_call(wave, index, decision, abort).await? {
+                ChildProgress::Refilled => return Ok(ChildProgress::Refilled),
+                ChildProgress::Settled(disposition) => disposition,
+            }
+        } else {
+            match self
+                .settle_child_call(
+                    &mut wave.children[index],
+                    result,
+                    valid_response,
+                    abort,
+                    wave.deadline,
+                )
+                .await
+            {
+                Ok(None) => {
+                    wave.queue.pending.push_back(index);
+                    None
+                }
+                Ok(Some(disposition)) => Some(disposition),
+                Err(error) => return Err(wave.queue.abort_with(error).await),
+            }
+        };
+        Ok(ChildProgress::Settled(step_disposition))
     }
 
     async fn settle_child_call(
