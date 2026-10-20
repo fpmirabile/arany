@@ -905,6 +905,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 | Event::ToolStarted { .. }
                 | Event::GoalProviderCallReserved { .. }
                 | Event::ProviderFallbackUsed { .. }
+                | Event::ProviderRetryScheduled { .. }
                 | Event::WorkerHandoverRecorded { .. }
                 | Event::WorkerVerificationRecorded { .. }
         )
@@ -918,6 +919,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
             Event::GoalProviderCallReserved { .. }
                 | Event::ProviderCallRecorded { .. }
                 | Event::ProviderFallbackUsed { .. }
+                | Event::ProviderRetryScheduled { .. }
         )
     {
         let a = run

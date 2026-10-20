@@ -830,17 +830,24 @@ pub fn abbreviate_home(path: &std::path::Path, home: Option<&std::path::Path>) -
     }
 }
 
-pub fn render_provider_fallbacks(run: &RunView) -> Option<String> {
-    render_goal_provider_fallbacks([run])
+pub fn render_provider_attempts(run: &RunView) -> Option<String> {
+    render_goal_provider_attempts([run])
 }
 
-pub fn render_goal_provider_fallbacks<'a>(
+pub fn render_goal_provider_attempts<'a>(
     runs: impl IntoIterator<Item = &'a RunView>,
 ) -> Option<String> {
     let notices: Vec<_> = runs
         .into_iter()
-        .flat_map(|run| run.provider_fallbacks.iter())
-        .map(|(_, fallback)| escape_terminal(&fallback.notice()))
+        .flat_map(|run| {
+            let retries = run.provider_retries.iter().map(|(_, retry)| retry.notice());
+            retries.chain(
+                run.provider_fallbacks
+                    .iter()
+                    .map(|(_, fallback)| fallback.notice()),
+            )
+        })
+        .map(|notice| escape_terminal(&notice))
         .collect();
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
@@ -1032,6 +1039,9 @@ fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
             return Some(
                 "Provider reported a usage limit. Check the selected account's usage before trying again.",
             );
+        }
+        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::RateLimited)) => {
+            return Some("Provider rate limited the request. Wait before trying again.");
         }
         (
             ProviderCallDisposition::Unavailable,
@@ -1410,6 +1420,7 @@ mod exec_jsonl_tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
         };
 
         let output = render_exec(&run, &events, Output::Jsonl, false);
@@ -1647,19 +1658,20 @@ mod tests {
             lifecycle_hook_sequence: None,
             provider_sequences: Default::default(),
             provider_fallbacks: fallbacks,
+            provider_retries: Vec::new(),
         };
         let earlier = run(vec![fallback("first")]);
         let latest = run(vec![fallback("second")]);
-        let notices = super::render_goal_provider_fallbacks([&earlier, &latest]).unwrap();
+        let notices = super::render_goal_provider_attempts([&earlier, &latest]).unwrap();
         let lines: Vec<_> = notices.lines().collect();
         assert_eq!(lines.len(), 2);
         assert!(lines[0].contains("openai/first ") && lines[1].contains("openai/second "));
         assert_eq!(
-            super::render_goal_provider_fallbacks([&latest]).unwrap(),
-            super::render_provider_fallbacks(&latest).unwrap()
+            super::render_goal_provider_attempts([&latest]).unwrap(),
+            super::render_provider_attempts(&latest).unwrap()
         );
         assert_eq!(
-            super::render_goal_provider_fallbacks([&run(Vec::new())]),
+            super::render_goal_provider_attempts([&run(Vec::new())]),
             None
         );
     }
@@ -2288,6 +2300,7 @@ mod unguarded_tests {
             images: Vec::new(),
             config: None,
             provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
             agents: Vec::new(),
             assistant_message: Some("Done".into()),
             status: arany::RunStatus::Finished,

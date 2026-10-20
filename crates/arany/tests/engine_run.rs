@@ -1269,19 +1269,20 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).unwrap();
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        // Each admitted action reserves its worst-case Event envelope before dispatch; the boundary is the
-        // largest prefix that still admits the Run: 11 Events for a single plain Run, 17 for one Team child.
+        // Each admitted action reserves its worst-case Event envelope before dispatch, including three
+        // same-route retry facts per call; the boundary is the largest prefix that still admits the Run.
+        // A single plain Run commits 11 Events and one Team child 17.
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
-            (9989, CollaborationPolicy::Single, false, false, false, false),
-            (9988, CollaborationPolicy::Single, true, false, false, false),
-            (9984, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9982, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
-            (9988, CollaborationPolicy::Single, false, true, false, false),
-            (9987, CollaborationPolicy::Single, true, true, false, false),
-            (9988, CollaborationPolicy::Single, false, false, true, false),
-            (9987, CollaborationPolicy::Single, true, false, true, false),
-            (9925, CollaborationPolicy::Single, false, false, false, true),
-            (9924, CollaborationPolicy::Single, true, false, false, true),
+            (9986, CollaborationPolicy::Single, false, false, false, false),
+            (9985, CollaborationPolicy::Single, true, false, false, false),
+            (9978, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9976, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9985, CollaborationPolicy::Single, false, true, false, false),
+            (9984, CollaborationPolicy::Single, true, true, false, false),
+            (9985, CollaborationPolicy::Single, false, false, true, false),
+            (9984, CollaborationPolicy::Single, true, false, true, false),
+            (9922, CollaborationPolicy::Single, false, false, false, true),
+            (9921, CollaborationPolicy::Single, true, false, false, true),
         ].into_iter().enumerate() {
             let path = temp.path().join(format!("state-{index}"));
             let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
@@ -1388,8 +1389,9 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
-        // Two children in two slots form one wave with a 4N+6 = 14 Event tail: 9978 admits to 9,999 Events and the root call reserves one more for a recorded plan.
-        for (prefix, admitted) in [(9978_i64, true), (9980, false)] {
+        // Two children in two slots form one wave with a 4N+6 = 14 Event tail plus three retry facts for each
+        // child call and the synthesis call (23): 9969 admits and the root call reserves one more for a recorded plan.
+        for (prefix, admitted) in [(9969_i64, true), (9971, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
@@ -1443,7 +1445,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             let events = store.load_session(id).await.unwrap();
             let spawned = events.iter().filter(|event| matches!(event.event, Event::AgentSpawned { role: arany::AgentRole::Child, .. })).count();
             assert_eq!(spawned, if admitted { 2 } else { 0 }, "two children at {prefix}: AgentSpawned");
-            assert_eq!(events.len(), if admitted { 9_999 } else { prefix as usize + 7 }, "two children at {prefix}: committed Events");
+            assert_eq!(events.len(), prefix as usize + if admitted { 21 } else { 7 }, "two children at {prefix}: committed Events");
             store.close().await.unwrap();
         }
         for (index, (prefix, prior_forks, admitted)) in [
@@ -5084,6 +5086,14 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     };
                     responses.push_back(response);
                     let mut expected_phases = expected_phases;
+                    // An uncancelled 5xx retries the same route three times before it settles.
+                    let retried = case == "service unavailable" && !cancel;
+                    if retried {
+                        for _ in 0..arany::MAX_PROVIDER_RETRIES {
+                            responses.push_back(Err(ProviderError::RemoteHttp(503)));
+                            expected_phases.push(phase);
+                        }
+                    }
                     if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
                             responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
@@ -5096,11 +5106,16 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     let engine = engine_support::open(StateRoot::admit(&state_path).expect("private state"), EngineConfig::default())
                     .expect("Engine");
                     let mut tapped = engine.subscribe();
-                    let outcome = tokio::time::timeout(
-                        Duration::from_secs(5),
-                        run_with(&engine, &provider, run_request, RunControls { cancellation, ..Default::default() }),
-                    )
-                    .await
+                    let run = run_with(&engine, &provider, run_request, RunControls { cancellation, ..Default::default() });
+                    // Paused time skips the backoff; a paused watchdog would fire while the Store thread works.
+                    let outcome = if retried {
+                        tokio::time::pause();
+                        let outcome = run.await;
+                        tokio::time::resume();
+                        Ok(outcome)
+                    } else {
+                        tokio::time::timeout(Duration::from_secs(5), run).await
+                    }
                     .unwrap_or_else(|_| {
                         let phase = format!("{phase:?}");
                         let cancellation = if cancel { "true" } else { "false" };

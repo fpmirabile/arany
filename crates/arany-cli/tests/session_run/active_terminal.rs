@@ -257,8 +257,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     failure_ready
                         .recv_timeout(Duration::from_secs(10))
                         .expect("release synthetic failure");
+                    // A Retry-After past the action deadline ends the call without a same-route retry.
                     stream
-                        .write_all(b"HTTP/1.1 503 Unavailable\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntest-key")
+                        .write_all(b"HTTP/1.1 503 Unavailable\r\nRetry-After: 86400\r\nContent-Length: 8\r\nConnection: close\r\n\r\ntest-key")
                         .expect("synthetic failure response");
                     return;
                 }

@@ -170,12 +170,18 @@ pub fn assert_action_bounds(events: &[crate::EventEnvelope], previews: bool, ste
                     Some(end),
                 ));
             }
+            // A switch or retry re-admits its attempt's action headroom before it commits.
             Event::ProviderFallbackUsed {
                 agent_run_id,
-                fallback,
+                fallback: crate::ProviderFallback { role, .. },
+                ..
+            }
+            | Event::ProviderRetryScheduled {
+                agent_run_id,
+                retry: crate::ProviderRetry { role, .. },
                 ..
             } => {
-                let action = match fallback.role {
+                let action = match role {
                     crate::ProviderRole::Primary => Action::ProviderCall { previews, steering },
                     crate::ProviderRole::Child => Action::Child {
                         in_flight: in_flight(index),

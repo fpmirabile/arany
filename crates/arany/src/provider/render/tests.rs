@@ -425,6 +425,7 @@ fn history_tool_block_projects_calls_without_intent_internals() {
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
         provider_fallbacks: Vec::new(),
+        provider_retries: Vec::new(),
     };
     let block = history_tool_block(&run);
     let parsed: Value = serde_json::from_str(&block).unwrap();
@@ -495,6 +496,7 @@ fn parse_steps_never_reach_history_or_shift_the_compaction_prefix() {
         lifecycle_hook_sequence: None,
         provider_sequences: Default::default(),
         provider_fallbacks: Vec::new(),
+        provider_retries: Vec::new(),
     };
     assert!(run.model_tools().is_empty());
     assert_eq!(history_tool_block(&run), "");

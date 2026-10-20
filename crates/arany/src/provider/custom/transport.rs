@@ -18,7 +18,11 @@ pub(super) enum TransportError {
     Unavailable,
     PartialTransport,
     Rejected,
-    HttpServerUnavailable,
+    HttpServerUnavailable(Option<std::time::Duration>),
+    RateLimited(Option<std::time::Duration>),
+    QuotaExceeded,
+    Transport,
+    StreamEnded,
     InvalidOutcome,
 }
 
@@ -138,17 +142,15 @@ impl CustomTransport {
             .body(body)
             .send()
             .await
-            .map_err(|_| TransportError::Unavailable)?;
-        streaming_admission(response.status(), response.url().as_str() == self.endpoint)?;
+            .map_err(|error| send_failure(&error))?;
+        let destination_matches = response.url().as_str() == self.endpoint;
+        if destination_matches && !response.status().is_success() {
+            return Err(status_failure(&mut response).await);
+        }
+        streaming_admission(response.status(), destination_matches)?;
         crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
             .await
-            .map_err(|error| {
-                if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable {
-                    TransportError::PartialTransport
-                } else {
-                    TransportError::InvalidOutcome
-                }
-            })
+            .map_err(stream_failure)
     }
 
     async fn send(&self, request: Value) -> Result<Vec<u8>, TransportError> {
@@ -162,16 +164,12 @@ impl CustomTransport {
             .body(body)
             .send()
             .await
-            .map_err(|_| TransportError::Unavailable)?;
+            .map_err(|error| send_failure(&error))?;
         if response.url().as_str() != self.endpoint {
             return Err(TransportError::InvalidOutcome);
         }
         if !response.status().is_success() {
-            return Err(if response.status().is_server_error() {
-                TransportError::HttpServerUnavailable
-            } else {
-                TransportError::Rejected
-            });
+            return Err(status_failure(&mut response).await);
         }
         let bytes = super::super::read_identity_body(&mut response, MAX_RESPONSE_BYTES)
             .await
@@ -187,6 +185,35 @@ impl CustomTransport {
     }
 }
 
+// Only a cut or an early end retries; a temporary-usage event keeps its unavailable class.
+pub(super) fn stream_failure(error: ProviderError) -> TransportError {
+    match error {
+        ProviderError::PartialTransport => TransportError::PartialTransport,
+        ProviderError::StreamEnded => TransportError::StreamEnded,
+        error if error.failure_class() == crate::provider::ProviderFailureClass::Unavailable => {
+            TransportError::Unavailable
+        }
+        _ => TransportError::InvalidOutcome,
+    }
+}
+
+fn send_failure(error: &reqwest::Error) -> TransportError {
+    match crate::provider::send_failure(error) {
+        ProviderError::Transport => TransportError::Transport,
+        _ => TransportError::Unavailable,
+    }
+}
+
+async fn status_failure(response: &mut reqwest::Response) -> TransportError {
+    match crate::provider::http_failure(response).await {
+        ProviderError::HttpServerUnavailable(after) => TransportError::HttpServerUnavailable(after),
+        ProviderError::RateLimited(after) => TransportError::RateLimited(after),
+        ProviderError::QuotaExceeded => TransportError::QuotaExceeded,
+        _ => TransportError::Rejected,
+    }
+}
+
+// A drifted destination never retries or switches; its status keeps the legacy disposition.
 pub(super) fn streaming_admission(
     status: reqwest::StatusCode,
     destination_matches: bool,
@@ -199,11 +226,7 @@ pub(super) fn streaming_admission(
         });
     }
     if !status.is_success() {
-        return Err(if status.is_server_error() {
-            TransportError::HttpServerUnavailable
-        } else {
-            TransportError::Rejected
-        });
+        return Err(TransportError::Rejected);
     }
     Ok(())
 }

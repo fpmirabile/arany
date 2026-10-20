@@ -5567,7 +5567,10 @@ async fn steered_run_near_the_event_cap_is_refused_up_front_never_stranded() {
         previews: false,
         steering: true,
     };
-    let steered_bound = steered_bound.max_events() + steered_bound.verdict_slots();
+    // The call's bound includes its three same-route retry facts.
+    let steered_bound = steered_bound.max_events()
+        + usize::from(arany::MAX_PROVIDER_RETRIES)
+        + steered_bound.verdict_slots();
     for free in steered_bound - 3..=steered_bound + 2 {
         let case = steered_run(temp.path(), &format!("free-{free}"), Some(free), run_offset).await;
         let count = |matches: fn(&Event) -> bool| {
@@ -5724,7 +5727,11 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
     };
     let run_start = index_of(1, |event| matches!(event, Event::GoalStarted { .. }));
     let tool_start = index_of(1, |event| matches!(event, Event::ToolStarted { .. }));
-    let free = arany::Action::Tool.max_events() + arany::Action::Tool.verdict_slots() - 1;
+    // The Tool step's bound includes its review call's three same-route retry facts.
+    let free = arany::Action::Tool.max_events()
+        + usize::from(arany::MAX_PROVIDER_RETRIES)
+        + arany::Action::Tool.verdict_slots()
+        - 1;
     let (events, view) = tokio::time::timeout(
         std::time::Duration::from_secs(60),
         reviewed_write_run(temp.path(), "capped", Some(free), tool_start - run_start),
@@ -5822,7 +5829,7 @@ async fn approving_review_cut_short_by_a_pause_is_not_recorded_as_an_ai_approval
 }
 
 #[tokio::test]
-async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
+async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
@@ -5866,13 +5873,9 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
-    assert_eq!(
-        run.provider_fallbacks
-            .iter()
-            .filter(|(_, fallback)| fallback.role == arany::ProviderRole::Compaction)
-            .count(),
-        1,
-        "the started switch completes before cancellation applies"
+    assert!(
+        run.provider_fallbacks.is_empty() && run.provider_retries.is_empty(),
+        "a cancelled compaction call starts no further attempt"
     );
     let record = events
         .iter()
@@ -5881,7 +5884,7 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
             _ => None,
         })
         .expect("compaction record");
-    assert_eq!(record.model, "compact-fallback");
+    assert_eq!(record.model, "compact-primary");
     assert!(matches!(
         record.status,
         arany::CompactionStatus::Failed {
@@ -5896,6 +5899,87 @@ async fn in_run_compaction_switch_is_journaled_before_cancellation_applies() {
             .is_empty()
     );
     assert_eq!(failing.compact_requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
+async fn a_pause_in_an_in_run_compaction_backoff_starts_no_further_compaction_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = paged_read_workspace(temp.path());
+    let state_path = temp.path().join("state");
+    let mut failing = ScriptedProvider::new(vec![]).with_profile("scripted", "compact-primary");
+    failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    let failing = Arc::new(failing);
+    let primary =
+        Arc::new(ScriptedProvider::new(paged_read_outcomes()).with_profile("scripted", "primary"));
+    let mut bindings = AdmittedProviders::single(primary.clone());
+    bindings.roles.compaction = vec![failing.clone()];
+    let engine = facts_engine(
+        StateRoot::admit(&state_path).expect("private state"),
+        &state_path,
+    );
+    let session = engine
+        .create_session(workspace.clone(), Some("Pause".into()))
+        .await
+        .expect("session");
+    let (entered, release) = arany::FaultPlan::gate_retry_backoff(session);
+    let mut input = request(&workspace, "Inspect the bounded file in pages");
+    input.include_paths.clear();
+    input.session_id = Some(session);
+    input.title = None;
+    input.goal.budget = Some(arany::GoalBudget {
+        max_provider_calls: None,
+        max_tokens: None,
+        max_active_ms: Some(30 * 60 * 1000),
+        max_runs: 1,
+    });
+    let steering = RunSteering::new();
+    let run = super::engine_support::run_routed(
+        &engine,
+        bindings,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            steering: Some(steering.clone()),
+            ..Default::default()
+        },
+    );
+    let outcome = {
+        tokio::pin!(run);
+        tokio::select! {
+            result = &mut run => panic!("Run ended before the held compaction backoff: {}", result.is_ok()),
+            entered = entered => entered.expect("backoff entered"),
+        }
+        assert!(steering.pause());
+        run.await.expect("paused Run")
+    };
+    // The gate stays held: only the pause can end the wait.
+    drop(release);
+    assert_eq!(outcome.run.status, RunStatus::Cancelled);
+    engine.close().await.expect("engine shutdown");
+    let (events, view) = replayed(&state_path, session).await;
+    let run = &view.runs[0];
+    assert!(run.provider_fallbacks.is_empty());
+    assert_eq!(
+        run.provider_retries
+            .iter()
+            .map(|(_, retry)| retry.role)
+            .collect::<Vec<_>>(),
+        [arany::ProviderRole::Compaction]
+    );
+    assert_eq!(failing.compact_requests.lock().expect("requests").len(), 1);
+    let record = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::GoalContextCompacted { record, .. } => Some(record),
+            _ => None,
+        })
+        .expect("compaction record");
+    assert!(matches!(
+        record.status,
+        arany::CompactionStatus::Failed {
+            reason: arany::CompactionFailure::Cancelled
+        }
+    ));
 }
 
 #[tokio::test]
@@ -5980,6 +6064,8 @@ async fn foreground_worker_goal_refuses_editor_authority_without_a_write_capable
 
 #[tokio::test]
 async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
+    // The continuation tail includes its call's three same-route retry facts.
+    const REFUSED: usize = 10 + arany::MAX_PROVIDER_RETRIES as usize;
     async fn run(root: &Path, free: Option<(usize, usize)>) -> Vec<arany::EventEnvelope> {
         use std::os::unix::fs::PermissionsExt;
         let workspace = facts_workspace(root, "stable");
@@ -6025,7 +6111,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             },
         )
         .await;
-        if free.is_some_and(|(_, free)| free == 10) {
+        if free.is_some_and(|(_, free)| free == REFUSED) {
             assert!(matches!(
                 result,
                 Err(EngineError::Store(arany::StoreError::ReplayLimit))
@@ -6047,7 +6133,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
         .position(|e| matches!(e.event, Event::GoalStarted { .. }))
         .unwrap();
     let offset = last_hook - initial;
-    for free in [10, 11] {
+    for free in [REFUSED, REFUSED + 1] {
         let events = run(
             &temp.path().join(format!("free-{free}")),
             Some((offset, free)),
@@ -6058,7 +6144,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
                 .iter()
                 .filter(|e| matches!(e.event, Event::HookStarted { .. }))
                 .count(),
-            if free == 10 { 7 } else { 8 },
+            if free == REFUSED { 7 } else { 8 },
             "free {free}: the last blocked hook needs its pair, verdict and complete continuation tail"
         );
         assert!(

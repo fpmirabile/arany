@@ -213,6 +213,18 @@ impl Event {
                     Err(ReplayError::InvalidPayload)
                 }
             }
+            Self::ProviderRetryScheduled { retry, .. } => {
+                use crate::provider::{MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS};
+                let backoff = crate::provider::ProviderRetry::backoff(retry.attempt).as_millis();
+                if (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
+                    && (backoff..=u128::from(MAX_PROVIDER_RETRY_DELAY_MS))
+                        .contains(&u128::from(retry.delay_ms))
+                {
+                    Ok(())
+                } else {
+                    Err(ReplayError::InvalidPayload)
+                }
+            }
             Self::ProviderCallRecorded { record, .. } => record.validate(),
             Self::GoalProviderCallReserved { goal_id, .. } => {
                 if goal_id.valid() {
