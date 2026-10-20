@@ -1315,10 +1315,10 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             );
         }
     }
-    for (command, needle, owned_row) in [
-        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..], 1),
-        (b"/agents\r", b"Last", 1),
-        (b"/help\r", b"local controls", 1),
+    for (command, needle) in [
+        (&b"/resume\r"[..], &b"Resume \xc2\xb7"[..]),
+        (b"/agents\r", b"Last"),
+        (b"/help\r", b"local controls"),
     ] {
         let from = transcript.len();
         input.write_all(command).unwrap();
@@ -1348,7 +1348,13 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             close_from,
             b"\x1b[?25h\x1b[22;3H",
         );
-        super::assert_classic_owned_clear(&transcript[close_from..], owned_row);
+        // The floored viewport keeps its height, so the frame diff repaints it without a clear.
+        assert!(
+            !transcript[close_from..]
+                .windows(4)
+                .any(|part| part == b"\x1b[2J"),
+            "settled history must not be cleared"
+        );
     }
     let exit_from = transcript.len();
     input.write_all(b"/exit\r").unwrap();

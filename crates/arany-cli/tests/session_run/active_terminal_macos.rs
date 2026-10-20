@@ -1169,11 +1169,11 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     && (!matches!(stage, 4 | 6 | 8)
                         || tail.windows(6).any(|part| part == b"\x1b[?25l"))
                 {
-                    if let Some(row) = match stage {
-                        5 | 7 | 9 => Some(1),
-                        _ => None,
-                    } {
-                        super::assert_classic_owned_clear(tail, row);
+                    if matches!(stage, 5 | 7 | 9) {
+                        assert!(
+                            !tail.windows(4).any(|part| part == b"\x1b[2J"),
+                            "settled history must not be cleared"
+                        );
                     }
                     from = bytes.len();
                     input.write_all(send).unwrap();
