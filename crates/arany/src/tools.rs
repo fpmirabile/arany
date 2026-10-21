@@ -153,6 +153,7 @@ pub(crate) struct PermissionSnapshot {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
+    git_writes_available: bool,
     worker: Option<std::sync::Arc<worker::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
@@ -717,6 +718,7 @@ impl ToolRuntime {
         Ok(Self {
             definitions: std::sync::Arc::new(definitions),
             config,
+            git_writes_available: guard::git_writes_available(),
             worker: None,
             handover: None,
             permissions,
@@ -868,7 +870,8 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
-                serde_json::json!({"operations":catalog::git_operations(self.config.write),"scope":catalog::GIT_SCOPE})
+                let write = self.config.write && self.git_writes_available;
+                serde_json::json!({"write":write,"operations":catalog::git_operations(write),"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },

@@ -990,6 +990,7 @@ impl Task {
             .and(worker_input.as_ref())
             .map(|bytes| Arc::from(bytes.as_slice()));
         let runtime = ToolRuntime {
+            git_writes_available: false,
             handover,
             worker: self.worker.zip(worker_input).map(|(transfer, input)| {
                 Arc::new(super::super::worker::Action {

@@ -1999,6 +1999,7 @@ done
             });
         }
         ToolRuntime {
+            git_writes_available: false,
             worker: None,
             handover: None,
             definitions: Default::default(),

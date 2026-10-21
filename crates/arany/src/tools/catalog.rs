@@ -290,7 +290,6 @@ pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
 }
 
 pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
-    let write = write && super::guard::git_writes_available();
     ALL.iter()
         .filter(|facts| {
             facts.family == Family::Git && (write || !facts.mutates || facts.name == "git_branch")
@@ -361,13 +360,7 @@ pub(crate) fn call_schemas() -> Vec<Value> {
 }
 
 pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
-    let git_writes = catalog["write"] == true
-        && catalog["git"].is_object()
-        && super::guard::git_writes_available();
-    catalog_call_schemas_with_git_writes(catalog, git_writes)
-}
-
-fn catalog_call_schemas_with_git_writes(catalog: &Value, git_writes: bool) -> Vec<Value> {
+    let git_writes = catalog["git"]["write"] == true;
     let mut calls = call_schemas();
     calls.retain_mut(|call| {
         let Some(facts) = facts_of(call) else {
@@ -646,9 +639,9 @@ mod tests {
             for git_writes in [false, true] {
                 let catalog = json!({
                     "write": write,
-                    "git": {"operations": ["git_status", "git_commit", "git_branch", "git_switch"]}
+                    "git": {"write": git_writes, "operations": ["git_status", "git_commit", "git_branch", "git_switch"]}
                 });
-                let calls = catalog_call_schemas_with_git_writes(&catalog, git_writes);
+                let calls = catalog_call_schemas(&catalog);
                 let offered: Vec<_> = calls
                     .iter()
                     .filter_map(|call| facts_of(call).map(|facts| facts.name))
