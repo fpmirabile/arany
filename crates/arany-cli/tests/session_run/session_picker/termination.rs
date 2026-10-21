@@ -342,7 +342,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
         stderr_bytes
             .windows(b"\x1b[?1000h".len())
             .any(|part| part == b"\x1b[?1000h"),
-        "picker enabled mouse capture"
+        "Fullscreen enabled mouse capture"
     );
     let stdout_text = String::from_utf8_lossy(&stdout_bytes);
     let shell_pid = stdout_text
@@ -363,11 +363,9 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     assert_ne!(tty_settings(product_pid), before, "picker owns raw mode");
 
     if attached_entry {
-        let transitions: [(&[u8], &[u8], &[u8]); 2] = [
-            (b"\r", b"\x1b[?1000l", b"\x1b[?25h"),
-            (b"/resume\r", b"\x1b[?1000h", b"\x1b[?25l"),
-        ];
-        for (keys, capture, cursor) in transitions {
+        let transitions: [(&[u8], &[u8]); 2] =
+            [(b"\r", b"\x1b[?25h"), (b"/resume\r", b"\x1b[?25l")];
+        for (keys, cursor) in transitions {
             let frame_at = stderr_bytes.len();
             input.write_all(keys).expect("attached picker transition");
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -383,8 +381,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
                 crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered);
                 let recent = &stderr_bytes[frame_at..];
                 // A reopened picker takes the later redraw key only once armed.
-                if recent.windows(capture.len()).any(|part| part == capture)
-                    && recent.windows(cursor.len()).any(|part| part == cursor)
+                if recent.windows(cursor.len()).any(|part| part == cursor)
                     && (keys == b"\r"
                         || crate::armed_selector(
                             &stderr_bytes,
@@ -409,16 +406,16 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
                 .windows(8)
                 .filter(|part| *part == b"\x1b[?1000h")
                 .count(),
-            2,
-            "attached picker reacquires mouse capture"
+            1,
+            "global capture spans picker close and reopen"
         );
         assert_eq!(
             stderr_bytes
                 .windows(8)
                 .filter(|part| *part == b"\x1b[?1000l")
                 .count(),
-            1,
-            "initial picker releases mouse capture before composer"
+            0,
+            "the composer keeps the global capture"
         );
         assert_ne!(
             tty_settings(product_pid),

@@ -6,7 +6,7 @@ use crate::accounts::chatgpt;
 use crate::cli::provider::select::ProviderArg;
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    InteractiveCommand, Submission, TerminalInput, TerminalMode,
+    InteractiveCommand, MouseMode, PointerSettings, Submission, TerminalInput, TerminalMode,
 };
 use arany::RecordKind;
 use arany::{
@@ -17,6 +17,7 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
+const UI_PREFERENCES_VERSION: u8 = 4;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -25,13 +26,48 @@ struct UiPreferences {
     preferences: Preferences,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+// Read first so an older record is refused by version rather than by its missing fields.
+#[derive(serde::Deserialize)]
+struct RecordVersion {
+    version: u8,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Preferences {
     pub completion: CompletionLayout,
     pub view: TerminalMode,
     pub goal_budget: arany::GoalBudget,
     pub resources: arany::ToolResourceSettings,
+    pub mouse: MouseMode,
+    pub copy_on_select: bool,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        let pointer = PointerSettings::default();
+        Self {
+            completion: CompletionLayout::default(),
+            view: TerminalMode::default(),
+            goal_budget: arany::GoalBudget::default(),
+            resources: arany::ToolResourceSettings::default(),
+            mouse: pointer.mouse,
+            copy_on_select: pointer.copy_on_select,
+        }
+    }
+}
+
+impl Preferences {
+    pub(super) fn pointer(self) -> PointerSettings {
+        PointerSettings {
+            mouse: self.mouse,
+            copy_on_select: self.copy_on_select,
+        }
+    }
+}
+
+fn on_off(value: bool) -> &'static str {
+    if value { "on" } else { "off" }
 }
 
 // Linear rows take `NUMBER VALUE`, numbered as `setting_rows` lists them.
@@ -82,6 +118,14 @@ fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
         Ok(11) => raw.parse().ok().map(|limit| {
             preferences.resources.build_cache_bytes = limit;
         }),
+        Ok(12) => MouseMode::ALL
+            .into_iter()
+            .find(|mouse| mouse.label() == raw)
+            .map(|mouse| preferences.mouse = mouse),
+        Ok(13) => [true, false]
+            .into_iter()
+            .find(|value| on_off(*value) == raw)
+            .map(|value| preferences.copy_on_select = value),
         _ => None,
     };
     if parsed.is_none()
@@ -133,6 +177,8 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
             "Build cache bytes: {}",
             preferences.resources.build_cache_bytes
         ),
+        format!("Mouse: {}", preferences.mouse.label()),
+        format!("Copy on select: {}", on_off(preferences.copy_on_select)),
     ]
 }
 
@@ -143,6 +189,8 @@ fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
     for row in &mut rows[2..5] {
         row.push_str(" (number or unlimited)");
     }
+    rows[11].push_str(" (wheel and clicks|wheel only|off)");
+    rows[12].push_str(" (on|off)");
     rows
 }
 
@@ -242,6 +290,8 @@ fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
                 forward,
             );
         }
+        11 => preferences.mouse = step(preferences.mouse, &MouseMode::ALL, forward),
+        12 => preferences.copy_on_select = !preferences.copy_on_select,
         _ => {}
     }
 }
@@ -279,12 +329,13 @@ fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
     else {
         return Ok(Preferences::default());
     };
-    let record: UiPreferences = serde_json::from_slice(&record)
-        .map_err(|_| "invalid display settings; use /settings to replace them")?;
-    if record.version != 3
-        || record.preferences.goal_budget.validate().is_err()
-        || !record.preferences.resources.valid()
-    {
+    let invalid = "invalid display settings; use /settings to replace them";
+    let version: RecordVersion = serde_json::from_slice(&record).map_err(|_| invalid)?;
+    if version.version != UI_PREFERENCES_VERSION {
+        return Err("unsupported settings; use /settings to replace them".into());
+    }
+    let record: UiPreferences = serde_json::from_slice(&record).map_err(|_| invalid)?;
+    if record.preferences.goal_budget.validate().is_err() || !record.preferences.resources.valid() {
         return Err("unsupported settings; use /settings to replace them".into());
     }
     Ok(record.preferences)
@@ -299,7 +350,7 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     tokio::task::spawn_blocking(move || {
         let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
         let record = serde_json::to_vec(&UiPreferences {
-            version: 3,
+            version: UI_PREFERENCES_VERSION,
             preferences,
         })
         .map_err(|_| "display settings unavailable")?;
@@ -408,6 +459,9 @@ pub(super) async fn settings(
                 let view_changed = chosen.view != *saved_view;
                 *saved_view = chosen.view;
                 composer.set_completion_layout(chosen.completion);
+                terminal
+                    .set_pointer(chosen.pointer())
+                    .map_err(|error| error.to_string())?;
                 if !linear && view_changed {
                     terminal
                         .set_mode(chosen.view, composer.text().len())
@@ -1431,6 +1485,10 @@ mod tests {
             "3 ",
             "0 64",
             "12 64",
+            "12 on",
+            "13 wheel only",
+            "13 yes",
+            "14 on",
             "x 64",
             "calls=64",
             "combined",
@@ -1459,15 +1517,29 @@ mod tests {
             );
         }
         let rows = linear_setting_rows(preferences);
-        assert_eq!(rows.len(), 11);
+        assert_eq!(rows.len(), 13);
         assert_eq!(rows[0], "Slash menu: tabs (tabs|combined)");
         assert_eq!(rows[2], "Goal provider calls: 64 (number or unlimited)");
         assert_eq!(rows[10], "Build cache bytes: 8589934592");
+        assert_eq!(
+            rows[11],
+            "Mouse: wheel and clicks (wheel and clicks|wheel only|off)"
+        );
+        assert_eq!(rows[12], "Copy on select: on (on|off)");
         assert!(apply_setting(&mut preferences, "1 combined"));
         assert!(apply_setting(&mut preferences, "2  fullscreen"));
         assert!(apply_setting(&mut preferences, "3 unlimited"));
         assert!(apply_setting(&mut preferences, "4 100000"));
         assert!(apply_setting(&mut preferences, "7 300000"));
+        assert!(apply_setting(&mut preferences, "12 wheel only"));
+        assert!(apply_setting(&mut preferences, "13 off"));
+        assert_eq!(preferences.mouse, MouseMode::WheelOnly);
+        assert!(!preferences.copy_on_select);
+        for expected in [(MouseMode::Off, true), (MouseMode::WheelAndClicks, false)] {
+            cycle_setting(&mut preferences, 11, true);
+            cycle_setting(&mut preferences, 12, true);
+            assert_eq!((preferences.mouse, preferences.copy_on_select), expected);
+        }
         assert_eq!(preferences.completion, CompletionLayout::Combined);
         assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
@@ -1620,6 +1692,11 @@ mod tests {
                 view: TerminalMode::Fullscreen,
                 ..Preferences::default()
             },
+            Preferences {
+                mouse: MouseMode::Off,
+                copy_on_select: false,
+                ..Preferences::default()
+            },
             Preferences::default(),
         ] {
             save_settings(&admission, preferences).await.unwrap();
@@ -1666,8 +1743,27 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#
+            br#"{"version":4,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true}}"#
         );
+        // A complete version-3 record is refused by version, without conversion or overwrite.
+        let version_three = br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
+        root.record(RecordKind::UiPreferences)
+            .replace(version_three)
+            .unwrap();
+        assert_eq!(
+            restore_settings(&admission).await.unwrap_err(),
+            "unsupported settings; use /settings to replace them"
+        );
+        assert_eq!(
+            root.record(RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .unwrap(),
+            version_three
+        );
+        root.record(RecordKind::UiPreferences)
+            .replace(&original)
+            .unwrap();
         let mut invalid = Preferences::default();
         invalid.resources.build_processes = 0;
         assert!(save_settings(&admission, invalid).await.is_err());

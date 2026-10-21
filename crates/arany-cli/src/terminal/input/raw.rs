@@ -1,9 +1,9 @@
 use super::{
-    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_DRAFT_BYTES, ReaderEvent, admit_input,
-    map_input, terminal_input,
+    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_DRAFT_BYTES, ReaderEvent, TerminalInput,
+    admit_input, map_input, pointer_input, terminal_input,
 };
 use crossterm::event::{
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
 };
 use mio::{Events, Interest, Poll, Token, unix::SourceFd};
 use std::{
@@ -27,6 +27,7 @@ const READ_BUFFER_BYTES: usize = 4096;
 const MAX_BACKLOG: usize = OUTBOX_LIMIT + READ_BUFFER_BYTES;
 const OUTBOX_RETRY: Duration = Duration::from_millis(2);
 const PASTE_END: &[u8; 6] = b"\x1b[201~";
+const MULTI_CLICK: Duration = Duration::from_millis(500);
 
 pub(super) fn start(
     sender: mpsc::Sender<super::Observed<ReaderEvent>>,
@@ -201,6 +202,7 @@ pub(super) struct Decoder {
     mode: Mode,
     sequence: Vec<u8>,
     started: Option<Instant>,
+    last_click: Option<(u16, u16, Instant, u8)>,
 }
 
 impl Decoder {
@@ -226,6 +228,30 @@ impl Decoder {
         self.mode = Mode::Key;
         self.sequence.clear();
         self.started = None;
+    }
+
+    // A press on the cell of the previous press within the window counts as a double or triple click.
+    fn count_click(&mut self, event: Option<ReaderEvent>, now: Instant) -> Option<ReaderEvent> {
+        let Some(ReaderEvent::Pointer(TerminalInput::PointerClick { column, row, .. })) = event
+        else {
+            return event;
+        };
+        let clicks = match self.last_click {
+            Some((last_column, last_row, at, clicks))
+                if (last_column, last_row) == (column, row)
+                    && clicks < 3
+                    && now.saturating_duration_since(at) <= MULTI_CLICK =>
+            {
+                clicks + 1
+            }
+            _ => 1,
+        };
+        self.last_click = Some((column, row, now, clicks));
+        Some(ReaderEvent::Pointer(TerminalInput::PointerClick {
+            column,
+            row,
+            clicks,
+        }))
     }
 
     pub(super) fn feed(&mut self, byte: u8, now: Instant) -> Option<ReaderEvent> {
@@ -328,7 +354,7 @@ impl Decoder {
                     if (b'@'..=b'~').contains(&byte) {
                         let event = sequence_event(&self.sequence);
                         self.reset();
-                        return event;
+                        return self.count_click(event, now);
                     }
                 }
                 if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {
@@ -350,7 +376,7 @@ impl Decoder {
                     )
                 });
                 self.reset();
-                event
+                self.count_click(event, now)
             }
             Mode::SkipCsi => {
                 if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {
@@ -569,38 +595,34 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
 }
 
 fn mouse(button: u16, column: u16, row: u16, release: bool) -> Option<ReaderEvent> {
-    if release || button > 127 {
+    if button > 127 {
         return None;
     }
-    let mut modifiers = KeyModifiers::NONE;
-    for (bit, modifier) in [
-        (4, KeyModifiers::SHIFT),
-        (8, KeyModifiers::ALT),
-        (16, KeyModifiers::CONTROL),
-    ] {
-        if button & bit != 0 {
-            modifiers |= modifier;
-        }
-    }
+    let left = button & 3 == 0;
+    let motion = button & 32 != 0;
     let kind = if button & 64 != 0 {
         match button & 3 {
-            0 => MouseEventKind::ScrollUp,
-            1 => MouseEventKind::ScrollDown,
+            0 if !release => MouseEventKind::ScrollUp,
+            1 if !release => MouseEventKind::ScrollDown,
             _ => return None,
         }
-    } else if button & 32 != 0 && button & 3 == 3 {
+    } else if release {
+        if !left || motion {
+            return None;
+        }
+        MouseEventKind::Up(MouseButton::Left)
+    } else if motion && button & 3 == 3 {
         MouseEventKind::Moved
-    } else if button & 32 == 0 && button & 3 == 0 {
-        MouseEventKind::Down(MouseButton::Left)
+    } else if left {
+        if motion {
+            MouseEventKind::Drag(MouseButton::Left)
+        } else {
+            MouseEventKind::Down(MouseButton::Left)
+        }
     } else {
         return None;
     };
-    Some(ReaderEvent::Event(Event::Mouse(MouseEvent {
-        kind,
-        column: column.checked_sub(1)?,
-        row: row.checked_sub(1)?,
-        modifiers,
-    })))
+    pointer_input(kind, column.checked_sub(1)?, row.checked_sub(1)?, 1).map(ReaderEvent::Pointer)
 }
 
 #[cfg(test)]
@@ -785,6 +807,29 @@ mod tests {
                 );
             }
             reader.stop();
+        }
+    }
+
+    #[test]
+    fn oversized_mouse_records_are_discarded_within_the_sequence_bound() {
+        let now = Instant::now();
+        let mut decoder = Decoder::default();
+        for _ in 0..3 {
+            let mut record = b"\x1b[<0;".to_vec();
+            record.extend([b'9'; 4096]);
+            record.extend_from_slice(b";1Mx");
+            let events = record
+                .iter()
+                .filter_map(|&byte| decoder.feed(byte, now))
+                .collect::<Vec<_>>();
+            assert!(matches!(
+                events.as_slice(),
+                [ReaderEvent::Event(Event::Key(KeyEvent {
+                    code: KeyCode::Char('x'),
+                    ..
+                }))]
+            ));
+            assert!(decoder.sequence.capacity() <= MAX_KEY_SEQUENCE_BYTES);
         }
     }
 

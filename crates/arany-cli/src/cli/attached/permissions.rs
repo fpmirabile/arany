@@ -453,8 +453,12 @@ mod tests {
             .build()
             .unwrap();
         runtime.block_on(async {
-            let mut terminal =
-                AttachedTerminal::acquire_with_mode(true, TerminalMode::default()).unwrap();
+            let mut terminal = AttachedTerminal::acquire_with_mode(
+                true,
+                TerminalMode::default(),
+                Default::default(),
+            )
+            .unwrap();
             let mut composer = Composer::default();
             let access = WorkspacePermissions::open(&workspace)
                 .unwrap()

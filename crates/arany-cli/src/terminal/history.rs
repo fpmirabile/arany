@@ -1,3 +1,4 @@
+use super::clipboard::{COPY_TOO_LARGE, MAX_COPY_BYTES, display_bytes, display_text};
 use crate::presentation::{
     escape_terminal, escaped_terminal_width, image_message_text, safe_truncate,
 };
@@ -64,12 +65,29 @@ struct MessageRow {
     source_byte: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextPoint {
+    source: MessageSource,
+    byte: usize,
+    // A boundary sits between graphemes; otherwise the grapheme starting at `byte` is selected.
+    boundary: bool,
+}
+
+#[derive(Clone, Copy)]
+struct Selection {
+    anchor: TextPoint,
+    head: TextPoint,
+    shown: bool,
+}
+
 #[derive(Clone)]
 pub(super) struct HistoryRow {
     pub(super) text: String,
     pub(super) speaker: MessageKind,
     pub(super) heading: bool,
     pub(super) matched: bool,
+    // Selected cells of `text`, as a half-open column range.
+    pub(super) selected: Option<(usize, usize)>,
 }
 
 #[derive(Default)]
@@ -95,6 +113,7 @@ pub(super) struct History {
     dirty: bool,
     preview_dirty: bool,
     preview: Option<arany::DisplayUpdate>,
+    selection: Option<Selection>,
 }
 
 impl History {
@@ -139,6 +158,7 @@ impl History {
             if new_session {
                 self.follow_tail = true;
                 self.unseen_new_content = false;
+                self.selection = None;
                 self.find = None;
                 self.matched_row = None;
                 self.notices.clear();
@@ -540,33 +560,12 @@ impl History {
             }
             return true;
         }
+        let page = self.height.saturating_sub(1).max(1);
         match input {
-            TerminalInput::PageUp | TerminalInput::PointerScrollUp { .. } => {
-                let amount = if input == TerminalInput::PageUp {
-                    self.height.saturating_sub(1).max(1)
-                } else {
-                    3
-                };
-                let top = self.top.saturating_sub(amount);
-                if top < self.top {
-                    self.top = top;
-                    self.follow_tail = false;
-                }
-                true
-            }
-            TerminalInput::PageDown | TerminalInput::PointerScrollDown { .. } => {
-                let amount = if input == TerminalInput::PageDown {
-                    self.height.saturating_sub(1).max(1)
-                } else {
-                    3
-                };
-                self.top = self.top.saturating_add(amount).min(self.tail());
-                self.follow_tail = self.top == self.tail();
-                if self.follow_tail {
-                    self.unseen_new_content = false;
-                }
-                true
-            }
+            TerminalInput::PageUp => self.scroll(true, page),
+            TerminalInput::PageDown => self.scroll(false, page),
+            TerminalInput::PointerScrollUp { .. } => self.scroll(true, 3),
+            TerminalInput::PointerScrollDown { .. } => self.scroll(false, 3),
             TerminalInput::HistoryLive => {
                 self.follow_tail = true;
                 self.unseen_new_content = false;
@@ -580,6 +579,221 @@ impl History {
             }
             _ => false,
         }
+    }
+
+    pub(super) fn scroll(&mut self, up: bool, rows: usize) -> bool {
+        if up {
+            let top = self.top.saturating_sub(rows);
+            if top < self.top {
+                self.top = top;
+                self.follow_tail = false;
+            }
+        } else {
+            self.top = self.top.saturating_add(rows).min(self.tail());
+            self.follow_tail = self.top == self.tail();
+            if self.follow_tail {
+                self.unseen_new_content = false;
+            }
+        }
+        true
+    }
+
+    // `row` and `column` are offsets into the visible rows; one click anchors, two pick a word, three a line.
+    pub(super) fn select_at(&mut self, view: &SessionView, row: usize, column: usize, clicks: u8) {
+        self.selection = self
+            .point_at(view, row, column)
+            .and_then(|point| match clicks {
+                1 => Some(Selection {
+                    anchor: point,
+                    head: point,
+                    shown: false,
+                }),
+                2 => self.word_at(view, point),
+                _ => self.line_at(view, point),
+            });
+    }
+
+    pub(super) fn extend_selection(&mut self, view: &SessionView, row: usize, column: usize) {
+        let head = self.point_at(view, row, column);
+        if let Some((selection, head)) = self.selection.as_mut().zip(head) {
+            selection.shown = selection.shown || head != selection.anchor;
+            selection.head = head;
+        }
+    }
+
+    pub(super) fn selecting(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    pub(super) fn has_selection(&self) -> bool {
+        self.selection.is_some_and(|selection| selection.shown)
+    }
+
+    pub(super) fn clear_selection(&mut self) -> bool {
+        self.selection.take().is_some()
+    }
+
+    // The escaped selected text without headings, rails or wrap breaks; refused before it exceeds the copy limit.
+    pub(super) fn selection_text(
+        &self,
+        view: &SessionView,
+    ) -> Option<Result<String, &'static str>> {
+        let ((first, start), (last, end)) = self.selection_range(view)?;
+        let mut parts = Vec::new();
+        let mut bytes = 0usize;
+        for index in first..=last {
+            let text = message_text(view, &self.messages[index], &self.notices);
+            let from = floor_boundary(&text, if index == first { start } else { 0 });
+            let to = floor_boundary(&text, if index == last { end } else { text.len() });
+            if from >= to {
+                continue;
+            }
+            let separator = if parts.is_empty() { 0 } else { 2 };
+            bytes = bytes.saturating_add(separator + display_bytes(&text[from..to]));
+            if bytes > MAX_COPY_BYTES {
+                return Some(Err(COPY_TOO_LARGE));
+            }
+            parts.push((text, from, to));
+        }
+        (!parts.is_empty()).then(|| {
+            Ok(parts
+                .iter()
+                .map(|(text, from, to)| display_text(&text[*from..*to]))
+                .collect::<Vec<_>>()
+                .join("\n\n"))
+        })
+    }
+
+    fn point_at(&self, view: &SessionView, row: usize, column: usize) -> Option<TextPoint> {
+        let last = self.total_rows.checked_sub(1)?;
+        let (row, column) = match self.top.checked_add(row) {
+            Some(row) if row <= last => (row, column),
+            _ => (last, usize::MAX),
+        };
+        let message = self.messages.get(
+            self.messages
+                .partition_point(|message| message.start + message.rows <= row),
+        )?;
+        let text = message_text(view, message, &self.notices);
+        let boundary = |byte| TextPoint {
+            source: message.source,
+            byte,
+            boundary: true,
+        };
+        let offset = row - message.start;
+        if offset == 0 && has_heading(message.kind) {
+            return Some(boundary(0));
+        }
+        let rows = message_rows(message.kind, &text, self.width);
+        let Some((start, end)) = row_span(&text, &rows, offset) else {
+            return Some(boundary(text.len()));
+        };
+        let indent = row_indent(message.kind);
+        if column < indent {
+            return Some(boundary(start));
+        }
+        Some(
+            row_cells(&text, start, end, indent)
+                .find(|(_, cell, width)| column < cell + width)
+                .map_or(boundary(end), |(byte, _, _)| TextPoint {
+                    source: message.source,
+                    byte,
+                    boundary: false,
+                }),
+        )
+    }
+
+    fn word_at(&self, view: &SessionView, point: TextPoint) -> Option<Selection> {
+        if point.boundary {
+            return None;
+        }
+        let message = self
+            .messages
+            .iter()
+            .find(|message| message.source == point.source)?;
+        let text = message_text(view, message, &self.notices);
+        let (line_start, line_end) = line_bounds(&text, point.byte);
+        let graphemes = text[line_start..line_end]
+            .grapheme_indices(true)
+            .map(|(byte, grapheme)| (line_start + byte, grapheme))
+            .collect::<Vec<_>>();
+        let at = graphemes.iter().position(|(byte, _)| *byte == point.byte)?;
+        let word = |grapheme: &str| {
+            grapheme
+                .chars()
+                .all(|character| character.is_alphanumeric() || "_-./~".contains(character))
+        };
+        let (first, last) = if word(graphemes[at].1) {
+            (
+                graphemes[..at]
+                    .iter()
+                    .rposition(|(_, grapheme)| !word(grapheme))
+                    .map_or(0, |index| index + 1),
+                graphemes[at..]
+                    .iter()
+                    .position(|(_, grapheme)| !word(grapheme))
+                    .map_or(graphemes.len(), |index| at + index)
+                    - 1,
+            )
+        } else {
+            (at, at)
+        };
+        let at_index = |index: usize| TextPoint {
+            byte: graphemes[index].0,
+            ..point
+        };
+        Some(Selection {
+            anchor: at_index(first),
+            head: at_index(last),
+            shown: true,
+        })
+    }
+
+    fn line_at(&self, view: &SessionView, point: TextPoint) -> Option<Selection> {
+        let message = self
+            .messages
+            .iter()
+            .find(|message| message.source == point.source)?;
+        let (start, end) = line_bounds(&message_text(view, message, &self.notices), point.byte);
+        let boundary = |byte| TextPoint {
+            source: point.source,
+            byte,
+            boundary: true,
+        };
+        Some(Selection {
+            anchor: boundary(start),
+            head: boundary(end),
+            shown: start < end,
+        })
+    }
+
+    // Message indices and source bytes of the selection, ordered, with an exclusive end.
+    fn selection_range(&self, view: &SessionView) -> Option<((usize, usize), (usize, usize))> {
+        let selection = self.selection.filter(|selection| selection.shown)?;
+        let locate = |point: TextPoint| {
+            self.messages
+                .iter()
+                .position(|message| message.source == point.source)
+                .map(|index| (index, point))
+        };
+        let mut low = locate(selection.anchor)?;
+        let mut high = locate(selection.head)?;
+        let order = |(index, point): (usize, TextPoint)| (index, point.byte, !point.boundary);
+        if order(high) < order(low) {
+            std::mem::swap(&mut low, &mut high);
+        }
+        let end = if high.1.boundary {
+            high.1.byte
+        } else {
+            let text = message_text(view, &self.messages[high.0], &self.notices);
+            let byte = floor_boundary(&text, high.1.byte);
+            text[byte..]
+                .graphemes(true)
+                .next()
+                .filter(|grapheme| *grapheme != "\n")
+                .map_or(byte, |grapheme| byte + grapheme.len())
+        };
+        Some(((low.0, low.1.byte), (high.0, end)))
     }
 
     fn search(&mut self, view: &SessionView, query: &str) -> bool {
@@ -652,26 +866,28 @@ impl History {
     pub(super) fn visible(&self, view: &SessionView) -> Vec<HistoryRow> {
         let mut visible = Vec::with_capacity(self.height);
         let end = self.top.saturating_add(self.height);
-        for message in &self.messages {
+        let range = self.selection_range(view);
+        for (index, message) in self.messages.iter().enumerate() {
             if message.start + message.rows <= self.top {
                 continue;
             }
             if message.start >= end {
                 break;
             }
-            let rows = message_rows(
-                message.kind,
-                &message_text(view, message, &self.notices),
-                self.width,
-            );
-            for (offset, line) in rows.into_iter().enumerate() {
+            let text = message_text(view, message, &self.notices);
+            let rows = message_rows(message.kind, &text, self.width);
+            for offset in 0..rows.len() {
                 let row = message.start + offset;
                 if row >= self.top && row < end {
+                    let selected = range.and_then(|range| {
+                        selected_cells(message.kind, &text, &rows, offset, index, range)
+                    });
                     visible.push(HistoryRow {
                         speaker: message.kind,
                         heading: offset == 0,
                         matched: self.matched_row == Some(row),
-                        text: line.text,
+                        text: rows[offset].text.clone(),
+                        selected,
                     });
                 }
             }
@@ -923,8 +1139,89 @@ pub(super) fn display_rows(kind: MessageKind, text: &str, width: usize) -> Vec<H
             speaker: kind,
             heading: index == 0,
             matched: false,
+            selected: None,
         })
         .collect()
+}
+
+fn has_heading(kind: MessageKind) -> bool {
+    !matches!(
+        kind,
+        MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Supervisor
+    )
+}
+
+fn row_indent(kind: MessageKind) -> usize {
+    if kind == MessageKind::Tool { 0 } else { 2 }
+}
+
+fn floor_boundary(text: &str, byte: usize) -> usize {
+    let mut byte = byte.min(text.len());
+    while !text.is_char_boundary(byte) {
+        byte -= 1;
+    }
+    byte
+}
+
+fn line_bounds(text: &str, byte: usize) -> (usize, usize) {
+    let byte = floor_boundary(text, byte);
+    (
+        text[..byte].rfind('\n').map_or(0, |index| index + 1),
+        text[byte..]
+            .find('\n')
+            .map_or(text.len(), |index| byte + index),
+    )
+}
+
+// The source bytes one rendered body row shows, excluding its line break.
+fn row_span(text: &str, rows: &[MessageRow], offset: usize) -> Option<(usize, usize)> {
+    let start = floor_boundary(text, rows.get(offset)?.source_byte);
+    let line_end = text[start..]
+        .find('\n')
+        .map_or(text.len(), |index| start + index);
+    let next = rows
+        .get(offset + 1)
+        .map_or(text.len(), |row| row.source_byte);
+    Some((start, floor_boundary(text, next.clamp(start, line_end))))
+}
+
+// Source byte, first cell and width of each grapheme in a row, as `message_rows` lays them out.
+fn row_cells(
+    text: &str,
+    start: usize,
+    end: usize,
+    indent: usize,
+) -> impl Iterator<Item = (usize, usize, usize)> + '_ {
+    let mut cell = indent;
+    text[start..end]
+        .grapheme_indices(true)
+        .map(move |(byte, grapheme)| {
+            let width = escaped_terminal_width(grapheme);
+            let item = (start + byte, cell, width);
+            cell += width;
+            item
+        })
+}
+
+fn selected_cells(
+    kind: MessageKind,
+    text: &str,
+    rows: &[MessageRow],
+    offset: usize,
+    index: usize,
+    ((first, start), (last, end)): ((usize, usize), (usize, usize)),
+) -> Option<(usize, usize)> {
+    if index < first || index > last || (offset == 0 && has_heading(kind)) {
+        return None;
+    }
+    let (row_start, row_end) = row_span(text, rows, offset)?;
+    let from = if index == first { start } else { 0 };
+    let to = if index == last { end } else { usize::MAX };
+    let mut cells = row_cells(text, row_start, row_end, row_indent(kind))
+        .filter(|(byte, _, _)| (from..to).contains(byte));
+    let first = cells.next()?;
+    let last = cells.last().unwrap_or(first);
+    Some((first.1, last.1 + last.2))
 }
 
 pub(super) fn native_marker(kind: MessageKind, heading: bool) -> &'static str {
@@ -1099,6 +1396,107 @@ mod tests {
             provider_sequences: Default::default(),
             provider_fallbacks: Vec::new(),
             provider_retries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn selection_anchors_to_source_text_and_copies_without_rails_or_wraps() {
+        let answer = "alpha beta gamma delta epsilon";
+        let mut view = session();
+        view.runs.push(run("first objective", answer));
+        let mut history = History::default();
+        history.sync(&view, 20, 40);
+        let row_of = |history: &History, view: &SessionView, needle: &str| {
+            history
+                .visible(view)
+                .iter()
+                .position(|row| row.text.contains(needle))
+                .expect("rendered row")
+        };
+        let copied = |history: &History, view: &SessionView| {
+            history
+                .selection_text(view)
+                .map(|text| text.expect("bounded selection"))
+        };
+        let heading = row_of(&history, &view, "Arany:");
+        assert_eq!(
+            history.visible(&view)[heading + 1].text,
+            "  alpha beta gamma d"
+        );
+        history.select_at(&view, heading, 0, 1);
+        assert!(history.selecting() && !history.has_selection());
+        assert_eq!(
+            copied(&history, &view),
+            None,
+            "a click alone selects nothing"
+        );
+        history.extend_selection(&view, heading + 2, 19);
+        assert_eq!(copied(&history, &view).as_deref(), Some(answer));
+        let rows = history.visible(&view);
+        assert_eq!(rows[heading].selected, None, "headings are never selected");
+        assert_eq!(rows[heading + 1].selected, Some((2, 20)));
+        assert_eq!(rows[heading + 2].selected, Some((2, 14)));
+        assert!(rows[..heading].iter().all(|row| row.selected.is_none()));
+
+        view.runs.push(run("second", "later answer"));
+        view.last_sequence = 2;
+        history.sync(&view, 20, 40);
+        assert_eq!(copied(&history, &view).as_deref(), Some(answer), "append");
+        history.sync(&view, 37, 40);
+        assert_eq!(copied(&history, &view).as_deref(), Some(answer), "resize");
+        let body = row_of(&history, &view, "alpha");
+        assert_eq!(history.visible(&view)[body].selected, Some((2, 32)));
+
+        // Dragging up from the answer's trailing row to the user heading copies both bodies.
+        history.select_at(&view, body + 1, 0, 1);
+        history.extend_selection(&view, 0, 0);
+        assert_eq!(
+            copied(&history, &view).as_deref(),
+            Some("first objective\n\nalpha beta gamma delta epsilon")
+        );
+        history.select_at(&view, body, 8, 2);
+        assert_eq!(copied(&history, &view).as_deref(), Some("beta"));
+        history.select_at(&view, body, 8, 3);
+        assert_eq!(copied(&history, &view).as_deref(), Some(answer));
+        history.select_at(&view, body, 0, 2);
+        assert!(
+            !history.has_selection(),
+            "a double click on the rail selects nothing"
+        );
+        assert!(!history.clear_selection());
+
+        let hostile = "a\u{1b}]52;c;eA==\u{7}b";
+        let mut view = session();
+        view.runs.push(run("hostile", hostile));
+        let mut history = History::default();
+        history.sync(&view, 80, 40);
+        let heading = row_of(&history, &view, "Arany:");
+        history.select_at(&view, heading, 0, 1);
+        history.extend_selection(&view, heading + 1, 79);
+        let text = copied(&history, &view).expect("escaped selection");
+        assert_eq!(text, super::super::clipboard::display_text(hostile));
+        assert!(!text.contains('\u{1b}') && !text.contains('\u{7}'));
+        assert!(history.clear_selection());
+        assert!(!history.selecting());
+    }
+
+    #[test]
+    fn selection_copy_refuses_over_the_limit_before_materializing_text() {
+        for (answer_bytes, accepted) in [(49_998, true), (49_999, false)] {
+            let mut view = session();
+            view.runs
+                .push(run(&"x".repeat(50_000), &"y".repeat(answer_bytes)));
+            let mut history = History::default();
+            history.sync(&view, 80, 40);
+            history.scroll(true, usize::MAX);
+            history.select_at(&view, 0, 0, 1);
+            history.extend_selection(&view, 1_000_000, 0);
+            let text = history.selection_text(&view).expect("selection");
+            assert_eq!(text.is_ok(), accepted, "{answer_bytes} answer bytes");
+            match text {
+                Ok(text) => assert_eq!(text.len(), MAX_COPY_BYTES),
+                Err(error) => assert_eq!(error, COPY_TOO_LARGE),
+            }
         }
     }
 

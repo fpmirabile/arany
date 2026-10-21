@@ -135,7 +135,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         let mut continued = false;
         let mut resumed_at = 0;
         let mut queries = 0;
-        // Fullscreen picker rows capture the mouse transiently; Classic never enables it.
+        // Fullscreen captures the mouse from acquisition; Classic never enables it.
         let captures = usize::from(fullscreen);
         let output = crate::process::capture_terminal(
             child.child(),
@@ -216,9 +216,31 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                 "fullscreen {fullscreen}"
             );
         }
-        if !fullscreen {
-            let text = String::from_utf8_lossy(&output.stderr);
-            for mode in [1049, 1000, 1002, 1003, 1006, 1015] {
+        let text = String::from_utf8_lossy(&output.stderr);
+        if fullscreen {
+            // Exactly button, drag and SGR reporting, each released on SIGTSTP and on exit.
+            for mode in [1000, 1002, 1006] {
+                for toggle in ['h', 'l'] {
+                    assert_eq!(
+                        text.matches(&format!("\x1b[?{mode}{toggle}")).count(),
+                        count,
+                        "Fullscreen mode {mode}{toggle}"
+                    );
+                }
+            }
+            for mode in [1003, 1007, 1015] {
+                assert!(
+                    !text.contains(&format!("\x1b[?{mode}h")),
+                    "Fullscreen enabled {mode}"
+                );
+            }
+            let last_disable = text.rfind("\x1b[?1000l").expect("capture released");
+            assert!(
+                text.rfind("\x1b[?1000h").expect("capture enabled") < last_disable,
+                "exit leaves capture released"
+            );
+        } else {
+            for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
                 assert!(
                     !text.contains(&format!("\x1b[?{mode}h")),
                     "Classic picker enabled {mode}"
