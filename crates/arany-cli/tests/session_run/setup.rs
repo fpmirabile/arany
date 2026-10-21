@@ -3596,40 +3596,83 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 Err(error) => panic!("synthetic admission bus accept failed: {error}"),
             }
         };
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            submitted_start,
-            if linear {
-                b"Notice: Preparing request... Ctrl+C cancels\r\n"
-            } else {
-                b"\x1b[10;3H"
-            },
-        );
+        // While admission waits, the decoded composer shows the draft and the status row names
+        // the preparing state. The composer row follows the content-sized viewport, so the
+        // frame is found by its border, not by a fixed caret row.
+        let admission_frame = |transcript: &[u8], from: usize, draft: &str| {
+            let end = transcript[from..]
+                .windows(6)
+                .rposition(|part| part == b"\x1b[?25h")?;
+            let screen = crate::screen_rows(&transcript[..from + end + 6], 40, 12);
+            let top = screen
+                .iter()
+                .position(|row| row.starts_with("─ Ask Arany"))?;
+            (screen.get(top + 1)?.starts_with(&format!("> {draft}"))
+                && screen.get(top + 3)?.trim_start().starts_with("preparing"))
+            .then_some(screen)
+        };
+        let wait_admission =
+            |output: &mut std::process::ChildStdout,
+             input: &mut std::process::ChildStdin,
+             transcript: &mut Vec<u8>,
+             answered: &mut crate::session_picker::PtyResponses,
+             (from, draft, label): (usize, &str, &str)| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(screen) = admission_frame(transcript, from, draft) {
+                        return screen;
+                    }
+                    pump(output, input, transcript, answered);
+                    assert!(
+                        Instant::now() < deadline,
+                        "{label}: {:?}",
+                        crate::screen_rows(transcript, 40, 12)
+                    );
+                    thread::yield_now();
+                }
+            };
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                submitted_start,
+                b"Notice: Preparing request... Ctrl+C cancels\r\n",
+            );
+        } else {
+            wait_admission(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (submitted_start, "", "admission shows preparing"),
+            );
+        }
         let edited_start = transcript.len();
         input
             .write_all(if linear { b"retained\x04" } else { b"retained" })
             .expect("continue a new draft during admission");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            edited_start,
-            if linear {
-                b"Notice: Draft: 8 characters; Enter offers it as a steering note\r\n"
-            } else {
-                b"\x1b[10;11H"
-            },
-        );
-        if !linear {
-            // The decoded status row is the visible state; a recreated viewport re-emits rows.
-            let screen = crate::screen_rows(&transcript, 40, 12);
-            assert!(
-                !screen[11].trim_start().starts_with("ready"),
-                "editing must not restore ready during admission: {screen:?}"
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                edited_start,
+                b"Notice: Draft: 8 characters; Enter offers it as a steering note\r\n",
+            );
+        } else {
+            wait_admission(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (
+                    edited_start,
+                    "retained",
+                    "editing must not restore ready during admission",
+                ),
             );
         }
         let interrupted_start = transcript.len();
