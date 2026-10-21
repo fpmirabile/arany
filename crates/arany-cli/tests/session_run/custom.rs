@@ -2,6 +2,19 @@ use super::*;
 
 #[test]
 fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
+    custom_profile_process_gate(None);
+}
+
+#[test]
+fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
+    for auth in ["bearer", "x-api-key"] {
+        custom_profile_process_gate(Some(auth));
+    }
+    #[cfg(target_os = "linux")]
+    messages_attached_case(false);
+}
+
+fn custom_profile_process_gate(messages: Option<&'static str>) {
     use std::{
         io::{Read, Write},
         net::{SocketAddr, TcpListener},
@@ -22,8 +35,19 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .env("ANTHROPIC_API_KEY", "OMITTED_NATIVE_KEY")
+            .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE")
             .current_dir(cwd)
-            .args(["provider", "check", "local", "--state-dir"])
+            .args([
+                "provider",
+                "check",
+                if proxy.is_some() {
+                    "custom:local"
+                } else {
+                    "local"
+                },
+                "--state-dir",
+            ])
             .arg(state);
         if let Some(key) = key {
             command.env("ARANY_PROVIDER_LOCAL_KEY", key);
@@ -54,6 +78,8 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
+            .env("ANTHROPIC_API_KEY", "OMITTED_NATIVE_KEY")
+            .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE")
             .current_dir(cwd)
             .args(["exec", "--state-dir"])
             .arg(state)
@@ -103,7 +129,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         .set_nonblocking(true)
         .expect("nonblocking proxy observation");
     let proxy_addr = hostile_proxy.local_addr().expect("proxy address");
-    let profile = serde_json::json!({
+    let mut profile = serde_json::json!({
         "version": 1,
         "profiles": [{
             "name": "local",
@@ -117,6 +143,18 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             "capability_evidence_version": 2, "efforts": []
         }]
     });
+    if let Some(auth) = messages {
+        profile["version"] = serde_json::json!(2);
+        let entry = profile["profiles"][0].as_object_mut().unwrap();
+        entry.remove("endpoint");
+        entry.insert("protocol".into(), "anthropic-messages".into());
+        entry.insert(
+            "base_url".into(),
+            format!("http://127.0.0.1:{port}/anthropic").into(),
+        );
+        entry.insert("auth".into(), auth.into());
+        entry.insert("outcome_encoding".into(), "native_tools".into());
+    }
     let profile_path = state_path.join("provider-profiles.json");
     std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile file");
     std::fs::set_permissions(&profile_path, std::fs::Permissions::from_mode(0o600))
@@ -125,7 +163,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     let mutation_path = state_path.join("provider-roster.json");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..10 {
+        for index in 0..if messages.is_some() { 12 } else { 10 } {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -169,20 +207,51 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 }
             };
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
+            let path = if messages.is_some() {
+                "/anthropic/v1/messages"
+            } else {
+                "/v1/responses"
+            };
+            assert!(header.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+            let header = header.to_ascii_lowercase();
+            assert!(header.contains(concat!("user-agent: arany/", env!("CARGO_PKG_VERSION"))));
+            assert!(!header.contains("anthropic-workspace-id:"));
+            if messages == Some("x-api-key") {
+                assert!(header.contains("x-api-key: test-key\r\n"));
+                assert!(!header.contains("authorization:"));
+            } else {
+                assert!(header.contains("authorization: bearer test-key\r\n"));
+                assert!(!header.contains("x-api-key:"));
+            }
+            assert_eq!(
+                header.contains("anthropic-version: 2023-06-01\r\n"),
+                messages.is_some()
             );
             let body: serde_json::Value =
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("synthetic JSON");
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body.get("text").is_some(), index == 2);
+            let compact = index == 2 || index == 11;
+            if messages.is_some() {
+                assert_eq!(body.get("output_config").is_some(), compact);
+                assert!(body.get("thinking").is_none());
+                if compact {
+                    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+                }
+            } else {
+                assert_eq!(body.get("text").is_some(), compact);
+            }
             assert_eq!(
-                body["max_output_tokens"],
-                if index == 0 || index >= 3 { 4096 } else { 128 }
+                body[if messages.is_some() {
+                    "max_tokens"
+                } else {
+                    "max_output_tokens"
+                }],
+                if index == 0 || (3..=9).contains(&index) {
+                    4096
+                } else {
+                    128
+                }
             );
             let input: serde_json::Value = crate::semantic::input(&body);
             if (3..9).contains(&index) {
@@ -219,7 +288,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                     .windows(b"OMITTED_WORKSPACE_CANARY".len())
                     .any(|bytes| { bytes == b"OMITTED_WORKSPACE_CANARY" })
             );
-            if index == 9 {
+            if index == 9 && messages.is_none() {
                 write!(
                     stream,
                     "HTTP/1.1 302 Found\r\nLocation: http://{proxy_addr}/v1/responses\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
@@ -227,12 +296,16 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 .expect("synthetic redirect");
                 continue;
             }
+            if index == 11 {
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                continue;
+            }
             if index == 4 {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
-                0 => serde_json::json!("ok"),
-                1 => {
+                0 | 9 => serde_json::json!("ok"),
+                1 | 10 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
                 2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
@@ -256,17 +329,27 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                 }
                 _ => unreachable!(),
             };
-            let response = serde_json::json!({
+            let text = arany::semantic::compaction_probe_reply(&body, text);
+            let mut response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
                 "model": "model-1",
                 "output": arany::semantic::responses_output(&text),
                 "usage": {"input_tokens":20,"output_tokens":10}
             });
+            if messages.is_some() {
+                response = serde_json::json!({"id":format!("msg_{}",index+1),"type":"message","role":"assistant","model":"model-1",
+                    "stop_reason":if text.is_object() { "tool_use" } else { "end_turn" },
+                    "content":arany::semantic::messages_content(&text),"usage":{"input_tokens":20,"output_tokens":10}});
+            }
             let (content_type, response) = if body["stream"] == true {
                 (
                     "text/event-stream",
-                    super::loopback::responses_stream(response),
+                    if messages.is_some() {
+                        arany::semantic::messages_stream(&response)
+                    } else {
+                        super::loopback::responses_stream(response)
+                    },
                 )
             } else {
                 ("application/json", response.to_string())
@@ -283,6 +366,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             )
             .expect("synthetic response");
         }
+        listener
     });
 
     let unverified = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
@@ -292,6 +376,13 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         unverified.stderr,
         b"error: custom Provider evidence unavailable\n"
     );
+    let current_profile: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&profile_path).unwrap()).unwrap();
+    assert_eq!(current_profile["version"], 2);
+    if messages.is_none() {
+        assert_eq!(current_profile["profiles"], profile["profiles"]);
+        profile = current_profile;
+    }
     let checked = run_check(&workspace, &state_path, Some("test-key"), Some(proxy_addr));
     assert!(checked.status.success());
     assert_eq!(
@@ -305,8 +396,16 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     ));
 
     let mut changed_profile = profile.clone();
-    changed_profile["profiles"][0]["endpoint"] =
-        format!("http://127.0.0.1:{port}/other/responses").into();
+    changed_profile["profiles"][0][if messages.is_some() {
+        "base_url"
+    } else {
+        "endpoint"
+    }] = if messages.is_some() {
+        format!("http://127.0.0.1:{port}/other")
+    } else {
+        format!("http://127.0.0.1:{port}/other/responses")
+    }
+    .into();
     std::fs::write(&profile_path, serde_json::to_vec(&changed_profile).unwrap())
         .expect("changed profile");
     let changed = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
@@ -376,7 +475,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     let endpoint = format!("http://127.0.0.1:{port}/v1/responses");
     for field in [
         env!("CARGO_PKG_VERSION"),
-        "openai-responses-goal-contract-conformance-effort-stream-v13",
+        "openai-responses-goal-contract-conformance-effort-stream-v30",
         "local",
         &endpoint,
         "model-1",
@@ -522,7 +621,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     assert_eq!(evidence_before_recheck, 1);
     drop(connection);
     let redirected = run_check(&workspace, &state_path, Some("test-key"), Some(proxy_addr));
-    server.join().expect("synthetic server completed");
+    let listener = server.join().expect("synthetic server completed");
     assert!(!redirected.status.success());
     assert_eq!(redirected.stdout, b"");
     assert_eq!(
@@ -641,7 +740,11 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     assert_eq!(view.runs[0].status, RunStatus::Finished);
     assert_eq!(
         view.runs[0].agents[0].provider_calls[0].wire_provenance,
-        Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
+        Some(if messages.is_some() {
+            arany::ProviderWireProvenance::MessagesEndTurnStorageUnspecified
+        } else {
+            arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested
+        })
     );
     let config = view.runs[0].config.as_ref().expect("Run config");
     assert_eq!(config.provider, "custom:local");
@@ -653,7 +756,11 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         .expect("verified custom provenance");
     assert_eq!(
         provenance.endpoint,
-        format!("http://127.0.0.1:{port}/v1/responses")
+        if messages.is_some() {
+            format!("http://127.0.0.1:{port}/anthropic/v1/messages")
+        } else {
+            format!("http://127.0.0.1:{port}/v1/responses")
+        }
     );
     assert_eq!(provenance.capability_evidence_version, 2);
     let team_events = runtime
@@ -694,8 +801,18 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             .agents
             .iter()
             .flat_map(|agent| &agent.provider_calls)
-            .all(|call| call.wire_provenance
-                == Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested))
+            .all(|call| if messages.is_some() {
+                matches!(
+                    call.wire_provenance,
+                    Some(
+                        arany::ProviderWireProvenance::MessagesEndTurnStorageUnspecified
+                            | arany::ProviderWireProvenance::MessagesToolUseStorageUnspecified
+                    )
+                )
+            } else {
+                call.wire_provenance
+                    == Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested)
+            })
     );
     assert_eq!(
         team_view.runs[0]
@@ -740,6 +857,11 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
     runtime
         .block_on(store.close())
         .expect("close read-only Store");
+    std::fs::write(
+        &profile_path,
+        b"invalid profile during historical inspection",
+    )
+    .unwrap();
     let journal_before = std::fs::read(state_path.join("events.sqlite3"))
         .expect("journal before read-only inspection");
     for (run_id, events, view) in [
@@ -830,6 +952,13 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
         );
     }
 
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock),
+        "replay must make no HTTP requests"
+    );
+    std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
     let unavailable = run_check(&workspace, &state_path, None, None);
     assert!(!unavailable.status.success());
     assert_eq!(unavailable.stdout, b"");
@@ -987,7 +1116,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
 
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
-        for index in 0..6 {
+        for index in 0..8 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -1002,13 +1131,13 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             let body: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).unwrap();
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body.get("text").is_some(), index == 2);
+            assert_eq!(body.get("text").is_some(), matches!(index, 2 | 4 | 6));
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
                 match index {
-                    3 => Some("low"),
-                    4 | 5 => Some("high"),
+                    3 | 4 => Some("low"),
+                    5..=7 => Some("high"),
                     _ => None,
                 }
             );
@@ -1016,7 +1145,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 | 4 | 6 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     serde_json::json!("answer")
                 }
@@ -1127,5 +1256,277 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             2
         );
         store.close().await.unwrap();
+    });
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn messages_preview_cancellation_discards_secret_tail() {
+    messages_attached_case(true);
+}
+
+#[cfg(target_os = "linux")]
+fn messages_attached_case(cancel: bool) {
+    use super::active_terminal::{ProductGuard, product_child_of};
+    use super::loopback::{ChildGuard, read_request_for, send_messages_response_for, wait_product};
+    use super::session_picker::{PtyResponses, pump, wait_for_screen};
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        os::unix::fs::PermissionsExt,
+        process::Stdio,
+        thread,
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("private.txt"), b"OMITTED_WORKSPACE_CANARY").unwrap();
+    let state = temp.path().join("state");
+    StateRoot::admit(&state).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let path = state.join("provider-profiles.json");
+    std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{
+        "name":"local","protocol":"anthropic-messages","base_url":format!("http://127.0.0.1:{port}/anthropic"),
+        "auth":"x-api-key","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY",
+        "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]
+    }]})).unwrap()).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let peer = thread::spawn(move || {
+        for index in 0..if cancel { 4 } else { 5 } {
+            let mut stream = crate::process::accept_with_deadline(
+                &listener,
+                Duration::from_secs(10),
+                "Messages attached request",
+            );
+            let body: serde_json::Value = serde_json::from_slice(&read_request_for(
+                &mut stream,
+                "/anthropic/v1/messages",
+                "x-api-key: test-key",
+            ))
+            .unwrap();
+            assert_eq!(body["model"], "model-1");
+            assert_eq!(
+                body.get("output_config").is_some(),
+                index == 2 || index == 4
+            );
+            assert!(body.get("thinking").is_none());
+            if index == 3 && cancel {
+                assert_eq!(body["stream"], true);
+                let events = [
+                    serde_json::json!({"type":"message_start","message":{"id":"msg_cancel","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"usage":{"input_tokens":20,"output_tokens":0}}}),
+                    serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"safe preview test-"}}),
+                ];
+                let prefix: String = events
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "event: {}\ndata: {event}\n\n",
+                            event["type"].as_str().unwrap()
+                        )
+                    })
+                    .collect();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{prefix}\r\n",prefix.len()).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(10)))
+                    .unwrap();
+                assert_eq!(
+                    stream.read(&mut [0; 1]).unwrap(),
+                    0,
+                    "cancellation drops the held stream"
+                );
+            } else {
+                let text = match index {
+                    1 => {
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"inspect","profile":null}]}})
+                    }
+                    2 | 4 => serde_json::json!(r#"{"summary":"strict saved summary"}"#),
+                    _ => serde_json::json!("verified answer"),
+                };
+                send_messages_response_for(&mut stream, index, text, body["stream"] == true);
+            }
+        }
+        listener
+    });
+    super::loopback::check_profile(&workspace, &state);
+    let mut command = crate::isolation::account_isolated_script(temp.path());
+    command.env_clear().env("ARANY_TEST_EXE",env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE",&state).env("ARANY_TEST_WORKSPACE",&workspace)
+        .env("ARANY_PROVIDER_LOCAL_KEY","test-key").env("TERM","xterm-256color")
+        .current_dir(&workspace).args(["-q","-e","-c",
+            "trap ':' INT; stty rows 30 cols 100; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 answer",
+            "/dev/null"])
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = PtyResponses::default();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let shell_pid = loop {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        if let Some(pid) = String::from_utf8_lossy(&transcript)
+            .lines()
+            .find_map(|line| {
+                line.trim_end_matches('\r')
+                    .strip_prefix("ARANY_TEST_SHELL_PID:")
+                    .and_then(|pid| pid.parse::<u32>().ok())
+            })
+        {
+            break pid;
+        }
+        assert!(Instant::now() < deadline, "attached shell PID deadline");
+        thread::yield_now();
+    };
+    let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (0, 100, 30),
+        if cancel {
+            "safe preview"
+        } else {
+            "verified answer"
+        },
+    );
+    if !cancel {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !super::screen_rows(&transcript, 100, 30)
+            .join(" ")
+            .contains("ready")
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "completed answer returns to ready composer"
+            );
+            thread::yield_now();
+        }
+    }
+    let from = transcript.len();
+    input
+        .write_all(if cancel { b"\x03" } else { b"/compact\r" })
+        .unwrap();
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (from, 100, 30),
+        if cancel {
+            "Goal paused"
+        } else {
+            "Compaction saved"
+        },
+    );
+    input.write_all(b"/exit\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.child().try_wait().unwrap().is_none() {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(Instant::now() < deadline, "attached exit deadline");
+        thread::yield_now();
+    }
+    pump(&mut output, &mut input, &mut transcript, &mut answered);
+    fcntl_setfl(&output, flags).unwrap();
+    child.child().stdout = Some(output);
+    let exited = wait_product(child.take());
+    drop(input);
+    transcript.extend_from_slice(&exited.stdout);
+    assert!(
+        exited.status.success(),
+        "attached process exit {:?}",
+        exited.status.code()
+    );
+    assert_eq!(exited.stderr, b"");
+    let listener = peer.join().unwrap();
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    );
+    for secret in [
+        b"test-key".as_slice(),
+        b"test-",
+        b"OMITTED_WORKSPACE_CANARY",
+    ] {
+        assert!(
+            !transcript.windows(secret.len()).any(|part| part == secret),
+            "sensitive tail reached the terminal"
+        );
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let sessions = list_sessions(StateRoot::open_existing(&state).unwrap(), workspace.clone())
+            .await
+            .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        let session = sessions[0].id;
+        let events = store.load_session(session).await.unwrap();
+        let view = SessionView::replay(session, &events).unwrap().unwrap();
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(
+            view.runs[0].status,
+            if cancel {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Finished
+            }
+        );
+        assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
+        if cancel {
+            assert!(view.runs[0].assistant_message.is_none());
+            assert_eq!(view.runs[0].agents[0].provider_calls[0].input_tokens, None);
+        } else {
+            assert_eq!(view.compactions.len(), 1);
+            assert!(matches!(
+                view.compactions[0].record.status,
+                arany::CompactionStatus::Succeeded { .. }
+            ));
+        }
+        store.close().await.unwrap();
+        let database = std::fs::read(state.join("events.sqlite3")).unwrap();
+        assert!(
+            !database
+                .windows(b"test-key".len())
+                .any(|part| part == b"test-key")
+        );
+        std::fs::write(path, b"invalid historical config").unwrap();
+        let mut show = Command::new(env!("CARGO_BIN_EXE_arany"));
+        show.env_clear()
+            .current_dir(&workspace)
+            .args(["show", "--state-dir"])
+            .arg(&state)
+            .arg(session.to_string())
+            .args(["--output", "jsonl"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let shown = wait_product(show.spawn().unwrap());
+        assert!(shown.status.success());
+        assert_eq!(shown.stderr, b"");
+        assert_eq!(
+            shown.stdout,
+            arany_cli::presentation::render_session(
+                &view,
+                &events,
+                arany_cli::presentation::Output::Jsonl
+            )
+            .as_bytes()
+        );
+        assert!(
+            listener
+                .accept()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+        );
     });
 }

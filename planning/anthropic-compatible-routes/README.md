@@ -2,9 +2,10 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-21`
+- Next action: S2 after S1 review and CI; live/platform gaps remain in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
 
 ## Outcome and scope
 
@@ -12,8 +13,9 @@ One feature: a user-selected `custom:NAME` profile can declare protocol
 `anthropic-messages` and an explicit base URL, pass data-free conformance, and
 run through Arany's existing Anthropic Messages adapter. This extends the
 harness's admitted Provider destinations without changing execution policy.
-Ship recipes for DeepSeek API keys, Kimi platform API keys and Kimi Code
-subscription console keys, and GLM standard API keys.
+DeepSeek API profiles remain explicitly unavailable candidates because strict
+compaction evidence is missing. Remaining recipes cover Kimi platform API keys,
+Kimi Code subscription console keys and GLM standard API keys.
 
 Kimi Code is included with Arany's honest User-Agent. GLM Coding Plan benefits
 are excluded unless Z.ai approves Arany; DeepSeek has no documented subscription
@@ -29,19 +31,11 @@ owns the dated vendor endpoints, models, authorization terms, peer source
 comparison, alternatives and unverified live behavior. Its conclusion replaces
 the input investigation's separate Chat/Responses adapter proposals.
 
-The following Arany facts were checked with `rg` against this worktree; line
-citations refer to the planning baseline, not proposed implementation:
-
-| Verified fact | Source |
-|---|---|
-| Custom configuration accepts document version 1, only `openai-responses` / `json_schema`, and a canonical endpoint ending `/responses`; credential references are `ARANY_PROVIDER_*`. | [custom.rs:53](../../crates/arany/src/provider/custom.rs), [custom.rs:75](../../crates/arany/src/provider/custom.rs), [custom.rs:111](../../crates/arany/src/provider/custom.rs), [custom.rs:208](../../crates/arany/src/provider/custom.rs), [custom.rs:218](../../crates/arany/src/provider/custom.rs) |
-| Custom transport currently imports OpenAI wire functions; its evidence fingerprint hardcodes the protocol and encoding. | [custom/transport.rs:5](../../crates/arany/src/provider/custom/transport.rs), [custom/check.rs:196](../../crates/arany/src/provider/custom/check.rs) |
-| Custom admission resolves the destination and compares evidence before reading its environment key; invocation rejects Workspace Tools and images. | [custom/adapter.rs:16](../../crates/arany/src/provider/custom/adapter.rs), [custom/adapter.rs:76](../../crates/arany/src/provider/custom/adapter.rs) |
-| The native Anthropic transport fixes `/v1/messages`, sends Bearer auth and `anthropic-version`, and separately supports an Anthropic workspace header. | [anthropic.rs:15](../../crates/arany/src/provider/anthropic.rs), [anthropic.rs:196](../../crates/arany/src/provider/anthropic.rs) |
-| Native Messages already has streaming assembly, request/tool-use encoding, opaque thinking handling and usage decoding. Run outcomes use text or native functions; compaction still requests structured JSON via `output_config`. | [anthropic/wire.rs:20](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:420](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:551](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:594](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:614](../../crates/arany/src/provider/anthropic/wire.rs) |
-| Checks clear old evidence, run direct/delegate/compaction probes plus each declared effort, and only publish complete success; the aggregate deadline is 180 seconds. | [custom/check.rs:12](../../crates/arany/src/provider/custom/check.rs), [custom/check.rs:31](../../crates/arany/src/provider/custom/check.rs), [custom/check.rs:73](../../crates/arany/src/provider/custom/check.rs) |
-| Saved-account CLI access is native-only; custom routes cannot use a saved native account. | [cli/provider.rs:133](../../crates/arany-cli/src/cli/provider.rs), [cli/provider/select.rs:84](../../crates/arany-cli/src/cli/provider/select.rs) |
-| `store::migrate` registers JSON record formats. `PROVIDER_PROFILES` declares version 1 as floor and current; `load_named` reads through the migration, which publishes an upgrade through `provider-profiles.pending` while ordinary writes to this 64 KiB user-authored record stay refused. | [store/migrate/record.rs](../../crates/arany/src/store/migrate/record.rs), [provider/custom.rs](../../crates/arany/src/provider/custom.rs), [store/state.rs](../../crates/arany/src/store/state.rs) |
+Current configuration, wire, admission and conformance behavior belongs to the
+[Provider contract](../../docs/specs/provider.md#custom-destinations-and-routing).
+The [execution contract](../../docs/specs/execution.md#json-record-migration) owns
+the registered JSON record migration; later recipes reuse it without changing
+stored formats or adding another migration framework.
 
 Editing/evidence rules: [security](../../agents/security.md#security-pass-triggers),
 [testing](../../agents/testing.md), [spec workflow](../../docs/specs/README.md),
@@ -89,7 +83,7 @@ introduce a second migration framework.
   client and custom identity/provenance; parameterizing native transport must
   not bypass custom admission or impose native Claude model validation.
   Add no vendor Provider enum variants, dependencies, crates or plugin system.
-- Proposed profile document version 2 uses protocol-specific closed entries:
+- The current profile document version 2 uses protocol-specific closed entries:
   Responses retains `endpoint` and `outcome_encoding: json_schema`; Messages
   requires `base_url` and `outcome_encoding: native_tools`. Both retain explicit
   model, credential reference, privacy, output cap and declared efforts. Messages
@@ -111,8 +105,9 @@ introduce a second migration framework.
   Anthropic's native Claude effort default. Declared efforts must have an
   evidenced wire mapping and pass their probes. Preserve the strict compaction
   contract and decoder; a vendor that cannot satisfy it remains unadmitted.
-  DeepSeek explicitly lacks documented `output_config.format` support; resolve
-  the open compaction question before treating S1 as implementation-ready.
+  DeepSeek explicitly lacks documented `output_config.format` support. S1 uses
+  the owner-approved fallback: ship generic Messages support and explicitly
+  unavailable DeepSeek candidates; strict compaction remains unchanged.
 - Ownership: custom admission owns normalized destination, credential reference
   and evidence; the adapter owns external wire translation and transient opaque
   turns; Engine/reducer retain semantic validation, budgets and durable facts.
@@ -148,40 +143,18 @@ an honest identifier, not authorization; never reuse kimi-cli's OAuth client ID.
 Z.ai's technical endpoint compatibility does not authorize Coding Plan benefits.
 Neither TLS nor a conformance pass proves ZDR, general DLP or vendor terms compliance.
 
-Retain these bounds, verified in [provider.rs:58](../../crates/arany/src/provider.rs),
-[provider.rs:179](../../crates/arany/src/provider.rs),
-[provider.rs:249](../../crates/arany/src/provider.rs),
-[custom/destination.rs:8](../../crates/arany/src/provider/custom/destination.rs),
-[custom/transport.rs:234](../../crates/arany/src/provider/custom/transport.rs),
-[custom/transport.rs:31](../../crates/arany/src/provider/custom/transport.rs),
-[custom.rs:139](../../crates/arany/src/provider/custom.rs),
-[custom.rs:218](../../crates/arany/src/provider/custom.rs),
-and [streaming.rs:151](../../crates/arany/src/provider/streaming.rs):
-
-- 32 profiles / 64 KiB document, 512-byte URL and 256-byte path (apply to base
-  and derived URL), 512-byte key, eight admitted DNS addresses / five-second
-  lookup, ten-second connection and 120-second custom call deadline.
-- 512 KiB request, 1 MiB uncompressed response/stream, 8,192 SSE events,
-  262,144 JSON nodes / depth 64; one-slot bounded preview, no unbounded queue.
-- Custom output cap 4,096 tokens; positive labelled input/output usage and valid
-  cache subsets, with absent optional cache fields remaining unknown. Missing
-  required counters reject. Check aggregate 180 seconds, no retries, bounded
-  probes, evidence expires after 24 hours ([custom/check.rs:12](../../crates/arany/src/provider/custom/check.rs)).
-- Concurrency one, as required by the [custom contract](../../docs/specs/provider.md#custom-destinations-and-routing);
-  normal calls share Goal charging/deadlines and the
-  [bounded retry contract](../../docs/specs/provider.md#usage-provenance-and-reliability).
-  A 429 without `Retry-After` uses the existing bounded backoff, never a vendor
-  retry loop. Overflow, cancellation or timeout ends the call without accepting
-  partial output. Provider work creates no new Guard/descendant authority;
-  Workspace effects remain subject to existing per-effect isolation.
+Later recipes retain the [custom limits](../../docs/specs/provider.md#custom-destinations-and-routing),
+[streaming limits](../../docs/specs/provider.md#streaming-and-provisional-text) and
+[bounded retry contract](../../docs/specs/provider.md#usage-provenance-and-reliability).
+A vendor queue cannot extend the 120-second custom call deadline. Provider work
+creates no new Guard or descendant authority.
 
 ## Risks and mitigations
 
-- Additive protocol values still change persisted format under AGENTS rule 5 →
-  bump the profile document to version 2, ship the registered v1 → v2 transform
-  and fixture via the JSON-record migration path in `store::migrate`, and keep
-  only the v2 ordinary decoder. Preserve existing Responses semantics; do not
-  reset user settings or add a compatibility reader.
+- Recipe-only slices reuse the current profile format. Any later stored-format
+  change must ship its registered migration and fixture under
+  [the JSON-record contract](../../docs/specs/execution.md#json-record-migration);
+  no reset or ordinary compatibility reader is permitted.
 - Vendor “Anthropic compatible” does not establish strict compaction, effort,
   tool-use or usage fidelity → per-slice fixtures and exact live checks; omit
   unsupported effort choices and leave failing routes unadmitted. Do not repair
@@ -193,29 +166,14 @@ and [streaming.rs:151](../../crates/arany/src/provider/streaming.rs):
 
 ## Vertical slices
 
-1. **S1 — Messages custom protocol and DeepSeek API recipe (one PR).** Depends
-   on automatic-state-migrations slice 4, not merely the journal registry.
-   Deliver v2 schema and migration → base-URL/DNS/credential admission →
-   protocol-specific conformance → shared Messages adapter → Engine/journal →
-   ordinary Run/show, with a DeepSeek recipe in `docs/setup.md` linked from the
-   Provider contract. Base URL `https://api.deepseek.com/anthropic`; exact model
-   profiles for `deepseek-flash` and `deepseek-v4-pro`, without Claude aliasing.
-   Update provider.md custom profiles/conformance and credentials.md's custom
-   key boundary. Tests extend the existing owners with migration success,
-   interruption/invalid-version preservation, stale cross-protocol evidence,
-   path preservation, credential canaries, direct answer, one child, compaction
-   and no-dispatch replay. Pin vendor deltas: thinking blocks/signatures and
-   tool-use continuation, ignored parallel-call suppression and cache controls,
-   unsupported thinking budget fields, missing optional cache usage versus missing required counters,
-   SSE keep-alive comments, and 429 without `Retry-After`. Test strict compaction
-   `output_config` rejection and omission of native-only effort defaults;
-   DeepSeek supports only `output_config.effort`, so the unchanged compaction
-   request is a known obstacle. A supported equally strict representation needs
-   primary-source evidence and a plan update before implementation; absent that,
-   ship the protocol with DeepSeek marked unavailable. DeepSeek's long queue
-   cannot extend the 120-second local bound. A usable slice includes the migrated
-   existing Responses path as a regression case and owner live-check procedure.
-2. **S2 — Kimi API and Kimi Code recipes (one PR, after S1).** Separate profiles
+S1 selects the owner-approved unavailable-candidate fallback. Its generic
+Messages protocol, registered profile migration and admission contract live in
+the [Provider spec](../../docs/specs/provider.md#custom-destinations-and-routing);
+the [setup guide](../../docs/setup.md#anthropic-compatible-custom-routes) keeps
+the explicitly **UNAVAILABLE** DeepSeek candidates. No JSON repair, skipped
+compaction or alternative schema representation is authorized.
+
+1. **S2 — Kimi API and Kimi Code recipes (one PR, after S1).** Separate profiles
    and keys: platform base `https://api.moonshot.ai/anthropic` with `kimi-k3`
    (other documented platform models only after exact checks); subscription base
    `https://api.kimi.com/coding/` with the plan console key and a tier-visible
@@ -230,7 +188,7 @@ and [streaming.rs:151](../../crates/arany/src/provider/streaming.rs):
    fallback. Offline fixtures establish the same path for both bases; owner
    live-checks each with its own key. Any necessary typed Messages delta ships
    with these tests in this PR, preserving native Anthropic regression evidence.
-3. **S3 — GLM standard API-key recipe (one PR, after S2).** Base URL
+2. **S3 — GLM standard API-key recipe (one PR, after S2).** Base URL
    `https://api.z.ai/api/anthropic`; Standard API Key and exact `glm-5.3` /
    `glm-5.3-flash` profiles. Cross profile/check → admitted adapter →
    Run/delegation/compaction → journal/show, with setup and Provider/credential
@@ -247,25 +205,23 @@ and [streaming.rs:151](../../crates/arany/src/provider/streaming.rs):
 
 ## Open questions
 
-- **DeepSeek strict compaction — owner: Fernando Mirabile / S1 implementer.**
+- **DeepSeek strict compaction — owner: Fernando Mirabile.**
   The documented Messages endpoint supports only `output_config.effort`, while
-  Arany requests a provider-enforced JSON schema for compaction (research and
-  `anthropic/wire.rs:551` above). Is there a documented, equally strict Messages
+  Arany requires [provider-enforced compaction JSON schema](../../docs/specs/provider.md#structured-outcomes-and-tool-encoding). Is there a documented, equally strict Messages
   representation usable by the shared adapter? Resolve from primary sources
   and exact conformance before admitting DeepSeek; tool selection plus repaired
   JSON is not a substitute. If none exists, skip DeepSeek as requested and
-  retain an explicitly unavailable candidate recipe. This is a material Plan
-  gate, so the plan remains Draft. Kimi/GLM exact wire fidelity remains an
+  retain an explicitly unavailable candidate recipe. The S1 implementation
+  brief selects this fallback, resolving the implementation gate. Kimi/GLM exact wire fidelity remains an
   explicit per-route conformance/live evidence gate, not an assumed capability.
 
 ## Exit criteria
 
 - Each slice ships one independently usable PR with its owning spec/scenario
   updates, recipe and deterministic checks at the existing evidence owners.
-  S1 includes the registered profile migration/fixture and guards; no ordinary
-  legacy reader survives. Native Anthropic and custom Responses behavior stays
-  covered. Local implementation verification follows the development guide;
-  full code-change CI passes on Linux/macOS. This planning task runs no cargo.
+  Native Anthropic, migrated custom Responses and the existing generic Messages
+  contract stay covered. Local implementation verification follows the development guide;
+  full code-change CI passes on Linux/macOS.
 - Observe success for direct answer, exactly one child and strict compaction;
   rejection for invalid destination, cross-route credential attempts, stale
   evidence, malformed/missing usage and over-bound/truncated streams; cancellation

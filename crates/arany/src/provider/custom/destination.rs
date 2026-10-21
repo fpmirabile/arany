@@ -227,6 +227,7 @@ mod tests {
     async fn numeric_loopback_uses_only_its_exact_address() {
         let profile = CustomProfile {
             name: "local".into(),
+            protocol: super::super::Protocol::OpenaiResponses,
             endpoint: "http://127.0.0.1:9321/v1/responses".into(),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
