@@ -1238,8 +1238,7 @@ fn native_explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     8 => (b"local controls", b"\x1b"),
                     _ => (b"", b"/exit\r"),
                 };
-                // A selector takes keys only once its armed frame is drawn; a closed one
-                // returns to the composer, found by its border.
+                // A selector takes keys only after its armed frame is drawn.
                 let frame_ready = if matches!(stage, 4 | 6 | 8) {
                     super::armed_selector(bytes, from, 80, 24).is_some()
                 } else {
