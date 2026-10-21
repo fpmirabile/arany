@@ -324,6 +324,8 @@ mod tests {
             InitialSetupFailure,
             InvalidHistory,
             InvalidHistorySameRoot,
+            InvalidHistorySetup,
+            InvalidHistorySetupQuit,
             CorruptHistory,
             CorruptHistoryCancel,
             StaleEventHistory,
@@ -333,7 +335,7 @@ mod tests {
             Cancel,
         }
         impl Case {
-            const ALL: [Self; 26] = [
+            const ALL: [Self; 28] = [
                 Self::ChatGpt,
                 Self::Locked,
                 Self::Missing,
@@ -353,6 +355,8 @@ mod tests {
                 Self::InitialSetupFailure,
                 Self::InvalidHistory,
                 Self::InvalidHistorySameRoot,
+                Self::InvalidHistorySetup,
+                Self::InvalidHistorySetupQuit,
                 Self::CorruptHistory,
                 Self::CorruptHistoryCancel,
                 Self::StaleEventHistory,
@@ -386,6 +390,8 @@ mod tests {
                     Self::CorruptHistory => "corrupt_history",
                     Self::CorruptHistoryCancel => "corrupt_history_cancel",
                     Self::StaleEventHistory => "stale_event_history",
+                    Self::InvalidHistorySetup => "invalid_history_setup",
+                    Self::InvalidHistorySetupQuit => "invalid_history_setup_quit",
                     Self::UnsafeHistory => "unsafe_history",
                     Self::ResumeLocked => "resume_locked",
                     Self::ContinueMissing => "continue_missing",
@@ -396,7 +402,11 @@ mod tests {
             fn archives_history(self) -> bool {
                 matches!(
                     self,
-                    Self::InvalidHistory | Self::InvalidHistorySameRoot | Self::StaleEventHistory
+                    Self::InvalidHistory
+                        | Self::InvalidHistorySameRoot
+                        | Self::InvalidHistorySetup
+                        | Self::InvalidHistorySetupQuit
+                        | Self::StaleEventHistory
                 )
             }
 
@@ -452,7 +462,10 @@ mod tests {
                         Interrupt,
                         Reply("/exit\n"),
                     ],
-                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/exit\n")],
+                    Case::InitialSetupFailure | Case::InvalidHistorySetup => {
+                        &[Reply("ChatGPT plan\n"), Reply("/exit\n")]
+                    }
+                    Case::InvalidHistorySetupQuit => &[Interrupt],
                     Case::CorruptHistory => &[
                         Reply("Reset history\n"),
                         Reply("Accept\n"),
@@ -610,17 +623,31 @@ mod tests {
                         !transcript.contains("Setup: History recovery"),
                         "incompatible history must not need a manual reset: {case}"
                     );
-                    assert!(
+                    // Setup replaces earlier startup notices; the archive notice must survive it.
+                    assert_eq!(
                         transcript
-                            .contains("History from an incompatible version archived intact to "),
+                            .lines()
+                            .filter(|line| line.starts_with("Notice: ")
+                                && line.contains(
+                                    "History from an incompatible version archived intact to "
+                                ))
+                            .count(),
+                        usize::from(case != Case::InvalidHistorySetupQuit),
                         "archive notice for {case}: {}",
                         crate::presentation::escape_terminal(&transcript)
                     );
                     if case == Case::InvalidHistorySameRoot {
                         assert!(transcript.contains("Initial task was not submitted"));
                     }
+                    if case == Case::InvalidHistorySetup {
+                        assert!(transcript.contains("Setup could not be completed"));
+                    }
                     let calls = std::fs::read_to_string(marker).unwrap_or_default();
-                    assert_eq!(calls.lines().count(), 1, "archived history keeps access");
+                    assert_eq!(
+                        calls.lines().count(),
+                        usize::from(!case.name().contains("_setup")),
+                        "archived history keeps access"
+                    );
                 } else if case.name().contains("history") {
                     assert!(
                         transcript.contains("Setup: History recovery"),
@@ -825,6 +852,8 @@ mod tests {
                 | Case::StaleEventHistory
                 | Case::UnsafeHistory => "exit 0",
                 Case::InitialSetupFailure
+                | Case::InvalidHistorySetup
+                | Case::InvalidHistorySetupQuit
                 | Case::InvalidChatgpt
                 | Case::InvalidChatgptReset
                 | Case::InvalidPreferences
@@ -886,7 +915,7 @@ mod tests {
                 .replace(b"unsupported-registration")
                 .unwrap();
         }
-        if case == Case::InitialSetupFailure {
+        if matches!(case, Case::InitialSetupFailure | Case::InvalidHistorySetup) {
             nix::unistd::mkfifo(
                 &state.path().join("chatgpt-registration.json"),
                 nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
@@ -944,7 +973,7 @@ mod tests {
             screen_reader: true,
             ..Default::default()
         };
-        args.setup = case == Case::InitialSetupFailure;
+        args.setup = case == Case::InitialSetupFailure || case.name().contains("_setup");
         if case == Case::InvalidHistorySameRoot {
             args.prompt = Some("synthetic task must remain unsubmitted".into());
             args.continue_session = true;
@@ -1088,12 +1117,23 @@ mod tests {
                         let archived = std::fs::read_dir(&archive)
                             .unwrap()
                             .map(|entry| entry.unwrap().path())
+                            .filter(|path| {
+                                path.file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .starts_with("history-")
+                            })
                             .collect::<Vec<_>>();
                         assert_eq!(archived.len(), 1, "one archive for {case}");
                         assert!(
                             std::fs::read(archived[0].join("events.sqlite3")).unwrap() == database,
                             "archived history stays intact"
                         );
+                        // Only a drawn archive notice is acknowledged into the manifest.
+                        let drawn = case != Case::InvalidHistorySetupQuit;
+                        assert_eq!(archived[0].join("manifest.json").exists(), drawn, "{case}");
+                        assert_eq!(archive.join("pending.json").exists(), !drawn, "{case}");
                     } else {
                         assert!(!archive.exists(), "manual reset never archives");
                     }

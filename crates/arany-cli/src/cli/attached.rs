@@ -615,8 +615,15 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 format!("Session {session_id} · /help for commands")
             }
         })
+    };
+    // Appended last so no setup branch can replace the archive path before it is drawn.
+    let archive_notice = archived_history
+        .as_ref()
+        .map(|archived| super::archived_history_notice(archived.path()));
+    if let Some(archive_notice) = &archive_notice {
+        append_notice(&mut notice, archive_notice);
     }
-    .map(Feedback::History);
+    let mut notice = notice.map(Feedback::History);
     let mut empty_interrupt = None::<Instant>;
     let mut idle_escape = None::<Instant>;
     if let Some(prompt) = startup_objective {
@@ -701,8 +708,11 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
+        let archive_drawn = archive_notice.as_deref().is_some_and(
+            |archive| matches!(&notice, Some(Feedback::History(text)) if text.contains(archive)),
+        );
         notice = archived_history
-            .take()
+            .take_if(|_| archive_drawn)
             .and_then(|archived| archived.acknowledge().err())
             .map(|error| {
                 Feedback::History(format!("Error: {error}; the archive notice may show again"))
@@ -1925,12 +1935,6 @@ async fn admit_startup(
         setup_notice,
         "Starting a new conversation; saved accounts and folder trust kept.",
     );
-    if let Some(archived) = &archived {
-        append_notice(
-            setup_notice,
-            &super::archived_history_notice(archived.path()),
-        );
-    }
     Ok(ControlFlow::Continue(archived))
 }
 
