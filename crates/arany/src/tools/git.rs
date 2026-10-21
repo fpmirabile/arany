@@ -84,7 +84,7 @@ const CONFIG_BYTES: usize = 64 * 1024;
 const MAX_GIT_RUNTIME: Duration = Duration::from_millis(super::types::GIT_TIMEOUT_MS as u64);
 pub(super) const VIEW: &str = "git-view";
 pub(super) const HOME: &str = "git-home";
-const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n";
+const VIEW_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n\tquotePath = false\n";
 const LINKED: [(&str, bool, bool); 4] = [
     ("objects", true, true),
     ("refs", true, true),
@@ -746,9 +746,12 @@ fn diff_output(
 fn visible_patch<'a>(patch: &'a str, hidden: &'a HiddenPaths) -> impl Iterator<Item = &'a str> {
     let mut hiding = true;
     patch.split_inclusive('\n').filter(move |line| {
-        if let Some(header) = line.strip_prefix("diff ") {
-            let header = header.strip_suffix('\n').unwrap_or(header);
+        let text = line.strip_suffix('\n').unwrap_or(line);
+        if let Some(header) = text.strip_prefix("diff ") {
             hiding = section_path(header).is_none_or(|path| !shown(path, hidden));
+        } else if let Some(path) = text.strip_prefix("* Unmerged path ") {
+            // A staged diff reports a conflicted path in this one line, without a section header.
+            hiding = path.is_empty() || path.starts_with('"') || !shown(path, hidden);
         }
         !hiding
     })
@@ -1929,6 +1932,8 @@ mod tests {
             "diff --git \"a/private/caf\\303\\251\" \"b/private/caf\\303\\251\"\n+DENY_CANARY\n",
             "diff --unknown src/a\n+DENY_CANARY\n",
             "diff --cc src/b\n++both\n",
+            "* Unmerged path private/u\n",
+            "* Unmerged path src/u\n",
         ]
         .concat();
         let value =
@@ -1939,7 +1944,7 @@ mod tests {
         );
         assert_eq!(
             value["patch"],
-            "diff --git a/src/a b/src/a\n+ok\ndiff --cc src/b\n++both\n"
+            "diff --git a/src/a b/src/a\n+ok\ndiff --cc src/b\n++both\n* Unmerged path src/u\n"
         );
 
         let commit = |n: u8, subject: &str, paths: &str| {
@@ -2072,6 +2077,22 @@ mod tests {
         let filtered: Value = serde_json::from_str(&filtered).unwrap();
         assert_eq!(
             filtered["commits"][0]["subject"], "move into private",
+            "{filtered}"
+        );
+        // A staged diff reports the conflicted path only as an `* Unmerged path` line.
+        git(&["add", "a"]);
+        let (plain, filtered) = run(
+            4,
+            ToolCall::GitDiff {
+                path: ".".into(),
+                base: None,
+                head: None,
+                staged: true,
+            },
+        );
+        assert!(plain.contains("* Unmerged path private/c"), "{plain}");
+        assert!(
+            !filtered.contains("private") && filtered.contains("+edited"),
             "{filtered}"
         );
     }

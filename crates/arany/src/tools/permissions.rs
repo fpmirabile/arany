@@ -362,8 +362,7 @@ impl PermissionConfig {
     }
 }
 
-// Restrictive path patterns only. Each ends in `(?:/.*)?` and a non-ASCII parent has non-ASCII children,
-// so a covered directory covers its whole subtree and walks may prune it unopened.
+// Every pattern ends in `(?:/.*)?`, so walks may prune a covered directory unopened.
 #[derive(Clone, Debug, Default)]
 pub(crate) struct HiddenPaths(Vec<Regex>);
 
