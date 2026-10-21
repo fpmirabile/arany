@@ -2631,7 +2631,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
                 json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});
         }
         let mut task = serde_json::to_vec(&task_value).unwrap();
-        const TASK_BYTES_CAP: usize = 96 * 1024;
+        const TASK_BYTES_CAP: usize = 1024 * 1024;
         match case {
             "malformed_task" => task = b"{".to_vec(),
             "maximum_task" => task.resize(TASK_BYTES_CAP, b' '),

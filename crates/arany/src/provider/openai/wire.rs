@@ -1,5 +1,5 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{function_outcome, review_outcome, tool_function};
+use crate::provider::decode::{argument_limit, function_outcome, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
@@ -167,16 +167,17 @@ pub(crate) fn outcome_failure_diagnostic(
         return (Stage::OutcomeContract, None);
     };
     if response.output.iter().any(|item| {
+        let operation = item
+            .name
+            .as_deref()
+            .and_then(|name| name.strip_prefix(NAME_PREFIX))
+            .unwrap_or_default();
         item.kind == "function_call"
-            && !matches!(
-                item.name
-                    .as_deref()
-                    .and_then(|name| name.strip_prefix(NAME_PREFIX)),
-                Some("delegate")
-            )
-            && item.arguments.as_ref().is_some_and(|arguments| {
-                arguments.len() > crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
-            })
+            && operation != "delegate"
+            && item
+                .arguments
+                .as_ref()
+                .is_some_and(|arguments| arguments.trim().len() > argument_limit(operation))
     }) {
         return (Stage::OutcomeToolArgumentSize, None);
     }
@@ -239,9 +240,9 @@ fn tool_failure_stage(
     use crate::diagnostics::SubscriptionFailureStage as Stage;
     use crate::tools::{
         ToolCall,
-        types::{MAX_TOOL_ARGUMENT_BYTES, valid_digest, valid_name, valid_relative},
+        types::{MAX_EDIT_CONTENT_BYTES, valid_digest, valid_name, valid_relative},
     };
-    if serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() > MAX_TOOL_ARGUMENT_BYTES) {
+    if serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() > call.argument_limit()) {
         return Stage::OutcomeToolArgumentSize;
     }
     let path = match call {
@@ -265,10 +266,12 @@ fn tool_failure_stage(
             ..
         } if !valid_digest(digest) => Stage::OutcomeToolDigest,
         ToolCall::Edit { old, .. } if old.is_empty() => Stage::OutcomeToolEmptyEdit,
-        ToolCall::Edit { old, new, .. } if old.len() + new.len() > 8 * 1024 => {
+        ToolCall::Edit { old, new, .. } if old.len() + new.len() > MAX_EDIT_CONTENT_BYTES => {
             Stage::OutcomeToolTextSize
         }
-        ToolCall::Write { content, .. } if content.len() > 8 * 1024 => Stage::OutcomeToolTextSize,
+        ToolCall::Write { content, .. } if content.len() > MAX_EDIT_CONTENT_BYTES => {
+            Stage::OutcomeToolTextSize
+        }
         ToolCall::Search { query, .. } if query.is_empty() || query.len() > 512 => {
             Stage::OutcomeToolTextSize
         }
@@ -634,16 +637,12 @@ impl FunctionCall {
     }
 
     fn fields(&self) -> Result<Map<String, Value>, ResponseError> {
-        let limit = if matches!(self.operation()?, "delegate") {
-            crate::store::MAX_EVENT_BYTES
-        } else {
-            crate::tools::types::MAX_TOOL_ARGUMENT_BYTES
-        };
+        let limit = argument_limit(self.operation()?);
         let arguments = self.arguments.trim();
         if arguments.len() > limit {
             return Err(ResponseError::Outcome);
         }
-        match crate::tools::parse_json(arguments.as_bytes(), crate::store::MAX_EVENT_BYTES) {
+        match crate::tools::parse_json(arguments.as_bytes(), limit) {
             Ok(Value::Object(fields)) => Ok(fields),
             _ => Err(ResponseError::Outcome),
         }
