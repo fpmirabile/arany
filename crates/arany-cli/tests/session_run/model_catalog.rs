@@ -524,8 +524,7 @@ fn inline_model_catalog_at_width(width: u16) {
         product_child_of(shell)
     });
     let _native_guard = native_pid.map(|pid| ProductGuard::new(pid, state.clone()));
-    // Ctrl+K arms before reading keys: the digit sent with it is discarded, and the
-    // focus move that follows proves the selector stayed open for later keys.
+    // A digit sent with Ctrl+K arrives before the selector arms and is discarded.
     for (keys, focused, label) in [
         (
             &b"\x1b[D\x0b1"[..],
