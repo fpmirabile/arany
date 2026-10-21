@@ -259,6 +259,123 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
     );
 }
 
+// The largest typed Write: a six-byte escape per content byte and a long escaped path.
+fn largest_tool_started_payload() -> String {
+    let intent = crate::tools::EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: u64::MAX,
+        workspace_inode: u64::MAX,
+        call: crate::tools::ToolCall::Write {
+            path: "\"".repeat(512),
+            expected_digest: Some("0".repeat(64)),
+            content: "\u{1}".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES),
+        },
+        limits: crate::tools::ToolLimits::default(),
+        expires_at_ms: u64::MAX,
+        use_count: 1,
+    };
+    assert!(intent.valid());
+    Event::ToolStarted {
+        run_id: intent.run_id,
+        agent_run_id: intent.agent_run_id,
+        intent,
+        active_ceiling_ms: u64::MAX,
+    }
+    .payload()
+    .unwrap()
+}
+
+// Near the floor, one admitted intent (its ToolStarted and ToolFinished slots) must leave room to
+// commit the largest ToolStarted and a full ToolFinished; reserving the completion alone does not.
+#[test]
+fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let root = StateRoot::admit(&temp.path().join("state")).expect("admitted state");
+    let mut connection = open_connection(&root, false).expect("file-backed store");
+    let session_id = SessionId::new();
+    let started = largest_tool_started_payload();
+    let finished = format!(
+        "\"{}\"",
+        "x".repeat(crate::store::MAX_TOOL_FINISHED_BYTES - 2)
+    );
+    let transaction = connection.transaction().unwrap();
+    let pages = |t: &Transaction<'_>| -> i64 {
+        t.query_row("PRAGMA page_count", [], |row| row.get(0))
+            .unwrap()
+    };
+    let page_size: i64 = transaction
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .unwrap();
+    let admits = |t: &Transaction<'_>, observations: usize| {
+        let results = [false, true].map(|sealed| {
+            admit_in_transaction(t, session_id, 2, observations, false, sealed).is_ok()
+        });
+        assert_eq!(
+            results[0], results[1],
+            "worker sealed-data admission reserves the same bytes"
+        );
+        results[0]
+    };
+    let pair_commits = |t: &Transaction<'_>| {
+        t.execute_batch("SAVEPOINT pair").unwrap();
+        for (kind, payload) in [("ToolStarted", &started), ("ToolFinished", &finished)] {
+            t.execute(
+                "INSERT INTO events (session_id, run_id, agent_run_id, kind, event_version, payload, created_at_ms) VALUES (?1, 'run', 'agent', ?2, 1, ?3, 0)",
+                params![session_id.to_string(), kind, payload],
+            )
+            .unwrap();
+        }
+        let room = MAX_DATABASE_BYTES - pages(t) * page_size;
+        t.execute_batch("ROLLBACK TO pair; RELEASE pair").unwrap();
+        room >= ADMISSION_HEADROOM_BYTES
+    };
+    // Pad, then step one page at a time to the last page count each reservation admits.
+    let pad = |t: &Transaction<'_>, rows: i64| {
+        t.execute(
+            "WITH RECURSIVE rows(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM rows WHERE n < ?1) INSERT INTO capacity_padding SELECT zeroblob(3000) FROM rows",
+            [rows],
+        )
+        .unwrap();
+    };
+    let last_admitted = |t: &Transaction<'_>, observations: usize| {
+        assert!(admits(t, observations));
+        loop {
+            t.execute_batch("SAVEPOINT step").unwrap();
+            pad(t, 1);
+            if !admits(t, observations) {
+                t.execute_batch("ROLLBACK TO step; RELEASE step").unwrap();
+                return;
+            }
+            t.execute_batch("RELEASE step").unwrap();
+        }
+    };
+    transaction
+        .execute_batch("CREATE TABLE capacity_padding(value BLOB NOT NULL) STRICT;")
+        .unwrap();
+    let floor = (MAX_DATABASE_BYTES - ADMISSION_HEADROOM_BYTES) / page_size;
+    pad(
+        &transaction,
+        floor - pages(&transaction) - 2 * 1024 * 1024 / page_size,
+    );
+    last_admitted(&transaction, 2);
+    assert!(pair_commits(&transaction));
+    pad(&transaction, 1);
+    assert!(
+        !admits(&transaction, 2),
+        "the intent is refused before dispatch"
+    );
+    last_admitted(&transaction, 1);
+    assert!(
+        !pair_commits(&transaction),
+        "a completion-only reservation would strand the intent"
+    );
+}
+
 #[test]
 fn every_event_slot_admits_a_current_tool_observation() {
     let supervisor = payload_version("SupervisorVerdictRecorded").unwrap();
@@ -279,6 +396,14 @@ fn every_event_slot_admits_a_current_tool_observation() {
         event_payload_limit("ToolFinished", finished - 1),
         crate::store::MAX_EVENT_BYTES
     );
+    let started = payload_version("ToolStarted").expect("payload version");
+    assert_eq!(
+        event_payload_limit("ToolStarted", started - 1),
+        crate::store::MAX_EVENT_BYTES
+    );
+    let payload = largest_tool_started_payload();
+    assert!(payload.len() > crate::store::MAX_EVENT_BYTES);
+    assert!(payload.len() <= event_payload_limit("ToolStarted", started));
     let verdict = payload_version("ToolPermissionDecided").expect("payload version");
     assert_eq!(
         event_payload_limit("ToolPermissionDecided", verdict),

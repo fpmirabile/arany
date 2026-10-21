@@ -891,6 +891,8 @@ impl RunLoop<'_> {
                 )
             }
         };
+        // This intent's ToolStarted can exceed the ordinary Event bound; an observation slot covers it.
+        let observations = observations.saturating_add(1);
         let mut sealed_data = false;
         let tail = if worker {
             let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;

@@ -10,7 +10,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use uuid::Uuid;
 
-pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+// Write content or combined Edit strings, in decoded UTF-8 bytes.
+pub(crate) const MAX_EDIT_CONTENT_BYTES: usize = 64 * 1024;
+// Six escaped bytes per content byte plus room for the path, digest and keys.
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
+// Every operation other than Write and Edit keeps this serialized bound.
+pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
 pub(crate) const MAX_READ_LINE_CHARS: usize = 2000;
@@ -114,7 +119,8 @@ impl CommandChangeset {
                 }
             }
         }
-        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES - 256)
+        serde_json::to_vec(self)
+            .is_ok_and(|bytes| bytes.len() <= MAX_ORDINARY_TOOL_ARGUMENT_BYTES - 256)
     }
 }
 
@@ -362,8 +368,15 @@ impl ToolCall {
         self.facts().researcher
     }
 
+    pub(crate) fn argument_limit(&self) -> usize {
+        match self {
+            Self::Write { .. } | Self::Edit { .. } => MAX_TOOL_ARGUMENT_BYTES,
+            _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
-        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= self.argument_limit()) {
             return false;
         }
         match self.facts().family {

@@ -44,9 +44,10 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
+| [Switch between agent chats](./agent-chat-switching/README.md) | Four slices: read-only child transcript switching, committed live updates, searchable `/agents` switch picker, messaging the selected child |
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
-| [Write and Edit content up to 64 KiB](./large-file-edits/README.md) | One slice: larger typed edits through bounded decoding, journal admission, hooks and Guard publication |
 | [Read-only Glob Tool](./glob-tool/README.md) | One slice: bounded in-process file discovery with regex-backed glob matching and deterministic path order |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.

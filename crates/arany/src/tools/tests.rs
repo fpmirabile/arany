@@ -1307,11 +1307,28 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         ToolCall::Write {
             path: "src/new".into(),
             expected_digest: None,
-            content: "x".repeat(8193),
+            content: "x".repeat(MAX_EDIT_CONTENT_BYTES + 1),
+        },
+        ToolCall::Write {
+            path: "src/new".into(),
+            expected_digest: None,
+            content: format!("{}x", "é".repeat(MAX_EDIT_CONTENT_BYTES / 2)),
+        },
+        ToolCall::Edit {
+            path: "src/new".into(),
+            expected_digest: "0".repeat(64),
+            old: "x".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+            new: "y".repeat(MAX_EDIT_CONTENT_BYTES / 2 + 1),
         },
         ToolCall::Command {
             program: "bash".into(),
             args: vec!["x".into(); 65],
+            cwd: "".into(),
+        },
+        // Within its field limits, but over the serialized bound every non-content operation keeps.
+        ToolCall::Command {
+            program: "bash".into(),
+            args: vec!["x".repeat(300); 64],
             cwd: "".into(),
         },
         ToolCall::Command {
@@ -1321,6 +1338,30 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         },
     ] {
         assert!(!call.valid());
+    }
+    // Bytes, not characters, and six-byte escapes plus a long escaped path still fit.
+    let escaped_path = "\"".repeat(512);
+    for call in [
+        ToolCall::Write {
+            path: "src/new".into(),
+            expected_digest: None,
+            content: "é".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+        },
+        ToolCall::Write {
+            path: escaped_path.clone(),
+            expected_digest: Some("0".repeat(64)),
+            content: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES),
+        },
+        ToolCall::Edit {
+            path: escaped_path,
+            expected_digest: "0".repeat(64),
+            old: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+            new: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+        },
+    ] {
+        assert!(call.valid());
+        let bytes = serde_json::to_vec(&call).unwrap().len();
+        assert!(bytes > MAX_ORDINARY_TOOL_ARGUMENT_BYTES && bytes <= MAX_TOOL_ARGUMENT_BYTES);
     }
     let intent = EffectIntent {
         target: crate::session::worker::EffectTarget::Workspace,
