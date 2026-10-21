@@ -88,13 +88,13 @@ Owner: use a ChatGPT-plan account with explicit usage consent, a new Session and
 
 ### Tool protocol
 
-1. Send `hola!`: exactly one greeting answer, no Tool row or notice, and one Provider call in `arany show`.
+1. Send `hello!`: exactly one greeting answer, no Tool row or notice, and one Provider call in `arany show`.
 2. Ask to write `test.txt` containing `hello`: one `⏺ Write(test.txt)` row with `⎿ applied`, one answer and matching file content.
 3. Ask to write `../outside.txt`: a denial row; a follow-up asking why explains the denial.
 4. Ask to write `a.txt`, then Ctrl+C before any Tool row: a follow-up recalls cancellation and no file was written.
 5. `/ask-matt` + Enter starts immediately, shows `⏺ Skill(ask-matt)` and applies the admitted Skill.
 6. `/ask-matt which skill fits a refactor plan?` applies that Skill to the question.
-7. `/resume` after the greeting shows `Resumed: hola!`.
+7. `/resume` after the greeting shows `Resumed: hello!`.
 8. `/model` + Enter during a Run names the unavailable command and the cancellation alternative.
 9. Force a proposal refusal with the [Engine refusal fixture](./crates/arany/tests/engine_run.rs): the development build's `development.log` and `arany show` retain the closed cause on the call.
 
