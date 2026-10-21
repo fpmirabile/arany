@@ -46,5 +46,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
+| [Search with regex, file filtering and paging](./search-regex/README.md) | One slice: regex/include/case controls and deterministic pages of at most 100 rows |
+| [Read-only Glob Tool](./glob-tool/README.md) | One slice: bounded in-process file discovery with regex-backed glob matching and deterministic path order |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
