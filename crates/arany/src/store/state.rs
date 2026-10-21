@@ -7,6 +7,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 mod archive;
 pub use archive::ArchivedHistory;
+#[cfg(test)]
+pub(super) use archive::FAIL_AT;
+pub(super) use archive::{
+    Identity, archive_name, identity_of, private_subdirectory, publish, rename, step, sync,
+    valid_archive_name,
+};
 mod build_cache;
 pub(crate) mod checkpoints;
 mod lock;
@@ -20,9 +26,9 @@ pub(crate) use build_cache::{
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
-pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
+pub(crate) use lock::{HistoryLock, SessionRunLock, WorkspaceRunLock};
 
-const HISTORY_FILES: [&str; 4] = [
+pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
     "events.sqlite3-wal",
     "events.sqlite3-shm",
@@ -178,7 +184,7 @@ impl Record<'_> {
 
 pub struct StateRoot {
     path: PathBuf,
-    dir: Dir,
+    pub(super) dir: Dir,
     #[cfg(unix)]
     ancestors: Vec<(u64, u64)>,
 }
@@ -486,7 +492,10 @@ impl StateRoot {
 }
 
 #[cfg(unix)]
-fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(), StoreError> {
+pub(super) fn check_private_record_file(
+    file: &cap_std::fs::File,
+    limit: usize,
+) -> Result<(), StoreError> {
     crate::private_fs::check_acl(file, true)?;
     use cap_std::fs::MetadataExt;
 
@@ -503,7 +512,7 @@ fn check_private_record_file(file: &cap_std::fs::File, limit: usize) -> Result<(
 }
 
 #[cfg(unix)]
-fn nonblocking(options: &mut OpenOptions) {
+pub(super) fn nonblocking(options: &mut OpenOptions) {
     use cap_std::fs::OpenOptionsExt;
     options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
 }

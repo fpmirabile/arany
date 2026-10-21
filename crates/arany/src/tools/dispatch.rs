@@ -93,6 +93,10 @@ pub(super) fn outcome(
             ToolDisposition::Limit,
             "output_ceiling: output passed 1 GiB per stream; stopped".into(),
         ),
+        Err(ToolError::Pattern(cause)) => (
+            ToolDisposition::Failed,
+            format!("Search pattern refused: {cause}; nothing was read"),
+        ),
         Err(ToolError::Conflict) => (
             ToolDisposition::Conflict,
             "File changed or edit did not match exactly once; read it again".into(),

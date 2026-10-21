@@ -35,6 +35,8 @@ macro_rules! raw_select {
 }
 pub(super) const HEAD_FIRST_SQL: &str =
     raw_select!("WHERE session_id = ?1 AND sequence <= ?2 ORDER BY sequence ASC LIMIT 1");
+pub(super) const ROWS_AFTER_SQL: &str =
+    raw_select!("WHERE sequence > ?1 ORDER BY sequence ASC LIMIT 256");
 pub(super) const LANE_SQL: &str = raw_select!(
     "WHERE session_id = ?1 AND sequence > ?2 AND sequence <= ?3 ORDER BY sequence ASC LIMIT 256"
 );
@@ -838,21 +840,21 @@ fn scan_events(
     }
 }
 
-struct RawRow {
-    sequence: i64,
+pub(super) struct RawRow {
+    pub(super) sequence: i64,
     id_bytes: i64,
     kind_bytes: i64,
-    payload_bytes: i64,
-    session_id: String,
-    run_id: Option<String>,
-    agent_run_id: Option<String>,
-    kind: String,
-    version: i64,
-    payload: String,
-    created_at_ms: i64,
+    pub(super) payload_bytes: i64,
+    pub(super) session_id: String,
+    pub(super) run_id: Option<String>,
+    pub(super) agent_run_id: Option<String>,
+    pub(super) kind: String,
+    pub(super) version: i64,
+    pub(super) payload: String,
+    pub(super) created_at_ms: i64,
 }
 
-fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
+pub(super) fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
     let text = |index: usize| -> Result<String, StoreError> {
         row.get::<_, String>(index)
             .map_err(|_| StoreError::InvalidHistory)
@@ -877,7 +879,7 @@ fn raw_row(row: &rusqlite::Row<'_>) -> Result<RawRow, StoreError> {
 }
 
 impl RawRow {
-    fn decode(self) -> Result<EventEnvelope, StoreError> {
+    pub(super) fn decode(self) -> Result<EventEnvelope, StoreError> {
         if self.id_bytes != 36 || !(1..=32).contains(&self.kind_bytes) {
             return Err(StoreError::InvalidHistory);
         }

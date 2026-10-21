@@ -434,14 +434,19 @@ impl View {
             &self.current,
             &intent.call,
             intent.limits.result_bytes as usize,
+            std::time::Instant::now()
+                + std::time::Duration::from_millis(u64::from(intent.limits.runtime_ms)),
         );
+        // A refused pattern read nothing, so it is attested like the Workspace refusal and the editor continues.
+        let refused = matches!(result, Err(ToolError::Pattern(_)));
         let (disposition, output, enforcement_cause, limit_cause) =
             super::dispatch::outcome(&intent, result);
-        let attestation =
-            (disposition == ToolDisposition::Succeeded).then(|| Attestation::WorkerRead {
+        let attestation = (disposition == ToolDisposition::Succeeded || refused).then(|| {
+            Attestation::WorkerRead {
                 intent_digest: intent.digest(),
                 guard: None,
-            });
+            }
+        });
         ToolObservation {
             intent,
             disposition,
@@ -1097,7 +1102,12 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
     Ok(image)
 }
 
-fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String, ToolError> {
+fn inspect(
+    image: &Image,
+    call: &ToolCall,
+    result_bytes: usize,
+    deadline: std::time::Instant,
+) -> Result<String, ToolError> {
     use serde_json::json;
     match call {
         ToolCall::Read {
@@ -1110,20 +1120,15 @@ fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String
             };
             fs::read_page(content.as_ref(), *offset, *limit, result_bytes)
         }
-        ToolCall::List { path } | ToolCall::Search { path, .. } => {
+        ToolCall::List { path } => {
             let mut rows = Vec::new();
             for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
-                match (call, entry) {
-                    (ToolCall::List { .. }, Entry::Directory) => {
-                        rows.push(json!({"path":name,"kind":"directory"}))
-                    }
-                    (ToolCall::List { .. }, Entry::File { content, .. }) => {
+                match entry {
+                    Entry::Directory => rows.push(json!({"path":name,"kind":"directory"})),
+                    Entry::File { content, .. } => {
                         rows.push(json!({"path":name,"bytes":content.len()}))
                     }
-                    (ToolCall::Search { query, .. }, Entry::File { content, .. }) => {
-                        fs::search_rows(name, content, query, &mut rows)
-                    }
-                    _ => {}
+                    Entry::Absent => {}
                 }
                 if rows.len() == 64 {
                     break;
@@ -1131,6 +1136,19 @@ fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String
             }
             let truncated = rows.len() == 64;
             fs::fit_rows(rows, truncated, result_bytes)
+        }
+        ToolCall::Search { path, .. } => {
+            let mut search = super::search::Search::new(call, deadline)?;
+            // BTreeMap order is the Workspace's UTF-8 byte order, as in the Workspace search.
+            for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
+                if let Entry::File { content, .. } = entry
+                    && search.includes(name)
+                    && search.scan(name, content)?
+                {
+                    break;
+                }
+            }
+            search.finish(result_bytes)
         }
         _ => Err(ToolError::Configuration),
     }
@@ -1680,6 +1698,65 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&listing.output).unwrap()["may_be_truncated"],
             false
         );
+        let search = |query: &str, include: Option<&str>, case_sensitive: bool, offset: u32| {
+            view.read(intent(
+                &runtime,
+                &view,
+                ToolCall::Search {
+                    path: "owned".into(),
+                    query: query.into(),
+                    regex: true,
+                    include: include.map(str::to_owned),
+                    case_sensitive,
+                    offset,
+                    limit: 100,
+                },
+            ))
+        };
+        let page = |observed: ToolObservation| {
+            assert_eq!(observed.disposition, ToolDisposition::Succeeded);
+            serde_json::from_str::<serde_json::Value>(&observed.output).unwrap()
+        };
+        assert_eq!(
+            page(search(r"^rev\w+$", Some("a"), true, 0)),
+            json!({"entries":[{"path":"owned/a","line":1,"text":"revised"}],"limit":100,"may_be_truncated":false,"next_offset":null})
+        );
+        assert_eq!(
+            page(search("REVISED", None, false, 0))["entries"][0]["line"],
+            1
+        );
+        for (query, include, case_sensitive, offset) in [
+            ("REVISED", None, true, 0),
+            ("revised", Some("b"), true, 0),
+            ("revised", None, true, 1),
+        ] {
+            assert_eq!(
+                page(search(query, include, case_sensitive, offset))["entries"],
+                json!([])
+            );
+        }
+        let mut refused = intent(
+            &runtime,
+            &view,
+            ToolCall::Search {
+                path: "owned".into(),
+                query: "(".into(),
+                regex: true,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+        );
+        refused.limits.result_bytes = 128;
+        let refused = view.read(refused);
+        assert_eq!(refused.disposition, ToolDisposition::Failed);
+        assert!(refused.valid() && refused.output.contains("invalid or unsupported regex"));
+        assert!(matches!(
+            refused.attestation,
+            Some(Attestation::WorkerRead { .. })
+        ));
+        assert!(!refused.stops_run());
         let handover = view.handover().unwrap();
         assert!(decode_data(&handover, WorkerDataPurpose::Handover).is_ok());
         let final_changes: WorkerChangeset = serde_json::from_slice(&handover).unwrap();

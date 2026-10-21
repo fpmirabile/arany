@@ -14,6 +14,7 @@ mod mcp;
 mod output;
 pub mod permissions;
 mod process;
+mod search;
 mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
@@ -91,10 +92,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, LimitCause, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
-    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
-    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
-    UnguardedReceipt,
+    FileVersion, GuardReceipt, LimitCause, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal,
+    ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt,
+    ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep,
+    UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -125,6 +126,8 @@ pub enum ToolError {
     Timeout(String),
     #[error("Tool file precondition changed")]
     Conflict,
+    #[error("Search pattern refused: {0}")]
+    Pattern(&'static str),
     #[error("Tool operation failed")]
     Operation,
     #[error("Tool effect completion is uncertain")]
@@ -494,7 +497,7 @@ impl ToolRuntime {
     pub(crate) fn step_context_reserve(command_integration: bool, feedback: usize) -> usize {
         512 + feedback
             + if command_integration {
-                types::MAX_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
+                types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES + 128 * 6 + 512
             } else {
                 0
             }
@@ -1175,6 +1178,8 @@ impl ToolRuntime {
                 &read_intent.call,
                 &runtime.config,
                 read_intent.limits.result_bytes as usize,
+                std::time::Instant::now()
+                    + Duration::from_millis(u64::from(read_intent.limits.runtime_ms)),
             ))
         });
         let result = tokio::select! {
