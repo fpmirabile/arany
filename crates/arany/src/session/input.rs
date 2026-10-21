@@ -237,6 +237,7 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
             prefix.push_str(name);
             prefix.push('/');
         }
+        let folds = folds_case(&directory)?;
         for file in InstructionFile::DISCOVERY {
             let name = file.name();
             let Some(opened) = open_nofollow(&directory, std::ffi::OsStr::new(name))? else {
@@ -245,7 +246,7 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
             let metadata = opened.metadata()?;
             #[cfg(test)]
             entry_hook();
-            if !exact_entry(&directory, name, &metadata)? {
+            if folds && !exact_entry(&directory, name, &metadata)? {
                 continue;
             }
             let snapshot = snapshot(opened, &metadata, format!("{prefix}{name}"), remaining)?;
@@ -255,6 +256,34 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
         }
     }
     Ok(found)
+}
+
+// Without case folding an exact-name open is exact; macOS volumes may fold, so they always check.
+fn folds_case(directory: &Dir) -> Result<bool, InputError> {
+    #[cfg(target_os = "linux")]
+    {
+        use rustix::io::Errno;
+        const FS_CASEFOLD_FL: u32 = 0x4000_0000;
+        use rustix::fs::{Mode, OFlags};
+        // The capability handle may be `O_PATH`, which takes no ioctl; reopen the directory itself.
+        let readable = rustix::fs::openat(
+            directory,
+            ".",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map_err(|error| InputError::Io(error.into()))?;
+        match rustix::fs::ioctl_getflags(&readable) {
+            Ok(flags) => Ok(flags.bits() & FS_CASEFOLD_FL != 0),
+            Err(Errno::NOTTY | Errno::OPNOTSUPP | Errno::INVAL | Errno::NOSYS) => Ok(false),
+            Err(error) => Err(InputError::Io(error.into())),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = directory;
+        Ok(true)
+    }
 }
 
 // Case-insensitive volumes open `agents.md` for `AGENTS.md`; only the exact, unreplaced entry counts.

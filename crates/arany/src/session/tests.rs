@@ -339,10 +339,16 @@ fn instruction_entry_check_binds_the_listed_inode_to_the_opened_file() {
     });
     let swapped = WorkspaceInputs::load(&workspace, &state, None, &[]);
     ENTRY_HOOK.with(|hook| hook.borrow_mut().take());
-    assert!(
-        matches!(swapped, Err(InputError::Io(_))),
-        "replaced entry rejects"
-    );
+    if cfg!(target_os = "macos") {
+        assert!(
+            matches!(swapped, Err(InputError::Io(_))),
+            "a volume that may fold case rejects the replaced entry"
+        );
+    } else {
+        // Linux without casefold: the exact-name open stands even though the listing now differs.
+        assert_eq!(swapped.unwrap().instructions[0].content, "hostile");
+        std::fs::rename(workspace.join("kept.md"), workspace.join("AGENTS.md")).unwrap();
+    }
     assert_eq!(
         WorkspaceInputs::load(&workspace, &state, None, &[])
             .unwrap()
