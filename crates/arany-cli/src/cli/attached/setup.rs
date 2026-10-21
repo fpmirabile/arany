@@ -178,6 +178,9 @@ pub(super) async fn admit_history(
                 HistoryRecovery::ArchiveConflict => {
                     "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
                 }
+                HistoryRecovery::MigrationConflict => {
+                    "An interrupted history migration no longer matches its files; inspect the migrations folder in the state directory."
+                }
                 HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
                 HistoryRecovery::Changed => "History changed during recovery; retry.",
                 HistoryRecovery::StorageFull => "Storage is full; free space and retry.",

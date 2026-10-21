@@ -130,49 +130,55 @@ impl FromStr for GoalId {
     }
 }
 
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+    ("SessionStarted", 6),
+    ("SessionDefaultChanged", 6),
+    ("SessionForked", 6),
+    ("SessionRenamed", 6),
+    ("GoalRunLinked", 6),
+    ("GoalResumed", 6),
+    ("GoalPlanContractRecorded", 7),
+    ("GoalContextCompacted", 6),
+    ("GoalSteeringNoteRecorded", 6),
+    ("AssistantDisplayRecorded", 6),
+    ("MessageCommitted", 6),
+    ("MessageAccepted", 7),
+    ("AgentSpawned", 12),
+    ("AgentFinished", 10),
+    ("ProviderCallRecorded", 13),
+    ("WorkerDataChunk", 1),
+    ("WorkerDataSealed", 1),
+    ("WorkerStopObserved", 1),
+    ("WorkerIntegrationRecorded", 1),
+    ("WorkerHandoverDiscarded", 1),
+    ("WorkerLeaseReleased", 1),
+    ("WorkerVerificationRecorded", 1),
+    ("WorkerHandoverRecorded", 2),
+    ("ToolResultsCleared", 1),
+    ("GoalStarted", 7),
+    ("GoalFinished", 7),
+    ("SupervisorVerdictRecorded", 1),
+    ("WorkspaceRewindStarted", 1),
+    ("WorkspaceRewindFinished", 1),
+    ("ProviderFallbackUsed", 1),
+    ("ProviderRetryScheduled", 1),
+    ("ToolPermissionDecided", 4),
+    ("HookStarted", 4),
+    ("HookFinished", 9),
+    ("ToolFinished", 20),
+    ("RunStarted", 18),
+    ("RunFinished", 9),
+    ("GoalProviderCallReserved", 7),
+    ("GoalCompactionCallReserved", 7),
+    ("ToolStarted", 14),
+    ("ContextCompacted", 7),
+];
+
 pub(crate) fn payload_version(kind: &str) -> Option<i64> {
-    match kind {
-        "SessionStarted"
-        | "SessionDefaultChanged"
-        | "SessionForked"
-        | "SessionRenamed"
-        | "GoalRunLinked"
-        | "GoalResumed"
-        | "GoalContextCompacted"
-        | "GoalSteeringNoteRecorded"
-        | "AssistantDisplayRecorded"
-        | "MessageCommitted" => Some(6),
-        "MessageAccepted" | "GoalPlanContractRecorded" => Some(7),
-        "AgentSpawned" => Some(12),
-        "AgentFinished" => Some(10),
-        "ProviderCallRecorded" => Some(13),
-        "WorkerDataChunk"
-        | "WorkerDataSealed"
-        | "WorkerStopObserved"
-        | "WorkerIntegrationRecorded"
-        | "WorkerHandoverDiscarded"
-        | "WorkerLeaseReleased"
-        | "WorkerVerificationRecorded" => Some(1),
-        "WorkerHandoverRecorded" => Some(2),
-        "ToolResultsCleared" => Some(1),
-        "GoalStarted" | "GoalFinished" => Some(7),
-        "SupervisorVerdictRecorded" => Some(1),
-        "WorkspaceRewindStarted"
-        | "WorkspaceRewindFinished"
-        | "ProviderFallbackUsed"
-        | "ProviderRetryScheduled" => Some(1),
-        "ToolPermissionDecided" => Some(4),
-        "HookStarted" => Some(4),
-        "HookFinished" => Some(9),
-        "ToolFinished" => Some(20),
-        "RunStarted" => Some(18),
-        "RunFinished" => Some(9),
-        "GoalProviderCallReserved" => Some(7),
-        "GoalCompactionCallReserved" => Some(7),
-        "ToolStarted" => Some(14),
-        "ContextCompacted" => Some(7),
-        _ => None,
-    }
+    PAYLOAD_VERSIONS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, version)| *version)
 }
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 // Every model Tool call takes one inference turn, plus the final report.
@@ -1402,6 +1408,40 @@ impl Event {
         };
         event.validate()?;
         Ok(event)
+    }
+}
+
+// The typed text a payload had before its kind only gained the glob variants, or `None`
+// when it names them (they did not exist) or does not parse.
+pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
+        serialize(&parse::<T>(payload).ok()?).ok()
+    }
+    let text = match kind {
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
+        "ToolFinished" => again::<ToolFinishedPayload>(payload),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
+        "RunStarted" => again::<RunStartedPayload>(payload),
+        _ => None,
+    }?;
+    (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
+}
+
+fn mentions_glob(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
+            (key == "operation" && field == "glob")
+                || (key == "tools"
+                    && field
+                        .as_array()
+                        .is_some_and(|tools| tools.iter().any(|tool| tool == "glob")))
+                || mentions_glob(field)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(mentions_glob),
+        _ => false,
     }
 }
 

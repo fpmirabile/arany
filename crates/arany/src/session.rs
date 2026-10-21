@@ -35,6 +35,9 @@ pub(crate) use compaction::{
     MAX_COMPACTION_SUMMARY_BYTES, PreparedCompaction, validate_compaction_references,
 };
 pub(crate) use context::CompiledContext;
+#[cfg(test)]
+pub(crate) use events::PAYLOAD_VERSIONS;
+pub(crate) use events::pre_glob_payload;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
@@ -50,13 +53,14 @@ pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
 };
-pub(crate) use lineage::prefix_digest;
+pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
 pub(crate) use reducer::rewind_tests::{
     finished as rewind_finished_fixture, started as rewind_started_fixture,
 };
 #[cfg(test)]
 pub(crate) use reducer::worker_tests::{
+    compacted_fixture as worker_compacted_fixture,
     completed_command_fixture as worker_command_protocol_fixture,
     completed_fixture as worker_protocol_fixture,
 };
