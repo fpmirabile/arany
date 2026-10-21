@@ -643,13 +643,21 @@ fn validate_all(connection: &Connection, limit: usize) -> Result<(), StoreError>
     Ok(())
 }
 
-// True only when a read-only look proves the history unsupported, leaving its database and WAL as found.
-pub(super) fn unsupported(root: &StateRoot) -> bool {
-    matches!(
-        inspect(&root.path().join(DATABASE_FILE)),
-        Err(StoreError::InvalidHistory)
-    ) && identity_of(&root.dir, DATABASE_FILE)
-        .is_ok_and(|file| file.is_some_and(|(_, _, size)| size > 0))
+pub(super) enum Inspection {
+    Current,
+    Unsupported,
+    Inconclusive,
+}
+
+// A read-only look leaves the database and WAL as found; only an inconclusive one needs a writable check.
+pub(super) fn inspect_history(root: &StateRoot) -> Inspection {
+    let nonempty = identity_of(&root.dir, DATABASE_FILE)
+        .is_ok_and(|file| file.is_some_and(|(_, _, size)| size > 0));
+    match inspect(&root.path().join(DATABASE_FILE)) {
+        Ok(()) if nonempty => Inspection::Current,
+        Err(StoreError::InvalidHistory) if nonempty => Inspection::Unsupported,
+        _ => Inspection::Inconclusive,
+    }
 }
 
 fn inspect(path: &std::path::Path) -> Result<(), StoreError> {

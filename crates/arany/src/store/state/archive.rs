@@ -193,11 +193,15 @@ pub(in crate::store) fn publish(
 }
 
 fn check_history(root: &StateRoot) -> Result<(), StoreError> {
-    if migrate::unsupported(root) {
-        return Err(StoreError::InvalidHistory);
+    use super::super::journal::open_connection;
+    // The writable open still finishes SQLite recovery and enforces the journal pragmas.
+    match migrate::inspect_history(root) {
+        migrate::Inspection::Unsupported => Err(StoreError::InvalidHistory),
+        migrate::Inspection::Current => open_connection(root, false).map(drop),
+        migrate::Inspection::Inconclusive => {
+            super::super::replay::validate_history(&open_connection(root, false)?)
+        }
     }
-    let connection = super::super::journal::open_connection(root, false)?;
-    super::super::replay::validate_history(&connection)
 }
 
 pub(in crate::store) fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
