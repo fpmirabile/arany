@@ -3766,3 +3766,56 @@ fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
         }
     }
 }
+
+#[test]
+fn pager_frame_gives_history_every_row_above_one_inert_footer() {
+    let footer = "Transcript · / find · n/N · j/k · g/G · Ctrl+U/D · [ scrollback · q close";
+    for (width, height, color) in [(80, 24, true), (50, 12, false), (16, 8, false)] {
+        let mut rows = super::super::history::display_rows(
+            MessageKind::Commentary,
+            "hostile \u{1b}]52;c;eA==\u{7} tail",
+            usize::from(width),
+        );
+        rows.extend(super::super::history::display_rows(
+            MessageKind::Assistant,
+            &"line\n".repeat(usize::from(height)),
+            usize::from(width),
+        ));
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("pager terminal");
+        let mut history_area = Rect::default();
+        terminal
+            .draw(|frame| {
+                history_area = draw_pager_frame(frame, &rows, footer, Palette { color });
+            })
+            .expect("pager frame");
+        assert_eq!(history_area, Rect::new(0, 0, width, height - 1));
+        let buffer = terminal.backend().buffer();
+        let screen = (0..height)
+            .map(|y| buffer_row(buffer, y))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            screen[usize::from(height) - 1].trim_end(),
+            safe_truncate(footer, usize::from(width)).trim_end(),
+            "{width}x{height}"
+        );
+        // History fills every row above the footer; the composer and status line are gone.
+        for (y, row) in screen[..usize::from(height) - 1].iter().enumerate() {
+            let expected = rows[y].text.as_str();
+            assert!(
+                row.trim_end().ends_with(expected.trim()),
+                "{width}x{height} row {y}: {row:?} vs {expected:?}"
+            );
+        }
+        assert!(
+            screen.iter().all(|row| !row.contains('\u{1b}')),
+            "{screen:#?}"
+        );
+        if width >= 50 {
+            assert!(
+                screen
+                    .iter()
+                    .any(|row| row.contains("hostile \\u{001b}]52"))
+            );
+        }
+    }
+}

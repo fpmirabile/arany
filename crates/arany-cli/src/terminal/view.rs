@@ -1103,6 +1103,31 @@ pub(super) fn draw_history_rows(
     }
 }
 
+// The transcript pager: History above one footer row of keys, the find prompt or a transient cue.
+pub(super) fn draw_pager_frame(
+    frame: &mut Frame,
+    history_rows: &[HistoryRow],
+    footer: &str,
+    palette: Palette,
+) -> Rect {
+    let area = frame.area();
+    let history_area = Rect {
+        height: area.height.saturating_sub(1),
+        ..area
+    };
+    draw_history_rows(frame, history_area, history_rows, palette);
+    if area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(accent_lead(
+                safe_truncate(footer, usize::from(area.width)),
+                palette,
+            )),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+    history_area
+}
+
 pub(super) fn draw_frame_with_history(
     frame: &mut Frame,
     model: &PresentationModel,

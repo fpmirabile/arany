@@ -1302,6 +1302,191 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     restored(&input, &before);
 }
 
+fn find(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).position(|part| part == needle)
+}
+
+fn rfind(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).rposition(|part| part == needle)
+}
+
+#[test]
+fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
+    const ANSWER: &str = "STREAM_CANARY";
+    const FOOTER: &str = "Transcript · / find · n/N · j/k · g/G";
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    crate::seed_fullscreen(&state);
+    let id = crate::seed_transcript_session(&state, &workspace);
+    let provider = super::loopback::held_stream_provider(&state, ANSWER);
+    check_profile(&workspace, &state);
+    let geometry = nix::pty::Winsize {
+        ws_row: 24,
+        ws_col: 80,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+    let before = crate::process::terminal_settings(&input);
+    let master = input.try_clone().unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+        .env("HOME", temp.path().join("fixture-home"))
+        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .env("TERM", "xterm")
+        .current_dir(&workspace)
+        .args(["--no-color", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .arg("--resume")
+        .arg(id.to_string())
+        .args(["--provider", "custom:local", "--model", "model-1", "stream"])
+        .stdin(Stdio::from(slave.try_clone().unwrap()))
+        .stdout(Stdio::piped())
+        .stderr(Stdio::from(slave));
+    own_terminal(&mut command);
+    let (mut child, mut input, master) = (ChildGuard::new(command.spawn().unwrap()), input, master);
+    drop(command);
+    let mut declined = false;
+    let mut stage = 0;
+    let mut from = 0;
+    let mut dump_from = 0;
+    let mut back_from = 0;
+    let output = crate::process::capture_terminal(
+        child.child(),
+        master,
+        Duration::from_secs(40),
+        256 * 1024,
+        |bytes| {
+            assert!(!bytes.windows(4).any(|part| part == b"\x1b[6n"));
+            crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
+            let tail = &bytes[from..];
+            let footer = |bytes: &[u8]| super::screen_rows(bytes, 80, 24)[23].starts_with(FOOTER);
+            // The lines `[` appended after leaving the alternate screen, decoded tall enough to
+            // keep the scrolled-off part, once the last one is the return cue.
+            let dumped = |bytes: &[u8]| {
+                let start = find(bytes, b"\x1b[?1049l")?;
+                let mut lines = super::screen_rows(&bytes[start..], 80, 512)
+                    .into_iter()
+                    .map(|row| row.trim_end().to_owned())
+                    .collect::<Vec<_>>();
+                let end = lines.iter().rposition(|line| !line.is_empty())?;
+                lines.truncate(end + 1);
+                (lines[end] == "Enter returns to Arany").then_some((start, lines))
+            };
+            let dump = (stage == 2).then(|| dumped(tail)).flatten();
+            let next: Option<&[u8]> = match stage {
+                0 if provider.streaming.try_recv().is_ok() => Some(b"\x0f"),
+                1 if footer(bytes) => Some(b"["),
+                2 if dump.is_some() => {
+                    let (start, lines) = dump.expect("dumped lines");
+                    let released = find(tail, b"\x1b[?1000l").expect("capture released");
+                    assert!(released < start, "capture is released before the text");
+                    assert_eq!(
+                        lines[..2],
+                        [
+                            "Arany transcript:",
+                            "Earlier Runs omitted; arany show prints the whole conversation"
+                        ]
+                    );
+                    // 17 seeded Runs and the active one: the 16 newest whole Runs, read like chat.
+                    let count =
+                        |expected: &str| lines.iter().filter(|line| *line == expected).count();
+                    assert_eq!(count("You:"), 16);
+                    assert_eq!(count("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}"), 15);
+                    assert_eq!(count("  Synthetic answer"), 15);
+                    let active = lines
+                        .iter()
+                        .rposition(|line| line == "You:")
+                        .expect("active Run");
+                    assert_eq!(lines[active + 1], "  stream");
+                    assert_eq!(find(tail, b"\x1b]52"), None);
+                    dump_from = from;
+                    provider.release.send(()).unwrap();
+                    stage = 3;
+                    None
+                }
+                3 if provider.consumed.try_recv().is_ok() => {
+                    assert_eq!(
+                        find(tail, b"\x1b[?1049h"),
+                        None,
+                        "no redraw during the dump"
+                    );
+                    assert_eq!(find(tail, b"\x1b[?1000h"), None);
+                    Some(b"\r")
+                }
+                4 if find(tail, b"\x1b[?1049h").is_some()
+                    && find(tail, b"\x1b[?1006h").is_some()
+                    && footer(tail)
+                    && {
+                        let rows = super::screen_rows(tail, 80, 24);
+                        rows.iter().enumerate().skip(1).any(|(index, row)| {
+                            row.trim_end() == format!("  {ANSWER}")
+                                && rows[index - 1].trim_end() == "● Arany:"
+                        })
+                    } =>
+                {
+                    back_from = from;
+                    Some(b"q")
+                }
+                5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some() => Some(b"/exit\r"),
+                _ => None,
+            };
+            if let Some(keys) = next {
+                from = bytes.len();
+                input.write_all(keys).unwrap();
+                stage += 1;
+            }
+        },
+    );
+    assert_eq!(stage, 6);
+    assert!(output.status.success());
+    restored(&input, &before);
+    provider.peer.join().unwrap();
+    let stderr = &output.stderr;
+    let dump = &stderr[dump_from..back_from];
+    assert!(find(dump, b"\x1b[?1049l").is_some() && find(dump, b"\x1b[?1000l").is_some());
+    for mode in [
+        b"\x1b[?1049h".as_slice(),
+        b"\x1b[?1000h",
+        b"\x1b[?1002h",
+        b"\x1b[?1006h",
+    ] {
+        assert!(
+            find(&stderr[back_from..], mode).is_some(),
+            "Enter reacquires"
+        );
+    }
+    let text = String::from_utf8_lossy(stderr);
+    for mode in [1003, 1007, 1015] {
+        assert!(
+            !text.contains(&format!("\x1b[?{mode}h")),
+            "Fullscreen enabled {mode}"
+        );
+    }
+    for mode in [1049, 1000, 1002, 1006] {
+        let enabled = text.rfind(&format!("\x1b[?{mode}h")).expect("mode enabled");
+        assert!(
+            text.rfind(&format!("\x1b[?{mode}l"))
+                .is_some_and(|disabled| enabled < disabled),
+            "exit releases {mode}"
+        );
+    }
+    let left = rfind(stderr, b"\x1b[?1049l").expect("alternate screen left");
+    assert_eq!(
+        find(&stderr[left..], b"\x1b[2J"),
+        None,
+        "the dump stays on the primary screen"
+    );
+}
+
 #[test]
 #[cfg_attr(
     not(arany_ci),

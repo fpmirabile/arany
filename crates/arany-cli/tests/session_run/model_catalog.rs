@@ -1,6 +1,8 @@
 use super::active_terminal::{ProductGuard, tty_settings};
 use super::loopback::{ChildGuard, write_profile};
-use super::session_picker::{pump, tail};
+use super::session_picker::{
+    checkpoint_screen, pump, screen_contains, screen_rows, tail, wait_for_screen,
+};
 use arany::{SessionId, StateRoot, Store, create_session, list_sessions};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal, kill_process};
@@ -98,22 +100,31 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let stages: [&[u8]; 24] = [
-            b"Input:", b"Command: /exit", b"Notice: Select /provider first",
-            b"Notice: Provider: custom:local; set /model", b"Notice: Error: Unknown command; did you mean /model?",
-            b"Choose number [effort|default], n next, p previous, or q close:",
-            b"Notice: invalid model or effort choice", b"Notice: Model: model-1",
-            b"Choose number [effort|default], n next, p previous, or q close:",
-            b"Notice: Model catalog closed", b"Notice: Provider: openai; set /model",
-            b"Notice: Model: gpt-linear-guard", b"Notice: Model: gpt-linear-guard",
-            b"Notice: Error: selected native API credentials or workspace configuration unavailable",
-            b"Notice: Model: gpt-6-astra", b"Provider unavailable",
-            b"Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes",
-            b"Notice: Provider: custom:local; set /model",
-            b"Choose number [effort|default], n next, p previous, or q close:",
-            b"Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes",
-            b"Choose number [effort|default], n next, p previous, or q close:",
-            b"Notice: Model: model-1", b"Notice: Provider: openai; set /model", b"Notice: Model: gpt-6-astra",
+        let stages: [&str; 24] = [
+            "Input:",
+            "Command: /exit",
+            "Notice: Select /provider first",
+            "Notice: Provider: custom:local; set /model",
+            "Notice: Error: Unknown command; did you mean /model?",
+            "Choose number [effort|default], n next, p previous, or q close:",
+            "Notice: invalid model or effort choice",
+            "Notice: Model: model-1",
+            "Choose number [effort|default], n next, p previous, or q close:",
+            "Notice: Model catalog closed",
+            "Notice: Provider: openai; set /model",
+            "Notice: Model: gpt-linear-guard",
+            "Notice: Model: gpt-linear-guard",
+            "Notice: Error: selected native API credentials or workspace configuration unavailable",
+            "Notice: Model: gpt-6-astra",
+            "Provider unavailable",
+            "Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes",
+            "Notice: Provider: custom:local; set /model",
+            "Choose number [effort|default], n next, p previous, or q close:",
+            "Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes",
+            "Choose number [effort|default], n next, p previous, or q close:",
+            "Notice: Model: model-1",
+            "Notice: Provider: openai; set /model",
+            "Notice: Model: gpt-6-astra",
         ];
         let mut next = 0;
         let mut start = 0;
@@ -126,19 +137,14 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
             assert!(bytes.len() + count <= 32 * 1024, "bounded PTY output");
             bytes.extend_from_slice(&chunk[..count]);
             super::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
-            while next < stages.len()
-                && let Some(position) = bytes[start..]
-                    .windows(stages[next].len())
-                    .position(|part| part == stages[next])
-            {
-                let after_marker = start + position + stages[next].len();
-                let Some(line_end) = bytes[after_marker..].iter().position(|byte| *byte == b'\n')
-                else {
-                    break;
-                };
-                sender.send(next).expect("stage receiver");
-                start = after_marker + line_end + 1;
-                next += 1;
+            while let Some(line_end) = bytes[start..].iter().position(|byte| *byte == b'\n') {
+                let end = start + line_end + 1;
+                if next < stages.len() && screen_contains(&bytes[start..end], 1024, 1, stages[next])
+                {
+                    sender.send(next).expect("stage receiver");
+                    next += 1;
+                }
+                start = end;
             }
         }
         bytes
@@ -383,12 +389,11 @@ fn inline_model_catalog_at_width(width: u16) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
+    let mut history = Vec::new();
+    let mut capture_from = 0;
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"Ask Ara".len())
-        .any(|part| part == b"Ask Ara")
-    {
+    while !screen_contains(&transcript, width.into(), 24, "Ask Ara") {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -397,7 +402,14 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let before_menu = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let before_menu = capture_from;
     input
         .write_all(b"note\x0b")
         .expect("draft and quick actions");
@@ -412,20 +424,20 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let before_catalog = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let before_catalog = capture_from;
     input.write_all(b"\r").expect("open catalog");
-    let model_label: &[u8] = if width < 20 {
-        "mo…-1".as_bytes()
-    } else {
-        b"model-1"
-    };
+    let model_label: &str = if width < 20 { "mo…-1" } else { "model-1" };
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        let catalog = &transcript[before_catalog..];
-        let complete = catalog
-            .windows(model_label.len())
-            .any(|part| part == model_label)
-            && crate::armed_selector(&transcript, before_catalog, width.into(), 24).is_some();
+        let complete = crate::armed_selector(&transcript, before_catalog, width.into(), 24)
+            .is_some_and(|screen| screen.iter().any(|row| row.contains(model_label)));
         if complete {
             break;
         }
@@ -437,40 +449,56 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let before_filter = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    assert!(screen_contains(
+        &transcript,
+        width.into(),
+        24,
+        "Models · exact"
+    ));
+    let filtered_at = capture_from;
     input.write_all(b"z").expect("filter model catalog");
-    let no_match_label: &[u8] = b"No matches";
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[before_filter..]
-        .windows(no_match_label.len())
-        .any(|part| part == no_match_label)
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "empty filter missing: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    let before_clear = transcript.len();
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (filtered_at, width.into(), 24),
+        "No matches",
+    );
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let restored_at = capture_from;
     input
         .write_all(b"\r\x7f")
         .expect("no-match Enter and Backspace filter");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[before_clear..]
-        .windows(model_label.len())
-        .any(|part| part == model_label)
-    {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "filter did not restore model: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
-    let before_selection = transcript.len();
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (restored_at, width.into(), 24),
+        model_label,
+    );
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let before_selection = capture_from;
     input.write_all(b"\r").expect("select model");
     let deadline = Instant::now() + Duration::from_secs(10);
     while !transcript[before_selection..]
@@ -485,14 +513,27 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let before_edit = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let before_edit = capture_from;
     input.write_all(b"X").expect("edit returned draft");
+    // The catalog redraws the composer caret too, so wait until its hint is gone.
+    let composer_ready = |transcript: &[u8], from: usize, draft: &str, column: usize| {
+        crate::composer_caret(transcript, from, width.into(), 24).is_some_and(|(caret, screen)| {
+            caret == column
+                && screen.iter().any(|row| row.starts_with(draft))
+                && !screen
+                    .iter()
+                    .any(|row| row.contains("L/R effort") || row.contains("Left/Right reasoning"))
+        })
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
-    // The Classic viewport row follows the cursor reply; the caret column proves draft restoration.
-    while !transcript[before_edit..]
-        .windows(b";7HX".len())
-        .any(|part| part == b";7HX")
-    {
+    while !composer_ready(&transcript, before_edit, "> noteX", 8) {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -501,19 +542,9 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let edit = &transcript[before_edit..];
-    let caret = edit
-        .windows(b";7HX".len())
-        .position(|part| part == b";7HX")
-        .expect("restored caret");
-    let row = edit[..caret]
-        .windows(2)
-        .rposition(|part| part == b"\x1b[")
-        .expect("caret row");
-    let composer_caret = [&edit[row..caret], b";7H"].concat();
-    let composer_edit = [composer_caret.as_slice(), b"Y"].concat();
+
     let native_pid = (width == 40).then(|| {
-        let text = String::from_utf8_lossy(&transcript);
+        let text = String::from_utf8_lossy(&history);
         let shell = text
             .lines()
             .find_map(|line| line.strip_prefix("SHELL_PID:"))
@@ -533,7 +564,14 @@ fn inline_model_catalog_at_width(width: u16) {
         ),
         (b"\x1b[B", "› 2. Agents", "armed selector takes later keys"),
     ] {
-        let start = transcript.len();
+        capture_from = checkpoint_screen(
+            &mut transcript,
+            &mut answered,
+            &mut history,
+            (width.into(), 24),
+            capture_from,
+        );
+        let start = capture_from;
         input.write_all(keys).expect(label);
         let deadline = Instant::now() + Duration::from_secs(10);
         while !crate::armed_selector(&transcript, start, width.into(), 24)
@@ -549,116 +587,142 @@ fn inline_model_catalog_at_width(width: u16) {
         }
     }
     {
-        let mut transition = |keys: &[u8], marker: &[u8], hide_cursor: bool, label: &str| {
-            let start = transcript.len();
-            input.write_all(keys).expect(label);
-            let deadline = Instant::now() + Duration::from_secs(10);
-            loop {
-                let frame = &transcript[start..];
-                let complete = frame_marker_end(frame, marker);
-                if complete.is_some_and(|end| {
-                    !hide_cursor
-                        || frame[end..]
-                            .windows(b"\x1b[?25l".len())
-                            .any(|part| part == b"\x1b[?25l")
-                }) {
-                    break;
-                }
-                pump(&mut output, &mut input, &mut transcript, &mut answered);
-                assert!(
-                    Instant::now() < deadline,
-                    "{label} at {width} columns: {}",
-                    tail(&transcript)
+        let mut transition =
+            |keys: &[u8], text: &str, caret: Option<usize>, hide_cursor: bool, label: &str| {
+                capture_from = checkpoint_screen(
+                    &mut transcript,
+                    &mut answered,
+                    &mut history,
+                    (width.into(), 24),
+                    capture_from,
                 );
-                thread::yield_now();
-            }
-        };
-        for (keys, marker, hide_cursor, label) in [
+                let start = capture_from;
+                input.write_all(keys).expect(label);
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let before = screen_rows(&transcript[..start], width.into(), 24);
+                loop {
+                    // Each check needs a frame drawn after the keys, never the stale screen.
+                    let complete = if hide_cursor {
+                        crate::armed_selector(&transcript, start, width.into(), 24).is_some_and(
+                            |screen| {
+                                screen != before && screen.iter().any(|row| row.contains(text))
+                            },
+                        )
+                    } else if let Some(column) = caret {
+                        composer_ready(&transcript, start, text, column)
+                    } else {
+                        // Selection notices are inserted into native scrollback above the
+                        // viewport, so they are read from the bytes drawn after the keys.
+                        screen_rows(&transcript, width.into(), 24) != before
+                            && composer_ready(&transcript, start, "> ", 3)
+                            && visible_text_contains(&transcript[start..], text)
+                    };
+                    if complete {
+                        break;
+                    }
+                    pump(&mut output, &mut input, &mut transcript, &mut answered);
+                    assert!(
+                        Instant::now() < deadline,
+                        "{label} at {width} columns: {}",
+                        tail(&transcript)
+                    );
+                    thread::yield_now();
+                }
+            };
+        for (keys, text, caret, hide_cursor, label) in [
             (
                 &b"1"[..],
-                &b"<low>"[..],
+                "<low>",
+                None,
                 true,
                 "armed digit 1 opens the picker with a mid-draft caret",
             ),
             (
                 &b"\x1b[C"[..],
-                &b"high"[..],
+                "high",
+                None,
                 true,
                 "right changes focused reasoning",
             ),
             (
                 &b"\x1b"[..],
-                composer_caret.as_slice(),
+                "> noteX",
+                Some(7),
                 false,
                 "cancel returns draft",
             ),
             (
                 &b"Y"[..],
-                composer_edit.as_slice(),
+                "> noteYX",
+                Some(8),
                 false,
                 "cancel restores caret",
             ),
             (
                 &b"\x1b[F\x7f\x7f\x7f\x7f\x7f\x7f/model\r"[..],
-                &b"<low>"[..],
+                "<low>",
+                None,
                 true,
                 "slash model picker",
             ),
             (
                 &b"\x1b[C\r"[..],
-                &b"\x1b[?25h"[..],
+                "> ",
+                Some(3),
                 false,
                 "atomic model and reasoning selection",
             ),
             (
                 &b"/model\r"[..],
-                &b"<high>"[..],
+                "<high>",
+                None,
                 true,
                 "reopen with current reasoning",
             ),
-            (
-                &b"\r"[..],
-                &b"\x1b[?25h"[..],
-                false,
-                "current tuple remains",
-            ),
-            (&b"/model\r"[..], &b"<high>"[..], true, "reopen for cancel"),
-            (
-                &b"\x1b"[..],
-                &b"\x1b[?25h"[..],
-                false,
-                "cancel keeps defaults",
-            ),
+            (&b"\r"[..], "> ", Some(3), false, "current tuple remains"),
+            (&b"/model\r"[..], "<high>", None, true, "reopen for cancel"),
+            (&b"\x1b"[..], "> ", Some(3), false, "cancel keeps defaults"),
         ] {
-            transition(keys, marker, hide_cursor, label);
+            transition(keys, text, caret, hide_cursor, label);
         }
         if native_pid.is_some() {
             transition(
                 b"/provider openai\r",
-                b"set /model",
+                "Provider: openai",
+                None,
                 false,
                 "select synthetic native source",
             );
             transition(
                 b"/model gpt-choice-guard high\r",
-                b"Model: gpt-choice-guard",
+                "Model: gpt-choice-guard",
+                None,
                 false,
                 "unknown tuple selects without probes",
             );
             transition(
                 b"/provider custom:local\r",
-                b"set /model",
+                "Provider: custom:local",
+                None,
                 false,
                 "restore exact profile",
             );
             transition(
                 b"/model model-1 high\r",
-                b"Model: model-1",
+                "Model: model-1",
+                None,
                 false,
                 "restore exact tuple",
             );
         }
     }
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
     input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -675,22 +739,14 @@ fn inline_model_catalog_at_width(width: u16) {
         thread::yield_now();
     }
     pump(&mut output, &mut input, &mut transcript, &mut answered);
-    let output = String::from_utf8(transcript).expect("UTF-8 PTY transcript");
-    // A diff frame skips unchanged blank cells, so words are separated by cursor controls.
-    let mut visible = String::new();
-    let mut chars = output.chars();
-    while let Some(character) = chars.next() {
-        if character == '\x1b' {
-            for next in chars.by_ref() {
-                if ('@'..='~').contains(&next) && next != '[' {
-                    break;
-                }
-            }
-        } else {
-            visible.push(character);
-        }
-    }
-    assert!(visible.contains("Models·exact"));
+    checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let output = String::from_utf8(history).expect("UTF-8 PTY transcript");
     let before = output
         .lines()
         .find_map(|line| line.strip_prefix("TTY_BEFORE:"))
@@ -740,39 +796,6 @@ fn inline_model_catalog_at_width(width: u16) {
     });
 }
 
-fn frame_marker_end(frame: &[u8], marker: &[u8]) -> Option<usize> {
-    if marker.contains(&b'\x1b') {
-        return frame
-            .windows(marker.len())
-            .position(|part| part == marker)
-            .map(|start| start + marker.len());
-    }
-    let mut visible = Vec::new();
-    let mut ends = Vec::new();
-    let mut cursor = 0;
-    while cursor < frame.len() {
-        if frame[cursor..].starts_with(b"\x1b[") {
-            cursor += 2;
-            while cursor < frame.len() && !(0x40..=0x7e).contains(&frame[cursor]) {
-                cursor += 1;
-            }
-        } else if !frame[cursor].is_ascii_whitespace() {
-            visible.push(frame[cursor]);
-            ends.push(cursor + 1);
-        }
-        cursor += 1;
-    }
-    let marker = marker
-        .iter()
-        .copied()
-        .filter(|byte| !byte.is_ascii_whitespace())
-        .collect::<Vec<_>>();
-    visible
-        .windows(marker.len())
-        .position(|part| part == marker)
-        .map(|start| ends[start + marker.len() - 1])
-}
-
 #[test]
 fn inline_model_catalog_cancel_then_sigterm_restores_terminal_without_selection() {
     for (columns, rows) in [(80, 24), (16, 8)] {
@@ -809,12 +832,11 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let flags = fcntl_getfl(&output).expect("stdout pipe flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking stdout pipe");
     let mut transcript = Vec::new();
+    let mut history = Vec::new();
+    let mut capture_from = 0;
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript
-        .windows(b"Ask Ara".len())
-        .any(|part| part == b"Ask Ara")
-    {
+    while !screen_contains(&transcript, columns.into(), rows.into(), "Ask Ara") {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -841,18 +863,24 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     let product_guard = ProductGuard::new(product_pid, state.clone());
     assert_ne!(tty_settings(product_pid), before, "raw mode active");
 
-    let catalog_marker: &[u8] = if columns == 16 {
-        b"Enter pick Esc"
+    let catalog_marker: &str = if columns == 16 {
+        "Enter pick Esc"
     } else {
-        b"model-1"
+        "model-1"
     };
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (columns.into(), rows.into()),
+        capture_from,
+    );
+    let opened_at = capture_from;
     input.write_all(b"/model\r").expect("open first catalog");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !frame_marker_end(&transcript, catalog_marker).is_some_and(|end| {
-        transcript[end..]
-            .windows(b"\x1b[?25l".len())
-            .any(|part| part == b"\x1b[?25l")
-    }) {
+    while !crate::armed_selector(&transcript, opened_at, columns.into(), rows.into())
+        .is_some_and(|screen| screen.iter().any(|row| row.contains(catalog_marker)))
+    {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -861,17 +889,25 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         );
         thread::yield_now();
     }
-    let prior_len = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (columns.into(), rows.into()),
+        capture_from,
+    );
+    let prior_len = capture_from;
     input.write_all(b"\x03").expect("cancel first browser");
-    let closed_marker: &[u8] = if columns == 16 {
-        b"Model catalog c"
+    let closed_marker: &str = if columns == 16 {
+        "Model catalog c"
     } else {
-        b"closed"
+        "Model catalog closed"
     };
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !transcript[prior_len..]
-        .windows(closed_marker.len())
-        .any(|part| part == closed_marker)
+    while !screen_contains(&transcript, columns.into(), rows.into(), closed_marker)
+        || !transcript[prior_len..]
+            .windows(6)
+            .any(|part| part == b"\x1b[?25h")
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
@@ -895,17 +931,21 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
         "composer reacquired raw mode"
     );
 
-    let reopen_at = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (columns.into(), rows.into()),
+        capture_from,
+    );
+    let reopen_at = capture_from;
     input.write_all(b"/model\r").expect("open second catalog");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
-        let frame = &transcript[reopen_at..];
-        if frame_marker_end(frame, catalog_marker).is_some_and(|end| {
-            frame[end..]
-                .windows(b"\x1b[?25l".len())
-                .any(|part| part == b"\x1b[?25l")
-        }) {
+        if crate::armed_selector(&transcript, reopen_at, columns.into(), rows.into())
+            .is_some_and(|screen| screen.iter().any(|row| row.contains(catalog_marker)))
+        {
             break;
         }
         assert!(
@@ -919,6 +959,13 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     assert!(
         product_guard.is_owned_and_running(),
         "private product child"
+    );
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (columns.into(), rows.into()),
+        capture_from,
     );
     kill_process(product_pid, Signal::TERM).expect("terminate model browser");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -936,7 +983,14 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
     };
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(!status.success(), "SIGTERM exits unsuccessfully");
-    let transcript = String::from_utf8(transcript).expect("PTY transcript UTF-8");
+    checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (columns.into(), rows.into()),
+        capture_from,
+    );
+    let transcript = String::from_utf8(history).expect("PTY transcript UTF-8");
     let after = transcript
         .split_once("TTY_AFTER:")
         .expect("restored terminal marker")
@@ -965,4 +1019,27 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
             "cancelled model navigation saves no empty conversation"
         );
     });
+}
+
+// Whether `text` was drawn in `frame`, ignoring cursor controls and the blank cells a
+// diffed frame skips between words.
+fn visible_text_contains(frame: &[u8], text: &str) -> bool {
+    let mut visible = Vec::new();
+    let mut cursor = 0;
+    while cursor < frame.len() {
+        if frame[cursor..].starts_with(b"\x1b[") {
+            cursor += 2;
+            while cursor < frame.len() && !(0x40..=0x7e).contains(&frame[cursor]) {
+                cursor += 1;
+            }
+        } else if !frame[cursor].is_ascii_whitespace() {
+            visible.push(frame[cursor]);
+        }
+        cursor += 1;
+    }
+    let text = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    visible.windows(text.len()).any(|part| part == text)
 }

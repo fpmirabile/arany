@@ -29,6 +29,42 @@ pub(super) struct LinearState {
     held_prompt: Option<&'static str>,
 }
 
+// A Run's unescaped detail parts: provisional or incomplete answer, public commentary, limit cue, Tools and verdicts.
+pub(super) fn transcript_details(run: &arany::RunView) -> Vec<String> {
+    let mut parts = Vec::new();
+    if run.assistant_message.is_none()
+        && let Some(answer) = crate::presentation::display_answer(run)
+    {
+        // Text of a Run still streaming is provisional; only a settled Run's text is incomplete.
+        let label = if matches!(
+            run.status,
+            arany::RunStatus::Pending | arany::RunStatus::Active
+        ) {
+            "Arany · provisional:"
+        } else {
+            "Arany · incomplete:"
+        };
+        parts.push(format!("{label}\n{answer}"));
+    }
+    parts.extend(
+        crate::presentation::display_commentary(run)
+            .into_iter()
+            .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
+    );
+    if run
+        .display
+        .iter()
+        .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
+    {
+        parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
+    }
+    parts.extend(run.tools.iter().map(|tool| {
+        crate::presentation::plain_tool_summary(&crate::presentation::tool_detail_text(tool))
+    }));
+    parts.extend(crate::presentation::supervisor_lines(run));
+    parts
+}
+
 impl LinearState {
     // An unarmed selector prints its rows and holds the prompt until input is admitted.
     pub(super) fn disarm(&mut self) {
@@ -199,32 +235,7 @@ impl LinearState {
             .take(super::history::MAX_CLASSIC_HISTORY_RUNS)
             .rev()
         {
-            let mut parts = Vec::new();
-            if run.assistant_message.is_none()
-                && let Some(answer) = crate::presentation::display_answer(run)
-            {
-                parts.push(format!("Arany · incomplete:\n{answer}"));
-            }
-            parts.extend(
-                crate::presentation::display_commentary(run)
-                    .into_iter()
-                    .map(|(_, _, text)| format!("Arany · public commentary:\n{text}")),
-            );
-            if run
-                .display
-                .iter()
-                .any(|chunk| chunk.category == arany::DisplayCategory::Limit)
-            {
-                parts.push(arany::DISPLAY_LIMIT_TEXT.to_owned());
-            }
-            let parts = parts
-                .into_iter()
-                .chain(run.tools.iter().map(|tool| {
-                    crate::presentation::plain_tool_summary(&crate::presentation::tool_detail_text(
-                        tool,
-                    ))
-                }))
-                .chain(crate::presentation::supervisor_lines(run));
+            let parts = transcript_details(run);
             for text in parts {
                 let text = crate::presentation::escape_terminal(&text);
                 if text.len().saturating_add(1) > remaining {
