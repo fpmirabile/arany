@@ -84,6 +84,8 @@ struct StoredAccountFile {
     account: Option<SavedAccount>,
 }
 
+pub(crate) const SAVED_ACCOUNT_SCHEMA: u8 = 2;
+
 pub(crate) const SAVED_ACCOUNT: RecordFormat = RecordFormat {
     kind: RecordKind::SavedAccount,
     field: "schema",
@@ -309,7 +311,7 @@ impl SavedAccount {
         api_key: String,
     ) -> Result<Self, CredentialError> {
         let account = Self {
-            schema: 2,
+            schema: SAVED_ACCOUNT_SCHEMA,
             id: Uuid::now_v7(),
             provider,
             model,
@@ -351,7 +353,7 @@ impl SavedAccount {
     }
 
     fn validate(&self) -> Result<(), CredentialError> {
-        if self.schema != 2
+        if self.schema != SAVED_ACCOUNT_SCHEMA
             || self.id.get_version() != Some(Version::SortRand)
             || !matches!(self.provider.as_str(), "openai" | "anthropic")
             || (resolve_native_effort(&self.provider, &self.model, self.effort).is_err()

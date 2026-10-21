@@ -18,6 +18,8 @@ use std::{
 };
 use uuid::{Uuid, Variant, Version};
 
+pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 1;
+
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
@@ -91,7 +93,7 @@ impl SelectedAccount {
 
 impl TokenRecord {
     fn valid_for(&self, storage: AccountStorage) -> bool {
-        self.schema == 1
+        self.schema == TOKEN_RECORD_SCHEMA
             && self.credentials.valid_saved()
             && self.consent.matches(&self.credentials, storage)
     }
@@ -167,7 +169,7 @@ impl AccountEntry {
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
                     !self.disconnected
-                        && token.schema == 1
+                        && token.schema == TOKEN_RECORD_SCHEMA
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
@@ -750,7 +752,7 @@ pub(super) fn save_private_file_at(
     expected_selected: Option<Uuid>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
         credentials,
         consent,
     };
@@ -848,7 +850,7 @@ fn save_keyring_at_with(
     write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
         credentials,
         consent,
     };
@@ -988,7 +990,7 @@ fn read_keyring_token(
     }
     let token: TokenRecord =
         serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
-    if token.schema != 1
+    if token.schema != TOKEN_RECORD_SCHEMA
         || !token.credentials.valid_saved()
         || token.credentials.subject != subject
         || token.credentials.host_id != host_id
@@ -1356,7 +1358,7 @@ fn refresh_selected_with(
                 return Err(AuthorizationError::InvalidIdentity);
             }
             let updated = TokenRecord {
-                schema: 1,
+                schema: TOKEN_RECORD_SCHEMA,
                 credentials: replacement,
                 consent: token.consent,
             };
