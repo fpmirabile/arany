@@ -301,16 +301,22 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let fingerprint = [7; 32];
+        // Reported totals include reasoning, above both caps; the adapter checked visible output.
         let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
             text: "Synthetic answer".into(),
         })])
         .with_chatgpt_account(account_id, fingerprint)
+        .with_reported_usage(arany::Usage {
+            input_tokens: Some(20),
+            output_tokens: Some(9_000),
+            ..Default::default()
+        })
         .with_compactions(vec![Ok(CompactionResponse {
             summary: "Compacted synthetic history".into(),
             response_id: Some("resp_compact".into()),
             usage: arany::Usage {
                 input_tokens: Some(20),
-                output_tokens: Some(8),
+                output_tokens: Some(3_000),
                 ..Default::default()
             },
             wire_provenance: Some(
@@ -380,6 +386,11 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
             Event::ContextCompacted { record, .. }
                 if record.chatgpt_provenance == config.chatgpt_provenance
                     && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
+                    && record.output_tokens == Some(3_000)
+        )));
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { record, .. } if record.output_tokens == Some(9_000)
         )));
         store.close().await.expect("store shutdown");
     });

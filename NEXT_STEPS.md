@@ -17,7 +17,7 @@ The goal: one normal engineering day in this repository (explore, multi-file edi
 
 1. **Tool protocol: live evidence.** Owner: run the [ChatGPT protocol checks](#tool-protocol).
 2. **Tool output limits: live evidence.** Owner: run the [output-limit checks](#tool-output-limits) and resolve [catalog window metadata](#catalog-window-metadata).
-3. **ChatGPT route limits like Codex.** The local output cap must not count reasoning tokens (or must match the API routes), and the 120 s per-call deadline becomes a stream-idle deadline. Bump the check versions.
+3. **ChatGPT route limits: live evidence.** The [Run limits](./docs/specs/chatgpt.md#run-limits) have synthetic evidence only. Remaining (owner, live): an `xhigh` turn whose reasoning exceeds 4,096 tokens succeeds and `arany show` charges the full total; a turn running past 120 seconds completes; and the live stream reports `usage.output_tokens_details.reasoning_tokens` (absent details still count every token against the cap).
 4. **Bounded Provider retries: live evidence.** The [retry contract](./docs/specs/provider.md#usage-provenance-and-reliability) has synthetic evidence only. Remaining (owner, live): against ChatGPT and each API-key route, confirm that a real 429 or 5xx shows `Reconnecting… n/3`, honors the server's `Retry-After` and charges every attempt in `arany show`; Codex's `Reconnecting... n/max` is the peer reference.
 5. **Attached-turn defaults.** A Goal budget that fits ordinary turns, a Write/Edit cap of at least 64 KiB, large drafts as attachments, and nested plus user-global `AGENTS.md`.
 6. **`cargo test` here inside the Guard.** Toolchain and Cargo cache selection in folder trust, and a Build profile on more cores; measure `cargo test -p arany --lib`.

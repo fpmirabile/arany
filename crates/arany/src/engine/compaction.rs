@@ -372,14 +372,16 @@ impl Engine {
                     )
                     .await?
                     .ok_or(EngineError::CoordinatorFailed)?;
-                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                let (status, response_id, usage, wire_provenance) =
+                    compaction_outcome(response, provider.identity().limits.output_token_bound);
                 (status, response_id, usage, wire_provenance, provider)
             }
             None => {
                 let response = tokio::time::timeout(provider_deadline, provider.compact(request))
                     .await
                     .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
-                let (status, response_id, usage, wire_provenance) = compaction_outcome(response);
+                let (status, response_id, usage, wire_provenance) =
+                    compaction_outcome(response, provider.identity().limits.output_token_bound);
                 (
                     status,
                     response_id,
@@ -609,6 +611,7 @@ fn pin_goal_context(
 
 fn compaction_outcome(
     response: Result<CompactionResponse, crate::provider::ProviderError>,
+    output_bound: crate::provider::OutputTokenBound,
 ) -> (
     CompactionStatus,
     Option<String>,
@@ -616,7 +619,7 @@ fn compaction_outcome(
     Option<crate::provider::ProviderWireProvenance>,
 ) {
     match response {
-        Ok(response) => classify_response(response),
+        Ok(response) => classify_response(response, output_bound),
         Err(error) => (
             CompactionStatus::Failed {
                 reason: if matches!(error, crate::provider::ProviderError::CallTimedOut) {
@@ -638,6 +641,7 @@ fn compaction_outcome(
 
 pub(super) fn classify_response(
     response: CompactionResponse,
+    output_bound: crate::provider::OutputTokenBound,
 ) -> (
     CompactionStatus,
     Option<String>,
@@ -654,12 +658,11 @@ pub(super) fn classify_response(
         && reported.cache_consistent();
     let valid_output_tokens = reported
         .output_tokens
-        .is_none_or(|count| count <= 1_000_000);
+        .is_none_or(|count| count <= crate::provider::MAX_REPORTED_OUTPUT_TOKENS);
     let valid_summary = !response.summary.is_empty()
         && response.summary.len() <= MAX_COMPACTION_SUMMARY_BYTES
-        && reported
-            .output_tokens
-            .is_none_or(|count| count <= MAX_COMPACTION_OUTPUT_TOKENS);
+        && output_bound
+            .admits_reported_output(reported.output_tokens, MAX_COMPACTION_OUTPUT_TOKENS);
     let valid_provenance = response.wire_provenance.is_none_or(|provenance| {
         provenance.valid_for(
             response.response_id.as_deref(),
