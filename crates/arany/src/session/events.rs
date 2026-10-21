@@ -1432,6 +1432,15 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
 }
 
+// Checked before the Goal and Message facts that precede RunStarted commit.
+pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
+    serialize(&RunStartedPayload {
+        config: config.clone(),
+        active_deadline_ms: Some(u64::MAX),
+    })
+    .is_ok_and(|payload| payload.len() <= crate::store::MAX_EVENT_BYTES)
+}
+
 // Version 18 read only the root, so its digest becomes the root source with an unknown name.
 pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_json::Value> {
     let serde_json::Value::Object(mut payload) = value else {

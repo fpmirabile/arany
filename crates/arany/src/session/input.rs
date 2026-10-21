@@ -243,6 +243,8 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
                 continue;
             };
             let metadata = opened.metadata()?;
+            #[cfg(test)]
+            entry_hook();
             if !exact_entry(&directory, name, &metadata)? {
                 continue;
             }
@@ -269,11 +271,15 @@ fn exact_entry(
         if entry.file_name().as_os_str() != std::ffi::OsStr::new(name) {
             continue;
         }
+        // The readdir record's inode, never a fresh lookup of a name that may have moved.
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
-            let listed = entry.metadata()?;
-            if (listed.dev(), listed.ino()) != (opened.dev(), opened.ino()) {
+            use std::os::unix::fs::DirEntryExt;
+            let listed = entry.ino();
+            #[cfg(test)]
+            entry_hook();
+            if (directory.dir_metadata()?.dev(), listed) != (opened.dev(), opened.ino()) {
                 return Err(InputError::Io(io::Error::other(
                     "instruction file was replaced",
                 )));
@@ -282,6 +288,22 @@ fn exact_entry(
         return Ok(true);
     }
     Ok(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    // Runs after an instruction file opens and again once its directory entry is listed.
+    pub(crate) static ENTRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn entry_hook() {
+    ENTRY_HOOK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook();
+        }
+    });
 }
 
 fn read_file(

@@ -312,3 +312,43 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     std::fs::create_dir(workspace.join("crates/cli/AGENTS.md")).unwrap();
     assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
 }
+
+#[cfg(unix)]
+#[test]
+fn instruction_entry_check_binds_the_listed_inode_to_the_opened_file() {
+    use input::{ENTRY_HOOK, InputError, WorkspaceInputs};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "hostile").unwrap();
+    std::fs::write(workspace.join("benign.md"), "benign").unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let root = workspace.clone();
+    let mut stage = 0;
+    // The opened file moves away while a benign one is listed, then returns before the check.
+    ENTRY_HOOK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move || {
+            stage += 1;
+            if stage == 1 {
+                std::fs::rename(root.join("AGENTS.md"), root.join("kept.md")).unwrap();
+                std::fs::rename(root.join("benign.md"), root.join("AGENTS.md")).unwrap();
+            } else {
+                std::fs::rename(root.join("kept.md"), root.join("AGENTS.md")).unwrap();
+            }
+        }));
+    });
+    let swapped = WorkspaceInputs::load(&workspace, &state, None, &[]);
+    ENTRY_HOOK.with(|hook| hook.borrow_mut().take());
+    assert!(
+        matches!(swapped, Err(InputError::Io(_))),
+        "replaced entry rejects"
+    );
+    assert_eq!(
+        WorkspaceInputs::load(&workspace, &state, None, &[])
+            .unwrap()
+            .instructions[0]
+            .content,
+        "hostile",
+        "the restored file loads on a fresh turn"
+    );
+}

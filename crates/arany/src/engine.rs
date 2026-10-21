@@ -1818,6 +1818,9 @@ impl Engine {
             tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
+        if !crate::session::run_started_fits(&config) {
+            return Err(EngineError::InputTooLarge);
+        }
         Ok(PreparedTurn {
             tools,
             tool_context,

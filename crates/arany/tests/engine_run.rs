@@ -3597,6 +3597,28 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
             Err(EngineError::WorkspaceUnavailable)
         ));
         std::fs::remove_file(workspace.join("notes/AGENTS.md")).expect("remove nested symlink");
+        // 32 sources on a long launch path overflow RunStarted; nothing may commit first.
+        let mut launch = workspace.join("long");
+        std::fs::create_dir(&launch).expect("long tree");
+        for level in 0..30 {
+            std::fs::write(launch.join("AGENTS.md"), "x").expect("nested instruction");
+            launch.push(if level < 13 {
+                "l".repeat(255)
+            } else {
+                "s".into()
+            });
+            std::fs::create_dir(&launch).expect("long tree level");
+        }
+        std::fs::write(launch.join("AGENTS.md"), "x").expect("deepest instruction");
+        std::fs::write(workspace.join("AGENTS.md"), "x").expect("root instruction");
+        let mut long = request(&workspace, "Question");
+        long.launch_directory = Some(launch);
+        assert!(matches!(
+            run_to_end(&engine, &provider, long).await,
+            Err(EngineError::InputTooLarge)
+        ));
+        std::fs::remove_dir_all(workspace.join("long")).expect("remove long tree");
+        std::fs::remove_file(workspace.join("AGENTS.md")).expect("remove root instruction");
         let mut traversal = request(&workspace, "Question");
         traversal.include_paths = vec!["../outside".into()];
         assert!(matches!(
