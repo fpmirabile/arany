@@ -1,22 +1,39 @@
 use super::TerminalInput;
+use crate::presentation::{
+    AgentFocus, AgentInspectorModel, AgentQuery, AgentRow, MAX_AGENT_SEARCH,
+};
+use arany::{AgentRunId, RunId};
 
 const MAX_CHOICE_BYTES: usize = 16;
+const SEARCH_LIMIT: &str = "Search takes up to 64 ASCII characters";
+pub(super) const INVALID_CHOICE: &str = "invalid agent selection";
+const NOTHING_FOCUSED: &str = "No agent focused; choose a number first";
 
 #[derive(Default)]
 pub(super) struct AgentPanel {
-    pub(super) selected: usize,
+    pub(super) query: AgentQuery,
     pub(super) scroll: usize,
     pub(super) locked: bool,
-    pub(super) last_linear: Option<(u64, usize)>,
-    pub(super) invalid_notice: bool,
+    // Linear numbers bind to the rows last printed, numbered from this offset plus one.
+    pub(super) printed: Option<(usize, Vec<AgentRow>)>,
+    pub(super) notice: Option<&'static str>,
     choice: String,
     invalid: bool,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 pub(super) enum PanelUpdate {
     Unchanged,
     Redraw,
+    // The rows changed under a user action that needs a fresh input barrier.
+    Rearm,
     Closed,
+    Open(RunId, AgentRunId),
+}
+
+// The first shown row of a window that keeps the focused row in view.
+pub(super) fn window_start(selected: Option<usize>, visible: usize) -> usize {
+    selected.map_or(0, |index| index.saturating_sub(visible.saturating_sub(1)))
 }
 
 impl AgentPanel {
@@ -30,60 +47,112 @@ impl AgentPanel {
     pub(super) fn handle(
         &mut self,
         input: TerminalInput,
-        count: usize,
+        model: &AgentInspectorModel,
         linear: bool,
     ) -> PanelUpdate {
         if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
             return PanelUpdate::Closed;
         }
         if input == TerminalInput::Resize {
-            return PanelUpdate::Redraw;
+            return PanelUpdate::Rearm;
         }
         if linear {
-            return self.handle_linear(input, count);
+            return self.handle_linear(input, model);
         }
-        let old = self.selected;
-        self.selected = match input {
-            TerminalInput::Up => self.selected.saturating_sub(1),
-            TerminalInput::Down => self.selected.saturating_add(1),
-            TerminalInput::PageUp => {
+        let cleared = self.notice.take().is_some();
+        let last = model.rows.len().checked_sub(1);
+        let update = match (input, last) {
+            (TerminalInput::Up, Some(_)) => self.focus(
+                model,
+                model.selected.map_or(0, |index| index.saturating_sub(1)),
+            ),
+            (TerminalInput::Down, Some(last)) => self.focus(
+                model,
+                model.selected.map_or(0, |index| (index + 1).min(last)),
+            ),
+            (TerminalInput::Home, Some(_)) => self.focus(model, 0),
+            (TerminalInput::End, Some(last)) => self.focus(model, last),
+            (TerminalInput::PageUp, _) => {
                 self.scroll = self.scroll.saturating_sub(5);
-                return PanelUpdate::Redraw;
+                PanelUpdate::Redraw
             }
-            TerminalInput::PageDown => {
+            (TerminalInput::PageDown, _) => {
                 self.scroll = self.scroll.saturating_add(5);
-                return PanelUpdate::Redraw;
+                PanelUpdate::Redraw
             }
-            TerminalInput::Home => 0,
-            TerminalInput::End => count.saturating_sub(1),
-            TerminalInput::Submit => return PanelUpdate::Closed,
-            _ => return PanelUpdate::Unchanged,
-        }
-        .min(count.saturating_sub(1));
-        if self.selected != old {
-            self.scroll = 0;
-        }
-        if self.selected == old {
-            PanelUpdate::Unchanged
-        } else {
+            (TerminalInput::Character(character), _) => self.type_search(character),
+            (TerminalInput::Backspace, _) if self.query.filter.pop().is_some() => {
+                self.refocus_first()
+            }
+            (TerminalInput::Submit, _) => self.activate(model),
+            _ => PanelUpdate::Unchanged,
+        };
+        if cleared && update == PanelUpdate::Unchanged {
             PanelUpdate::Redraw
+        } else {
+            update
         }
     }
 
-    pub(super) fn select(&mut self, index: usize, count: usize) -> PanelUpdate {
-        let next = index.min(count.saturating_sub(1));
-        if self.selected == next {
+    pub(super) fn focus(&mut self, model: &AgentInspectorModel, index: usize) -> PanelUpdate {
+        let Some(row) = model.rows.get(index) else {
+            return PanelUpdate::Unchanged;
+        };
+        if self.query.focus == AgentFocus::Row(*row) {
             return PanelUpdate::Unchanged;
         }
-        self.selected = next;
+        self.query.focus = AgentFocus::Row(*row);
         self.scroll = 0;
         PanelUpdate::Redraw
     }
 
-    fn handle_linear(&mut self, input: TerminalInput, count: usize) -> PanelUpdate {
+    fn refocus_first(&mut self) -> PanelUpdate {
+        self.query.focus = AgentFocus::First;
+        self.scroll = 0;
+        PanelUpdate::Redraw
+    }
+
+    fn type_search(&mut self, character: char) -> PanelUpdate {
+        if !(character.is_ascii_graphic() || character == ' ')
+            || self.query.filter.len() >= MAX_AGENT_SEARCH
+        {
+            self.notice = Some(SEARCH_LIMIT);
+            return PanelUpdate::Redraw;
+        }
+        self.query.filter.push(character);
+        self.refocus_first()
+    }
+
+    // Only the focused row acts; a collapsed group expands in place and hidden rows never open.
+    fn activate(&mut self, model: &AgentInspectorModel) -> PanelUpdate {
+        match model.selected.map(|index| model.rows[index]) {
+            Some(AgentRow::Agent(run, agent)) => PanelUpdate::Open(run, agent),
+            Some(AgentRow::Idle) => {
+                self.query.expanded = true;
+                self.query.focus = model
+                    .first_hidden
+                    .map_or(AgentFocus::First, AgentFocus::Row);
+                self.scroll = 0;
+                PanelUpdate::Rearm
+            }
+            None => PanelUpdate::Unchanged,
+        }
+    }
+
+    // Every reprint renumbers the choices, so it waits behind a fresh barrier.
+    fn handle_linear(&mut self, input: TerminalInput, model: &AgentInspectorModel) -> PanelUpdate {
         match input {
             TerminalInput::Character(character) => {
-                if character.is_ascii_graphic() && self.choice.len() < MAX_CHOICE_BYTES {
+                let search =
+                    self.choice.starts_with('/') || (self.choice.is_empty() && character == '/');
+                let limit = if search {
+                    1 + MAX_AGENT_SEARCH
+                } else {
+                    MAX_CHOICE_BYTES
+                };
+                if (character.is_ascii_graphic() || (search && character == ' '))
+                    && self.choice.len() < limit
+                {
                     self.choice.push(character);
                 } else {
                     self.invalid = true;
@@ -95,42 +164,81 @@ impl AgentPanel {
                 PanelUpdate::Unchanged
             }
             TerminalInput::Submit => {
-                let choice = self.choice.as_str();
-                if !self.invalid {
-                    if choice == "q" {
-                        return PanelUpdate::Closed;
+                let choice = std::mem::take(&mut self.choice);
+                let update = if std::mem::take(&mut self.invalid) {
+                    None
+                } else {
+                    self.linear_choice(&choice, model)
+                };
+                match update {
+                    Some(PanelUpdate::Unchanged) if choice == "o" => {
+                        self.notice = Some(NOTHING_FOCUSED);
+                        self.reprint()
                     }
-                    let next = match choice {
-                        "n" => Some(self.selected.saturating_add(1)),
-                        "p" => Some(self.selected.saturating_sub(1)),
-                        _ => choice
-                            .parse::<usize>()
-                            .ok()
-                            .filter(|number| (1..=count).contains(number))
-                            .map(|number| number - 1),
-                    };
-                    if let Some(next) = next {
-                        self.selected = next.min(count.saturating_sub(1));
-                        self.choice.clear();
-                        self.invalid_notice = false;
-                        self.last_linear = None;
-                        return PanelUpdate::Redraw;
+                    Some(PanelUpdate::Rearm | PanelUpdate::Redraw) => self.reprint(),
+                    Some(update) => update,
+                    None => {
+                        self.notice = Some(INVALID_CHOICE);
+                        self.reprint()
                     }
                 }
-                self.choice.clear();
-                self.invalid = false;
-                self.invalid_notice = true;
-                self.last_linear = None;
-                PanelUpdate::Redraw
             }
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
                 self.choice.clear();
                 self.invalid = false;
-                self.invalid_notice = true;
-                self.last_linear = None;
-                PanelUpdate::Redraw
+                self.notice = Some(INVALID_CHOICE);
+                self.reprint()
             }
             _ => PanelUpdate::Unchanged,
+        }
+    }
+
+    fn reprint(&mut self) -> PanelUpdate {
+        self.printed = None;
+        PanelUpdate::Rearm
+    }
+
+    fn linear_choice(&mut self, choice: &str, model: &AgentInspectorModel) -> Option<PanelUpdate> {
+        if let Some(filter) = choice.strip_prefix('/') {
+            filter.clone_into(&mut self.query.filter);
+            return Some(self.refocus_first());
+        }
+        let last = model.rows.len().checked_sub(1);
+        match (choice, last) {
+            ("q", _) => Some(PanelUpdate::Closed),
+            ("o", _) => Some(self.activate(model)),
+            ("n", Some(last)) => {
+                self.focus(
+                    model,
+                    model.selected.map_or(0, |index| (index + 1).min(last)),
+                );
+                Some(PanelUpdate::Redraw)
+            }
+            ("p", Some(_)) => {
+                self.focus(
+                    model,
+                    model.selected.map_or(0, |index| index.saturating_sub(1)),
+                );
+                Some(PanelUpdate::Redraw)
+            }
+            (number, _) => {
+                let (start, rows) = self.printed.as_ref()?;
+                let row = *number
+                    .parse::<usize>()
+                    .ok()?
+                    .checked_sub(start + 1)
+                    .and_then(|index| rows.get(index))?;
+                if row == AgentRow::Idle {
+                    self.query.expanded = true;
+                    self.query.focus = model
+                        .first_hidden
+                        .map_or(AgentFocus::First, AgentFocus::Row);
+                } else {
+                    self.query.focus = AgentFocus::Row(row);
+                }
+                self.scroll = 0;
+                Some(PanelUpdate::Redraw)
+            }
         }
     }
 }
@@ -138,53 +246,212 @@ impl AgentPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use TerminalInput::{Backspace, Character, Down, End, Escape, Home, Resize, Submit, Up};
+
+    fn agent() -> (RunId, AgentRunId) {
+        (RunId::new(), AgentRunId::new())
+    }
+
+    fn row((run, agent): (RunId, AgentRunId)) -> AgentRow {
+        AgentRow::Agent(run, agent)
+    }
+
+    fn model(
+        rows: &[AgentRow],
+        selected: Option<usize>,
+        first_hidden: Option<AgentRow>,
+    ) -> AgentInspectorModel {
+        AgentInspectorModel {
+            selected,
+            choices: rows.iter().map(|_| String::new()).collect(),
+            rows: rows.to_vec(),
+            first_hidden,
+            search: String::new(),
+            header: 0,
+            lines: Vec::new(),
+        }
+    }
+
+    fn line(panel: &mut AgentPanel, text: &str, model: &AgentInspectorModel) -> PanelUpdate {
+        for character in text.chars() {
+            assert_eq!(
+                panel.handle(Character(character), model, true),
+                PanelUpdate::Unchanged
+            );
+        }
+        panel.handle(Submit, model, true)
+    }
 
     #[test]
-    fn inspector_navigation_is_bounded_and_linear_choices_do_not_submit_work() {
+    fn inline_focus_search_and_activation_follow_identity_not_position() {
+        let (a, b, c) = (agent(), agent(), agent());
         let mut panel = AgentPanel::default();
-        assert!(matches!(
-            panel.handle(TerminalInput::End, 3, false),
-            PanelUpdate::Redraw
-        ));
-        assert_eq!(panel.selected, 2);
-        assert!(matches!(
-            panel.handle(TerminalInput::Down, 3, false),
+        let shown = model(&[row(a), row(b), row(c)], Some(0), None);
+        assert_eq!(panel.handle(Down, &shown, false), PanelUpdate::Redraw);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(b)));
+        assert_eq!(panel.handle(End, &shown, false), PanelUpdate::Redraw);
+        assert_eq!(
+            panel.handle(
+                Down,
+                &model(&[row(a), row(b), row(c)], Some(2), None),
+                false
+            ),
             PanelUpdate::Unchanged
-        ));
-        assert!(matches!(
-            panel.handle(TerminalInput::PageDown, 3, false),
+        );
+        assert_eq!(panel.handle(Home, &shown, false), PanelUpdate::Redraw);
+        assert_eq!(panel.handle(Down, &shown, false), PanelUpdate::Redraw);
+        // A committed change moves the focused row; Enter still opens it and Up moves from its new place.
+        let changed = model(&[row(c), row(agent()), row(b)], Some(2), None);
+        assert_eq!(
+            panel.handle(Submit, &changed, false),
+            PanelUpdate::Open(b.0, b.1)
+        );
+        assert_eq!(panel.handle(Up, &changed, false), PanelUpdate::Redraw);
+        assert_eq!(panel.query.focus, AgentFocus::Row(changed.rows[1]));
+        // Typed text, digits included, is search text that refocuses the first match.
+        for character in "child 2".chars() {
+            assert_eq!(
+                panel.handle(Character(character), &shown, false),
+                PanelUpdate::Redraw
+            );
+        }
+        assert_eq!(panel.query.filter, "child 2");
+        assert_eq!(panel.query.focus, AgentFocus::First);
+        assert_eq!(panel.handle(Backspace, &shown, false), PanelUpdate::Redraw);
+        assert_eq!(panel.query.filter, "child ");
+        // The limit and non-ASCII text leave the search unchanged with feedback the next key clears.
+        panel.query.filter = "x".repeat(MAX_AGENT_SEARCH);
+        assert_eq!(
+            panel.handle(Character('y'), &shown, false),
             PanelUpdate::Redraw
-        ));
-        assert_eq!(panel.scroll, 5);
-        assert!(matches!(
-            panel.handle(TerminalInput::Home, 3, false),
+        );
+        assert_eq!(panel.notice, Some(SEARCH_LIMIT));
+        assert_eq!(panel.query.filter.len(), MAX_AGENT_SEARCH);
+        assert_eq!(
+            panel.handle(TerminalInput::Left, &shown, false),
             PanelUpdate::Redraw
-        ));
-        assert_eq!(panel.scroll, 0);
-        assert!(matches!(
-            panel.handle(TerminalInput::Resize, 3, false),
+        );
+        assert_eq!(panel.notice, None);
+        panel.query.filter.clear();
+        assert_eq!(
+            panel.handle(Character('é'), &shown, false),
             PanelUpdate::Redraw
-        ));
-        assert!(matches!(panel.select(1, 3), PanelUpdate::Redraw));
-        assert_eq!(panel.selected, 1);
-        assert!(matches!(panel.select(99, 3), PanelUpdate::Redraw));
-        assert_eq!(panel.selected, 2);
-        panel.handle(TerminalInput::Character('2'), 3, true);
-        assert!(matches!(
-            panel.handle(TerminalInput::Submit, 3, true),
-            PanelUpdate::Redraw
-        ));
-        assert_eq!(panel.selected, 1);
-        panel.handle(TerminalInput::Character('!'), 3, true);
-        assert!(matches!(
-            panel.handle(TerminalInput::Submit, 3, true),
-            PanelUpdate::Redraw
-        ));
-        assert!(panel.invalid_notice);
-        panel.handle(TerminalInput::Character('q'), 3, true);
-        assert!(matches!(
-            panel.handle(TerminalInput::Submit, 3, true),
-            PanelUpdate::Closed
-        ));
+        );
+        assert!(panel.query.filter.is_empty());
+        // No match activates nothing.
+        let empty = model(&[], None, None);
+        panel.notice = None;
+        for input in [Submit, Up, Down, Home, End, Backspace] {
+            assert_eq!(panel.handle(input, &empty, false), PanelUpdate::Unchanged);
+        }
+        // Hidden rows open only after Enter expands their group, which focuses the first of them.
+        let hidden = agent();
+        let grouped = model(&[row(a), AgentRow::Idle], Some(1), Some(row(hidden)));
+        assert_eq!(panel.handle(Submit, &grouped, false), PanelUpdate::Rearm);
+        assert!(panel.query.expanded);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(hidden)));
+        assert_eq!(panel.handle(Resize, &grouped, false), PanelUpdate::Rearm);
+        assert_eq!(panel.handle(Escape, &grouped, false), PanelUpdate::Closed);
+    }
+
+    #[test]
+    fn linear_numbers_bind_to_the_printed_rows_and_every_reprint_rearms() {
+        let (a, b, c) = (agent(), agent(), agent());
+        let mut panel = AgentPanel {
+            printed: Some((0, vec![row(a), row(b)])),
+            ..AgentPanel::default()
+        };
+        // A row committed above after printing does not shift the printed numbers.
+        let shown = model(&[row(c), row(a), row(b)], Some(0), None);
+        assert_eq!(line(&mut panel, "2", &shown), PanelUpdate::Rearm);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(b)));
+        assert_eq!(panel.printed, None);
+        panel.printed = Some((10, vec![row(a)]));
+        assert_eq!(line(&mut panel, "11", &shown), PanelUpdate::Rearm);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(a)));
+        for invalid in ["1", "12", "0", "x", "-1", &"9".repeat(17)] {
+            panel.printed = Some((10, vec![row(a)]));
+            assert_eq!(
+                line(&mut panel, invalid, &shown),
+                PanelUpdate::Rearm,
+                "{invalid}"
+            );
+            assert_eq!(panel.notice, Some(INVALID_CHOICE), "{invalid}");
+            panel.notice = None;
+        }
+        assert_eq!(line(&mut panel, "/child 2", &shown), PanelUpdate::Rearm);
+        assert_eq!(panel.query.filter, "child 2");
+        assert_eq!(panel.query.focus, AgentFocus::First);
+        assert_eq!(
+            line(
+                &mut panel,
+                &format!("/{}", "z".repeat(MAX_AGENT_SEARCH)),
+                &shown
+            ),
+            PanelUpdate::Rearm
+        );
+        assert_eq!(panel.query.filter.len(), MAX_AGENT_SEARCH);
+        assert_eq!(
+            line(
+                &mut panel,
+                &format!("/{}", "z".repeat(MAX_AGENT_SEARCH + 1)),
+                &shown
+            ),
+            PanelUpdate::Rearm
+        );
+        assert_eq!(panel.notice, Some(INVALID_CHOICE));
+        assert_eq!(panel.query.filter.len(), MAX_AGENT_SEARCH);
+        assert_eq!(line(&mut panel, "/", &shown), PanelUpdate::Rearm);
+        assert!(panel.query.filter.is_empty());
+        assert_eq!(line(&mut panel, "o", &shown), PanelUpdate::Open(c.0, c.1));
+        assert_eq!(
+            line(&mut panel, "o", &model(&[], None, None)),
+            PanelUpdate::Rearm
+        );
+        assert_eq!(panel.notice, Some(NOTHING_FOCUSED));
+        panel.query.focus = AgentFocus::Row(row(c));
+        assert_eq!(line(&mut panel, "n", &shown), PanelUpdate::Rearm);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(a)));
+        assert_eq!(
+            line(&mut panel, "p", &model(&[row(c), row(a)], Some(1), None)),
+            PanelUpdate::Rearm
+        );
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(c)));
+        let hidden = agent();
+        panel.printed = Some((0, vec![row(a), AgentRow::Idle]));
+        assert_eq!(
+            line(
+                &mut panel,
+                "2",
+                &model(&[row(a), AgentRow::Idle], None, Some(row(hidden)))
+            ),
+            PanelUpdate::Rearm
+        );
+        assert!(panel.query.expanded);
+        assert_eq!(panel.query.focus, AgentFocus::Row(row(hidden)));
+        assert_eq!(
+            panel.handle(TerminalInput::LineRejected, &shown, true),
+            PanelUpdate::Rearm
+        );
+        assert_eq!(panel.notice, Some(INVALID_CHOICE));
+        assert_eq!(line(&mut panel, "q", &shown), PanelUpdate::Closed);
+    }
+
+    #[test]
+    fn windows_keep_the_focused_row_last_once_it_passes_the_first_window() {
+        for (selected, visible, start) in [
+            (None, 10, 0),
+            (Some(0), 10, 0),
+            (Some(9), 10, 0),
+            (Some(10), 10, 1),
+            (Some(143), 10, 134),
+            (Some(3), 0, 3),
+        ] {
+            assert_eq!(
+                window_start(selected, visible),
+                start,
+                "{selected:?} of {visible}"
+            );
+        }
     }
 }

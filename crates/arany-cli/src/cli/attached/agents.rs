@@ -1,10 +1,11 @@
 use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalInput};
 use arany::SessionView;
 
+// Closes with an optional notice, or ends on a signal; Enter may leave an agent chat open.
 pub(super) async fn inspect(
     terminal: &mut AttachedTerminal,
     view: &SessionView,
-) -> Result<Option<ShutdownSignal>, String> {
+) -> Result<Result<Option<&'static str>, ShutdownSignal>, String> {
     terminal
         .open_agents(view, false)
         .await
@@ -17,7 +18,7 @@ pub(super) async fn inspect(
         match input {
             TerminalInput::Shutdown(signal) => {
                 terminal.close_agents().map_err(|error| error.to_string())?;
-                return Ok(Some(signal));
+                return Ok(Err(signal));
             }
             TerminalInput::Suspend => {
                 terminal
@@ -29,14 +30,15 @@ pub(super) async fn inspect(
             }
             TerminalInput::Interrupt => {
                 terminal.close_agents().map_err(|error| error.to_string())?;
-                return Ok(None);
+                return Ok(Ok(None));
             }
             _ => {
-                terminal
+                let notice = terminal
                     .agent_input(view, input)
+                    .await
                     .map_err(|error| error.to_string())?;
                 if !terminal.agents_open() {
-                    return Ok(None);
+                    return Ok(Ok(notice));
                 }
             }
         }
