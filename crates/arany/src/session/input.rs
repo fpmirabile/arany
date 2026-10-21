@@ -49,6 +49,10 @@ pub(crate) struct InputSnapshot {
 }
 
 impl InputSnapshot {
+    pub(crate) fn model_instructions(&self) -> String {
+        crate::provider::instructions_text(&self.path, &self.content)
+    }
+
     pub(crate) fn model_include(&self) -> String {
         let digest: String = self
             .digest

@@ -51,6 +51,7 @@ pub use native_check::{
     check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
+pub(crate) use render::instructions_text;
 #[cfg(feature = "test-support")]
 pub use render::semantic;
 pub(crate) use render::{history_refusal_block, history_tool_block, history_unanswered_block};

@@ -2,8 +2,8 @@ use super::conversation::{Block, Conversation, Message, Role, SystemBlock};
 use super::prompts;
 use super::tool_specs::specs;
 use super::{
-    AgentPhase, HistoryTurn, PromptRole, ProviderError, ProviderRequest, WorkspaceGuidance,
-    outcome_schema, restrict_outcome_schema,
+    AgentPhase, HistoryTurn, PromptRole, ProviderError, ProviderRequest, outcome_schema,
+    restrict_outcome_schema,
 };
 use crate::session::RunView;
 use crate::tools::types::{
@@ -33,7 +33,12 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     let mut messages: Vec<Message> = input
         .workspace_guidance
         .iter()
-        .map(|guidance| user(vec![instructions_block(guidance)]))
+        .map(|guidance| {
+            user(vec![Block::Text(instructions_text(
+                &guidance.path,
+                &guidance.text,
+            ))])
+        })
         .chain(input.history.iter().map(history_message))
         .collect();
     let delegate_step = input
@@ -109,7 +114,7 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
 
 // Codex's AGENTS.md framing. File text cannot open or close a wrapper or start a heading that
 // passes for a new block; the replacements add no `<` or line-leading `#`, so none rematches.
-fn instructions_block(guidance: &WorkspaceGuidance) -> Block {
+pub(crate) fn instructions_text(path: &str, text: &str) -> String {
     static TAG: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)<(\s*/?\s*instructions)").expect("static instruction tag pattern")
     });
@@ -117,12 +122,9 @@ fn instructions_block(guidance: &WorkspaceGuidance) -> Block {
         Regex::new(r"(?im)^([ \t]*)(#+[ \t]*agents\.md[ \t]+instructions)")
             .expect("static instruction heading pattern")
     });
-    let text = TAG.replace_all(&guidance.text, "&lt;$1");
+    let text = TAG.replace_all(text, "&lt;$1");
     let text = HEADING.replace_all(&text, "$1\\$2");
-    Block::Text(format!(
-        "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>",
-        guidance.path,
-    ))
+    format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")
 }
 
 pub(crate) fn data_block(scope: &str, data: Value) -> Block {
