@@ -37,6 +37,7 @@ pub(crate) use compaction::{
 pub(crate) use context::CompiledContext;
 #[cfg(test)]
 pub(crate) use events::PAYLOAD_VERSIONS;
+pub(crate) use events::pre_glob_payload;
 pub use events::{
     AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,

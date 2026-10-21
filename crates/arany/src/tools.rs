@@ -9,6 +9,7 @@ mod dispatch;
 mod executable;
 mod fs;
 mod git;
+mod glob;
 mod guard;
 mod mcp;
 mod output;
@@ -871,6 +872,7 @@ impl ToolRuntime {
                         WorkerTool::List,
                         WorkerTool::Read,
                         WorkerTool::Search,
+                        WorkerTool::Glob,
                         WorkerTool::Mkdir,
                         WorkerTool::Write,
                         WorkerTool::Edit,

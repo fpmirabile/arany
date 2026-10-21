@@ -1048,10 +1048,13 @@ pub(super) fn draw_history_rows(
             Style::default().add_modifier(Modifier::DIM)
         } else if line.heading {
             match line.speaker {
-                MessageKind::User => Style::default().add_modifier(Modifier::BOLD),
-                MessageKind::Assistant | MessageKind::Preview | MessageKind::Incomplete => {
-                    palette.selection()
+                MessageKind::User | MessageKind::Assignment => {
+                    Style::default().add_modifier(Modifier::BOLD)
                 }
+                MessageKind::Assistant
+                | MessageKind::AgentResult
+                | MessageKind::Preview
+                | MessageKind::Incomplete => palette.selection(),
                 MessageKind::Tool | MessageKind::ToolDetails | MessageKind::Commentary => {
                     palette.accent()
                 }
@@ -1063,9 +1066,11 @@ pub(super) fn draw_history_rows(
             Style::default()
         };
         let marker = match (line.speaker, line.heading) {
-            (MessageKind::User, true) => Some("› "),
-            (MessageKind::Assistant, true) => Some("● "),
-            (MessageKind::User, false) if !line.text.is_empty() => Some("│ "),
+            (MessageKind::User | MessageKind::Assignment, true) => Some("› "),
+            (MessageKind::Assistant | MessageKind::AgentResult, true) => Some("● "),
+            (MessageKind::User | MessageKind::Assignment, false) if !line.text.is_empty() => {
+                Some("│ ")
+            }
             _ => None,
         };
         let spans = if let Some(marker) = marker {
@@ -1377,12 +1382,13 @@ pub(super) fn draw_frame_with_history(
 }
 
 pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {
-    let marker = if row.speaker == MessageKind::User && !row.heading && row.text.is_empty() {
+    let quoted = matches!(row.speaker, MessageKind::User | MessageKind::Assignment);
+    let marker = if quoted && !row.heading && row.text.is_empty() {
         ""
     } else {
         native_marker(row.speaker, row.heading)
     };
-    let text = if row.speaker == MessageKind::User && !row.heading {
+    let text = if quoted && !row.heading {
         row.text.strip_prefix("  ").unwrap_or(&row.text)
     } else {
         &row.text
@@ -1668,7 +1674,17 @@ fn draw_composer(
         } else {
             ""
         };
-        let newline_hint = if composer_area.width >= 80 && menu_height == 0 {
+        let agents_hint = draft.is_empty()
+            && composer.images().is_empty()
+            && model.agent_switch
+            && menu_height == 0
+            && !picker_focused;
+        let hint = match composer_area.width {
+            40.. if agents_hint => " Alt+Left/Right agents ",
+            24.. if agents_hint => " Alt+←/→ agents ",
+            _ => hint,
+        };
+        let newline_hint = if composer_area.width >= 80 && menu_height == 0 && !agents_hint {
             "· Shift+Enter newline "
         } else {
             ""
@@ -2195,6 +2211,63 @@ pub(super) fn draw_agent_inspector_frame(
             Paragraph::new(safe_truncate(hint, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
+    }
+}
+
+pub(super) const AGENT_CHAT_ROWS: u16 = 3;
+
+// The read-only label, the disabled composer and, once armed, the key hint.
+pub(super) fn draw_agent_chat_frame(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    armed: bool,
+    notice: Option<&str>,
+    fullscreen: bool,
+    palette: Palette,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let width = usize::from(area.width);
+    let full = format!("viewing {label} (read-only)");
+    let short = format!("{label} (read-only)");
+    let title = [full.as_str(), short.as_str()]
+        .into_iter()
+        .find(|title| UnicodeWidthStr::width(*title) <= width)
+        .map_or_else(
+            || safe_truncate(&format!("{label} read-only"), width),
+            str::to_owned,
+        );
+    let composer = match width {
+        40.. => "> Read-only · Esc returns to primary",
+        20.. => "> Read-only · Esc",
+        _ => "> Read-only",
+    };
+    let hint = match (width, fullscreen) {
+        (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
+        (40.., _) => "Alt+Left/Right agents · Esc primary",
+        (24.., _) => "Alt+←/→ agents · Esc",
+        _ => "Esc primary",
+    };
+    let rows = [
+        Some((title, palette.selection())),
+        Some((safe_truncate(composer, width), palette.subtle())),
+        armed.then(|| {
+            (
+                safe_truncate(notice.unwrap_or(hint), width),
+                Style::default(),
+            )
+        }),
+    ];
+    for (offset, row) in rows.into_iter().enumerate().take(usize::from(area.height)) {
+        if let Some((text, style)) = row {
+            frame.render_widget(
+                Paragraph::new(text).style(style),
+                Rect::new(area.x, area.y + offset as u16, area.width, 1),
+            );
+        }
     }
 }
 

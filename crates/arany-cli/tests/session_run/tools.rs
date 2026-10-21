@@ -766,9 +766,9 @@ impl Provider for InProcessReads {
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?
             .observation_count();
-        let outcome = match step % 3 {
+        let outcome = match step % 4 {
             _ if step == IN_PROCESS_READS => ProviderOutcome::Answer(Answer {
-                text: "Read, listed and searched in process.".into(),
+                text: "Read, listed, searched and globbed in process.".into(),
             }),
             0 => crate::tool_outcome(ToolCall::Read {
                 path: "src/main.c".into(),
@@ -776,7 +776,7 @@ impl Provider for InProcessReads {
                 limit: None,
             }),
             1 => crate::tool_outcome(ToolCall::List { path: "src".into() }),
-            _ => crate::tool_outcome(ToolCall::Search {
+            2 => crate::tool_outcome(ToolCall::Search {
                 path: "src".into(),
                 query: r"^INT \w+\(".into(),
                 regex: true,
@@ -784,6 +784,11 @@ impl Provider for InProcessReads {
                 case_sensitive: false,
                 offset: 0,
                 limit: 2,
+            }),
+            _ => crate::tool_outcome(ToolCall::Glob {
+                pattern: "**".into(),
+                path: "src".into(),
+                limit: 100,
             }),
         };
         Ok(ProviderResponse {
@@ -863,6 +868,19 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
                 serde_json::json!({"entries":[{"path":"src/main.c","line":1,"text":"int main(void) { return 0; }"}],"limit":2,"may_be_truncated":false,"next_offset":null})
             );
         }
+    }
+    let globbed: Vec<_> = outcome
+        .run
+        .tools
+        .iter()
+        .filter(|tool| matches!(tool.intent.call, ToolCall::Glob { .. }))
+        .collect();
+    assert_eq!(globbed.len(), IN_PROCESS_READS / 4);
+    for tool in globbed {
+        assert_eq!(
+            tool.observation.as_ref().unwrap().output,
+            r#"{"entries":[{"bytes":29,"path":"src/main.c"}],"limit":100,"may_be_truncated":false}"#
+        );
     }
 
     // A fresh read-only Store stands in for the next process.

@@ -573,7 +573,10 @@ impl RunLoop<'_> {
         view.note_intent(&intent);
         if matches!(
             intent.call,
-            ToolCall::Read { .. } | ToolCall::List { .. } | ToolCall::Search { .. }
+            ToolCall::Read { .. }
+                | ToolCall::List { .. }
+                | ToolCall::Search { .. }
+                | ToolCall::Glob { .. }
         ) {
             return Ok((view.read(intent), None));
         }

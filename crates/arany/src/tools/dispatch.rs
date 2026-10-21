@@ -107,6 +107,7 @@ pub(super) fn outcome(
                 ToolCall::Read { .. }
                     | ToolCall::List { .. }
                     | ToolCall::Search { .. }
+                    | ToolCall::Glob { .. }
                     | ToolCall::Write { .. }
                     | ToolCall::Edit { .. }
                     | ToolCall::Mkdir { .. }

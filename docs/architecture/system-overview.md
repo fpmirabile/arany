@@ -103,7 +103,7 @@ flowchart LR
         Tap --> Terminal
         Tap --> OTLP[Telemetry]
         Tap --> Diagnostics[Diagnostics]
-        Tools --> Reads[In-process List / Read / Search]
+        Tools --> Reads[In-process List / Read / Search / Glob]
     end
 
     Provider --> Adapters[OpenAI / Anthropic / custom / scripted]
@@ -145,7 +145,7 @@ The [researcher contract](../specs/execution.md#researcher-children) owns their
 catalog, budgets, ordering and failure rules; children never inherit a broader
 grant than their parent.
 
-List, Read and Search use the admitted directory capability in process.
+List, Read, Search and Glob use the admitted directory capability in process.
 Observations carry `Attestation::{InProcess, Guard}`; the reducer validates the
 execution site. Mutations, typed Git reads, Skill loading and MCP stay behind
 the separate Guard. The [Tool contract](../specs/tools.md#in-process-reads) owns

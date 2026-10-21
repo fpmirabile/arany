@@ -386,6 +386,7 @@ impl GoalPlanContract {
             ToolCall::List { path }
             | ToolCall::Read { path, .. }
             | ToolCall::Search { path, .. }
+            | ToolCall::Glob { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. }

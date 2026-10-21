@@ -51,6 +51,22 @@ pub(super) struct Registry<'a> {
     pub(super) event_steps: &'a [EventStep],
 }
 
+// The glob Tool only added a call variant and a worker Tool label, so older payloads keep
+// their bytes; one that names glob is forged and refuses.
+macro_rules! glob_step {
+    ($kind:literal, $from:literal) => {
+        EventStep {
+            kind: $kind,
+            from: $from,
+            transform: |value| {
+                crate::session::pre_glob_payload($kind, &value.to_string())
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            },
+            canonical: |payload| crate::session::pre_glob_payload($kind, payload),
+        }
+    };
+}
+
 pub(super) const REGISTRY: Registry<'static> = Registry {
     schema_floor: 4,
     schema_steps: &[SchemaStep {
@@ -89,7 +105,16 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             ) STRICT;",
     }],
     event_floor: &EVENT_FLOOR,
-    event_steps: &[],
+    event_steps: &[
+        glob_step!("ToolStarted", 13),
+        glob_step!("ToolFinished", 19),
+        glob_step!("HookStarted", 3),
+        glob_step!("HookFinished", 8),
+        glob_step!("GoalPlanContractRecorded", 6),
+        glob_step!("AgentSpawned", 11),
+        glob_step!("RunStarted", 17),
+        glob_step!("ProviderCallRecorded", 13),
+    ],
 };
 
 // Payload versions when migrations landed; older history is archived, never upgraded.
