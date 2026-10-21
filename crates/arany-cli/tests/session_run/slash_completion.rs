@@ -1198,14 +1198,14 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         3,
     );
     input.write_all(b"\x03").expect("clear multiline draft");
-    // The viewport shrinks with the draft, so the idle caret row is read from the settled screen.
+    // The viewport shrinks with the draft, so the cleared composer is read from the settled screen.
     let deadline = Instant::now() + Duration::from_secs(10);
-    let idle_row = loop {
+    loop {
         let rows = crate::session_picker::screen_rows(&transcript, 40, 24);
-        if let Some(row) = rows.iter().rposition(|row| row.starts_with('>'))
+        if rows.iter().any(|row| row.starts_with('>'))
             && !rows.iter().any(|row| row.contains("alpha"))
         {
-            break row + 1;
+            break;
         }
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
@@ -1214,7 +1214,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             tail(&transcript)
         );
         thread::yield_now();
-    };
+    }
     let model_menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous Session prefix");
     wait_for_caret(
@@ -1236,15 +1236,22 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss completion menu");
-    // The open menu also leaves the caret in column 5; only the idle row proves Escape was handled.
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        closed_at,
-        format!("\x1b[?25h\x1b[{idle_row};5H").as_bytes(),
-    );
+    // The open menu also leaves the caret in column 5; only a decoded composer without the
+    // menu proves Escape was handled, wherever the content-sized viewport now sits.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::composer_caret(&transcript, closed_at, 40, 24).is_some_and(|(column, screen)| {
+        column == 5
+            && !screen.iter().any(|row| row.contains("Cmd /status"))
+            && screen.iter().any(|row| row.starts_with("> /s"))
+    }) {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "closed completion menu: {}",
+            tail(&transcript[closed_at..])
+        );
+        thread::yield_now();
+    }
     input
         .write_all(b"\x7f\x7f/model staged-model\r")
         .expect("correct retained prefix with a literal model selection");

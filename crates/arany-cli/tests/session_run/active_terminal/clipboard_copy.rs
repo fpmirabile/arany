@@ -5,7 +5,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 // Ratatui skips unchanged blank cells, so a spaceless canary is the only contiguous rendered text.
 const ANSWER: &str = "COPY_CANARY\u{1b}]52;c;aGlqYWNr\u{7}done";
 const DISPLAYED: &str = "COPY_CANARY\\u{001b}]52;c;aGlqYWNr\\u{0007}done";
-const CARET: &[u8] = b"\x1b[?25h\x1b[22;3H";
+// The idle composer caret, found by the composer border wherever the Classic viewport sits.
+const CARET: &[u8] = b"<idle composer caret>";
 
 fn osc52_payloads(bytes: &[u8]) -> Vec<&[u8]> {
     let mut payloads = Vec::new();
@@ -64,10 +65,14 @@ fn copy_over_ssh_writes_one_osc52_on_stderr_and_linear_mode_writes_none() {
         let mut answered = PtyResponses::default();
         let mut wait = |input: &mut ChildStdin, transcript: &mut Vec<u8>, from, needle: &[u8]| {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !transcript[from..]
-                .windows(needle.len())
-                .any(|part| part == needle)
-            {
+            while !if needle == CARET {
+                crate::composer_caret(transcript, from, 80, 24)
+                    .is_some_and(|(column, _)| column == 3)
+            } else {
+                transcript[from..]
+                    .windows(needle.len())
+                    .any(|part| part == needle)
+            } {
                 pump(&mut output, input, transcript, &mut answered);
                 assert!(
                     Instant::now() < deadline,

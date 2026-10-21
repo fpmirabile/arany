@@ -10,6 +10,119 @@ fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 #[test]
+fn classic_dialogs_fill_their_content_sized_viewport() {
+    for screen_height in [8, 24, 50] {
+        for (panel, height) in [
+            ("permission", 12),
+            ("secret", 7),
+            ("text", 7),
+            ("choices", 8),
+            ("warning", 8),
+            ("rewind", 12),
+            ("rewind review", 12),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(80, screen_height)).unwrap();
+            // As in Codex, the viewport is min(screen, the dialog's content height).
+            let rows = height.min(screen_height);
+            let full = Rect::new(0, screen_height - rows, 80, rows);
+            let area = crate::terminal::dialog_area(full, height, true);
+            let palette = Palette { color: false };
+            let lines = vec!["Review this change".to_owned()];
+            terminal
+                .draw(|frame| match panel {
+                    "permission" => {
+                        draw_permission_frame(
+                            frame,
+                            area,
+                            &lines,
+                            PermissionFrameState {
+                                choices: &["Read only", "Trust folder"],
+                                page: 0,
+                                focus: 0,
+                                profile_start: None,
+                                profile_count: 0,
+                                focused_profile: None,
+                                profile_selection_enabled: None,
+                                footer: Some("Enter confirms"),
+                                palette,
+                                boxed: false,
+                            },
+                        );
+                    }
+                    "secret" => draw_setup_frame(
+                        frame,
+                        area,
+                        3,
+                        "API key",
+                        "Hidden input",
+                        0,
+                        Some("Enter confirms"),
+                        palette,
+                    ),
+                    "text" => draw_setup_text_frame(
+                        frame,
+                        area,
+                        "Workspace",
+                        "Enter ID",
+                        &Composer::default(),
+                        None,
+                        palette,
+                    ),
+                    "choices" => draw_setup_choices_frame(
+                        frame,
+                        area,
+                        "Account",
+                        "Choose one",
+                        &[(1, "Saved"), (2, "New")],
+                        0,
+                        None,
+                        palette,
+                    ),
+                    "warning" => {
+                        draw_setup_warning_frame(
+                            frame,
+                            area,
+                            "Consent",
+                            "Review this change",
+                            0,
+                            false,
+                            None,
+                            palette,
+                        );
+                    }
+                    "rewind" | "rewind review" => {
+                        crate::terminal::rewind::draw_rewind_frame(
+                            frame,
+                            area,
+                            "Checkpoints",
+                            if panel == "rewind" { &[] } else { &lines },
+                            &["Cancel".into(), "Restore".into()],
+                            0,
+                            0,
+                            palette,
+                        );
+                    }
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            let rows = (0..screen_height)
+                .map(|y| buffer_row(terminal.backend().buffer(), y))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.iter().position(|row| !row.trim().is_empty()),
+                Some(usize::from(area.y)),
+                "{panel}: {rows:?}"
+            );
+            assert!(
+                !rows[usize::from(area.bottom() - 1)].trim().is_empty(),
+                "{panel}: footer stays with content: {rows:?}"
+            );
+            assert_eq!(area, full, "{panel}: no spare rows around the dialog");
+        }
+    }
+}
+
+#[test]
 fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
     use crate::presentation::{
         escape_terminal,
@@ -104,8 +217,10 @@ fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
                 let mut more = false;
                 terminal
                     .draw(|frame| {
+                        let area = frame.area();
                         more = draw_rewind_frame(
                             frame,
+                            area,
                             title,
                             &lines,
                             &choices,
@@ -262,8 +377,10 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 draw_setup_frame(
                     frame,
+                    area,
                     3,
                     "Enter API key",
                     "Hidden input; up to 512 ASCII characters",
@@ -314,8 +431,10 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                     let caret = draft.cursor_byte_offset();
                     terminal
                         .draw(|frame| {
+                            let area = frame.area();
                             draw_setup_text_frame(
                                 frame,
+                                area,
                                 "API workspace ID",
                                 "From Claude Console",
                                 &draft,
@@ -434,8 +553,10 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 Terminal::new(TestBackend::new(width, height)).expect("test terminal");
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     draw_setup_choices_frame(
                         frame,
+                        area,
                         title,
                         instruction,
                         choices,
@@ -484,8 +605,10 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
     let mut terminal = Terminal::new(TestBackend::new(16, 8)).expect("test terminal");
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_setup_frame(
                 frame,
+                area,
                 3,
                 "Enter API key",
                 "Hidden input; up to 512 ASCII characters",
@@ -525,8 +648,10 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("settings terminal");
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_setup_choices_frame(
                 frame,
+                area,
                 "Settings",
                 "↑↓ selects a setting; ←→ changes it; Enter saves",
                 &choices,
@@ -556,8 +681,10 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
             let mut has_more = false;
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     has_more = draw_setup_warning_frame(
                         frame,
+                        area,
                         "ChatGPT plan consent",
                         &warning,
                         page,
@@ -611,8 +738,10 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
             for accept in [false, true] {
                 terminal
                     .draw(|frame| {
+                        let area = frame.area();
                         assert!(!draw_setup_warning_frame(
                             frame,
+                            area,
                             "ChatGPT plan consent",
                             &warning,
                             usize::MAX,
@@ -2356,7 +2485,11 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                     ("quick actions", 6, "› 2. "),
                     ("resume", 9, "› 1. "),
                     ("help", 20, "› 1. /help"),
-                    ("settings", settings_height(&settings, width), "› 4. "),
+                    (
+                        "settings",
+                        settings_height(&settings, width, SELECTOR_ROWS),
+                        "› 4. ",
+                    ),
                     ("agents", 8, "› 2. "),
                 ];
                 for (name, dialog_height, focused) in cases {
@@ -2834,8 +2967,10 @@ fn permission_profile_rows_wrap_at_spaces_with_a_hanging_indent() {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_permission_frame(
                 frame,
+                area,
                 &lines,
                 PermissionFrameState {
                     choices: &["Read only", "Trust folder"],
@@ -2885,8 +3020,10 @@ fn permission_long_path_hard_breaks_only_at_the_row_edge() {
         let mut progress = PermissionFrameProgress { more: true, page };
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 progress = draw_permission_frame(
                     frame,
+                    area,
                     &lines,
                     PermissionFrameState {
                         choices: &["Read only", "Trust folder"],
@@ -2946,8 +3083,10 @@ fn permission_frame_fills_the_terminal_like_chat() {
         let mut progress = None;
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 progress = Some(draw_permission_frame(
                     frame,
+                    area,
                     &lines,
                     PermissionFrameState {
                         choices: &["Read only", "Trust this folder"],
@@ -2988,6 +3127,71 @@ fn permission_frame_fills_the_terminal_like_chat() {
 }
 
 #[test]
+fn trust_dialog_takes_its_content_height_and_pages_beyond_the_screen() {
+    let state = |profile_start| PermissionFrameState {
+        choices: &["Continue read only", "Trust this folder"],
+        page: 0,
+        focus: 0,
+        profile_start,
+        profile_count: 0,
+        focused_profile: None,
+        profile_selection_enabled: None,
+        footer: None,
+        palette: Palette { color: false },
+        boxed: false,
+    };
+    let fitting =
+        crate::presentation::workspace_permission_lines(std::path::Path::new("/home/user/project"));
+    let mut long = profile_frame_lines();
+    let profile_start = long.len();
+    long.extend((3..20).map(|index| {
+        format!(
+            "    [ ] {index}. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
+        )
+    }));
+    for (lines, profile_start, pages) in
+        [(&fitting, None, false), (&long, Some(profile_start), true)]
+    {
+        // As in Codex, the Classic viewport is min(screen, the dialog's content height).
+        let content = permission_height(lines, 80, false, profile_start);
+        let height = content.min(24);
+        assert_eq!(content > 24, pages, "content of {} rows", content);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let area = Rect::new(0, 24 - height, 80, height);
+        let mut progress = None;
+        terminal
+            .draw(|frame| {
+                progress = Some(draw_permission_frame(
+                    frame,
+                    area,
+                    lines,
+                    state(profile_start),
+                ));
+            })
+            .unwrap();
+        let rows = (0..24)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect::<Vec<_>>();
+        assert_eq!(progress.unwrap().more, pages, "{rows:?}");
+        assert!(
+            rows[usize::from(area.y)].contains("Do you trust this folder?"),
+            "{rows:?}"
+        );
+        if pages {
+            assert!(rows.iter().any(|row| row.contains("Page 1/")), "{rows:?}");
+        } else {
+            // Every content row and both choices fit on the one page.
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Every edit and command"))
+            );
+            assert!(rows.iter().any(|row| row.contains("› Continue read only")));
+            assert!(rows.iter().any(|row| row.contains("Trust this folder")));
+        }
+    }
+}
+
+#[test]
 fn wrap_cells_keeps_words_and_indents_continuations() {
     assert_eq!(wrap_cells("aaa bbb ccc", 7, 2), ["aaa bbb", "  ccc"]);
     assert_eq!(wrap_cells("abcdefghij", 4, 1), ["abcd", " efg", " hij"]);
@@ -3006,8 +3210,10 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
             let mut progress = PermissionFrameProgress { more: true, page };
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     progress = draw_permission_frame(
                         frame,
+                        area,
                         &lines,
                         PermissionFrameState {
                             choices: &["Read only", "Trust folder"],
@@ -3515,13 +3721,6 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             );
             assert_eq!(buffer_row(buffer, 3).trim_end(), "  ⎿ 2 lines");
         }
-    }
-}
-
-#[test]
-fn classic_floor_is_the_larger_of_24_rows_and_sixty_percent_within_the_screen() {
-    for (screen, floor) in [(8, 8), (12, 12), (24, 24), (40, 24), (60, 36), (100, 60)] {
-        assert_eq!(classic_floor(screen), floor, "{screen} rows");
     }
 }
 

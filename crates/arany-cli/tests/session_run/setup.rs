@@ -2056,13 +2056,25 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             b"\x1b[?25h",
         );
         input.write_all(b"/exit\r").expect("exit Session");
+        // Viewport height changes query the cursor, so keep answering until the product exits.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.child().try_wait().expect("product status").is_none() {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "{columns}: exit: {}",
+                tail(&transcript)
+            );
+            thread::yield_now();
+        }
         let result = wait_product(child.take());
         output
             .read_to_end(&mut transcript)
             .expect("final PTY output");
         assert!(
             result.status.success(),
-            "inline setup journey failed at {columns}"
+            "inline setup journey failed at {columns}: {}",
+            tail(&transcript)
         );
         assert!(
             (1..=128).contains(&answered.cursor_queries),
@@ -3321,6 +3333,29 @@ fn credential_helper_command(operation: &str, slot: &str, directory: &Path) -> C
 }
 
 #[cfg(target_os = "linux")]
+// Waits for the Classic composer caret in `column`, located by the composer border on the
+// decoded 40x12 screen instead of a fixed row, since the content-sized viewport moves.
+fn wait_composer_column(
+    output: &mut std::process::ChildStdout,
+    input: &mut std::process::ChildStdin,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    from: usize,
+    column: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::composer_caret(transcript, from, 40, 12).is_some_and(|(caret, _)| caret == column)
+    {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "composer caret at column {column}: {:?}",
+            crate::screen_rows(transcript, 40, 12)
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -3535,13 +3570,13 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             },
         );
         if !linear {
-            wait_for_after(
+            wait_composer_column(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
                 startup_end,
-                b"\x1b[10;3H",
+                3,
             );
         }
         if replaced {
@@ -3584,38 +3619,83 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 Err(error) => panic!("synthetic admission bus accept failed: {error}"),
             }
         };
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            submitted_start,
-            if linear {
-                b"Notice: Preparing request... Ctrl+C cancels\r\n"
-            } else {
-                b"\x1b[10;3H"
-            },
-        );
+        // While admission waits, the decoded composer shows the draft and the status row names
+        // the preparing state. The composer row follows the content-sized viewport, so the
+        // frame is found by its border, not by a fixed caret row.
+        let admission_frame = |transcript: &[u8], from: usize, draft: &str| {
+            let end = transcript[from..]
+                .windows(6)
+                .rposition(|part| part == b"\x1b[?25h")?;
+            let screen = crate::screen_rows(&transcript[..from + end + 6], 40, 12);
+            let top = screen
+                .iter()
+                .position(|row| row.starts_with("─ Ask Arany"))?;
+            (screen.get(top + 1)?.starts_with(&format!("> {draft}"))
+                && screen.get(top + 3)?.trim_start().starts_with("preparing"))
+            .then_some(screen)
+        };
+        let wait_admission =
+            |output: &mut std::process::ChildStdout,
+             input: &mut std::process::ChildStdin,
+             transcript: &mut Vec<u8>,
+             answered: &mut crate::session_picker::PtyResponses,
+             (from, draft, label): (usize, &str, &str)| {
+                let deadline = Instant::now() + Duration::from_secs(10);
+                loop {
+                    if let Some(screen) = admission_frame(transcript, from, draft) {
+                        return screen;
+                    }
+                    pump(output, input, transcript, answered);
+                    assert!(
+                        Instant::now() < deadline,
+                        "{label}: {:?}",
+                        crate::screen_rows(transcript, 40, 12)
+                    );
+                    thread::yield_now();
+                }
+            };
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                submitted_start,
+                b"Notice: Preparing request... Ctrl+C cancels\r\n",
+            );
+        } else {
+            wait_admission(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (submitted_start, "", "admission shows preparing"),
+            );
+        }
         let edited_start = transcript.len();
         input
             .write_all(if linear { b"retained\x04" } else { b"retained" })
             .expect("continue a new draft during admission");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            edited_start,
-            if linear {
-                b"Notice: Draft: 8 characters; Enter offers it as a steering note\r\n"
-            } else {
-                b"\x1b[10;11H"
-            },
-        );
-        if !linear {
-            assert!(
-                !String::from_utf8_lossy(&transcript[edited_start..]).contains("ready"),
-                "editing must not restore ready during admission"
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                edited_start,
+                b"Notice: Draft: 8 characters; Enter offers it as a steering note\r\n",
+            );
+        } else {
+            wait_admission(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (
+                    edited_start,
+                    "retained",
+                    "editing must not restore ready during admission",
+                ),
             );
         }
         let interrupted_start = transcript.len();
@@ -3650,31 +3730,38 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 b"Input:\r\n",
             );
         } else {
-            wait_for_after(
+            wait_composer_column(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
                 interrupted_start,
-                b"\x1b[10;11H",
+                11,
             );
         }
         let continuation_start = transcript.len();
         input
             .write_all(if linear { b"-suffix\x04" } else { b"-suffix" })
             .expect("continue recovered draft");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            continuation_start,
-            if linear {
-                b"Notice: Draft: 15 characters; Enter submits\r\n"
-            } else {
-                b"\x1b[10;18H"
-            },
-        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                continuation_start,
+                b"Notice: Draft: 15 characters; Enter submits\r\n",
+            );
+        } else {
+            wait_composer_column(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                continuation_start,
+                18,
+            );
+        }
         if linear {
             wait_for_after(
                 &mut output,
@@ -3687,14 +3774,25 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         }
         let cleared_start = transcript.len();
         kill_process(product_pid, Signal::INT).expect("clear retained draft while idle");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            cleared_start,
-            if linear { b"Input:\r\n" } else { b"\x1b[10;3H" },
-        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                cleared_start,
+                b"Input:\r\n",
+            );
+        } else {
+            wait_composer_column(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                cleared_start,
+                3,
+            );
+        }
         input
             .write_all(b"/exit\r")
             .expect("explicit quit after cancellation");

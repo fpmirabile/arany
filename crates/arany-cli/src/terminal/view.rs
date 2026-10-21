@@ -83,6 +83,7 @@ fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
 
 pub(super) fn draw_permission_frame(
     frame: &mut Frame,
+    full: Rect,
     lines: &[String],
     state: PermissionFrameState<'_>,
 ) -> PermissionFrameProgress {
@@ -98,7 +99,6 @@ pub(super) fn draw_permission_frame(
         palette,
         boxed,
     } = state;
-    let full = frame.area();
     let gutter = if boxed {
         0
     } else if full.width >= 40 {
@@ -318,12 +318,6 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
     (rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
         .saturating_add(2)
         .min(area.height.saturating_sub(1))
-}
-
-pub(super) const CLASSIC_FLOOR_ROWS: u16 = 24;
-
-pub(super) fn classic_floor(screen_height: u16) -> u16 {
-    screen_height.min(CLASSIC_FLOOR_ROWS.max(screen_height.saturating_mul(3) / 5))
 }
 
 pub(super) fn classic_height(
@@ -647,8 +641,13 @@ fn setup_area(full: Rect) -> Rect {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_frame(
     frame: &mut Frame,
+    full: Rect,
     step: u8,
     title: &str,
     instruction: &str,
@@ -656,7 +655,7 @@ pub(super) fn draw_setup_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let area = setup_area(frame.area());
+    let area = setup_area(full);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -726,13 +725,14 @@ pub(super) fn draw_setup_frame(
 
 pub(super) fn draw_setup_text_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     instruction: &str,
     draft: &Composer,
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let area = setup_area(frame.area());
+    let area = setup_area(full);
     if area.width < 3 || area.height < 6 {
         return;
     }
@@ -793,8 +793,13 @@ pub(super) fn draw_setup_text_frame(
     });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_choices_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     instruction: &str,
     choices: &[(u8, &str)],
@@ -802,7 +807,6 @@ pub(super) fn draw_setup_choices_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let full = frame.area();
     let height = full.height.min(8);
     let width = full.width.min(64);
     let area = Rect::new(
@@ -897,8 +901,13 @@ pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
     .clamp(8, 16)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_warning_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     warning: &str,
     page: usize,
@@ -906,7 +915,6 @@ pub(super) fn draw_setup_warning_frame(
     notice: Option<&str>,
     palette: Palette,
 ) -> bool {
-    let full = frame.area();
     let width = full.width.min(72);
     let height = full.height.min(16);
     if width == 0 || height < 8 {
@@ -1794,13 +1802,17 @@ fn settings_stacked(rows: &[String], width: usize) -> bool {
         .any(|(index, row)| numbered_label(index, row, false).width() > width)
 }
 
-pub(super) fn settings_height(rows: &[String], width: u16) -> u16 {
+// Classic selector lists show at most this many rows and scroll inside, like Codex's
+// MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
+pub(super) const SELECTOR_ROWS: usize = 10;
+
+pub(super) fn settings_height(rows: &[String], width: u16, max_rows: usize) -> u16 {
     let lines_per_row = if settings_stacked(rows, usize::from(width)) {
         2
     } else {
         1
     };
-    u16::try_from(rows.len() * lines_per_row + 2).unwrap_or(u16::MAX)
+    u16::try_from(rows.len().min(max_rows) * lines_per_row + 2).unwrap_or(u16::MAX)
 }
 
 pub(super) fn draw_settings_frame(

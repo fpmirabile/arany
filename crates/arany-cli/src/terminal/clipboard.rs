@@ -1060,6 +1060,7 @@ pub(super) mod cleanup_tests {
             history: Default::default(),
             classic_history: Default::default(),
             dialog_armed: false,
+            history_adjacent: true,
             input: None,
             _raw_mode: None,
             pointer: Default::default(),

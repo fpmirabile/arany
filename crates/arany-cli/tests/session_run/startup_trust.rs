@@ -517,14 +517,24 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     );
                     let from = transcript.len();
                     input.write_all(b"\x03").unwrap();
-                    wait(
-                        &mut output,
-                        &mut input,
-                        &mut transcript,
-                        &mut answered,
-                        from,
-                        b"\x1b[22;3H",
-                    );
+                    // The cleared composer is found by its border wherever the viewport sits.
+                    let deadline = Instant::now() + Duration::from_secs(10);
+                    while !crate::composer_caret(&transcript, from, 80, 24)
+                        .is_some_and(|(column, _)| column == 3)
+                    {
+                        super::session_picker::pump(
+                            &mut output,
+                            &mut input,
+                            &mut transcript,
+                            &mut answered,
+                        );
+                        assert!(
+                            Instant::now() < deadline,
+                            "cleared Skill draft: {}",
+                            super::session_picker::tail(&transcript[from..])
+                        );
+                        thread::yield_now();
+                    }
                 }
                 let from = transcript.len();
                 input.write_all(b"/permissions\r").unwrap();
