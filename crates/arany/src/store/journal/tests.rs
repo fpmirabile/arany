@@ -826,11 +826,7 @@ fn listing_waits_past_the_old_bound_for_a_committing_writer_then_reports_busy() 
         .expect("writer commit lock");
     let refused = list_session_page(&reader, mine, None, 10, usize::MAX, None);
     connection.execute_batch("COMMIT").expect("commit");
-    assert!(matches!(
-        refused,
-        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
-            if failure.code == rusqlite::ErrorCode::DatabaseBusy
-    ));
+    assert!(matches!(refused, Err(StoreError::ListingBusy)));
 }
 
 #[test]
@@ -985,10 +981,7 @@ fn listing_retries_busy_reads_at_the_same_watermark_and_stops_at_the_bound() {
             .execute_batch("COMMIT")
             .expect("release commit lock")
     });
-    assert!(matches!(refused,
-        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
-            if failure.code == rusqlite::ErrorCode::DatabaseBusy
-    ));
+    assert!(matches!(refused, Err(StoreError::ListingBusy)));
     assert_eq!(BUSY.get(), 4, "one attempt and three retries");
 }
 

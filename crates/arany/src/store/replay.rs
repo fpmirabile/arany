@@ -205,14 +205,19 @@ fn discover_session_heads(
 }
 
 fn retry_listing_read<T>(mut read: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    let busy = |result: &Result<T, StoreError>| {
+        matches!(result, Err(StoreError::Sqlite(error))
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))
+    };
     let mut result = read();
     for _ in 0..MAX_LIST_BUSY_RETRIES {
-        if !matches!(&result, Err(StoreError::Sqlite(error))
-            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))
-        {
-            break;
+        if !busy(&result) {
+            return result;
         }
         result = read();
+    }
+    if busy(&result) {
+        return Err(StoreError::ListingBusy);
     }
     result
 }
