@@ -35,7 +35,7 @@ pub use approval::{
 };
 pub use cancel::Cancellation;
 use config::Config;
-pub(crate) use git::recover_locks as recover_git_locks;
+pub(crate) use git::recover_locks as report_git_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
 pub use workspace::{
@@ -134,6 +134,10 @@ pub enum ToolError {
     Operation,
     #[error("Tool effect completion is uncertain")]
     Uncertain,
+    #[error(
+        "an interrupted Git write left these locks: {0}; once no Git process is running, remove them yourself, then retry"
+    )]
+    StaleGitLocks(String),
     #[error("Guard rejected its {0} stage")]
     GuardRejected(guard::GuardStage),
     #[error("Guard rejected at {0}")]

@@ -44,6 +44,8 @@ const DRIFT: &str = "The repository changed or another Git process holds its loc
 const PROTECTED: &str = "Switching would change a protected, invalid or deeply nested path; switch in your own terminal instead.";
 const CASE_ALIAS: &str = "Switching would change paths that differ only by letter case, or one that aliases an existing name by case; switch in your own terminal instead.";
 const REF_CASE_ALIAS: &str = "A ref differing only by letter case already exists; on case-insensitive storage the new branch would overwrite it.";
+const UNSUPPORTED_HEAD: &str =
+    "HEAD points to a ref outside local branches; switch to a branch in your own terminal first.";
 const SYMBOLIC_START: &str = "The start point names a symbolic ref such as origin/HEAD; name the branch it points to instead.";
 const UNSUPPORTED_ENTRY: &str = "Switching would change a symbolic link or submodule entry, which typed Git writes do not support.";
 
@@ -70,7 +72,8 @@ impl RefState {
     fn symbolic(&self, name: &str) -> bool {
         self.loose
             .iter()
-            .any(|(loose, bytes)| loose == name && bytes.starts_with(b"ref: "))
+            // Git's files backend treats any `ref:` prefix, whatever whitespace follows, as symbolic.
+            .any(|(loose, bytes)| loose == name && bytes.starts_with(b"ref:"))
     }
 
     fn names(&self) -> BTreeSet<String> {
@@ -442,6 +445,10 @@ async fn branch(
     let existing = snapshot.names();
     if existing.iter().any(|other| case_alias(&name, other)) {
         return Ok(Err(failure(REF_CASE_ALIAS, &[], git.max_bytes)));
+    }
+    // A symbolic HEAD outside local branches has a referent no lock would hold.
+    if repository.head.starts_with(b"ref:") && branch_of(&repository.head).is_none() {
+        return Ok(Err(failure(UNSUPPORTED_HEAD, &[], git.max_bytes)));
     }
     let starts = start_refs(&existing, &repository.head, start_point);
     // A symbolic ref's referent is not held, so only a direct ref or HEAD may name the start.
@@ -1113,8 +1120,8 @@ fn valid_lock_path(path: &str) -> bool {
             })
 }
 
-/// Removes the locks a dead Guard recorded for `intent`, each only while it is the same inode
-/// with the same bytes it wrote; anything else stays for the user. Publication is never retried.
+// After a Guard died, its recorded locks can no longer be proven exclusively ours, so they are
+// only reported for manual cleanup; once none remains, its own record goes. Nothing is retried.
 pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), ToolError> {
     let root = super::super::fs::open_directory(workspace)?;
     let Ok(git_dir) = root.open_dir_nofollow(".git") else {
@@ -1127,8 +1134,8 @@ pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), 
     };
     let locks: Vec<LockRecord> =
         serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
-    let mut left = 0usize;
-    for (index, record) in locks.into_iter().enumerate() {
+    let mut stale = Vec::new();
+    for record in locks {
         if !valid_lock_path(&record.path) {
             return Err(ToolError::Operation);
         }
@@ -1144,51 +1151,18 @@ pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), 
                 }
             }
         }
-        if !present || directory.symlink_metadata(leaf).is_err() {
-            continue;
-        }
-        #[cfg(all(test, target_os = "linux"))]
-        tests::race(workspace, tests::Stage::Recovering);
-        // Move the file out of Git's way first, so the checks and the unlink see the same file.
-        let private = format!("arany-recovering-{intent}-{index}");
-        if rustix::fs::renameat_with(
-            &directory,
-            leaf,
-            &git_dir,
-            &private,
-            rustix::fs::RenameFlags::NOREPLACE,
-        )
-        .is_err()
-        {
-            left += 1;
-            continue;
-        }
-        let ours = super::open_optional(&git_dir, &private)?.is_some_and(|file| {
-            use std::os::unix::fs::MetadataExt;
-            file.metadata()
-                .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == (record.device, record.inode))
-                // A multiply linked, special or rewritten file is not the lock this Guard wrote.
-                && super::super::fs::read_regular(file, MAX_SNAPSHOT_BYTES)
-                    .is_ok_and(|bytes| hex_digest(&bytes) == record.sha256)
-        });
+        // A different file at the path belongs to someone else and is not reported.
+        let ours = present
+            && directory.symlink_metadata(leaf).is_ok_and(|metadata| {
+                use cap_std::fs::MetadataExt;
+                (metadata.dev(), metadata.ino()) == (record.device, record.inode)
+            });
         if ours {
-            git_dir
-                .remove_file(&private)
-                .map_err(|_| ToolError::Operation)?;
-        } else {
-            // Not ours: return it unless a new lock took the name meanwhile; then it stays aside.
-            left += 1;
-            let _ = rustix::fs::renameat_with(
-                &git_dir,
-                &private,
-                &directory,
-                leaf,
-                rustix::fs::RenameFlags::NOREPLACE,
-            );
+            stale.push(format!(".git/{}", record.path));
         }
     }
-    if left > 0 {
-        crate::diagnostics::tool_failure("Guard", &ToolError::Conflict);
+    if !stale.is_empty() {
+        return Err(ToolError::StaleGitLocks(stale.join(", ")));
     }
     git_dir
         .remove_file(&name)

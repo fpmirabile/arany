@@ -12,7 +12,6 @@ pub(super) enum Stage {
     Checked,
     Planned,
     Locked,
-    Recovering,
 }
 
 type Race = (PathBuf, Stage, Box<dyn FnOnce() + Send>);
@@ -341,7 +340,34 @@ fn refusals_leave_the_repository_and_workspace_unchanged() {
             "refs/remotes/origin/main",
         ]);
     };
-    let cases: [(&str, Setup, ToolCall, &str); 19] = [
+    let cases: [(&str, Setup, ToolCall, &str); 21] = [
+        (
+            "a symbolic start point spelled with a tab",
+            |repo| {
+                host_git(
+                    &repo.workspace,
+                    &repo.home,
+                    &["update-ref", "refs/remotes/origin/main", "HEAD~1"],
+                );
+                std::fs::write(
+                    repo.workspace.join(".git/refs/remotes/origin/HEAD"),
+                    "ref:\trefs/remotes/origin/main\n",
+                )
+                .unwrap();
+            },
+            branch("topic", Some("origin/HEAD")),
+            SYMBOLIC_START,
+        ),
+        (
+            "a branch from a HEAD outside local branches",
+            |repo| {
+                let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+                git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
+                git(&["symbolic-ref", "HEAD", "refs/remotes/origin/main"]);
+            },
+            branch("topic", None),
+            UNSUPPORTED_HEAD,
+        ),
         (
             "switch from a detached HEAD",
             |repo| {
@@ -757,7 +783,7 @@ fn a_branch_start_ref_stays_locked_until_the_branch_publishes() {
 }
 
 #[test]
-fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
+fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
     let mut repo = Repo::new();
     host_git(&repo.workspace, &repo.home, &["branch", "older", "HEAD~1"]);
     let stash = repo.temp.path().join("stash");
@@ -815,31 +841,26 @@ fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
             std::fs::remove_file(link).unwrap();
         }
     }
-    // A lock someone else rewrote is no longer ours.
-    std::fs::write(git_dir.join("HEAD.lock"), "x").unwrap();
+    // A lock replaced by another Git is not ours and is not reported.
+    std::fs::remove_file(git_dir.join("HEAD.lock")).unwrap();
+    std::fs::write(git_dir.join("HEAD.lock"), "").unwrap();
+    let before = tree(&git_dir);
     recover_locks(&repo.workspace, uuid::Uuid::now_v7()).unwrap();
+    // Exclusion over a dead Guard's locks cannot be proven, so they are reported, never touched.
+    let reported = recover_locks(&repo.workspace, repo.intent);
     assert!(
-        git_dir.join("packed-refs.lock").exists(),
-        "another intent recovers nothing"
+        matches!(&reported, Err(ToolError::StaleGitLocks(paths))
+            if paths == ".git/refs/heads/older.lock, .git/packed-refs.lock"),
+        "{reported:?}"
     );
-    // A live Git replaces a recorded lock right before recovery moves it: it must survive.
-    let replaced = git_dir.join("refs/heads/older.lock");
-    let racer = replaced.clone();
-    RACES.lock().unwrap().push((
-        repo.workspace.clone(),
-        Stage::Recovering,
-        Box::new(move || {
-            std::fs::remove_file(&racer).unwrap();
-            std::fs::write(&racer, "").unwrap();
-        }),
-    ));
+    assert_unchanged(&git_dir, &before);
+    for path in ["HEAD.lock", "packed-refs.lock", "refs/heads/older.lock"] {
+        std::fs::remove_file(git_dir.join(path)).unwrap();
+    }
     recover_locks(&repo.workspace, repo.intent).unwrap();
-    assert_eq!(
-        residue(&git_dir),
-        ["HEAD.lock".to_owned(), "refs/heads/older.lock".into()]
-            .into_iter()
-            .collect(),
-        "only unchanged locks of this intent go, and nothing is left aside"
+    assert!(
+        residue(&git_dir).is_empty(),
+        "the record goes once its locks are gone"
     );
     assert_eq!(
         repo.git(&["rev-parse", "topic"]),

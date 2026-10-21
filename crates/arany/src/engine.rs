@@ -1542,8 +1542,7 @@ impl Engine {
                 }
                 crate::tools::worker::recover_private(&ids).await?;
             }
-            // A Git write whose Guard died with the Engine may have left its locks; remove them
-            // once private recovery confirms its unit is gone. Publication is never retried.
+            // A Git write whose Guard died may have left locks, reported once its unit is gone.
             let git_writes: Vec<_> = view
                 .runs
                 .iter()
@@ -1560,7 +1559,7 @@ impl Engine {
                 }
                 crate::tools::worker::recover_private(&git_writes).await?;
                 for id in git_writes {
-                    crate::tools::recover_git_locks(&request.workspace, id)?;
+                    crate::tools::report_git_locks(&request.workspace, id)?;
                 }
             }
         }

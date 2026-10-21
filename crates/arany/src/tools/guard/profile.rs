@@ -194,6 +194,7 @@ pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
         non_spawning_program()?,
         metadata_program()?,
         ioctl_program()?,
+        unknown_syscalls_program()?,
     ]) {
         bytes.extend_from_slice(&(program.len() as u32).to_le_bytes());
         for instruction in program {
@@ -241,6 +242,7 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
         const FCHMODAT2: i64 = 452;
         const SETXATTRAT: i64 = 463;
         const REMOVEXATTRAT: i64 = 466;
+        const FILE_SETATTR: i64 = 469;
         let mut rules = BTreeMap::new();
         for call in [
             libc::SYS_fchmod,
@@ -257,6 +259,7 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
             libc::SYS_fremovexattr,
             SETXATTRAT,
             REMOVEXATTRAT,
+            FILE_SETATTR,
         ] {
             rules.insert(call, Vec::new());
         }
@@ -279,6 +282,28 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
     }
 }
 
+// The newest syscall this policy knows; any later one could be a new metadata setter, so the Git
+// child gets ENOSYS for it, which libc treats as an older kernel and falls back from.
+const LAST_KNOWN_SYSCALL: u32 = 469;
+
+// One range check, too wide for per-number rules: load `nr`, return ENOSYS above the last known
+// number, else allow. Every other architecture refusal stays with the Guard's own filters.
+fn unknown_syscalls_program() -> Result<BpfProgram, ToolError> {
+    use seccompiler::sock_filter;
+    const LOAD_NR: u16 = 0x20;
+    const JUMP_ABOVE: u16 = 0x25;
+    const RETURN: u16 = 0x06;
+    const RET_ERRNO: u32 = 0x0005_0000;
+    const RET_ALLOW: u32 = 0x7fff_0000;
+    let instruction = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+    Ok(vec![
+        instruction(LOAD_NR, 0, 0, 0),
+        instruction(JUMP_ABOVE, 0, 1, LAST_KNOWN_SYSCALL),
+        instruction(RETURN, 0, 0, RET_ERRNO | libc::ENOSYS as u32),
+        instruction(RETURN, 0, 0, RET_ALLOW),
+    ])
+}
+
 // Every ioctl: requests such as inode-flag, fsxattr or filesystem-version setters change metadata
 // through a read-only descriptor. Git without a terminal needs none; ENOTTY keeps isatty honest.
 fn ioctl_program() -> Result<BpfProgram, ToolError> {
@@ -290,7 +315,11 @@ fn ioctl_program() -> Result<BpfProgram, ToolError> {
 
 // Calling thread only: the Git child inherits them while the Guard thread keeps its access.
 pub(super) fn install_metadata_filter() -> Result<(), ToolError> {
-    for program in [metadata_program()?, ioctl_program()?] {
+    for program in [
+        metadata_program()?,
+        ioctl_program()?,
+        unknown_syscalls_program()?,
+    ] {
         seccompiler::apply_filter(&program).map_err(|_| ToolError::ProtectionUnavailable)?;
     }
     Ok(())

@@ -207,6 +207,22 @@ mod tests {
                 .unwrap()
         });
         assert_eq!(confined.err(), Some(rustix::io::Errno::NOTTY));
+        // file_setattr (469) and any later syscall are refused even where the kernel lacks them.
+        let errno = |call: libc::c_long| {
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        restrict_thread(&[&scratch]).unwrap();
+                        // SAFETY: a refused or unknown syscall with null arguments touches no memory.
+                        let result = unsafe { libc::syscall(call, 0, 0, 0, 0, 0) };
+                        (result, std::io::Error::last_os_error().raw_os_error())
+                    })
+                    .join()
+                    .unwrap()
+            })
+        };
+        assert_eq!(errno(469), (-1, Some(libc::EPERM)));
+        assert_eq!(errno(1000), (-1, Some(libc::ENOSYS)));
         std::fs::write(workspace.join("guard.txt"), "guard").unwrap();
     }
 }
