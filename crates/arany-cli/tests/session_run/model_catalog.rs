@@ -139,7 +139,10 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
             super::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             while let Some(line_end) = bytes[start..].iter().position(|byte| *byte == b'\n') {
                 let end = start + line_end + 1;
-                if next < stages.len() && screen_contains(&bytes[start..end], 1024, 1, stages[next])
+                // Decode the line without its feed: on a one-row screen a line feed scrolls the
+                // text off, as an emulator would.
+                if next < stages.len()
+                    && screen_contains(&bytes[start..start + line_end], 1024, 1, stages[next])
                 {
                     sender.send(next).expect("stage receiver");
                     next += 1;

@@ -2968,8 +2968,54 @@ mod insert_rows_tests {
                         .all(|row| row.is_empty() || row == "settled history"),
                     "{context}"
                 );
+                if needed == 5 {
+                    assert_reflow_keeps_adjacent_history(&mut terminal, height, &context);
+                }
             }
         }
+    }
+
+    // A width change with keep_top recovers the top from the cursor and keeps the adjacent
+    // history directly above the viewport. Short rows do not rewrap, so the narrower
+    // terminal shows the same rows; TestBackend::resize would reshape its flat cells.
+    fn assert_reflow_keeps_adjacent_history(
+        terminal: &mut Terminal<TestBackend>,
+        height: u16,
+        context: &str,
+    ) {
+        use ratatui::widgets::{Paragraph, Widget};
+        let before = terminal.get_frame().area();
+        let mut narrower = TestBackend::new(60, height);
+        for (y, row) in text_rows(terminal.backend().buffer())
+            .into_iter()
+            .enumerate()
+        {
+            let area = Rect::new(0, u16::try_from(y).unwrap(), 60, 1);
+            let mut line = Buffer::empty(area);
+            Paragraph::new(row).render(area, &mut line);
+            narrower
+                .draw(Buffer::empty(area).diff(&line).into_iter())
+                .unwrap();
+        }
+        narrower.set_cursor_position((2, before.y)).unwrap();
+        *terminal.backend_mut() = narrower;
+        resize_classic(terminal, 0, before.height, true, || TestBackend::new(1, 1)).unwrap();
+        let area = terminal.get_frame().area();
+        assert_eq!(
+            area,
+            Rect::new(0, before.y, 60, before.height),
+            "reflow keeps the top: {context}"
+        );
+        let rows = text_rows(terminal.backend().buffer());
+        assert_eq!(
+            rows[usize::from(area.y) - 1],
+            "settled history",
+            "reflow keeps history directly above: {context}: {rows:?}"
+        );
+        assert!(
+            rows[usize::from(area.y)..].iter().all(String::is_empty),
+            "reflow clears the old viewport rows: {context}: {rows:?}"
+        );
     }
 
     #[derive(Clone, Copy)]
