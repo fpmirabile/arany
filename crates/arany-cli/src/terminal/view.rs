@@ -2286,7 +2286,7 @@ pub(super) fn draw_agent_chat_frame(
 }
 
 pub(super) fn agent_choice_rows(height: u16, count: usize) -> usize {
-    usize::from(height.saturating_sub(3) / 2)
+    usize::from(height.saturating_sub(3))
         .min(crate::presentation::MAX_AGENT_ROWS)
         .min(count)
 }

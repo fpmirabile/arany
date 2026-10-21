@@ -2962,6 +2962,52 @@ fn agent_picker_windows_rows_and_shows_search_feedback_without_false_focus() {
 }
 
 #[test]
+fn agent_picker_reserves_all_ten_choice_rows_before_short_detail() {
+    let choices = (1..=10)
+        .map(|ordinal| format!("Run 1: child {ordinal}; active"))
+        .collect::<Vec<_>>();
+    let model = inspector_model(
+        Some(9),
+        choices,
+        vec![
+            "Current Run: 10 agents; children: 10".into(),
+            "Agent 10/10: child 10; active".into(),
+            "Summary: short".into(),
+        ],
+    );
+    // Two detail lines plus three chrome rows and ten choice rows.
+    let height = 2 + 3 + 10;
+    let mut terminal = Terminal::new(TestBackend::new(80, height)).expect("picker terminal");
+    terminal
+        .draw(|frame| {
+            draw_agent_inspector_frame(
+                frame,
+                frame.area(),
+                &model,
+                0,
+                true,
+                None,
+                Palette { color: false },
+            );
+        })
+        .expect("picker frame");
+    let buffer = terminal.backend().buffer();
+    assert_eq!(
+        buffer_row(buffer, 2).trim_end(),
+        "  1. Run 1: child 1; active"
+    );
+    assert_eq!(
+        buffer_row(buffer, 11).trim_end(),
+        "› 10. Run 1: child 10; active"
+    );
+    assert_eq!(
+        buffer_row(buffer, 12).trim_end(),
+        "Agent 10/10: child 10; active"
+    );
+    assert_eq!(buffer_row(buffer, 13).trim_end(), "Summary: short");
+}
+
+#[test]
 fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
     for width in [40, 50, 79, 80, 120] {
         let backend = TestBackend::new(width, 14);
@@ -3010,10 +3056,10 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
         assert_eq!(agent_picker_index(area, 0, 4, Some(1), 2), None);
         assert_eq!(agent_picker_index(area, width, 2, Some(1), 2), None);
         assert_eq!(agent_picker_index(area, 0, 2, None, 0), None);
-        // Five rows fit in 14 lines; the window keeps the focused row last.
-        assert_eq!(agent_picker_index(area, 0, 2, Some(7), 8), Some(3));
-        assert_eq!(agent_picker_index(area, 0, 6, Some(7), 8), Some(7));
-        assert_eq!(agent_picker_index(area, 0, 7, Some(7), 8), None);
+        // Eight choices reserve their rows in 14 lines; the detail keeps the rest.
+        assert_eq!(agent_picker_index(area, 0, 2, Some(7), 8), Some(0));
+        assert_eq!(agent_picker_index(area, 0, 9, Some(7), 8), Some(7));
+        assert_eq!(agent_picker_index(area, 0, 10, Some(7), 8), None);
         assert_eq!(agent_picker_index(area, 0, 2, None, 8), Some(0));
         for y in 0..14 {
             assert!(!row(y).contains('\u{1b}'));
