@@ -612,12 +612,17 @@ fn goal_context_metadata_reservation(
 // to resume past its unsettled effect; nothing is moved or retried.
 async fn report_stale_git_locks(
     view: &crate::SessionView,
+    goal: crate::session::GoalId,
     tools: bool,
     workspace: &std::path::Path,
 ) -> Result<(), EngineError> {
+    let Some(goal) = view.goal(goal) else {
+        return Ok(());
+    };
     let git_writes: Vec<_> = view
         .runs
         .iter()
+        .filter(|r| goal.run_ids.contains(&r.id))
         .flat_map(|r| &r.tools)
         .filter(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop())
         .map(|t| t.intent.id)
@@ -1554,8 +1559,10 @@ impl Engine {
         }
         if entry == GoalEntry::Resume
             && let Some(view) = &history
+            && let Some(goal) = request.goal.id
         {
-            report_stale_git_locks(view, submission.tools.is_some(), &request.workspace).await?;
+            report_stale_git_locks(view, goal, submission.tools.is_some(), &request.workspace)
+                .await?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         if goal.entry == GoalEntry::Resume {

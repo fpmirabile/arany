@@ -317,7 +317,7 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
 // The committed receipt, not a later read, is the evidence of what was published.
 fn git_write_summary(observation: &arany::ToolObservation) -> String {
     let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap_or_default();
-    let text = |key: &str| result[key].as_str().unwrap_or("?").to_owned();
+    let text = |key: &str| safe_truncate(result[key].as_str().unwrap_or("?"), 160);
     let short = |key: &str| text(key).chars().take(12).collect::<String>();
     match &observation.intent.call {
         arany::ToolCall::GitCommit { .. } => {

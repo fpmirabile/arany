@@ -66,7 +66,7 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 
 ### Frozen areas
 
-The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
+The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan, and for the typed Git writes of Pursue item 9 ([Git write workflow](./planning/git-write-workflow/README.md)); it stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 

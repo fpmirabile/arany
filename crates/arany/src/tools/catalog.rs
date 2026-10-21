@@ -381,9 +381,10 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
             Family::Git => {
                 return catalog["git"].is_object()
                     && (!facts.mutates
-                        || catalog["git"]["operations"]
-                            .as_array()
-                            .is_some_and(|names| names.iter().any(|name| name == facts.name)));
+                        || catalog["write"] == true
+                            && catalog["git"]["operations"]
+                                .as_array()
+                                .is_some_and(|names| names.iter().any(|name| name == facts.name)));
             }
             Family::Preparation => return false,
         };

@@ -227,8 +227,7 @@ pub(super) fn discover() -> Option<Program> {
 
 const USER_CONFIG_BYTES: u64 = 64 * 1024;
 
-// The user's global user.name/user.email as data, the way peers' Git picks its identity. Includes,
-// conditional includes and every other key are ignored; missing or invalid data yields None.
+// Parsed as data only: includes and every key except user.name/user.email are ignored.
 pub(super) fn user_identity() -> Option<GitIdentity> {
     let home = directories::BaseDirs::new()?.home_dir().to_owned();
     let xdg = std::env::var_os("XDG_CONFIG_HOME")

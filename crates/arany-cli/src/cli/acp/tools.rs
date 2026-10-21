@@ -159,6 +159,12 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 detail: path
                     .or_else(|| call["name"].as_str())
                     .or_else(|| call["program"].as_str())
+                    .or_else(|| call["branch"].as_str())
+                    .or_else(|| {
+                        call["message"]
+                            .as_str()
+                            .and_then(|message| message.lines().next())
+                    })
                     .unwrap_or(""),
                 paths: path.into_iter().collect(),
                 status,

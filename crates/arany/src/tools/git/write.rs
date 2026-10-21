@@ -914,43 +914,47 @@ impl Lock {
         let mut parts: Vec<&str> = path.split('/').collect();
         let leaf = parts.pop().ok_or(ToolError::Operation)?;
         let mut created = Vec::new();
-        for part in parts {
-            exact_case(&directory, part)?;
-            match directory.open_dir_nofollow(part) {
-                Ok(next) => directory = next,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    // A new nested branch needs its directory, as Git creates it.
-                    directory
-                        .create_dir(part)
-                        .map_err(|_| ToolError::Conflict)?;
-                    // The new directory must survive a crash once its ref is acknowledged.
-                    sync_directory(&directory).map_err(|_| ToolError::Operation)?;
-                    created.push((
-                        directory.try_clone().map_err(|_| ToolError::Operation)?,
-                        part.to_owned(),
-                    ));
-                    directory = directory
-                        .open_dir_nofollow(part)
-                        .map_err(|_| ToolError::Conflict)?;
+        // Any failure after a directory was created removes it again, as an uncommitted lock does.
+        let opened = (|| {
+            for part in parts {
+                exact_case(&directory, part)?;
+                match directory.open_dir_nofollow(part) {
+                    Ok(next) => directory = next,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        // A new nested branch needs its directory, as Git creates it.
+                        directory
+                            .create_dir(part)
+                            .map_err(|_| ToolError::Conflict)?;
+                        // The new directory must survive a crash once its ref is acknowledged.
+                        sync_directory(&directory).map_err(|_| ToolError::Operation)?;
+                        created.push((
+                            directory.try_clone().map_err(|_| ToolError::Operation)?,
+                            part.to_owned(),
+                        ));
+                        directory = directory
+                            .open_dir_nofollow(part)
+                            .map_err(|_| ToolError::Conflict)?;
+                    }
+                    Err(_) => return Err(ToolError::Conflict),
                 }
-                Err(_) => return Err(ToolError::Conflict),
             }
-        }
-        exact_case(&directory, leaf)?;
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create_new(true)
-            .follow(FollowSymlinks::No);
-        {
-            use cap_std::fs::OpenOptionsExt;
-            options.mode(0o644);
-        }
-        let file = directory
-            .open_with(format!("{leaf}.lock"), &options)
-            .map_err(|_| ToolError::Conflict);
-        let file = match file {
-            Ok(file) => file,
+            exact_case(&directory, leaf)?;
+            let mut options = OpenOptions::new();
+            options
+                .write(true)
+                .create_new(true)
+                .follow(FollowSymlinks::No);
+            {
+                use cap_std::fs::OpenOptionsExt;
+                options.mode(0o644);
+            }
+            let file = directory
+                .open_with(format!("{leaf}.lock"), &options)
+                .map_err(|_| ToolError::Conflict)?;
+            Ok((directory, file))
+        })();
+        let (directory, file) = match opened {
+            Ok(opened) => opened,
             Err(error) => {
                 remove_created(&created);
                 return Err(error);
