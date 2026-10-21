@@ -69,7 +69,12 @@ const BRACKETED_PASTE: [&[u8]; 2] = [b"\x1b[?2004h", b"\x1b[?2004l"];
 static SELECTION_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn report_error(message: impl std::fmt::Display) {
-    let _ = writeln!(io::stderr().lock(), "error: {message}");
+    let _ = writeln!(io::stderr().lock(), "{}", error_line(&message.to_string()));
+}
+
+// Errors can quote untrusted repository data such as lock paths.
+pub(crate) fn error_line(message: &str) -> String {
+    format!("error: {}", crate::presentation::escape_terminal(message))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -3386,5 +3391,16 @@ mod pointer_tests {
                     "Escape clears the selection"
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod error_line_tests {
+    #[test]
+    fn errors_quoting_repository_data_are_escaped_at_the_terminal_boundary() {
+        assert_eq!(
+            super::error_line("locks: .git/refs/heads/\u{202e}kcol.x\u{1b}[2J; remove them"),
+            "error: locks: .git/refs/heads/\\u{202e}kcol.x\\u{001b}[2J; remove them"
+        );
     }
 }

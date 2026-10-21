@@ -52,21 +52,64 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     let reads = read("src/lib.rs");
     let edits = write("src/lib.rs");
     let process = command("git", &["diff"]);
+    // A Git write is a process mutation, not a typed edit: edit modes still ask for it.
+    let git_write = ToolCall::GitCommit {
+        message: "m".into(),
+        paths: vec!["src/lib.rs".into()],
+        staged: false,
+    };
+    use Decision::{Allow, Ask, Deny};
     for (mode, decisions) in [
-        ("default", [Decision::Allow, Decision::Ask, Decision::Ask]),
-        (
-            "acceptEdits",
-            [Decision::Allow, Decision::Allow, Decision::Ask],
-        ),
-        ("auto", [Decision::Allow, Decision::Ask, Decision::Ask]),
-        ("plan", [Decision::Allow, Decision::Deny, Decision::Deny]),
-        ("dontAsk", [Decision::Allow, Decision::Deny, Decision::Deny]),
+        ("default", [Allow, Ask, Ask, Ask]),
+        ("acceptEdits", [Allow, Allow, Ask, Ask]),
+        ("auto", [Allow, Ask, Ask, Ask]),
+        ("plan", [Allow, Deny, Deny, Deny]),
+        ("dontAsk", [Allow, Deny, Deny, Deny]),
     ] {
         let parsed = config(json!({"defaultMode": mode}));
-        for (call, expected) in [&reads, &edits, &process].into_iter().zip(decisions) {
+        for (call, expected) in [&reads, &edits, &process, &git_write]
+            .into_iter()
+            .zip(decisions)
+        {
             assert_eq!(parsed.decision(call), expected, "{mode} {call:?}");
         }
     }
+    assert!(ApprovalMode::AutoEdits.asks(&git_write) && !ApprovalMode::AutoEdits.asks(&edits));
+    assert_eq!(
+        config(json!({"allow": ["git_commit"]})).decision(&git_write),
+        Allow
+    );
+    assert_eq!(
+        config(json!({"defaultMode": "acceptEdits", "allow": ["git_commit"]})).decision(&git_write),
+        Ask
+    );
+    assert_eq!(
+        config(json!({"deny": ["Read(./src/**)"]})).decision(&git_write),
+        Deny
+    );
+    for paths in [
+        vec![],
+        vec![".".to_owned()],
+        vec!["docs".to_owned(), ".".to_owned()],
+    ] {
+        let whole = ToolCall::GitCommit {
+            message: "m".into(),
+            staged: paths.is_empty(),
+            paths,
+        };
+        assert_eq!(
+            config(json!({"deny": ["Read(./private/**)"]})).decision(&whole),
+            Deny,
+            "{whole:?}"
+        );
+    }
+    let switch = ToolCall::GitSwitch {
+        branch: "topic".into(),
+    };
+    assert_eq!(
+        config(json!({"allow": ["git_switch"], "ask": ["Edit(./src/**)"]})).decision(&switch),
+        Ask
+    );
     let plan = config(json!({"defaultMode": "plan", "allow": ["Bash", "Edit"]}));
     assert_eq!(plan.decision(&process), Decision::Deny);
     assert_eq!(plan.decision(&edits), Decision::Deny);
@@ -83,6 +126,49 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     let dont_ask = config(json!({"defaultMode": "dontAsk", "allow": ["Bash(git diff *)"]}));
     assert_eq!(dont_ask.decision(&process), Decision::Allow);
     assert_eq!(config(json!({})).mode(), PermissionMode::Default);
+}
+
+#[test]
+fn commit_paths_cannot_bypass_restrictive_descendant_rules() {
+    let cases: &[(&str, &[&str], bool, bool)] = &[
+        ("./src/secrets/**", &["src"], false, true),
+        ("./src/secrets/key", &["src"], false, true),
+        ("./SRC/secrets/**", &["src"], false, true),
+        ("./docs/secrets/**", &["src"], false, false),
+        ("./src-other/secrets/**", &["src"], false, false),
+        ("./src/secrets/**", &["src/public"], false, false),
+        ("**/secret", &["src"], false, true),
+        ("./src/**/secret", &["src/public"], false, true),
+        ("./docs/**/secret", &["src"], false, false),
+        ("./src/s?cret/key", &["src"], false, true),
+        ("./src/s[ae]cret/key", &["src"], false, true),
+        ("./src/secrets/**", &["docs", "src"], false, true),
+        ("./private/**", &["."], false, true),
+        ("./private/**", &[], true, true),
+        ("./private/**", &["s\u{00e9}cret"], false, true),
+    ];
+    for &(pattern, paths, staged, restricted) in cases {
+        let call = ToolCall::GitCommit {
+            message: "m".into(),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            staged,
+        };
+        for tool in ["Read", "Edit"] {
+            for (list, decision) in [("deny", Decision::Deny), ("ask", Decision::Ask)] {
+                let rule = format!("{tool}({pattern})");
+                let parsed = config(json!({"allow": ["git_commit"], (list): [rule]}));
+                assert_eq!(
+                    parsed.decision(&call),
+                    if restricted {
+                        decision
+                    } else {
+                        Decision::Allow
+                    },
+                    "{list} {rule}: {call:?}"
+                );
+            }
+        }
+    }
 }
 
 #[test]

@@ -422,7 +422,7 @@ pub(super) fn install(
     if task.intent.call.is_process() {
         return install_command(task, stage);
     }
-    if task.intent.call.is_git_read() {
+    if task.intent.call.is_git() {
         return install_git(task, stage);
     }
     configure_file_cpu()?;
@@ -990,6 +990,7 @@ impl Task {
             .and(worker_input.as_ref())
             .map(|bytes| Arc::from(bytes.as_slice()));
         let runtime = ToolRuntime {
+            git_writes_available: false,
             handover,
             worker: self.worker.zip(worker_input).map(|(transfer, input)| {
                 Arc::new(super::super::worker::Action {
@@ -1108,7 +1109,7 @@ async fn execute_worker(
         .arg("--internal-tool-guard")
         .env_clear()
         .current_dir(
-            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git_read() {
+            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git() {
                 root
             } else {
                 Path::new("/")

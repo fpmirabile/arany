@@ -299,7 +299,7 @@ async fn native_git_journey_helper() {
         serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
-        json!(["git_status", "git_diff", "git_log"])
+        json!(["git_status", "git_diff", "git_log", "git_branch"])
     );
     let after = tree_snapshot(&workspace.join(".git"));
     let changed: Vec<_> = before

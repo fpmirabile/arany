@@ -138,7 +138,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 7),
+    ("GoalPlanContractRecorded", 8),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AssistantDisplayRecorded", 6),
@@ -146,7 +146,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 12),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 14),
+    ("ProviderCallRecorded", 15),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -164,14 +164,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 4),
-    ("HookStarted", 4),
-    ("HookFinished", 9),
-    ("ToolFinished", 20),
+    ("HookStarted", 5),
+    ("HookFinished", 10),
+    ("ToolFinished", 21),
     ("RunStarted", 19),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 14),
+    ("ToolStarted", 15),
     ("ContextCompacted", 7),
 ];
 
@@ -1415,6 +1415,25 @@ impl Event {
 // The typed text a payload had before its kind only gained the glob variants, or `None`
 // when it names them (they did not exist) or does not parse.
 pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
+    before_operations(kind, payload, &["glob"], Some("glob"))
+}
+
+// The same for the typed Git write variants, which a later payload version added.
+pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
+    before_operations(
+        kind,
+        payload,
+        &["git_commit", "git_branch", "git_switch"],
+        None,
+    )
+}
+
+fn before_operations(
+    kind: &str,
+    payload: &str,
+    operations: &[&str],
+    worker_label: Option<&str>,
+) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
@@ -1429,7 +1448,7 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
-    (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, operations, worker_label)).then_some(text)
 }
 
 // Checked before the Goal and Message facts that precede RunStarted commit.
@@ -1478,17 +1497,28 @@ pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
     (text.matches(&current).count() == 1).then(|| text.replacen(&current, &legacy, 1))
 }
 
-fn mentions_glob(value: &serde_json::Value) -> bool {
+fn mentions(value: &serde_json::Value, operations: &[&str], worker_label: Option<&str>) -> bool {
+    let named = |field: &serde_json::Value| {
+        field.as_str().is_some_and(|name| {
+            operations.iter().any(|operation| {
+                name == *operation || name.strip_prefix("arany_") == Some(operation)
+            })
+        })
+    };
     match value {
         serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
-            (key == "operation" && (field == "glob" || field == "arany_glob"))
+            (key == "operation" && named(field))
                 || (key == "tools"
-                    && field
-                        .as_array()
-                        .is_some_and(|tools| tools.iter().any(|tool| tool == "glob")))
-                || mentions_glob(field)
+                    && worker_label.is_some_and(|label| {
+                        field
+                            .as_array()
+                            .is_some_and(|tools| tools.iter().any(|tool| tool == label))
+                    }))
+                || mentions(field, operations, worker_label)
         }),
-        serde_json::Value::Array(items) => items.iter().any(mentions_glob),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| mentions(item, operations, worker_label)),
         _ => false,
     }
 }

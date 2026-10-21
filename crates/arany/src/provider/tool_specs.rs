@@ -88,7 +88,7 @@ mod tests {
             "commands": [{"name": "cargo"}],
             "skills": [{"name": "guide"}],
             "mcp_servers": [{"name": "local", "tools": ["probe"]}],
-            "git": {"operations": ["git_status", "git_diff", "git_log"]},
+            "git": {"write": true, "operations": ["git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_switch"]},
             "tool_calls_remaining": 2
         })
     }
@@ -118,6 +118,9 @@ mod tests {
                 "arany_mcp_call",
                 "arany_command_unguarded",
                 "arany_glob",
+                "arany_git_commit",
+                "arany_git_branch",
+                "arany_git_switch",
                 "arany_plan"
             ]
         );
