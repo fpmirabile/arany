@@ -604,6 +604,7 @@ fn fixture_with_manifest(
         provider_concurrency: 4,
         workspace_device: 1,
         workspace_inode: 2,
+        user_instruction_digest: None,
         instruction_sources: Vec::new(),
         launch_directory: String::new(),
         include_digests: Vec::new(),
@@ -612,7 +613,7 @@ fn fixture_with_manifest(
         context_usage: None,
         compaction_event_sequence: None,
         compaction_content_digest: None,
-        tool_policy: Some(crate::tools::ToolPolicyReceipt {
+        tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
             contract_version: 1,
             config_digest: [1; 32],
             permissions_digest: None,
@@ -620,7 +621,7 @@ fn fixture_with_manifest(
             unguarded_rules_digest: None,
             unguarded: crate::tools::UnguardedGrant::HumanOnly,
             child_unguarded: crate::tools::UnguardedGrant::Denied,
-        }),
+        })),
     };
     let mut f = Fixture {
         session,
@@ -1562,7 +1563,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 19),
+        ("RunStarted", 20),
         ("AgentSpawned", 12),
         ("ProviderCallRecorded", 14),
         ("AgentFinished", 10),

@@ -1,5 +1,5 @@
 use crate::session::{InstructionFile, WorkspaceIdentity};
-use crate::store::{StateRoot, StoreError};
+use crate::store::{RecordKind, StateRoot, StoreError};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
@@ -25,12 +25,14 @@ pub(crate) enum InputError {
     UnsafeLinkCount,
     #[error("Workspace input exceeds its byte limit")]
     TooLarge,
-    #[error("Workspace input is not UTF-8")]
+    #[error("input is not UTF-8")]
     InvalidUtf8,
     #[error("explicit include does not exist")]
     MissingInclude,
     #[error("too many explicit includes")]
     TooManyIncludes,
+    #[error("user instructions are unavailable")]
+    State(#[from] StoreError),
     #[error("state directory overlaps the Workspace")]
     StateOverlap,
     #[error("Workspace input is unavailable")]
@@ -83,6 +85,7 @@ impl InputSnapshot {
 }
 
 pub(crate) struct WorkspaceInputs {
+    pub user_instructions: Option<InputSnapshot>,
     pub instructions: Vec<InputSnapshot>,
     pub launch_directory: String,
     pub includes: Vec<InputSnapshot>,
@@ -149,6 +152,7 @@ impl WorkspaceInputs {
             return Err(InputError::InvalidPath);
         }
 
+        let user_instructions = read_user_instructions(state)?;
         let launch = launch_components(workspace, launch)?;
         let instructions = read_instructions(&root, &launch)?;
         let mut includes = Vec::with_capacity(include_paths.len());
@@ -165,6 +169,7 @@ impl WorkspaceInputs {
             includes.push(snapshot);
         }
         Ok(Self {
+            user_instructions,
             instructions,
             launch_directory: launch.join("/"),
             includes,
@@ -217,6 +222,21 @@ fn launch_components(workspace: &Path, launch: Option<&Path>) -> Result<Vec<Stri
         return Err(InputError::InvalidPath);
     }
     Ok(names)
+}
+
+pub(crate) const USER_INSTRUCTIONS_LABEL: &str = "user AGENTS.md";
+
+fn read_user_instructions(state: &StateRoot) -> Result<Option<InputSnapshot>, InputError> {
+    let Some(bytes) = state.record(RecordKind::UserInstructions).read()? else {
+        return Ok(None);
+    };
+    let digest = Sha256::digest(&bytes).into();
+    let content = String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)?;
+    Ok(Some(InputSnapshot {
+        content,
+        path: USER_INSTRUCTIONS_LABEL.to_owned(),
+        digest,
+    }))
 }
 
 // A directory that vanished after the launch path resolved ends the walk.

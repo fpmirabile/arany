@@ -121,6 +121,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             transform: crate::session::run_started_v18_to_v19,
             canonical: crate::session::run_started_v18_payload,
         },
+        EventStep {
+            kind: "RunStarted",
+            from: 19,
+            transform: crate::session::run_started_v19_to_v20,
+            canonical: crate::session::run_started_v19_payload,
+        },
         glob_step!("ProviderCallRecorded", 13),
     ],
 };
