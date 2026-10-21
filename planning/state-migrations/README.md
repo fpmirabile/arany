@@ -14,14 +14,7 @@ It covers every persisted format: the Event journal (`events.sqlite3`), `checkpo
 
 ## Research
 
-[State migrations research](../../docs/research/state-migrations-2026-10.md) holds the inventory, churn, constraints and peer practice, with citations. The decision-relevant facts:
-
-- About 45 Event kinds carry their own payload version (`payload_version()` in `crates/arany/src/session/events.rs`), and decoding rejects any other version. The journal schema is `user_version = 4` (`store/journal.rs`); `checkpoints.sqlite` is 1 (`store/state/checkpoints.rs`). The StateRoot holds 12 JSON record kinds (`RecordKind`, `store/state.rs`).
-- Churn: about 1 in 8 PRs since 2026-10-07 bumped an Event version. Most added a field; some (`ToolFinished`, `RunStarted`) added facts that cannot be reconstructed honestly, so old history cannot be fully upgraded without inventing data.
-- There is no hash chain over Events. Fork boundaries store a `prefix_digest` (`session/lineage.rs`) over re-serialized payloads, so any rewrite must recompute it; checkpoint blob references and compaction `content_digest` must stay valid.
-- Today an incompatible store gives `state storage failed`, or a confirmed "Reset history" that deletes the journal (terminal.md History recovery; exclusive lease and identity checks already exist).
-- Peer evidence and its limits are in [the research report](../../docs/research/state-migrations-2026-10.md#4-peer-practice).
-- Rules to change: AGENTS.md global rule 5, which forbids migrations, and the "no migration" statements in execution.md, goals.md, terminal.md and credentials.md.
+[State migrations research](../../docs/research/state-migrations-2026-10.md) owns the persisted-format inventory, commit-based churn measurement, digest and storage constraints, and peer evidence and its limits.
 
 ## Contract and scenarios
 
@@ -32,7 +25,8 @@ It covers every persisted format: the Event journal (`events.sqlite3`), `checkpo
   - A JSON record behind is upgraded in its atomic pending replacement.
 - Archive path: history older than the migration floor, or failing any migration step, is moved intact to `archive/history-<UTC timestamp>/` (events.sqlite3, its sidecars and checkpoints.sqlite). A fresh store opens with a visible notice naming the archive path. Accounts, settings and trust are untouched.
 - Failure and recovery:
-  - A crash at any point leaves either the original or the completed upgrade, never a mix.
+  - Fault injection before and after each migration transaction commit, phase-marker publication, file/directory sync, swap and marker removal, followed by repeated startup, proves the [swap recovery protocol](#chosen-direction): either the original opens without a fact for this migration or the validated upgrade opens with exactly one matching fact. Ambiguous identities fail closed without archiving either candidate.
+  - A backup reopens independently with every committed record, including a fixture with uncheckpointed WAL records; unsupported SQLite state is preserved and refused.
   - A busy store (another Arany) is retried, not archived.
   - An unsafe or inaccessible state dir still fails closed with its typed cause.
   - Nothing is ever deleted silently.
@@ -42,18 +36,20 @@ It covers every persisted format: the Event journal (`events.sqlite3`), `checkpo
 
 The hybrid: archive as the safety net, plus a copy-transform migration framework that every future bump must use.
 
-- Runtime keeps one current format. Decoders and the reducer never see old shapes, so strict replay and "one current internal format at runtime" hold.
-- Migration steps are JSON-level `Value -> Value` transforms keyed by (kind, from-version). They run only in a `store::migrate` module, on open, under the existing exclusive lease.
-- Floor = the current versions when slice 2 lands. Anything older is archived (slice 1), so none of today's ~19 historical bumps need transforms; [D-22](../../docs/research/next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns that accepted trade-off.
-- A guard test iterates `payload_version()`, the schema versions and the record versions, and fails when a version is above the floor without a registered step and a fixture.
-- OS impact: none beyond existing atomic rename and private-directory rules on Linux and macOS.
+- Runtime keeps one current format. JSON-level `Value -> Value` record and Event transforms keyed by (kind, from-version) run only in the bounded migration path under the exclusive lease, then pass current records to the owning decoders and reducer. Legacy handling never enters ordinary decoders. Store orchestration stays in `store::migrate`; JSON shape knowledge stays with each record owner.
+- Journal floor = the current versions when slice 2 lands; [D-22](../../docs/research/next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns the pre-floor archive trade-off. Slice 4 declares each JSON record floor, including ui-preferences v3 for its initial v3 → v4 step. Floors stay fixed across subsequent bumps.
+- The guard test enumerates every in-scope version family: each Event kind's `payload_version()`, both SQLite `user_version`s, and every persisted JSON record version. For each family it requires a registered transform and fixture for every adjacent source → target edge from its declared floor through current, retaining older edges after later bumps. Multi-step fixtures also prove migration from the floor to current. Slice 2 introduces the guard; slices 3 and 4 extend its registry and fixtures as their families become migratable.
+- SQLite backups use the online backup API under the exclusive lease with other owners quiesced, producing a timestamped private, self-contained snapshot. SQLite reads any admitted WAL records; raw copies of `events.sqlite3`, `-wal` or `-shm` are not backups. Before replacement, SQLite completes recovery/checkpointing and closes all source connections; unexpected or unsafe sidecars fail closed. Backup and staged output use DELETE mode and close without live sidecars; source sidecars are never attached to the replacement.
+- Swap recovery uses a private, atomically replaced phase marker, syncing its file and parent directory at each publication. `Preparing` records a migration ID, source identity, pinned versions and backup/staging paths before copying. The staged database commits a `MigrationRecorded` row in its migration table with that ID in the transaction finalizing its transformed data and recomputed digests, then passes whole-history strict replay. After closing and syncing the backup and staged database and their parent directories, publish `Ready` with their verified identities/digests and the source identity/digest. Atomically replace the source, sync its directory, then remove the marker and sync again; retain the backup. The migration fact is installed with the database, never appended after the rename.
+- Before ordinary startup, recovery holds the exclusive lease. With `Preparing`, verify the original identity, discard the marker's incomplete staging/backup artifacts, clear the marker with directory sync and retain the original. With `Ready` and the original still present, verify its digest and abandon staging; with the matching upgraded database present, verify its digest and migration ID and finish directory sync. Both `Ready` cases validate the retained backup before marker cleanup; cleanup tolerates already-discarded staging. Missing required artifacts or ambiguous identities fail closed and preserve the artifacts. Recovery never re-executes journaled effects.
+- OS impact: the same protocol requires durable file and directory sync and atomic replacement in the admitted StateRoot on Linux and macOS; platform CI fixtures verify recovery, while native support evidence remains separate.
 
 ## Security and resource model
 
 - Migrated or archived data stays data. A transform never adds authority, grants or trust, and never reads repository content.
 - Archives inherit the private StateRoot permissions.
-- Bounds: migration works within the existing journal size limits and one copy's free space. If space is short, the result is a typed `StorageFull` with nothing changed.
-- Account and credential records only migrate forward through explicit steps. On failure they keep today's preserve-and-reset behavior.
+- Bounds: migration keeps the existing per-store size limits and budgets space for both the backup and staged database, SQLite sidecars and bounded phase metadata. If space is short, the result is a typed `StorageFull` with the original preserved.
+- Account and credential records only migrate non-secret shapes forward through explicit steps. On failure they keep today's preserve-and-explicit-reset behavior.
 
 ## Risks and mitigations
 
@@ -64,9 +60,9 @@ The hybrid: archive as the safety net, plus a copy-transform migration framework
 ## Vertical slices
 
 1. **Automatic archive at startup.** An incompatible or damaged history at attached startup (and in `exec`/`serve`/`acp`) is archived intact under `archive/history-<ts>/`, a fresh store opens, and a notice names the archive. Accounts and settings are kept. This replaces the manual "Reset history" path for incompatible history (damaged or busy keep their current handling), updates terminal.md and the AGENTS.md rule 5 text, and adds tests that an old-version journal opens fresh with the archive present and an unsafe dir still fails closed. Implemented on `fix/startup-history-recovery`.
-2. **Journal migration framework and guard.** Adds the `store::migrate` registry, the copy → transform → recompute digests → strict replay → atomic swap with backup, a `MigrationRecorded` fact, the floor at current versions, and the guard test. It also adds one real example step with a fixture, the next Event bump, to prove the path end to end. Updates execution.md and session.md.
+2. **Journal migration framework and guard.** Implements the journal protocol and guard in [Chosen direction](#chosen-direction), with the backup and crash scenarios in [Contract and scenarios](#contract-and-scenarios). It also adds one real example step with a fixture, the next Event bump, to prove the path end to end. Updates execution.md and session.md.
 3. **Checkpoint store migration.** `checkpoints.sqlite` schema steps through the same framework, keeping blob references valid. Its tests are an old schema upgraded with rewind still working.
-4. **JSON record migration.** The registry covers the `RecordKind` records through their atomic pending replacement, starting with ui-preferences v3 → v4 (fixture already in `controls.rs`) and the native account schema. Updates terminal.md, credentials.md and goals.md.
+4. **JSON record migration.** Extends the migration registry and guard to the `RecordKind` records through their atomic pending replacement, following [Chosen direction](#chosen-direction) and the [security model](#security-and-resource-model). Starts with the [existing ui-preferences fixture](../../docs/research/state-migrations-2026-10.md#3-arany-constraints) and the native account schema. Updates terminal.md, credentials.md and goals.md.
 
 Each slice is one PR and usable on its own: after slice 1 nobody is blocked by an old store; after slice 2 Session history survives every future Event bump.
 

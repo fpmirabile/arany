@@ -14,7 +14,7 @@ must be read before using an old recommendation as implementation guidance.
 
 | Report | Investigation area |
 |---|---|
-| [Automatic state migrations](./state-migrations-2026-10.md) | Persisted-format inventory, version churn, digest constraints, peer practice and archive/upcast/migrate options |
+| [Automatic state migrations](./state-migrations-2026-10.md) | Persisted-format inventory, commit churn, digest and storage constraints, and peer evidence |
 | [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership |
 | [Harness effect-loop comparisons](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership |
 | [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Dated MCP protocol comparison, complete legacy tools flow, portable progressive Skills, bounded parser choices |
