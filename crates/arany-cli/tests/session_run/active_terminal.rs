@@ -1541,8 +1541,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     assert!(wait_product(child.take()).status.success());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
-    // Exit clears from the owned top: a filled screen starts at row 1, the composer at its own top.
-    super::assert_classic_owned_clear(&transcript[exit_from..], 1..=21);
+    super::assert_classic_owned_clear(&transcript, exit_from);
     let text = String::from_utf8_lossy(&transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(

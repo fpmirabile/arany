@@ -1262,8 +1262,7 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         output.stderr[..first_query].ends_with(b"\x1b[24;1H"),
         "Classic reserves rows below any existing shell output"
     );
-    // Exit clears from the owned top: a filled screen starts at row 1, the composer at its own top.
-    super::assert_classic_owned_clear(&output.stderr[from..], 1..=21);
+    super::assert_classic_owned_clear(&output.stderr, from);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {

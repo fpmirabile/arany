@@ -182,41 +182,38 @@ fn armed_selector(bytes: &[u8], from: usize, columns: usize, rows: usize) -> Opt
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
-    let mut rows = Vec::new();
-    for (start, _) in bytes
-        .windows(2)
-        .enumerate()
-        .filter(|(_, part)| *part == b"\x1b[")
-    {
-        let rest = &bytes[start + 2..];
-        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
-        if digits > 0 && rest[digits..].starts_with(b";1H\x1b[J") && rows.len() < 256 {
-            rows.push(
-                String::from_utf8_lossy(&rest[..digits])
-                    .parse()
-                    .unwrap_or(0),
-            );
-        }
-    }
-    rows
-}
-
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-fn assert_classic_owned_clear(bytes: &[u8], rows: std::ops::RangeInclusive<usize>) {
+fn assert_classic_owned_clear(bytes: &[u8], exit_from: usize) {
+    let clear = exit_from
+        + bytes[exit_from..]
+            .windows(3)
+            .rposition(|part| part == b"\x1b[J")
+            .expect("Classic exit clears its owned area");
+    let before = terminal_grid(&bytes[..exit_from], 80, 24);
+    let after = terminal_grid(&bytes[..clear + 3], 80, 24);
+    let owned_top = before
+        .1
+        .iter()
+        .position(|row| row.starts_with("─ Ask Arany"))
+        .expect("Classic composer visible before exit cleanup");
+    let settled = before
+        .0
+        .iter()
+        .chain(&before.1[..owned_top])
+        .filter(|row| !row.trim().is_empty())
+        .collect::<Vec<_>>();
     assert!(
-        observed_clear_rows(bytes)
-            .iter()
-            .any(|row| rows.contains(row)),
-        "Classic must clear its previous owned area from a row in {rows:?}; observed clears at rows {:?}; tail {:?}",
-        observed_clear_rows(bytes),
-        String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(400)..])
-            .escape_debug()
-            .to_string()
+        !settled.is_empty(),
+        "settled history must be present before cleanup"
     );
-    assert!(
-        !bytes.windows(4).any(|part| part == b"\x1b[2J"),
-        "settled history must not be cleared"
+    let remaining = after
+        .0
+        .iter()
+        .chain(&after.1)
+        .filter(|row| !row.trim().is_empty())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        remaining, settled,
+        "exit must preserve all settled history and clear every transient row"
     );
 }
 

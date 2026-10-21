@@ -10,6 +10,123 @@ fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 #[test]
+fn classic_dialog_content_stays_above_the_spare_floor_rows() {
+    for screen_height in [8, 24, 50] {
+        for (panel, height) in [
+            ("permission", 12),
+            ("secret", 7),
+            ("text", 7),
+            ("choices", 8),
+            ("warning", 8),
+            ("rewind", 12),
+            ("rewind review", 12),
+        ] {
+            let mut terminal = Terminal::new(TestBackend::new(80, screen_height)).unwrap();
+            let floor = classic_floor(screen_height);
+            let full = Rect::new(0, screen_height - floor, 80, floor);
+            let area = crate::terminal::dialog_area(full, height, true);
+            let palette = Palette { color: false };
+            let lines = vec!["Review this change".to_owned()];
+            terminal
+                .draw(|frame| match panel {
+                    "permission" => {
+                        draw_permission_frame(
+                            frame,
+                            area,
+                            &lines,
+                            PermissionFrameState {
+                                choices: &["Read only", "Trust folder"],
+                                page: 0,
+                                focus: 0,
+                                profile_start: None,
+                                profile_count: 0,
+                                focused_profile: None,
+                                profile_selection_enabled: None,
+                                footer: Some("Enter confirms"),
+                                palette,
+                                boxed: false,
+                            },
+                        );
+                    }
+                    "secret" => draw_setup_frame(
+                        frame,
+                        area,
+                        3,
+                        "API key",
+                        "Hidden input",
+                        0,
+                        Some("Enter confirms"),
+                        palette,
+                    ),
+                    "text" => draw_setup_text_frame(
+                        frame,
+                        area,
+                        "Workspace",
+                        "Enter ID",
+                        &Composer::default(),
+                        None,
+                        palette,
+                    ),
+                    "choices" => draw_setup_choices_frame(
+                        frame,
+                        area,
+                        "Account",
+                        "Choose one",
+                        &[(1, "Saved"), (2, "New")],
+                        0,
+                        None,
+                        palette,
+                    ),
+                    "warning" => {
+                        draw_setup_warning_frame(
+                            frame,
+                            area,
+                            "Consent",
+                            "Review this change",
+                            0,
+                            false,
+                            None,
+                            palette,
+                        );
+                    }
+                    "rewind" | "rewind review" => {
+                        crate::terminal::rewind::draw_rewind_frame(
+                            frame,
+                            area,
+                            "Checkpoints",
+                            if panel == "rewind" { &[] } else { &lines },
+                            &["Cancel".into(), "Restore".into()],
+                            0,
+                            0,
+                            palette,
+                        );
+                    }
+                    _ => unreachable!(),
+                })
+                .unwrap();
+            let rows = (0..screen_height)
+                .map(|y| buffer_row(terminal.backend().buffer(), y))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                rows.iter().position(|row| !row.trim().is_empty()),
+                Some(usize::from(area.y)),
+                "{panel}: {rows:?}"
+            );
+            assert!(
+                !rows[usize::from(area.bottom() - 1)].trim().is_empty(),
+                "{panel}: footer stays with content: {rows:?}"
+            );
+            assert!(
+                rows[usize::from(area.bottom())..]
+                    .iter()
+                    .all(|row| row.trim().is_empty()),
+                "{panel}: spare rows below content: {rows:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
     use crate::presentation::{
         escape_terminal,
@@ -104,8 +221,10 @@ fn rewind_frame_corpus_keeps_every_panel_state_inert_and_paged_at_all_widths() {
                 let mut more = false;
                 terminal
                     .draw(|frame| {
+                        let area = frame.area();
                         more = draw_rewind_frame(
                             frame,
+                            area,
                             title,
                             &lines,
                             &choices,
@@ -262,8 +381,10 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 draw_setup_frame(
                     frame,
+                    area,
                     3,
                     "Enter API key",
                     "Hidden input; up to 512 ASCII characters",
@@ -314,8 +435,10 @@ fn setup_step_stays_centered_and_borderless_without_echoing_input() {
                     let caret = draft.cursor_byte_offset();
                     terminal
                         .draw(|frame| {
+                            let area = frame.area();
                             draw_setup_text_frame(
                                 frame,
+                                area,
                                 "API workspace ID",
                                 "From Claude Console",
                                 &draft,
@@ -434,8 +557,10 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
                 Terminal::new(TestBackend::new(width, height)).expect("test terminal");
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     draw_setup_choices_frame(
                         frame,
+                        area,
                         title,
                         instruction,
                         choices,
@@ -484,8 +609,10 @@ fn setup_choices_remain_visible_at_narrow_widths_without_color() {
     let mut terminal = Terminal::new(TestBackend::new(16, 8)).expect("test terminal");
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_setup_frame(
                 frame,
+                area,
                 3,
                 "Enter API key",
                 "Hidden input; up to 512 ASCII characters",
@@ -525,8 +652,10 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).expect("settings terminal");
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_setup_choices_frame(
                 frame,
+                area,
                 "Settings",
                 "↑↓ selects a setting; ←→ changes it; Enter saves",
                 &choices,
@@ -556,8 +685,10 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
             let mut has_more = false;
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     has_more = draw_setup_warning_frame(
                         frame,
+                        area,
                         "ChatGPT plan consent",
                         &warning,
                         page,
@@ -611,8 +742,10 @@ fn setup_warning_pages_every_line_before_showing_acceptance_actions() {
             for accept in [false, true] {
                 terminal
                     .draw(|frame| {
+                        let area = frame.area();
                         assert!(!draw_setup_warning_frame(
                             frame,
+                            area,
                             "ChatGPT plan consent",
                             &warning,
                             usize::MAX,
@@ -2825,8 +2958,10 @@ fn permission_profile_rows_wrap_at_spaces_with_a_hanging_indent() {
     let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
     terminal
         .draw(|frame| {
+            let area = frame.area();
             draw_permission_frame(
                 frame,
+                area,
                 &lines,
                 PermissionFrameState {
                     choices: &["Read only", "Trust folder"],
@@ -2876,8 +3011,10 @@ fn permission_long_path_hard_breaks_only_at_the_row_edge() {
         let mut progress = PermissionFrameProgress { more: true, page };
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 progress = draw_permission_frame(
                     frame,
+                    area,
                     &lines,
                     PermissionFrameState {
                         choices: &["Read only", "Trust folder"],
@@ -2937,8 +3074,10 @@ fn permission_frame_fills_the_terminal_like_chat() {
         let mut progress = None;
         terminal
             .draw(|frame| {
+                let area = frame.area();
                 progress = Some(draw_permission_frame(
                     frame,
+                    area,
                     &lines,
                     PermissionFrameState {
                         choices: &["Read only", "Trust this folder"],
@@ -2997,8 +3136,10 @@ fn permission_choices_are_vertical_and_complete_before_selection() {
             let mut progress = PermissionFrameProgress { more: true, page };
             terminal
                 .draw(|frame| {
+                    let area = frame.area();
                     progress = draw_permission_frame(
                         frame,
+                        area,
                         &lines,
                         PermissionFrameState {
                             choices: &["Read only", "Trust folder"],

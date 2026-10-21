@@ -513,17 +513,18 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::permission_height(&lines, width, false, profile_start);
-        self.draw_frame(height, true, |frame| {
-            if frame.area().width >= 16 && frame.area().height >= 8 {
+        self.draw_frame(height, true, |frame, area| {
+            if area.width >= 16 && area.height >= 8 {
                 progress = view::draw_permission_frame(
                     frame,
+                    area,
                     &lines,
                     view::PermissionFrameState {
-                        choices: if configured && frame.area().width < 24 {
+                        choices: if configured && area.width < 24 {
                             &["Use config", "Trust folder"]
                         } else if configured {
                             &["Use explicit config", "Trust this folder"]
-                        } else if frame.area().width < 24 {
+                        } else if area.width < 24 {
                             &["Read only", "Trust folder"]
                         } else {
                             &["Continue read only", "Trust this folder"]
@@ -542,7 +543,7 @@ impl AttachedTerminal {
             } else {
                 frame.render_widget(
                     ratatui::widgets::Paragraph::new("Resize to review; Ctrl+C exits"),
-                    frame.area(),
+                    area,
                 );
             }
         })?;
@@ -1262,11 +1263,19 @@ impl AttachedTerminal {
         &mut self,
         height: u16,
         dialog: bool,
-        render: impl FnOnce(&mut ratatui::Frame<'_>),
+        render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<(), TerminalError> {
         self.prepare_frame_height(height, dialog)?;
         let terminal = self.terminal.as_mut().expect("owned terminal");
-        terminal.draw(render)?;
+        let classic = self.mode == TerminalMode::Classic;
+        terminal.draw(|frame| {
+            let area = if dialog && classic {
+                dialog_area(frame.area(), height, classic)
+            } else {
+                frame.area()
+            };
+            render(frame, area);
+        })?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
         Ok(())
@@ -1475,7 +1484,7 @@ impl AttachedTerminal {
             .map(TerminalNotice::text);
         let palette = self.palette();
         let armed = self.dialog_armed;
-        self.draw_frame(height, false, |frame| {
+        self.draw_frame(height, false, |frame, _| {
             draw_frame_with_history(
                 frame,
                 &model,
@@ -1580,9 +1589,10 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame| {
+        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame, area| {
             draw_setup_frame(
                 frame,
+                area,
                 step,
                 title,
                 instruction,
@@ -1614,8 +1624,8 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame| {
-            draw_setup_text_frame(frame, title, instruction, draft, notice, palette)
+        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame, area| {
+            draw_setup_text_frame(frame, area, title, instruction, draft, notice, palette)
         })?;
         Ok(())
     }
@@ -1650,9 +1660,10 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(8, true, |frame| {
+        self.draw_frame(8, true, |frame, area| {
             draw_setup_choices_frame(
                 frame,
+                area,
                 title,
                 instruction,
                 choices,
@@ -1689,10 +1700,11 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::setup_warning_height(warning, width);
-        self.draw_frame(height, true, |frame| {
-            visible = frame.area().width >= 16 && frame.area().height >= 8;
+        self.draw_frame(height, true, |frame, area| {
+            visible = area.width >= 16 && area.height >= 8;
             has_more = draw_setup_warning_frame(
                 frame,
+                area,
                 title,
                 warning,
                 page,

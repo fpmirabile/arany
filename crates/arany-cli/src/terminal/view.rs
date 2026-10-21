@@ -83,6 +83,7 @@ fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
 
 pub(super) fn draw_permission_frame(
     frame: &mut Frame,
+    full: Rect,
     lines: &[String],
     state: PermissionFrameState<'_>,
 ) -> PermissionFrameProgress {
@@ -98,7 +99,6 @@ pub(super) fn draw_permission_frame(
         palette,
         boxed,
     } = state;
-    let full = frame.area();
     let gutter = if boxed {
         0
     } else if full.width >= 40 {
@@ -647,8 +647,13 @@ fn setup_area(full: Rect) -> Rect {
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_frame(
     frame: &mut Frame,
+    full: Rect,
     step: u8,
     title: &str,
     instruction: &str,
@@ -656,7 +661,7 @@ pub(super) fn draw_setup_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let area = setup_area(frame.area());
+    let area = setup_area(full);
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -726,13 +731,14 @@ pub(super) fn draw_setup_frame(
 
 pub(super) fn draw_setup_text_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     instruction: &str,
     draft: &Composer,
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let area = setup_area(frame.area());
+    let area = setup_area(full);
     if area.width < 3 || area.height < 6 {
         return;
     }
@@ -793,8 +799,13 @@ pub(super) fn draw_setup_text_frame(
     });
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_choices_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     instruction: &str,
     choices: &[(u8, &str)],
@@ -802,7 +813,6 @@ pub(super) fn draw_setup_choices_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    let full = frame.area();
     let height = full.height.min(8);
     let width = full.width.min(64);
     let area = Rect::new(
@@ -897,8 +907,13 @@ pub(super) fn setup_warning_height(warning: &str, width: u16) -> u16 {
     .clamp(8, 16)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dialog content and its explicit rendering bounds stay together"
+)]
 pub(super) fn draw_setup_warning_frame(
     frame: &mut Frame,
+    full: Rect,
     title: &str,
     warning: &str,
     page: usize,
@@ -906,7 +921,6 @@ pub(super) fn draw_setup_warning_frame(
     notice: Option<&str>,
     palette: Palette,
 ) -> bool {
-    let full = frame.area();
     let width = full.width.min(72);
     let height = full.height.min(16);
     if width == 0 || height < 8 {
