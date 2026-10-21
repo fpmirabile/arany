@@ -410,28 +410,15 @@ fn choice_style(focus: Option<usize>, index: usize) -> Style {
     }
 }
 
-fn numbered_line(index: usize, label: &str, selected: usize, width: u16) -> Line<'static> {
+// An unarmed selector shows dim rows with no focus until its input barrier completes.
+fn numbered_line(index: usize, label: &str, focus: Option<usize>, width: u16) -> Line<'static> {
     Line::styled(
         safe_truncate(
-            &numbered_label(index, label, index == selected),
+            &numbered_label(index, label, focus == Some(index)),
             usize::from(width),
         ),
-        choice_style(Some(selected), index),
+        choice_style(focus, index),
     )
-}
-
-// Fullscreen dialogs keep the latest history rows visible above their bottom area.
-pub(super) fn draw_backdrop(frame: &mut Frame, bottom: u16, rows: &[HistoryRow], palette: Palette) {
-    let full = frame.area();
-    let top = full.y + history_top_padding(bottom.saturating_sub(full.y));
-    let height = bottom.saturating_sub(top);
-    let skip = rows.len().saturating_sub(usize::from(height));
-    draw_history_rows(
-        frame,
-        Rect::new(full.x, top, full.width, height),
-        &rows[skip..],
-        palette,
-    );
 }
 
 pub(super) fn draw_tool_approval_frame(
@@ -1374,6 +1361,7 @@ pub(super) fn draw_session_picker_frame(
     area: Rect,
     items: &[SessionListItem],
     selected: usize,
+    armed: bool,
     palette: Palette,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -1389,7 +1377,12 @@ pub(super) fn draw_session_picker_frame(
     let start = session_picker_start(selected, rows);
     for (row, item) in items.iter().enumerate().skip(start).take(rows) {
         frame.render_widget(
-            Paragraph::new(numbered_line(row, &item.title, selected, area.width)),
+            Paragraph::new(numbered_line(
+                row,
+                &item.title,
+                armed.then_some(selected),
+                area.width,
+            )),
             Rect::new(area.x, area.y + 1 + (row - start) as u16, area.width, 1),
         );
     }
@@ -1433,7 +1426,7 @@ pub(super) fn draw_session_picker_frame(
             );
         }
     }
-    if area.height >= 2 {
+    if armed && area.height >= 2 {
         let hint = if area.width < 20 {
             "Up/Dn Enter Esc"
         } else if area.width < 24 {
@@ -1681,6 +1674,7 @@ pub(super) fn draw_quick_actions_frame(
     frame: &mut Frame,
     area: Rect,
     selected: usize,
+    armed: bool,
     has_draft: bool,
     palette: Palette,
 ) {
@@ -1723,11 +1717,16 @@ pub(super) fn draw_quick_actions_frame(
         .min(labels.len().saturating_sub(visible));
     for (index, label) in labels.into_iter().enumerate().skip(first).take(visible) {
         frame.render_widget(
-            Paragraph::new(numbered_line(index, label, selected, area.width)),
+            Paragraph::new(numbered_line(
+                index,
+                label,
+                armed.then_some(selected),
+                area.width,
+            )),
             Rect::new(area.x, area.y + 1 + (index - first) as u16, area.width, 1),
         );
     }
-    if area.height >= 2 {
+    if armed && area.height >= 2 {
         let hint = if selected == 2 && has_draft {
             if area.width < 20 {
                 "Draft first Esc"
@@ -1752,11 +1751,28 @@ pub(super) fn draw_quick_actions_frame(
     }
 }
 
+// A row too wide for one line puts its value on the next, so a change stays visible.
+fn settings_stacked(rows: &[String], width: usize) -> bool {
+    rows.iter()
+        .enumerate()
+        .any(|(index, row)| numbered_label(index, row, false).width() > width)
+}
+
+pub(super) fn settings_height(rows: &[String], width: u16) -> u16 {
+    let lines_per_row = if settings_stacked(rows, usize::from(width)) {
+        2
+    } else {
+        1
+    };
+    u16::try_from(rows.len() * lines_per_row + 2).unwrap_or(u16::MAX)
+}
+
 pub(super) fn draw_settings_frame(
     frame: &mut Frame,
     area: Rect,
     rows: &[String],
     selected: usize,
+    armed: bool,
     notice: Option<&str>,
     palette: Palette,
 ) {
@@ -1768,15 +1784,35 @@ pub(super) fn draw_settings_frame(
         Paragraph::new("Settings").style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let visible = usize::from(area.height.saturating_sub(2));
+    let width = usize::from(area.width);
+    let focus = armed.then_some(selected);
+    let stacked = settings_stacked(rows, width);
+    let lines_per_row = if stacked { 2 } else { 1 };
+    let visible = usize::from(area.height.saturating_sub(2)) / lines_per_row;
     let start = session_picker_start(selected, visible);
     for (index, row) in rows.iter().enumerate().skip(start).take(visible) {
+        let y = area.y + 1 + ((index - start) * lines_per_row) as u16;
+        let (label, value) = match row.split_once(": ") {
+            Some((name, value)) if stacked => (name, Some(value)),
+            _ => (row.as_str(), None),
+        };
         frame.render_widget(
-            Paragraph::new(numbered_line(index, row, selected, area.width)),
-            Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
+            Paragraph::new(numbered_line(index, label, focus, area.width)),
+            Rect::new(area.x, y, area.width, 1),
         );
+        if let Some(value) = value {
+            let indent = 5.min(width.saturating_sub(value.width()));
+            frame.render_widget(
+                Paragraph::new(Line::styled(
+                    safe_truncate(&format!("{}{value}", " ".repeat(indent)), width),
+                    choice_style(focus, index),
+                )),
+                Rect::new(area.x, y + 1, area.width, 1),
+            );
+        }
     }
-    if area.height >= 2 {
+    // The key hint appears once armed, telling the user that input now counts.
+    if area.height >= 2 && (armed || notice.is_some()) {
         let (footer, style) = match notice {
             Some(notice) => (notice, palette.attention()),
             None if area.width < 50 => ("↑↓ ←→ Enter Esc", Style::default()),
@@ -1792,7 +1828,13 @@ pub(super) fn draw_settings_frame(
     }
 }
 
-pub(super) fn draw_help_frame(frame: &mut Frame, area: Rect, selected: usize, palette: Palette) {
+pub(super) fn draw_help_frame(
+    frame: &mut Frame,
+    area: Rect,
+    selected: usize,
+    armed: bool,
+    palette: Palette,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -1831,7 +1873,12 @@ pub(super) fn draw_help_frame(frame: &mut Frame, area: Rect, selected: usize, pa
             command
         };
         frame.render_widget(
-            Paragraph::new(numbered_line(index, &line, selected, area.width)),
+            Paragraph::new(numbered_line(
+                index,
+                &line,
+                armed.then_some(selected),
+                area.width,
+            )),
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
     }
@@ -1847,16 +1894,19 @@ pub(super) fn draw_help_frame(frame: &mut Frame, area: Rect, selected: usize, pa
         } else {
             format!("{}/{} · Up/Down · Enter/Esc close", selected + 1, count)
         };
-        frame.render_widget(
-            Paragraph::new(safe_truncate(&hint, usize::from(area.width))),
-            Rect::new(area.x, area.bottom() - 1, area.width, 1),
-        );
+        if armed {
+            frame.render_widget(
+                Paragraph::new(safe_truncate(&hint, usize::from(area.width))),
+                Rect::new(area.x, area.bottom() - 1, area.width, 1),
+            );
+        }
     }
 }
 
 pub(super) fn draw_model_catalog_frame(
     frame: &mut Frame,
     picker: &super::ModelPicker<'_>,
+    armed: bool,
     composer: &Composer,
     model: &PresentationModel,
     palette: Palette,
@@ -1952,7 +2002,7 @@ pub(super) fn draw_model_catalog_frame(
     }
     for (row, item) in picker.items.iter().skip(start).take(rows).enumerate() {
         let index = start + row;
-        let focused = index == selected;
+        let focused = armed && index == selected;
         let prefix = numbered_label(index, "", focused).width();
         let suffix = if focused {
             format!(
@@ -1973,7 +2023,7 @@ pub(super) fn draw_model_catalog_frame(
             Paragraph::new(numbered_line(
                 index,
                 &format!("{id}{suffix}"),
-                selected,
+                armed.then_some(selected),
                 area.width,
             )),
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
@@ -1993,7 +2043,7 @@ pub(super) fn draw_model_catalog_frame(
     } else {
         "Enter selects both · Esc keeps draft · Type/BS filter · PgUp/PgDn"
     };
-    for (offset, text) in [(2, navigation), (1, action)] {
+    for (offset, text) in [(2, navigation), (1, action)].into_iter().filter(|_| armed) {
         frame.render_widget(
             Paragraph::new(safe_truncate(text, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - offset, area.width, 1),
@@ -2048,6 +2098,7 @@ pub(super) fn draw_agent_inspector_frame(
     area: Rect,
     model: &AgentInspectorModel,
     scroll: usize,
+    armed: bool,
     palette: Palette,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -2062,7 +2113,12 @@ pub(super) fn draw_agent_inspector_frame(
     let start = model.selected.saturating_sub(choices.saturating_sub(1));
     for (index, choice) in model.choices.iter().enumerate().skip(start).take(choices) {
         frame.render_widget(
-            Paragraph::new(numbered_line(index, choice, model.selected, area.width)),
+            Paragraph::new(numbered_line(
+                index,
+                choice,
+                armed.then_some(model.selected),
+                area.width,
+            )),
             Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
         );
     }
@@ -2081,7 +2137,7 @@ pub(super) fn draw_agent_inspector_frame(
             Rect::new(area.x, detail_y + index as u16, area.width, 1),
         );
     }
-    if area.height > 1 {
+    if armed && area.height > 1 {
         let hint = if area.width < 20 {
             "Esc Up/Dn Pg"
         } else {

@@ -154,9 +154,12 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                     .windows(8)
                     .filter(|part| *part == b"\x1b[?1000h")
                     .count();
-                let frame_complete = [b"Stable".as_slice(), b"Esc", b"\x1b[?25l"]
-                    .iter()
-                    .all(|cue| bytes.windows(cue.len()).any(|part| part == *cue));
+                let armed_with = |from: usize| {
+                    super::armed_selector(bytes, from, columns.into(), rows.into()).is_some_and(
+                        |screen| screen.iter().any(|row| row.starts_with("› 1. Stable")),
+                    )
+                };
+                let frame_complete = armed_with(0);
                 if !signalled && enabled == captures && frame_complete {
                     assert_ne!(crate::process::terminal_settings(&probe), before);
                     kill_process(pid, if suspend { Signal::TSTP } else { signal }).unwrap();
@@ -185,17 +188,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                     kill_process(pid, Signal::CONT).unwrap();
                     suspended = true;
                 }
-                if suspended
-                    && !continued
-                    && enabled == 2 * captures
-                    && bytes[resumed_at..]
-                        .windows(6)
-                        .any(|part| part == b"\x1b[?25l")
-                    && (fullscreen
-                        || bytes[resumed_at..]
-                            .windows(b"Stable".len())
-                            .any(|part| part == b"Stable"))
-                {
+                if suspended && !continued && enabled == 2 * captures && armed_with(resumed_at) {
                     assert_ne!(crate::process::terminal_settings(&probe), before);
                     kill_process(pid, signal).unwrap();
                     continued = true;
@@ -334,9 +327,14 @@ fn native_resume_picker_renderer_failure_restores_surviving_terminal() {
                     Err(error) => panic!("native picker output: {error}"),
                 }
                 crate::process::decline_workspace_consent(&mut input, &transcript, &mut declined);
-                if [b"Stable".as_slice(), b"Esc", b"\x1b[?1000h", b"\x1b[?25l"]
-                    .iter()
-                    .all(|cue| transcript.windows(cue.len()).any(|part| part == *cue))
+                // The redraw key below acts only once the picker is armed.
+                if transcript
+                    .windows(b"\x1b[?1000h".len())
+                    .any(|part| part == b"\x1b[?1000h")
+                    && super::armed_selector(&transcript, 0, columns.into(), rows.into())
+                        .is_some_and(|screen| {
+                            screen.iter().any(|row| row.starts_with("› 1. Stable"))
+                        })
                 {
                     break;
                 }
@@ -1192,9 +1190,10 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     8 => (b"local controls", b"\x1b"),
                     _ => (cursor, b"/exit\r"),
                 };
+                // A selector takes keys only once its armed frame is drawn.
                 if tail.windows(needle.len()).any(|part| part == needle)
                     && (!matches!(stage, 4 | 6 | 8)
-                        || tail.windows(6).any(|part| part == b"\x1b[?25l"))
+                        || super::armed_selector(bytes, from, 80, 24).is_some())
                 {
                     if matches!(stage, 5 | 7 | 9) {
                         assert!(

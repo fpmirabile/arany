@@ -7,6 +7,7 @@ pub(super) async fn inspect(
 ) -> Result<Option<ShutdownSignal>, String> {
     terminal
         .open_agents(view, false)
+        .await
         .map_err(|error| error.to_string())?;
     loop {
         let input = terminal

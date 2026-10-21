@@ -319,13 +319,7 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let mut answered = 0;
     let mut declined = false;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !stderr_bytes
-        .windows(b"Esc".len())
-        .any(|part| part == b"Esc")
-        || !stderr_bytes
-            .windows(b"\x1b[?25l".len())
-            .any(|part| part == b"\x1b[?25l")
-    {
+    while crate::armed_selector(&stderr_bytes, 0, columns.into(), rows.into()).is_none() {
         drain(&mut output, &mut stdout_bytes);
         drain(&mut stderr_master, &mut stderr_bytes);
         crate::process::decline_workspace_consent(&mut input, &stderr_bytes, &mut declined);
@@ -388,8 +382,17 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
                 assert!(queries <= 32, "bounded cursor queries");
                 crate::reply_positioned_cursor_queries(&mut input, &stderr_bytes, &mut answered);
                 let recent = &stderr_bytes[frame_at..];
+                // A reopened picker takes the later redraw key only once armed.
                 if recent.windows(capture.len()).any(|part| part == capture)
                     && recent.windows(cursor.len()).any(|part| part == cursor)
+                    && (keys == b"\r"
+                        || crate::armed_selector(
+                            &stderr_bytes,
+                            frame_at,
+                            columns.into(),
+                            rows.into(),
+                        )
+                        .is_some())
                 {
                     break;
                 }

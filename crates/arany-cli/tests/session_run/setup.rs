@@ -1836,7 +1836,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_arany")));
     assert!(executable.is_absolute() && executable.is_file());
-    for columns in [16, 40] {
+    for columns in [16_u16, 40] {
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace");
@@ -1939,14 +1939,19 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         input
             .write_all(b"\x0b")
             .expect("open local actions with a draft");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            quick_at,
-            b"4. Setup",
-        );
+        // Ctrl+K takes keys only once its armed frame focuses Setup.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !crate::armed_selector(&transcript, quick_at, columns.into(), 8)
+            .is_some_and(|screen| screen.iter().any(|row| row.starts_with("› 4. Setup")))
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "{columns}: armed quick actions missing: {}",
+                tail(&transcript[quick_at..])
+            );
+            thread::yield_now();
+        }
         let quick_setup_at = transcript.len();
         input.write_all(b"\r").expect("open focused setup action");
         wait_for_after(

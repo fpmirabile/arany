@@ -25,9 +25,37 @@ pub(super) struct LinearState {
     permission_mode: Option<arany::ApprovalMode>,
     pub(super) line_open: bool,
     pub(super) newline_pending: bool,
+    unarmed: bool,
+    held_prompt: Option<&'static str>,
 }
 
 impl LinearState {
+    // An unarmed selector prints its rows and holds the prompt until input is admitted.
+    pub(super) fn disarm(&mut self) {
+        self.unarmed = true;
+        self.held_prompt = None;
+    }
+
+    pub(super) fn arm(&mut self, writer: &mut impl Write) -> io::Result<()> {
+        self.unarmed = false;
+        if let Some(prompt) = self.held_prompt.take() {
+            writeln!(writer, "{prompt}")?;
+            self.line_open = true;
+            self.prompt_needed = false;
+        }
+        writer.flush()
+    }
+
+    fn write_prompt(&mut self, writer: &mut impl Write, prompt: &'static str) -> io::Result<()> {
+        if self.unarmed {
+            self.held_prompt = Some(prompt);
+            return Ok(());
+        }
+        writeln!(writer, "{prompt}")?;
+        self.line_open = true;
+        Ok(())
+    }
+
     pub(super) fn draw_tool_approval(
         &mut self,
         id: uuid::Uuid,
@@ -128,6 +156,8 @@ impl LinearState {
             permission_mode: None,
             line_open: false,
             newline_pending: false,
+            unarmed: false,
+            held_prompt: None,
         }
     }
 
@@ -531,9 +561,8 @@ impl LinearState {
             writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
         }
         if self.prompt_needed {
-            writeln!(writer, "Input:")?;
+            self.write_prompt(writer, "Input:")?;
             self.prompt_needed = false;
-            self.line_open = true;
         }
         writer.flush()
     }
@@ -581,12 +610,11 @@ impl LinearState {
                 )
             )?;
         }
-        writeln!(
+        self.write_prompt(
             writer,
-            "Choose number, exact ID, n next, p previous, or q close:"
+            "Choose number, exact ID, n next, p previous, or q close:",
         )?;
         self.last_picker_page = Some(start);
-        self.line_open = true;
         writer.flush()
     }
 
@@ -658,12 +686,11 @@ impl LinearState {
                 status
             )?;
         }
-        writeln!(
+        self.write_prompt(
             writer,
-            "Choose number [effort|default], n next, p previous, or q close:"
+            "Choose number [effort|default], n next, p previous, or q close:",
         )?;
         self.last_model_page = Some((start, picker.catalog_state));
-        self.line_open = true;
         writer.flush()
     }
 
@@ -684,11 +711,10 @@ impl LinearState {
         for line in &model.lines {
             writeln!(writer, "{line}")?;
         }
-        writeln!(
+        self.write_prompt(
             writer,
-            "Agent choice: n next, p previous, number select, q close:"
+            "Agent choice: n next, p previous, number select, q close:",
         )?;
-        self.line_open = true;
         writer.flush()
     }
 }
@@ -746,14 +772,20 @@ mod tests {
     }
 
     #[test]
-    fn linear_settings_number_rows_and_reprint_only_after_a_change() {
+    fn linear_settings_number_rows_hold_the_prompt_until_armed_and_reprint_after_a_change() {
         let mut state = LinearState::new("screen-reader");
         let mut output = Vec::new();
         let rows = vec![
             "Slash menu: tabs (tabs|combined)".to_owned(),
             "Goal tokens: unlimited (number or unlimited)".to_owned(),
         ];
+        state.disarm();
         state.write_settings(&mut output, &rows, None).unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output).contains("Input:"),
+            "an unarmed selector holds its prompt"
+        );
+        state.arm(&mut output).unwrap();
         state.write_settings(&mut output, &rows, None).unwrap();
         state.prompt_needed = true;
         state.line_open = false;

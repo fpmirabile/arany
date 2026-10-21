@@ -52,6 +52,81 @@ fn reply_positioned_cursor_queries(
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
+    let mut grid = vec![vec![' '; columns]; rows];
+    let (mut row, mut column) = (0, 0);
+    let text = String::from_utf8_lossy(transcript);
+    let mut chars = text.chars().peekable();
+    while let Some(character) = chars.next() {
+        match character {
+            '\x1b' if chars.peek() == Some(&'[') => {
+                chars.next();
+                let mut parameters = String::new();
+                let mut command = None;
+                for next in chars.by_ref() {
+                    if ('@'..='~').contains(&next) {
+                        command = Some(next);
+                        break;
+                    }
+                    parameters.push(next);
+                }
+                let mut values = parameters
+                    .trim_start_matches('?')
+                    .split(';')
+                    .map(|value| value.parse::<usize>().unwrap_or(0));
+                let first = values.next().unwrap_or(0);
+                match command {
+                    Some('H') => {
+                        row = first.max(1).min(rows) - 1;
+                        column = values.next().unwrap_or(1).max(1).min(columns) - 1;
+                    }
+                    Some('J') if first == 2 || first == 3 => {
+                        grid.iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('J') => {
+                        grid[row][column..].fill(' ');
+                        grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
+                    }
+                    Some('K') => grid[row][column..].fill(' '),
+                    _ => {}
+                }
+            }
+            '\r' => column = 0,
+            '\n' => row = (row + 1).min(rows - 1),
+            character if !character.is_control() && column < columns => {
+                grid[row][column] = character;
+                column += 1;
+            }
+            _ => {}
+        }
+    }
+    grid.into_iter()
+        .map(|line| line.into_iter().collect())
+        .collect()
+}
+
+// A selector takes keys only once armed: its finished frame shows the focused `› N.` row.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn armed_selector(bytes: &[u8], from: usize, columns: usize, rows: usize) -> Option<Vec<String>> {
+    let end = from
+        + bytes[from..]
+            .windows(6)
+            .rposition(|part| part == b"\x1b[?25l")?
+        + 6;
+    let screen = screen_rows(&bytes[..end], columns, rows);
+    screen
+        .iter()
+        .any(|row| {
+            row.strip_prefix("› ")
+                .and_then(|rest| rest.split_once(". "))
+                .is_some_and(|(number, _)| {
+                    !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+                })
+        })
+        .then_some(screen)
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
     let mut rows = Vec::new();
     for (start, _) in bytes

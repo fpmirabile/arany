@@ -1,6 +1,6 @@
 use super::{Admission, Selector};
 use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalInput};
-use arany::{SessionId, SessionListItem, StateRoot, list_sessions};
+use arany::{SessionId, SessionListItem, SessionView, StateRoot, list_sessions};
 use std::str::FromStr;
 
 pub(super) enum PickerChoice {
@@ -20,7 +20,7 @@ pub(super) enum QuickChoice {
 pub(super) async fn pick_quick_action(
     terminal: &mut AttachedTerminal,
     composer: &Composer,
-    setup_required: bool,
+    view: &SessionView,
 ) -> Result<QuickChoice, String> {
     let action = |index| match index {
         0 => Selector::Models,
@@ -28,11 +28,23 @@ pub(super) async fn pick_quick_action(
         2 => Selector::Resume,
         _ => Selector::Setup,
     };
-    let mut selected = if setup_required { 3 } else { 0 };
+    let mut selected = if view.defaults.provider.is_none() {
+        3
+    } else {
+        0
+    };
+    terminal.begin_dialog();
     loop {
         terminal
-            .draw_quick_actions(selected, !composer.is_empty())
+            .draw_quick_actions(selected, !composer.is_empty(), view)
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         let input = terminal
             .next_input()
             .await
@@ -62,8 +74,9 @@ pub(super) async fn pick_quick_action(
 pub(super) async fn pick_session(
     terminal: &mut AttachedTerminal,
     admission: &Admission,
-    fallback: Option<&arany::SessionDefaults>,
+    view: Option<&SessionView>,
 ) -> Result<PickerChoice, String> {
+    let fallback = view.map(|view| &view.defaults);
     let root = match StateRoot::open_existing(&admission.state_dir) {
         Ok(root) => root,
         Err(_) => {
@@ -97,10 +110,11 @@ pub(super) async fn pick_session(
             }
         }
     }
+    terminal.begin_dialog();
     let result = if terminal.is_linear() {
         pick_session_linear(terminal, &items).await
     } else {
-        pick_session_inline(terminal, &items).await
+        pick_session_inline(terminal, &items, view).await
     };
     terminal
         .close_sessions()
@@ -111,12 +125,20 @@ pub(super) async fn pick_session(
 async fn pick_session_inline(
     terminal: &mut AttachedTerminal,
     items: &[SessionListItem],
+    view: Option<&SessionView>,
 ) -> Result<PickerChoice, String> {
     let mut selected = 0;
     loop {
         terminal
-            .draw_sessions(items, selected)
+            .draw_sessions(items, selected, view)
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         match terminal
             .next_input()
             .await
@@ -180,8 +202,15 @@ async fn pick_session_linear(
     let mut too_long = false;
     loop {
         terminal
-            .draw_sessions(items, start)
+            .draw_sessions(items, start, None)
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         match terminal
             .next_input()
             .await

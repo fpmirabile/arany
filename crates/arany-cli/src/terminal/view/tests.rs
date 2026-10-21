@@ -171,6 +171,7 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
                         frame,
                         bottom_area(frame.area(), 20),
                         selected,
+                        true,
                         Palette { color: false },
                     )
                 })
@@ -207,6 +208,7 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
                     frame,
                     bottom_area(frame.area(), 20),
                     index,
+                    true,
                     Palette { color: false },
                 )
             })
@@ -2249,6 +2251,7 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                     bottom_area(frame.area(), 12),
                     &items,
                     14,
+                    true,
                     Palette { color: false },
                 )
             })
@@ -2295,6 +2298,7 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
                     bottom_area(frame.area(), 12),
                     &items,
                     14,
+                    true,
                     Palette { color: true },
                 )
             })
@@ -2307,15 +2311,7 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
 }
 
 #[test]
-fn inline_dialogs_number_rows_below_the_latest_history_at_every_geometry() {
-    let backdrop = (0..30)
-        .map(|index| HistoryRow {
-            text: format!("history {index}"),
-            speaker: MessageKind::Assistant,
-            heading: false,
-            matched: false,
-        })
-        .collect::<Vec<_>>();
+fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
     let items = ["First", "Second", "Third"]
         .into_iter()
         .map(|title| SessionListItem {
@@ -2327,9 +2323,12 @@ fn inline_dialogs_number_rows_below_the_latest_history_at_every_geometry() {
             defaults: arany::SessionDefaults::default(),
         })
         .collect::<Vec<_>>();
-    let settings = (1..=11)
-        .map(|row| format!("Setting {row}: value"))
-        .collect::<Vec<_>>();
+    let settings = vec![
+        "Slash menu: tabs".to_owned(),
+        "Chat view: classic".to_owned(),
+        "Goal tokens: unlimited".to_owned(),
+        "Build cache bytes: 8589934592".to_owned(),
+    ];
     let agents = AgentInspectorModel {
         selected: 1,
         choices: vec![
@@ -2343,73 +2342,115 @@ fn inline_dialogs_number_rows_below_the_latest_history_at_every_geometry() {
     };
     for width in [80, 50, 16] {
         for height in [8, 24] {
-            let cases: [(&str, u16, &str); 5] = [
-                ("quick actions", 6, "› 2. "),
-                ("resume", 9, "› 1. "),
-                ("help", 20, "› 1. /help"),
-                ("settings", 13, "› 11. "),
-                ("agents", 8, "› 2. "),
-            ];
-            for (name, dialog_height, focused) in cases {
-                let mut terminal =
-                    Terminal::new(TestBackend::new(width, height)).expect("dialog terminal");
-                let mut area = Rect::default();
-                terminal
-                    .draw(|frame| {
-                        area = bottom_area(frame.area(), dialog_height);
-                        draw_backdrop(frame, area.y, &backdrop, Palette { color: false });
-                        let palette = Palette { color: false };
-                        match name {
-                            "quick actions" => {
-                                draw_quick_actions_frame(frame, area, 1, false, palette);
+            for armed in [false, true] {
+                let cases: [(&str, u16, &str); 5] = [
+                    ("quick actions", 6, "› 2. "),
+                    ("resume", 9, "› 1. "),
+                    ("help", 20, "› 1. /help"),
+                    ("settings", settings_height(&settings, width), "› 4. "),
+                    ("agents", 8, "› 2. "),
+                ];
+                for (name, dialog_height, focused) in cases {
+                    let mut terminal =
+                        Terminal::new(TestBackend::new(width, height)).expect("dialog terminal");
+                    let mut area = Rect::default();
+                    terminal
+                        .draw(|frame| {
+                            frame.render_widget(
+                                Paragraph::new("history ".repeat(400)).wrap(Wrap { trim: false }),
+                                frame.area(),
+                            );
+                            area = bottom_area(frame.area(), dialog_height);
+                            let palette = Palette { color: false };
+                            match name {
+                                "quick actions" => {
+                                    draw_quick_actions_frame(frame, area, 1, armed, false, palette);
+                                }
+                                "resume" => {
+                                    draw_session_picker_frame(
+                                        frame, area, &items, 0, armed, palette,
+                                    );
+                                }
+                                "help" => draw_help_frame(frame, area, 0, armed, palette),
+                                "settings" => draw_settings_frame(
+                                    frame, area, &settings, 3, armed, None, palette,
+                                ),
+                                _ => draw_agent_inspector_frame(
+                                    frame, area, &agents, 0, armed, palette,
+                                ),
                             }
-                            "resume" => draw_session_picker_frame(frame, area, &items, 0, palette),
-                            "help" => draw_help_frame(frame, area, 0, palette),
-                            "settings" => {
-                                draw_settings_frame(frame, area, &settings, 10, None, palette);
-                            }
-                            _ => draw_agent_inspector_frame(frame, area, &agents, 0, palette),
-                        }
-                    })
-                    .expect("dialog frame");
-                let buffer = terminal.backend().buffer();
-                let rows = (0..height)
-                    .map(|y| buffer_row(buffer, y))
-                    .collect::<Vec<_>>();
-                let context = format!("{name} at {width}x{height}: {rows:?}");
-                assert_eq!(area.bottom(), height, "{context}");
-                assert!(rows[usize::from(height - 1)].contains("Esc"), "{context}");
-                let focus = (area.y..height)
-                    .find(|y| rows[usize::from(*y)].starts_with(focused))
-                    .unwrap_or_else(|| panic!("focused row missing in {context}"));
-                assert!(
-                    buffer[(0, focus)].modifier.contains(Modifier::REVERSED),
-                    "{context}"
-                );
-                assert!(
-                    rows[usize::from(area.y)..]
-                        .iter()
-                        .any(|row| row.starts_with("  ") && row.contains(". ")),
-                    "unfocused numbered row in {context}"
-                );
-                assert!(
-                    rows[usize::from(area.y)..]
-                        .iter()
-                        .all(|row| !row.contains("history")),
-                    "{context}"
-                );
-                if area.y > 0 {
-                    assert!(
-                        rows[usize::from(area.y - 1)].starts_with("history 29"),
+                        })
+                        .expect("dialog frame");
+                    let buffer = terminal.backend().buffer();
+                    let rows = (0..height)
+                        .map(|y| buffer_row(buffer, y))
+                        .collect::<Vec<_>>();
+                    let context = format!("{name} armed {armed} at {width}x{height}: {rows:?}");
+                    assert_eq!(area.bottom(), height, "{context}");
+                    // The key hint is the arming cue.
+                    assert_eq!(
+                        rows[usize::from(height - 1)].contains("Esc"),
+                        armed,
                         "{context}"
                     );
+                    let dialog = &rows[usize::from(area.y)..];
+                    assert!(
+                        dialog.iter().all(|row| !row.contains("history")),
+                        "the dialog clears its own rows: {context}"
+                    );
+                    let numbered = (area.y..height)
+                        .filter(|y| {
+                            rows[usize::from(*y)]
+                                .chars()
+                                .skip(2)
+                                .collect::<String>()
+                                .split_once(". ")
+                                .is_some_and(|(number, _)| {
+                                    !number.is_empty()
+                                        && number.bytes().all(|byte| byte.is_ascii_digit())
+                                })
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(numbered.len() >= 2, "numbered rows in {context}");
+                    if armed {
+                        let focus = (area.y..height)
+                            .find(|y| rows[usize::from(*y)].starts_with(focused))
+                            .unwrap_or_else(|| panic!("focused row missing in {context}"));
+                        assert!(
+                            buffer[(0, focus)].modifier.contains(Modifier::REVERSED),
+                            "{context}"
+                        );
+                    } else {
+                        assert!(
+                            dialog.iter().all(|row| !row.starts_with('›')),
+                            "an unarmed selector shows no focus: {context}"
+                        );
+                        for y in numbered {
+                            assert!(buffer[(2, y)].modifier.contains(Modifier::DIM), "{context}");
+                        }
+                    }
+                    if name == "settings" {
+                        // A visible value is whole, on its own row when the label is wide.
+                        for value in ["tabs", "classic", "unlimited", "8589934592"] {
+                            if dialog.iter().any(|row| row.contains(&value[..3])) {
+                                assert!(
+                                    dialog.iter().any(|row| row.contains(value)),
+                                    "{value} clipped in {context}"
+                                );
+                            }
+                        }
+                        assert!(
+                            dialog.iter().any(|row| row.contains("8589934592")),
+                            "focused value visible in {context}"
+                        );
+                    }
+                    assert!(
+                        buffer
+                            .content()
+                            .iter()
+                            .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
+                    );
                 }
-                assert!(
-                    buffer
-                        .content()
-                        .iter()
-                        .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
-                );
             }
         }
     }
@@ -2431,6 +2472,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                                     frame,
                                     bottom_area(frame.area(), 6),
                                     selected,
+                                    true,
                                     has_draft,
                                     Palette { color },
                                 )
@@ -2542,6 +2584,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                                     invalid: false,
                                     catalog_state,
                                 },
+                                true,
                                 &composer,
                                 &model,
                                 Palette { color },
@@ -2645,6 +2688,7 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
                             invalid: false,
                             catalog_state: crate::terminal::ModelCatalogState::Current,
                         },
+                        true,
                         &composer,
                         &model,
                         Palette { color: false },
@@ -2699,6 +2743,7 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
                     bottom_area(frame.area(), 14),
                     &model,
                     0,
+                    true,
                     Palette { color: false },
                 )
             })
@@ -2743,6 +2788,7 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
                 bottom_area(frame.area(), 14),
                 &model,
                 0,
+                true,
                 Palette { color: false },
             )
         })
@@ -3298,6 +3344,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                             bottom_area(frame.area(), 14),
                             &inspector,
                             scroll,
+                            true,
                             Palette { color },
                         )
                     })

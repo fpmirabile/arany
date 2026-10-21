@@ -374,7 +374,7 @@ pub struct AttachedTerminal {
     active_run: Option<arany::RunId>,
     history: History,
     classic_history: History,
-    backdrop: Vec<history::HistoryRow>,
+    dialog_armed: bool,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
     mouse_capture: Option<MouseCapture>,
@@ -584,19 +584,7 @@ impl AttachedTerminal {
         terminal.draw(|frame| {
             let area = bottom_area(frame.area(), height);
             if self.mode == TerminalMode::Fullscreen {
-                let history_area = Rect::new(
-                    frame.area().x,
-                    frame.area().y,
-                    frame.area().width,
-                    area.y.saturating_sub(frame.area().y),
-                );
-                // History has a disjoint rectangle and cannot overwrite approval chrome.
-                history.sync(
-                    session,
-                    usize::from(history_area.width),
-                    usize::from(history_area.height),
-                );
-                view::draw_history_rows(frame, history_area, &history.visible(session), palette);
+                draw_history_above(frame, history, session, area.y, palette);
             }
             more = view::draw_tool_approval_frame(
                 frame,
@@ -685,7 +673,7 @@ impl AttachedTerminal {
             active_run: None,
             history: History::default(),
             classic_history: History::default(),
-            backdrop: Vec::new(),
+            dialog_armed: false,
             input: Some(input),
             _raw_mode: raw_mode,
             mouse_capture: None,
@@ -1269,20 +1257,47 @@ impl AttachedTerminal {
         Ok(())
     }
 
+    // A selector opens unarmed; `arm_dialog` admits input once the reader barrier completes.
+    pub fn begin_dialog(&mut self) {
+        self.dialog_armed = false;
+        if let Some(linear) = &mut self.linear {
+            linear.disarm();
+        }
+    }
+
+    // Returns true when this call armed the selector, so the caller redraws before reading input.
+    pub async fn arm_dialog(&mut self) -> Result<bool, TerminalError> {
+        if self.dialog_armed {
+            return Ok(false);
+        }
+        self.input
+            .as_mut()
+            .expect("active terminal input")
+            .discard_typeahead()
+            .await?;
+        self.dialog_armed = true;
+        if let Some(linear) = &mut self.linear {
+            linear.arm(&mut io::stderr())?;
+        }
+        Ok(true)
+    }
+
     fn draw_dialog(
         &mut self,
+        session: Option<&SessionView>,
         height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<Rect, TerminalError> {
         self.prepare_frame_height(height)?;
         let palette = self.palette();
-        let backdrop = (self.mode == TerminalMode::Fullscreen).then_some(self.backdrop.as_slice());
+        let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
+        let history = &mut self.history;
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let mut area = Rect::default();
         terminal.draw(|frame| {
             area = bottom_area(frame.area(), height);
-            if let Some(rows) = backdrop {
-                view::draw_backdrop(frame, area.y, rows, palette);
+            if let Some(session) = session {
+                draw_history_above(frame, history, session, area.y, palette);
             }
             render(frame, area);
         })?;
@@ -1304,7 +1319,7 @@ impl AttachedTerminal {
                 .map(TerminalNotice::Transient)
         });
         if let Some(selected) = self.help_selected {
-            return self.draw_help(selected);
+            return self.draw_help(selected, view);
         }
         if self.agent_panel.is_some() {
             return self.draw_agents(view);
@@ -1412,8 +1427,7 @@ impl AttachedTerminal {
             self.history_mut().record_notice(notice);
         }
         let history_rows = if self.mode == TerminalMode::Fullscreen {
-            self.backdrop = self.history_mut().visible(view);
-            self.backdrop.clone()
+            self.history_mut().visible(view)
         } else {
             self.classic_history.live_rows(view)
         };
@@ -1444,6 +1458,7 @@ impl AttachedTerminal {
             })
             .map(TerminalNotice::text);
         let palette = self.palette();
+        let armed = self.dialog_armed;
         self.draw_frame(height, |frame| {
             draw_frame_with_history(
                 frame,
@@ -1455,7 +1470,7 @@ impl AttachedTerminal {
                 history_status.as_deref(),
             );
             if let Some(picker) = picker {
-                draw_model_catalog_frame(frame, picker, composer, &model, palette);
+                draw_model_catalog_frame(frame, picker, armed, composer, &model, palette);
             }
         })?;
         Ok(())
@@ -1773,7 +1788,7 @@ impl AttachedTerminal {
         state: SnapshotState,
     ) -> Result<(), TerminalError> {
         if let Some(selected) = self.help_selected {
-            return self.draw_help(selected);
+            return self.draw_help(selected, view);
         }
         if self.agent_panel.is_some() {
             return self.draw_agents(view);
@@ -1801,6 +1816,7 @@ impl AttachedTerminal {
         &mut self,
         items: &[SessionListItem],
         selected: usize,
+        session: Option<&SessionView>,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
@@ -1812,11 +1828,13 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
+        let armed = self.dialog_armed;
         let result = self.draw_dialog(
+            session,
             u16::try_from(items.len().saturating_add(6))
                 .unwrap_or(u16::MAX)
                 .min(12),
-            |frame, area| draw_session_picker_frame(frame, area, items, selected, palette),
+            |frame, area| draw_session_picker_frame(frame, area, items, selected, armed, palette),
         );
         match result {
             Ok(area) => {
@@ -1835,6 +1853,7 @@ impl AttachedTerminal {
         rows: &[String],
         selected: usize,
         notice: Option<&str>,
+        session: &SessionView,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
@@ -1843,9 +1862,17 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
+        let armed = self.dialog_armed;
+        let width = self
+            .terminal
+            .as_mut()
+            .expect("owned terminal")
+            .size()?
+            .width;
         self.draw_dialog(
-            u16::try_from(rows.len().saturating_add(2)).unwrap_or(u16::MAX),
-            |frame, area| draw_settings_frame(frame, area, rows, selected, notice, palette),
+            Some(session),
+            view::settings_height(rows, width),
+            |frame, area| draw_settings_frame(frame, area, rows, selected, armed, notice, palette),
         )?;
         Ok(())
     }
@@ -1854,24 +1881,29 @@ impl AttachedTerminal {
         &mut self,
         selected: usize,
         has_draft: bool,
+        session: &SessionView,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         let palette = self.palette();
-        self.draw_dialog(6, |frame, area| {
-            draw_quick_actions_frame(frame, area, selected, has_draft, palette);
+        let armed = self.dialog_armed;
+        self.draw_dialog(Some(session), 6, |frame, area| {
+            draw_quick_actions_frame(frame, area, selected, armed, has_draft, palette);
         })?;
         Ok(())
     }
 
-    pub fn open_help(&mut self) -> Result<(), TerminalError> {
+    pub async fn open_help(&mut self, session: &SessionView) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         if let Some(linear) = &mut self.linear {
             return linear
                 .write_help(&mut io::stderr())
                 .map_err(TerminalError::Io);
         }
+        self.begin_dialog();
         self.help_selected = Some(0);
-        self.draw_help(0)
+        self.draw_help(0, session)?;
+        self.arm_dialog().await?;
+        self.draw_help(0, session)
     }
 
     #[must_use]
@@ -1902,10 +1934,11 @@ impl AttachedTerminal {
         }
     }
 
-    fn draw_help(&mut self, selected: usize) -> Result<(), TerminalError> {
+    fn draw_help(&mut self, selected: usize, session: &SessionView) -> Result<(), TerminalError> {
         let palette = self.palette();
-        self.draw_dialog(20, |frame, area| {
-            draw_help_frame(frame, area, selected, palette);
+        let armed = self.dialog_armed;
+        self.draw_dialog(Some(session), 20, |frame, area| {
+            draw_help_frame(frame, area, selected, armed, palette);
         })?;
         Ok(())
     }
@@ -1980,9 +2013,19 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    pub fn open_agents(&mut self, view: &SessionView, locked: bool) -> Result<(), TerminalError> {
+    pub async fn open_agents(
+        &mut self,
+        view: &SessionView,
+        locked: bool,
+    ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
+        self.begin_dialog();
         self.agent_panel = Some(AgentPanel::new(locked));
+        self.draw_agents(view)?;
+        if let Err(error) = self.arm_dialog().await {
+            let _ = self.close_agents();
+            return Err(error);
+        }
         self.draw_agents(view)
     }
 
@@ -2115,8 +2158,9 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        let area = self.draw_dialog(height, |frame, area| {
-            draw_agent_inspector_frame(frame, area, &model, scroll, palette);
+        let armed = self.dialog_armed;
+        let area = self.draw_dialog(Some(view), height, |frame, area| {
+            draw_agent_inspector_frame(frame, area, &model, scroll, armed, palette);
         })?;
         self.agent_picker_area = Some(area);
         Ok(())
@@ -2184,7 +2228,7 @@ impl AttachedTerminal {
     fn replace_released(&mut self, mut replacement: Self) {
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
-        replacement.backdrop = std::mem::take(&mut self.backdrop);
+        replacement.dialog_armed = self.dialog_armed;
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {
@@ -2203,6 +2247,20 @@ impl AttachedTerminal {
         self.shutdown_clipboard_on_drop = false;
         *self = replacement;
     }
+}
+
+// History keeps a rectangle disjoint from bottom-area chrome, so it cannot overwrite a dialog.
+fn draw_history_above(
+    frame: &mut ratatui::Frame<'_>,
+    history: &mut History,
+    session: &SessionView,
+    bottom: u16,
+    palette: Palette,
+) {
+    let full = frame.area();
+    let area = Rect::new(full.x, full.y, full.width, bottom.saturating_sub(full.y));
+    history.sync(session, usize::from(area.width), usize::from(area.height));
+    view::draw_history_rows(frame, area, &history.visible(session), palette);
 }
 
 fn resize_classic<B: Backend>(

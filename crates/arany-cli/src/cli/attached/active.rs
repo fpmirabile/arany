@@ -874,13 +874,13 @@ pub(super) async fn submit_objective(
                                 Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
                             }),
                             ActiveSubmission::OpenAgents => {
-                                if terminal.open_agents(view, true).is_err() {
+                                if terminal.open_agents(view, true).await.is_err() {
                                     break "terminal rendering failed".to_owned();
                                 }
                                 None
                             }
                             ActiveSubmission::OpenHelp => {
-                                if terminal.open_help().is_err() {
+                                if terminal.open_help(view).await.is_err() {
                                     break "terminal rendering failed".to_owned();
                                 }
                                 None

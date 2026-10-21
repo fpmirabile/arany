@@ -317,11 +317,13 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
+    view: &SessionView,
 ) -> Result<Option<Preferences>, String> {
     let linear = terminal.is_linear();
     let mut selected_row = 0usize;
     let mut answer = Composer::default();
     let mut invalid = false;
+    terminal.begin_dialog();
     loop {
         let notice = std::mem::take(&mut invalid).then_some(if linear {
             "Type NUMBER VALUE from the list; q cancels"
@@ -334,8 +336,15 @@ async fn choose_settings(
             setting_rows(chosen)
         };
         terminal
-            .draw_settings(&rows, selected_row, notice)
+            .draw_settings(&rows, selected_row, notice, view)
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         let input = terminal
             .next_input()
             .await
@@ -386,12 +395,13 @@ pub(super) async fn settings(
     admission: &Admission,
     composer: &mut Composer,
     saved_view: &mut TerminalMode,
+    view: &SessionView,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
     let mut current = restore_settings(admission).await?;
     current.completion = composer.completion_layout();
     current.view = *saved_view;
-    let notice = match choose_settings(terminal, current).await? {
+    let notice = match choose_settings(terminal, current, view).await? {
         None => "Settings unchanged".to_owned(),
         Some(chosen) => match save_settings(admission, chosen).await {
             Ok(()) => {

@@ -22,58 +22,7 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
-    let mut grid = vec![vec![' '; columns]; rows];
-    let (mut row, mut column) = (0, 0);
-    let text = String::from_utf8_lossy(transcript);
-    let mut chars = text.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
-            '\x1b' if chars.peek() == Some(&'[') => {
-                chars.next();
-                let mut parameters = String::new();
-                let mut command = None;
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        command = Some(next);
-                        break;
-                    }
-                    parameters.push(next);
-                }
-                let mut values = parameters
-                    .trim_start_matches('?')
-                    .split(';')
-                    .map(|value| value.parse::<usize>().unwrap_or(0));
-                let first = values.next().unwrap_or(0);
-                match command {
-                    Some('H') => {
-                        row = first.max(1).min(rows) - 1;
-                        column = values.next().unwrap_or(1).max(1).min(columns) - 1;
-                    }
-                    Some('J') if first == 2 || first == 3 => {
-                        grid.iter_mut().for_each(|line| line.fill(' '));
-                    }
-                    Some('J') => {
-                        grid[row][column..].fill(' ');
-                        grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
-                    }
-                    Some('K') => grid[row][column..].fill(' '),
-                    _ => {}
-                }
-            }
-            '\r' => column = 0,
-            '\n' => row = (row + 1).min(rows - 1),
-            character if !character.is_control() && column < columns => {
-                grid[row][column] = character;
-                column += 1;
-            }
-            _ => {}
-        }
-    }
-    grid.into_iter()
-        .map(|line| line.into_iter().collect())
-        .collect()
-}
+pub(super) use crate::screen_rows;
 
 pub(super) fn screen_contains(
     transcript: &[u8],
@@ -238,14 +187,14 @@ fn run_picker_case(
     let mut transcript = Vec::new();
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_rows(&transcript, width.into(), 24)
-        .iter()
-        .any(|line| line.contains("Newer"))
+    // Keys reach the picker only after its armed frame; earlier input is discarded.
+    while !crate::armed_selector(&transcript, 0, width.into(), 24)
+        .is_some_and(|screen| screen.iter().any(|line| line.contains("Newer")))
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
-            "picker not visible in {name}: {}",
+            "armed picker not visible in {name}: {}",
             tail(&transcript)
         );
         thread::yield_now();
@@ -359,14 +308,13 @@ fn run_picker_case(
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let recent = &transcript[open_at..];
-            if recent.windows(6).any(|part| part == b"\x1b[?25l") {
+            if crate::armed_selector(&transcript, open_at, width.into(), 24).is_some() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
                 "attached picker: {}",
-                tail(recent)
+                tail(&transcript[open_at..])
             );
             thread::yield_now();
         }

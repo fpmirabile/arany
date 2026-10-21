@@ -820,9 +820,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 empty_interrupt = None;
             }
             TerminalInput::QuickActions if !terminal.is_linear() => {
-                match pick_quick_action(&mut terminal, &composer, view.defaults.provider.is_none())
-                    .await?
-                {
+                match pick_quick_action(&mut terminal, &composer, &view).await? {
                     QuickChoice::Selected(Selector::Resume) if !composer.is_empty() => {
                         notice = Some(Feedback::History(
                             "Submit or clear this draft before switching Sessions".into(),
@@ -1055,6 +1053,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     &admission,
                                     &mut composer,
                                     &mut saved_view,
+                                    &view,
                                 )
                                 .await?,
                             ));
@@ -1139,7 +1138,10 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await?,
                             );
                         } else if command == InteractiveCommand::Help {
-                            terminal.open_help().map_err(|error| error.to_string())?;
+                            terminal
+                                .open_help(&view)
+                                .await
+                                .map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
                             notice = Some(feedback_or_end(
                                 run_selector(
@@ -1313,7 +1315,7 @@ async fn run_selector(
             None => Ok(Feedback::Transient("Agent inspection closed".into())),
         },
         Selector::Resume => {
-            let choice = pick_session(terminal, admission, Some(&view.defaults)).await?;
+            let choice = pick_session(terminal, admission, Some(view)).await?;
             match choice {
                 PickerChoice::Selected(id) => {
                     let root = open_state(admission)?;
