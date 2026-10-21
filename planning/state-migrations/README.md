@@ -20,7 +20,7 @@ It covers every persisted format: the Event journal (`events.sqlite3`), `checkpo
 - Churn: about 1 in 8 PRs since 2026-10-07 bumped an Event version. Most added a field; some (`ToolFinished`, `RunStarted`) added facts that cannot be reconstructed honestly, so old history cannot be fully upgraded without inventing data.
 - There is no hash chain over Events. Fork boundaries store a `prefix_digest` (`session/lineage.rs`) over re-serialized payloads, so any rewrite must recompute it; checkpoint blob references and compaction `content_digest` must stay valid.
 - Today an incompatible store gives `state storage failed`, or a confirmed "Reset history" that deletes the journal (terminal.md History recovery; exclusive lease and identity checks already exist).
-- Peers: Codex keeps rollout files readable through serde defaults and retained legacy variants, additive-only, with no explicit version. Event-sourcing practice uses upcasters or copy-and-transform migrations, and archive as the fallback.
+- Peer evidence and its limits are in [the research report](../../docs/research/state-migrations-2026-10.md#4-peer-practice).
 - Rules to change: AGENTS.md global rule 5, which forbids migrations, and the "no migration" statements in execution.md, goals.md, terminal.md and credentials.md.
 
 ## Contract and scenarios
@@ -44,7 +44,7 @@ The hybrid: archive as the safety net, plus a copy-transform migration framework
 
 - Runtime keeps one current format. Decoders and the reducer never see old shapes, so strict replay and "one current internal format at runtime" hold.
 - Migration steps are JSON-level `Value -> Value` transforms keyed by (kind, from-version). They run only in a `store::migrate` module, on open, under the existing exclusive lease.
-- Floor = the current versions when slice 2 lands. Anything older is archived (slice 1), so none of today's ~19 historical bumps need transforms. The owner accepted archiving pre-floor history during pre-beta (2026-10-21).
+- Floor = the current versions when slice 2 lands. Anything older is archived (slice 1), so none of today's ~19 historical bumps need transforms; [D-22](../../docs/research/next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns that accepted trade-off.
 - A guard test iterates `payload_version()`, the schema versions and the record versions, and fails when a version is above the floor without a registered step and a fixture.
 - OS impact: none beyond existing atomic rename and private-directory rules on Linux and macOS.
 

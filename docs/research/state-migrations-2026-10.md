@@ -1,6 +1,12 @@
 # State migrations research
 
+- Question: how can Arany preserve stored state across format changes without inventing replay facts?
+- Source-check date: 2026-10-21. Repository inventory is pinned to `40be2a7a`; the Codex revision and evidence limits are in [peer practice](#4-peer-practice).
+- Conclusion: copy-and-transform migrations with an archive safety net fit the replay constraints. The [active plan](../../planning/state-migrations/README.md#chosen-direction) owns the chosen direction; [D-22](./next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns the accepted archive trade-off.
+- Scope: persisted-format inventory, churn, digest constraints and design alternatives; no implementation or native-platform verification claim.
+
 ## 1. Inventory (verified in repo @ main 40be2a7a)
+
 | Format | Owner file | Version today | Rejection |
 |---|---|---|---|
 | events.sqlite3 SQLite schema | crates/arany/src/store/journal.rs (SCHEMA_SQL, `PRAGMA user_version=4`, check ~L162 `version != 4 && !fresh`) | 4 | StoreError::InvalidHistory, no change to data |
@@ -18,15 +24,18 @@
 | workspace-permissions.json | store/state.rs RecordKind::WorkspacePermissions; run.rs fixtures use version 2 | 2 | reject |
 | tools.json, permissions.json | user/workspace-authored | 1 | reject |
 | unguarded-commands.json | arany/src/tools/unguarded_rules.rs | 1 | reject |
-| guard reservation | tools/guard/admission.rs RESERVATION_VERSION 2 (linux)/1 | transient |
+| guard reservation (transient) | [tools/guard/admission.rs](../../crates/arany/src/tools/guard/admission.rs) `RESERVATION_VERSION` | 2 (Linux) / 1 (macOS) | `ToolError::ProtectionUnavailable` on version mismatch |
+
 RecordKind enum (store/state.rs L74) lists 12 JSON record kinds, all in one StateRoot with pending-file atomic replace. Protocol: JSONL/serve emit `event_version` straight from payload_version (protocol.rs L32), so serve clients see version bumps too (external contract).
 Total: ~45 Event kinds across ~19 distinct version numbers, 2 SQLite DBs, ~12 JSON records, 4 check-version strings. Existing user-facing recovery: attached startup "Reset history" (discard, terminal.md ~L207-229) and credential/model resets.
 
 ## 2. Churn
+
 - 201 commits since 2026-10-07 (235 total in repo, first 2026-09-29); 24-29 commits changed the `payload_version` table (git log -G on `=> Some(N)`), i.e. roughly one PR in eight bumps an Event version. 33 commits touched events.rs. Highest counters: ToolFinished 19, RunStarted 17, ProviderCall 13: each ~1 bump per active day. Bumps are mostly "required nullable field added" (execution.md L157/L180), which is the easiest upcast (insert null/default), but several are semantic (ToolFinished checkpoint outcome, before/after digests; RunStarted roster/definition pins) where the old value cannot be reconstructed honestly.
 - Cumulative cost of full upcasting: ~19 version steps across ~11 evolving kinds already, +~1 step/day at current rate.
 
 ## 3. Arany constraints
+
 - Hash/chain: no hash chain over the journal. Only `prefix_digest` (lineage.rs PrefixHasher, SHA-256 of "arany-session-prefix-v1", over sequence, session, run ids, kind, **re-serialized payload text**, created_at) stored in SessionForked/fork boundary events (events.rs L237/L458/L855) and compared in store/journal.rs L424/L453 and replay validation. Consequences: (1) read-time upcasting changes `event.payload()` output so every fork digest and any compaction `content_digest` check would fail unless digest is computed over raw stored bytes or fork digests are recomputed; (2) a copy-and-transform migration must recompute prefix digests for forks in the same rewrite (possible: whole database transformed in one transaction, forks reference sources in same DB). No per-event hash, so rewriting in place is not chain-breaking, but it is digest-breaking.
 - Strict replay: events.rs decode rejects unknown version; execution.md L157/L180 states "No SQL change, migration, dual reader... previous versions and missing fields reject unchanged", goals.md L89, terminal.md L209 ("never interpreted or migrated"). Specs need the same edit as AGENTS.md rule 5.
 - Replay never re-executes, so upcasting is a pure function raw->current struct; but honest-uncertainty requires an upcaster to never fabricate facts: missing required facts must become explicit "unknown"/legacy-marked values or the Session must be marked non-resumable (open Goal/Run/Uncertain effect with unreconstructable fields should be frozen read-only).
@@ -37,21 +46,33 @@ Total: ~45 Event kinds across ~19 distinct version numbers, 2 SQLite DBs, ~12 JS
 - Evidence tables and *_CHECK_VERSION: caches; do not migrate, just drop/recompute.
 
 ## 4. Peer practice
-- Codex CLI (primary: raw.githubusercontent.com/openai/codex/main/codex-rs/protocol/src/protocol.rs, first 100k chars read): no version field on rollout events; tolerant readers via `#[serde(default)]` ("Old rollout files may contain ItemCompleted events ... without this field"), `alias` for renamed wire names (`task_started`/`turn_started`), Optional fields "Absent on older records", and retained legacy variants "for replay of existing rollouts" (ThreadRolledBack). Not read: RolloutItem/SessionMeta definitions (unverified). Net: additive-only evolution, never rewrite files.
-- Claude Code: transcripts are JSONL under ~/.claude/projects with a `version` field per line; resume tolerates older lines (from memory; docs do not specify a compatibility guarantee; unverified).
-- Event sourcing (Greg Young, "Versioning in an Event Sourced System", 2017; Microsoft CQRS Journey; Axon upcasters): upcasting at read time is the recommended default; copy-and-transform (new stream/store) when upcaster chains get long; archive is the "weak schema/never" fallback. Mark: cited from memory, not re-fetched.
+
+- Codex CLI at revision `70b3bb6d8814ab3f2045238b4ae14c43da99783b`: the [protocol source](https://github.com/openai/codex/blob/70b3bb6d8814ab3f2045238b4ae14c43da99783b/codex-rs/protocol/src/protocol.rs#L1513-L1520) retains `ThreadRolledBack` for replay and accepts `turn_started` as an alias for `task_started`. It also [defaults an absent `ItemCompletedEvent.completed_at_ms`](https://github.com/openai/codex/blob/70b3bb6d8814ab3f2045238b4ae14c43da99783b/codex-rs/protocol/src/protocol.rs#L2063-L2079) to keep older persisted events deserializable. These are observed compatibility mechanisms, not evidence that all rollout evolution is additive or that files are never rewritten; rollout storage and migration paths were not investigated.
+- Unresolved: Claude Code transcript compatibility and general event-sourcing recommendations have no verified primary-source evidence in this investigation. They are excluded from the recommendation.
 
 ## 5. Options
+
+Proposal sketches: (a)–(c) are unaccepted alternatives; (d) underlies the [active plan](../../planning/state-migrations/README.md#chosen-direction), which owns the selected details. The accepted pre-floor archive trade-off is recorded in [D-22](./next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor). These sketches do not authorize implementation or replace current contracts.
+
 (a) Read-time upcasters per kind/version. Journal never rewritten. Cost: chain of N steps per kind (ToolFinished 18 steps back to v1; but only need steps from "oldest supported", can set a floor). Existing ~19 bumps: write upcasters only for versions users have (owner's history: unknown floor; set floor = current minus 1 version gap at first). Strict replay: pure and deterministic, fine, but prefix_digest/content_digest need raw-byte hashing or stored digest compat (breaking change itself). Complexity: highest, permanent dual decode paths, every struct change needs a frozen copy of old structs (or JSON-level transforms). Risk: fabricating unknown facts. Slice: upcaster registry in events.rs decode keyed (kind,version)->fn(serde_json::Value)->Value, plus golden-fixture test per bump; start with floor = today.
+
 (b) One-shot migration on open. Backup events.sqlite3 (timestamped, private), transform in a new file with the same JSON-level upcasters (so reducer only ever sees current), recompute fork prefix_digests, validate whole history by strict replay, atomic rename, journal MigrationRecorded. Cost: medium; decoders stay current-only (preserves strict replay and rule "one current format at runtime"). Needs exclusive lease, size bounds, crash-safe (backup first, rename last). Still needs per-version transforms (same ~19 steps) but only in a migration module, not hot path. Slice: `store::migrate` module + schema 4->5 table `schema_migrations`, with a single hardest-case test (ToolFinished vN->current with a fork digest).
+
 (c) Automatic archive. On open, if InvalidHistory/UnknownEvent, move events.sqlite3(+3 sidecars) and checkpoints.sqlite to `archive/history-<ts>/`, create fresh, keep accounts/settings, show notice. Cost: small (reuse reset lease/identity checks in terminal.md L229, replace delete with rename). Old history not lost but not openable (could be opened by a matching older binary). Zero effect on bumps: no per-bump work. Strict replay untouched. Slice: change "Reset history" to "Archive and start fresh" auto path + notice. Does not solve user wanting continuity of sessions/Goals.
-(d) Hybrid: (c) now as the safety net for anything unreadable, plus (b) framework: every bump of payload_version/user_version/record version must add a transform step (JSON-level Value->Value) in a registry, enforced by a test that iterates payload_version() and asserts a transform exists for (kind, current-1) and a fixture; pre-beta floor = current at framework landing (everything older archived via (c)). Post-beta ratchet: floor never rises without a major-version note. Cost: (c) small + framework medium; per-bump cost then ~5-20 lines + fixture. Existing ~19 bumps: not migrated (floor), archived. Recommended.
+
+(d) Hybrid: (c) now as the safety net for anything unreadable, plus (b) framework: every bump of payload_version/user_version/record version must add a transform step (JSON-level Value->Value) in a registry, enforced by a test that iterates payload_version() and asserts a transform exists for (kind, current-1) and a fixture; pre-beta floor = current at framework landing (everything older archived via (c)). Post-beta ratchet: floor never rises without a major-version note. Cost: (c) small + framework medium; per-bump cost then ~5-20 lines + fixture. Existing ~19 bumps: not migrated (floor), archived.
+
 JSON records (ui-preferences, accounts, provider-profiles, workspace-permissions): do per-record JSON `Value` transform in the owning decoder with same registry pattern; for settings v3->v4 it is trivial (add fields with defaults, controls.rs L1771 already has a v3 fixture). Credentials: transform allowed only for non-secret shape changes; failure falls back to existing preserve+explicit reset.
 
 ## 6. AGENTS.md rule 5 text per option
-Current: "5. **No historical residue**: remove superseded code cleanly. During pre-beta, keep one current internal format without compatibility readers, automatic migrations or relocation fallbacks. Reject unsupported stored formats without changing their data; ..."
+
+Proposed wording only, pending acceptance in the [owning instructions](../../AGENTS.md#global-rules); do not apply these alternatives as policy. [D-22](./next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) records the accepted archive trade-off, and the [active plan](../../planning/state-migrations/README.md#vertical-slices) owns implementation work.
+
+Current rule: [AGENTS.md global rule 5](../../AGENTS.md#global-rules).
+
 - (a): "...keep one current internal format; stored formats older than the declared floor are read only through a registered per-version upcaster, never rewritten; below the floor reject without changing data."
 - (b): "...keep one current internal format at runtime. Opening older stored state runs one automatic, backed-up, journaled migration to the current format; there are no compatibility readers; unmigratable state is rejected without changing data."
 - (c): "...keep one current internal format without compatibility readers or migrations. Incompatible history is moved intact to a timestamped archive and replaced by an empty store with a notice; accounts and settings are never archived or altered."
 - (d): "...keep one current internal format at runtime without compatibility readers. Every change to a stored format version ships its migration step and fixture (enforced by a test); state older than the migration floor is archived intact and replaced with a fresh store with a notice. Reject (never silently alter) anything neither migratable nor archivable."
+
 Also edit: docs/specs/execution.md L157/L180, goals.md L89, terminal.md L207-229, credentials.md L66/L76 (reset wording), plus agents/testing.md if a bump-checklist is added.
