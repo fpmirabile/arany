@@ -148,6 +148,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
                 ToolCall::Skill { .. } => ("read", "Read Skill"),
                 ToolCall::List { .. } => ("search", "List"),
                 ToolCall::Search { .. } => ("search", "Search"),
+                ToolCall::Glob { .. } => ("search", "Glob"),
                 _ => ("other", "Tool"),
             };
             let path = call["path"].as_str();

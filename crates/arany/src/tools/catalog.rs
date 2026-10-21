@@ -92,7 +92,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 20] = [
+pub(crate) static ALL: [OperationFacts; 21] = [
     read_row(
         "list",
         Family::File,
@@ -205,19 +205,25 @@ pub(crate) static ALL: [OperationFacts; 20] = [
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
     facts_row("prepare_worker", Family::Preparation, 16, ""),
+    read_row(
+        "glob",
+        Family::File,
+        17,
+        "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+    ),
     git_write_row(
         "git_commit",
-        17,
+        18,
         "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
     ),
     git_write_row(
         "git_branch",
-        18,
+        19,
         "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
-        19,
+        20,
         "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
     ),
 ];
@@ -226,7 +232,7 @@ static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
     mutates: false,
     asks_approval: false,
     prelude: true,
-    ..git_write_row("git_branch", 18, "")
+    ..git_write_row("git_branch", 19, "")
 };
 
 static WORKER_BASE: OperationFacts = OperationFacts {
@@ -266,10 +272,11 @@ impl ToolCall {
             Self::GitStatus { .. } => &ALL[11],
             Self::GitDiff { .. } => &ALL[12],
             Self::GitLog { .. } => &ALL[13],
-            Self::GitCommit { .. } => &ALL[17],
+            Self::Glob { .. } => &ALL[17],
+            Self::GitCommit { .. } => &ALL[18],
             Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
-            Self::GitBranch { .. } => &ALL[18],
-            Self::GitSwitch { .. } => &ALL[19],
+            Self::GitBranch { .. } => &ALL[19],
+            Self::GitSwitch { .. } => &ALL[20],
         }
     }
 }
@@ -596,6 +603,11 @@ mod tests {
                     max_chunks: 1,
                 },
             },
+            ToolCall::Glob {
+                pattern: "**/*.rs".into(),
+                path: path(),
+                limit: 1,
+            },
             ToolCall::GitCommit {
                 message: "m".into(),
                 paths: vec![path()],
@@ -643,7 +655,7 @@ mod tests {
             .filter(|facts| facts.site == Site::InProcess)
             .map(|facts| facts.name)
             .collect();
-        assert_eq!(in_process, ["list", "read", "search"]);
+        assert_eq!(in_process, ["list", "read", "search", "glob"]);
         assert!(
             ALL.iter()
                 .filter(|facts| facts.site == Site::InProcess)

@@ -117,6 +117,7 @@ mod tests {
                 "arany_command",
                 "arany_mcp_call",
                 "arany_command_unguarded",
+                "arany_glob",
                 "arany_git_commit",
                 "arany_git_branch",
                 "arany_git_switch",
@@ -154,7 +155,13 @@ mod tests {
         let read_only = json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "git": "unavailable"});
         assert_eq!(
             names(&specs(&read_only, PromptRole::Primary, &Default::default())),
-            ["arany_list", "arany_read", "arany_search", "arany_plan"]
+            [
+                "arany_list",
+                "arany_read",
+                "arany_search",
+                "arany_glob",
+                "arany_plan"
+            ]
         );
         let primary = specs(&catalog(), PromptRole::Primary, &Default::default());
         let command = primary
@@ -186,7 +193,7 @@ mod tests {
                 &Default::default()
             ))
             .len()
-                <= 4
+                <= 5
         );
     }
 
@@ -200,7 +207,8 @@ mod tests {
                 "arany_read",
                 "arany_search",
                 "arany_skill",
-                "arany_mcp_list"
+                "arany_mcp_list",
+                "arany_glob"
             ]
         );
         assert!(

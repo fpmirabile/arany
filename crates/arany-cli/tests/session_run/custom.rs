@@ -496,7 +496,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             .iter()
             .find(|line| line["kind"] == "RunStarted")
             .unwrap()["event_version"],
-        17
+        18
     );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))

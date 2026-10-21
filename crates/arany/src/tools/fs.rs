@@ -48,6 +48,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && old.len() + new.len() <= MAX_EDIT_CONTENT_BYTES
         }
         ToolCall::ApplyChangeset { source } => source.valid(),
+        ToolCall::Glob { .. } => super::glob::valid(call),
         _ => false,
     }
 }
@@ -94,6 +95,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                 json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
             ),
         ],
+        "glob" => super::glob::schema(),
         "write" => vec![
             path,
             ("expected_digest", nullable()),
@@ -1177,6 +1179,7 @@ pub(super) fn inspect(
             }
             read_page(file, *offset, *limit, result_bytes)
         }
+        ToolCall::Glob { .. } => super::glob::inspect(root, call, config, result_bytes),
         ToolCall::List { path } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] {

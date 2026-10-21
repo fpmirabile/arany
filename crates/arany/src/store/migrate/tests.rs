@@ -7,8 +7,52 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// Production registers no Event step yet; each future step adds its (kind, from, input, expected) row.
-const EVENT_FIXTURES: [EventFixture<'static>; 0] = [];
+// One (kind, from, input, expected) row per production step. The glob and Git write steps keep
+// payload bytes; one shape is canonical for both source versions.
+const EVENT_FIXTURES: [EventFixture<'static>; 14] = [
+    ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 9, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        7,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        14,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("ToolStarted", 13, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 19, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 3, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 8, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        6,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    ("AgentSpawned", 11, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    ("RunStarted", 17, GLOB_RUNSTARTED, GLOB_RUNSTARTED),
+    (
+        "ProviderCallRecorded",
+        13,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+];
+const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
+const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
+const GLOB_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"succeeded","enforcement_cause":null,"limit_cause":null,"output":"{\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}","attestation":{"in_process":{"policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"workspace_device":1,"workspace_inode":2}},"cache_update":"not_applicable","checkpoint":null}"#;
+const GLOB_HOOKSTARTED: &str = r#"{"event":"PreToolUse","group":0,"handler":0,"subject_digest":[4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4,4],"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"input_digest":[9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9],"active_ceiling_ms":null}"#;
+const GLOB_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation":{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"changeset\":{\"files\":[]},\"exit_code\":2,\"stderr\":\"blocked\",\"stderr_total\":{\"bytes\":7,\"lines\":1},\"stdout\":\"\",\"stdout_total\":{\"bytes\":0,\"lines\":0}}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable"},"result":{"restricted":{"decision":"deny","reason":"blocked"}}}"#;
+const GLOB_GOALPLANCONTRACTRECORDED: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","contract":{"mission":"Plan","paths":["src/lib.rs"],"commands":[],"resource_class":"default","command_timeout_ms":null,"skills":[],"mcp_tools":[],"success_criterion":{"kind":"workspace_file_content","path":"src/lib.rs","content":"ok"},"budget":{"max_provider_calls":64,"max_tokens":1000,"max_active_ms":1800000,"max_runs":16}}}"#;
+const GLOB_AGENTSPAWNED: &str = r#"{"profile":null,"assignment":null,"definition":null,"role":"primary","ordinal":0,"objective":null,"grant":null}"#;
+const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
 // Synthetic test-only edge: a version-5 SessionStarted stored `name` where version 6 stores `title`.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -864,12 +908,15 @@ fn uncovered(
             chained = Some(chained.unwrap_or(Some(input)).and_then(step.transform));
         }
         if let Some(value) = chained {
-            let scopes = [
-                (None, None),
-                (Some(RunId::new()), None),
-                (Some(RunId::new()), Some(AgentRunId::new())),
-            ];
             let decodes = value.is_some_and(|value| {
+                // A payload that pins its own actor (a Tool intent) decodes only under that scope.
+                let pinned = intent_scope(&value);
+                let scopes = [
+                    (None, None),
+                    (Some(RunId::new()), None),
+                    (Some(RunId::new()), Some(AgentRunId::new())),
+                    (pinned.map(|(run, _)| run), pinned.map(|(_, agent)| agent)),
+                ];
                 scopes.into_iter().any(|(run, agent)| {
                     Event::decode(kind, current, &value.to_string(), run, agent).is_ok()
                 })
@@ -897,6 +944,17 @@ fn uncovered(
     problems
 }
 
+fn intent_scope(value: &Value) -> Option<(RunId, AgentRunId)> {
+    let intent = ["intent", "observation"]
+        .into_iter()
+        .find_map(|key| value.get(key))
+        .map(|field| field.get("intent").unwrap_or(field))?;
+    Some((
+        serde_json::from_value(intent.get("run_id")?.clone()).ok()?,
+        serde_json::from_value(intent.get("agent_run_id")?.clone()).ok()?,
+    ))
+}
+
 fn schema_of(sql: &str) -> Vec<[String; 4]> {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(sql).unwrap();
@@ -914,11 +972,30 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    // History older than the glob Tool cannot name it, so such a row is forged and refuses.
+    let forged = GLOB_TOOLSTARTED.replace(
+        r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,
+        r#"{"operation":"glob","pattern":"*.rs","path":".","limit":100}"#,
+    );
+    assert_ne!(forged, GLOB_TOOLSTARTED);
+    let step = REGISTRY.event_step("ToolStarted", 13).unwrap();
+    assert!((step.canonical)(&forged).is_none());
+    assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    // Version 14 may name glob but not the later Git writes.
+    let git_step = REGISTRY.event_step("ToolStarted", 14).unwrap();
+    assert!((git_step.canonical)(&forged).is_some());
+    let forged_git = GLOB_TOOLSTARTED.replace(
+        r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,
+        r#"{"operation":"git_switch","branch":"topic"}"#,
+    );
+    assert_ne!(forged_git, GLOB_TOOLSTARTED);
+    assert!((git_step.canonical)(&forged_git).is_none());
+    assert!((git_step.transform)(serde_json::from_str(&forged_git).unwrap()).is_none());
     let floor = started_floor();
     assert_eq!(
         uncovered(
             &synthetic(&floor, &STARTED_STEP),
-            &PAYLOAD_VERSIONS,
+            &[("SessionStarted", 6)],
             SCHEMA_VERSION,
             &[STARTED_FIXTURE]
         ),

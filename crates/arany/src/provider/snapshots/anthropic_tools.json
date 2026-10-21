@@ -475,6 +475,39 @@
       "name": "arany_command_unguarded"
     },
     {
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "name": "arany_glob"
+    },
+    {
       "description": "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
       "input_schema": {
         "additionalProperties": false,
@@ -1082,6 +1115,39 @@
       "name": "arany_search"
     },
     {
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "name": "arany_glob"
+    },
+    {
       "cache_control": {
         "type": "ephemeral"
       },
@@ -1403,9 +1469,6 @@
       "name": "arany_skill"
     },
     {
-      "cache_control": {
-        "type": "ephemeral"
-      },
       "description": "List an admitted local MCP server's bounded tool catalog.",
       "input_schema": {
         "additionalProperties": false,
@@ -1423,6 +1486,42 @@
         "type": "object"
       },
       "name": "arany_mcp_list"
+    },
+    {
+      "cache_control": {
+        "type": "ephemeral"
+      },
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "name": "arany_glob"
     }
   ]
 }

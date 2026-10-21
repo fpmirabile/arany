@@ -299,6 +299,20 @@ pub enum ToolCall {
     GitSwitch {
         branch: String,
     },
+    // Null or omitted path and limit normalize to their defaults before intent hashing.
+    Glob {
+        pattern: String,
+        #[serde(
+            default = "super::glob::default_path",
+            deserialize_with = "super::glob::path_or_default"
+        )]
+        path: String,
+        #[serde(
+            default = "super::glob::default_limit",
+            deserialize_with = "super::glob::limit_or_default"
+        )]
+        limit: u32,
+    },
 }
 
 fn required_nullable<'de, D: serde::Deserializer<'de>>(

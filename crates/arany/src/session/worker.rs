@@ -24,6 +24,7 @@ pub enum WorkerTool {
     List,
     Read,
     Search,
+    Glob,
     Mkdir,
     Write,
     Edit,
@@ -38,6 +39,7 @@ impl WorkerTool {
             Self::List => "list",
             Self::Read => "read",
             Self::Search => "search",
+            Self::Glob => "glob",
             Self::Mkdir => "mkdir",
             Self::Write => "write",
             Self::Edit => "edit",
@@ -52,6 +54,7 @@ impl WorkerTool {
             ToolCall::List { .. } => Self::List,
             ToolCall::Read { .. } => Self::Read,
             ToolCall::Search { .. } => Self::Search,
+            ToolCall::Glob { .. } => Self::Glob,
             ToolCall::Mkdir { .. } => Self::Mkdir,
             ToolCall::Write { .. } => Self::Write,
             ToolCall::Edit { .. } => Self::Edit,
@@ -88,7 +91,7 @@ impl WorkerGrant {
                 .all(|p| crate::tools::types::valid_relative(p, true))
             && (self.write_paths == ["."] || valid_leases(&self.write_paths))
             && !self.tools.is_empty()
-            && self.tools.len() <= 9
+            && self.tools.len() <= 10
             && self
                 .tools
                 .iter()
@@ -153,7 +156,8 @@ impl WorkerGrant {
             && match call {
                 ToolCall::List { path }
                 | ToolCall::Read { path, .. }
-                | ToolCall::Search { path, .. } => within(path, &self.read_paths),
+                | ToolCall::Search { path, .. }
+                | ToolCall::Glob { path, .. } => within(path, &self.read_paths),
                 ToolCall::Mkdir { path }
                 | ToolCall::Write { path, .. }
                 | ToolCall::Edit { path, .. } => {

@@ -246,7 +246,9 @@ fn tool_failure_stage(
         return Stage::OutcomeToolArgumentSize;
     }
     let path = match call {
-        ToolCall::List { path } | ToolCall::Search { path, .. } => Some((path, true)),
+        ToolCall::List { path } | ToolCall::Search { path, .. } | ToolCall::Glob { path, .. } => {
+            Some((path, true))
+        }
         ToolCall::Read { path, .. }
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
@@ -279,6 +281,9 @@ fn tool_failure_stage(
                     .as_ref()
                     .is_some_and(|glob| glob.is_empty() || glob.len() > 512) =>
         {
+            Stage::OutcomeToolTextSize
+        }
+        ToolCall::Glob { pattern, .. } if pattern.is_empty() || pattern.len() > 512 => {
             Stage::OutcomeToolTextSize
         }
         ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. }

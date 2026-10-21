@@ -462,7 +462,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 18);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 19);
 }
 
 #[test]
@@ -665,7 +665,13 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
     assert!(rendered.get("text").is_none());
     assert_eq!(
         function_names(&rendered),
-        ["arany_list", "arany_read", "arany_search", "arany_plan"]
+        [
+            "arany_list",
+            "arany_read",
+            "arany_search",
+            "arany_glob",
+            "arany_plan"
+        ]
     );
     assert!(
         rendered["tools"]
@@ -686,6 +692,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             "arany_list",
             "arany_read",
             "arany_search",
+            "arany_glob",
             "arany_plan",
             "arany_delegate"
         ]
@@ -747,7 +754,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 10);
+    assert_eq!(rows.len(), 11);
     for (catalog, accepted) in [
         (
             json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
@@ -791,12 +798,13 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
                 })
         };
         for (index, row) in rows.iter().enumerate() {
+            // The read-only glob row follows the scoped rows and is always offered.
             assert_eq!(
                 valid(row),
-                index < accepted,
+                index < accepted || row["operation"] == "glob",
                 "catalog Tool availability: {index}"
             );
-            if index >= 6 {
+            if (6..10).contains(&index) {
                 let mut unnamed = row.clone();
                 let field = match index {
                     6 => "program",
@@ -1521,7 +1529,8 @@ fn child_research_request_offers_only_read_only_functions_and_text_at_exhaustion
             "arany_read",
             "arany_search",
             "arany_skill",
-            "arany_mcp_list"
+            "arany_mcp_list",
+            "arany_glob"
         ]
     );
     assert!(

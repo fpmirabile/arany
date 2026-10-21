@@ -176,11 +176,11 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
         assert_eq!(
             connection
                 .execute(
-                    "UPDATE events SET event_version=7 WHERE kind='HookFinished'",
+                    "UPDATE events SET event_version=8 WHERE kind='HookFinished'",
                     []
                 )
                 .unwrap(),
