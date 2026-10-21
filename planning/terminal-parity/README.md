@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-20
 
@@ -291,6 +291,7 @@ The [security pass](../../agents/security.md#security-pass-triggers) applies to 
   - Inbound OSC 52 replies, which stay discarded (`terminal/input.rs:996` test).
   - The environment variables used to choose a transport (`TMUX`, `WAYLAND_DISPLAY`, `DISPLAY`, `SSH_CONNECTION`, `SSH_TTY`, `TERM_PROGRAM`). They pick only a transport or hint text, after validation.
 - **Authority source and immutable intent.** A copy is authorized only by a `CopyRequest` built from a raw-reader gesture or a submitted `/copy`. Its payload is a snapshot of already-escaped display text taken at gesture time. There is no API through which content, hooks, Skills, MCP or the Engine can request a copy. Approval verdicts still bind the immutable intent digest. The changes are presentation only: [D6](#decisions) (a) and (c), the trusted bottom-area chrome, and digits acting only while the dialog has focus.
+- **Slice 3 security pass.** The Engine supplies only whether Request approvals alone caused a primary typed-edit Ask; rule, settings-mode, hook, child and AI-review fallback Asks cannot offer that mode shortcut. The presentation adapter maps fixed choice identities to existing replies; file edits still return AllowOnce. Intent normalization, grant admission, expiry, journal-before-dispatch, platform Guard enforcement and child restrictions keep their current owners. No new credential access, descendant, persistent format, egress, inference, cost or storage path is introduced; the existing finite action and input bounds apply. The pending dialog hides the composer, draws into a rectangle disjoint from history and discards pre-frame input without discarding cancellation. Failure stays denial, cancellation, expiry or no verdict while review is incomplete. This does not claim protection against a malicious terminal emulator or native macOS/assistive-technology evidence. Frame, reader, linear and native approval corpora own verification; test execution is CI-only for this slice.
 - **Spec exception (replaces `terminal.md:52`'s clipboard sentence).** "OSC 52 is written only on an explicit user copy gesture (selection release, a copy key or `/copy`), never because of model, Tool, MCP, Skill, hook or repository content. It is output-only: Arany never emits the `?` query and discards inbound OSC 52. The payload is the user-selected display text, already escaped, with C0/C1 controls other than LF and TAB removed, base64-encoded under the fixed `c` selection, at most 100,000 bytes, and never written in linear mode. No mode enables focus reporting or title OSC." It names Claude Code and Codex as the peers.
 - **Descendant authority.**
   - Copy clients get a cleared environment holding only the selected display or runtime variables (plus `LANG` for `pbcopy`). They get no credentials, network settings or home directory as configuration. They read only the payload on stdin.

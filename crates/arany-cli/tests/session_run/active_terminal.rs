@@ -1164,7 +1164,7 @@ mod output_window;
 mod broken_stderr;
 
 #[path = "active_terminal/tool_group.rs"]
-mod tool_group;
+pub(crate) mod tool_group;
 
 #[path = "active_terminal/acquisition.rs"]
 mod acquisition;

@@ -1,5 +1,6 @@
 use super::{
-    CursorQuery, INPUT_POLL_INTERVAL, MAX_DRAFT_BYTES, ReaderEvent, map_input, terminal_input,
+    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_DRAFT_BYTES, ReaderEvent, admit_input,
+    map_input, terminal_input,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -28,54 +29,63 @@ const OUTBOX_RETRY: Duration = Duration::from_millis(2);
 const PASTE_END: &[u8; 6] = b"\x1b[201~";
 
 pub(super) fn start(
-    sender: mpsc::Sender<io::Result<ReaderEvent>>,
+    sender: mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
     cursor: CursorQuery,
-) -> io::Result<JoinHandle<()>> {
+) -> io::Result<(JoinHandle<()>, InputAdmission)> {
     let mut input = terminal_input()?;
     let mut poll = Poll::new()?;
     let fd = input.as_raw_fd();
     poll.registry()
         .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
-    std::thread::Builder::new()
+    let (admission, mut requests) = InputAdmission::new(&poll)?;
+    let thread = std::thread::Builder::new()
         .name("arany-terminal-input".into())
         .spawn(move || {
             let mut outbox = Outbox {
                 sender: &sender,
                 backlog: VecDeque::new(),
             };
-            let result = read(&mut poll, &mut input, &mut outbox, &shutdown, &cursor);
+            let result = read(
+                &mut poll,
+                &mut input,
+                &mut outbox,
+                &shutdown,
+                &cursor,
+                &mut requests,
+            );
             cursor.close();
             if let Err(error) = result {
-                let _ = sender.blocking_send(Err(error));
+                let _ = sender.blocking_send((0, Err(error)));
             }
-        })
+        })?;
+    Ok((thread, admission))
 }
 
 // A cursor reply must not wait behind a full event queue while the owner waits for that reply.
 struct Outbox<'a> {
-    sender: &'a mpsc::Sender<io::Result<ReaderEvent>>,
-    backlog: VecDeque<ReaderEvent>,
+    sender: &'a mpsc::Sender<super::Observed<ReaderEvent>>,
+    backlog: VecDeque<(u64, ReaderEvent)>,
 }
 
 impl Outbox<'_> {
-    fn push(&mut self, event: ReaderEvent) -> io::Result<bool> {
+    fn push(&mut self, event: ReaderEvent, observed: u64) -> io::Result<bool> {
         if self.backlog.len() == MAX_BACKLOG && !self.flush() {
             return Ok(false);
         }
         if self.backlog.len() == MAX_BACKLOG {
             return Err(io::Error::other("terminal input backlog exceeded"));
         }
-        self.backlog.push_back(event);
+        self.backlog.push_back((observed, event));
         Ok(self.flush())
     }
 
     fn flush(&mut self) -> bool {
-        while let Some(event) = self.backlog.pop_front() {
-            match self.sender.try_send(Ok(event)) {
+        while let Some((observed, event)) = self.backlog.pop_front() {
+            match self.sender.try_send((observed, Ok(event))) {
                 Ok(()) => {}
-                Err(TrySendError::Full(Ok(event))) => {
-                    self.backlog.push_front(event);
+                Err(TrySendError::Full((observed, Ok(event)))) => {
+                    self.backlog.push_front((observed, event));
                     break;
                 }
                 Err(_) => return false,
@@ -91,13 +101,16 @@ fn read(
     outbox: &mut Outbox<'_>,
     shutdown: &AtomicBool,
     cursor: &CursorQuery,
+    requests: &mut mpsc::Receiver<tokio::sync::oneshot::Sender<u64>>,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
     let mut bytes = [0; READ_BUFFER_BYTES];
     let mut decoder = Decoder::default();
     let mut geometry = crossterm::terminal::size().ok();
+    let mut epoch = 0;
     while !shutdown.load(Ordering::Acquire) {
+        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
         if !outbox.flush() {
             return Ok(());
         }
@@ -107,7 +120,7 @@ fn read(
         }
         let now = Instant::now();
         if let Some(event) = decoder.expire(now)?
-            && !outbox.push(event)?
+            && !outbox.push(event, epoch)?
         {
             return Ok(());
         }
@@ -115,7 +128,7 @@ fn read(
         if resized != geometry {
             geometry = resized;
             if let Some((width, height)) = resized
-                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)))?
+                && !outbox.push(ReaderEvent::Event(Event::Resize(width, height)), epoch)?
             {
                 return Ok(());
             }
@@ -131,6 +144,7 @@ fn read(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
+        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
         match input.read(&mut bytes) {
             Ok(0) => {
                 return Err(io::Error::new(
@@ -147,17 +161,14 @@ fn read(
                     if let Some(event) = decoder.feed(byte, now) {
                         if let ReaderEvent::CursorPosition(column, row) = event {
                             cursor.respond(column, row);
-                        } else if !outbox.push(event)? {
+                        } else if !outbox.push(event, epoch)? {
                             return Ok(());
                         }
                     }
                 }
             }
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
-                ) => {}
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => return Err(error),
         }
         poll.registry()
@@ -594,8 +605,188 @@ fn mouse(button: u16, column: u16, row: u16, release: bool) -> Option<ReaderEven
 
 #[cfg(test)]
 mod tests {
+    use super::super::{
+        INPUT_QUEUE_CAPACITY, InputReader, LineEvent, LineReader, TerminalInput, TerminalReader,
+        read_lines,
+    };
     use super::*;
+    use rustix::fs::OFlags;
     use std::{io::Write, os::fd::OwnedFd, os::unix::net::UnixStream};
+
+    async fn next_input(reader: &mut TerminalReader) -> TerminalInput {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let event = reader.recv().await.unwrap();
+                if !matches!(event, TerminalInput::LineRejected | TerminalInput::Resize) {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap()
+    }
+
+    fn wait_until(mut ready: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready() {
+            assert!(Instant::now() < deadline, "reader progress deadline");
+            std::thread::yield_now();
+        }
+    }
+
+    #[tokio::test]
+    async fn approval_admission_discards_pre_barrier_records_and_delivers_later_bytes() {
+        for linear in [false, true] {
+            let (mut master, mut input) = arany::test_support::process::cloexec_pty(None);
+            let probe = input.try_clone().unwrap();
+            let flags = rustix::fs::fcntl_getfl(&input).unwrap();
+            rustix::fs::fcntl_setfl(&input, flags | OFlags::NONBLOCK).unwrap();
+            // A full input queue fails the write instead of blocking the test.
+            let flags = rustix::fs::fcntl_getfl(&master).unwrap();
+            rustix::fs::fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
+            let mut settings = rustix::termios::tcgetattr(&input).unwrap();
+            // Linear keeps canonical echo, which shows when the line discipline holds a partial line.
+            if !linear {
+                settings.make_raw();
+                settings
+                    .local_modes
+                    .remove(rustix::termios::LocalModes::ECHO);
+            }
+            rustix::termios::tcsetattr(&input, rustix::termios::OptionalActions::Now, &settings)
+                .unwrap();
+            let mut poll = Poll::new().unwrap();
+            let fd = input.as_raw_fd();
+            poll.registry()
+                .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)
+                .unwrap();
+            let (admission, mut requests) = InputAdmission::new(&poll).unwrap();
+            let (start, ready) = std::sync::mpsc::sync_channel(1);
+            let shutdown = Arc::new(AtomicBool::new(false));
+            let should_stop = shutdown.clone();
+            let mut reader = if linear {
+                let (sender, receiver) = mpsc::channel(4);
+                for _ in 0..4 {
+                    sender
+                        .try_send((0, Ok(LineEvent::Submitted(b"1".to_vec()))))
+                        .unwrap();
+                }
+                assert_eq!(sender.capacity(), 0);
+                master.write_all(b"1\n1\n").unwrap();
+                let thread = std::thread::spawn(move || {
+                    ready.recv().unwrap();
+                    read_lines(&mut poll, &mut input, &sender, &should_stop, &mut requests)
+                        .unwrap();
+                });
+                TerminalReader::Lines(LineReader {
+                    receiver,
+                    shutdown,
+                    thread: Some(thread),
+                    pending: VecDeque::from([TerminalInput::Character('1'), TerminalInput::Submit]),
+                    draft_bytes: 1,
+                    epoch: 0,
+                    admission,
+                })
+            } else {
+                let (sender, receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
+                for _ in 0..INPUT_QUEUE_CAPACITY {
+                    sender
+                        .try_send((
+                            0,
+                            Ok(ReaderEvent::Event(Event::Key(KeyEvent::new(
+                                KeyCode::Enter,
+                                KeyModifiers::NONE,
+                            )))),
+                        ))
+                        .unwrap();
+                }
+                assert_eq!(sender.capacity(), 0);
+                // XNU blocks PTY writers near its 1024-byte input queue, so the unread bytes stay small.
+                master.write_all(&b"1\r".repeat(64)).unwrap();
+                let cursor = CursorQuery::default();
+                let query = cursor.clone();
+                let thread = std::thread::spawn(move || {
+                    ready.recv().unwrap();
+                    let mut outbox = Outbox {
+                        sender: &sender,
+                        backlog: VecDeque::new(),
+                    };
+                    read(
+                        &mut poll,
+                        &mut input,
+                        &mut outbox,
+                        &should_stop,
+                        &query,
+                        &mut requests,
+                    )
+                    .unwrap();
+                });
+                TerminalReader::Keys(InputReader {
+                    receiver,
+                    shutdown,
+                    thread: Some(thread),
+                    paste: None,
+                    cursor,
+                    epoch: 0,
+                    admission,
+                })
+            };
+            let (admitted, ()) = tokio::join!(biased; reader.discard_typeahead(), async {
+                start.send(()).unwrap();
+            });
+            admitted.unwrap();
+            master
+                .write_all(if linear { b"no\n" } else { b"n" })
+                .unwrap();
+            assert_eq!(
+                next_input(&mut reader).await,
+                TerminalInput::Character('n'),
+                "linear={linear}: unread OS bytes and queued events cannot act after admission"
+            );
+            if linear {
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('o'));
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Submit);
+                master.write_all(b"yes").unwrap();
+                let mut echoed = Vec::new();
+                wait_until(|| {
+                    let mut chunk = [0; 256];
+                    if let Ok(count) = master.read(&mut chunk) {
+                        echoed.extend_from_slice(&chunk[..count]);
+                    }
+                    echoed.ends_with(b"yes")
+                });
+            } else {
+                // A read prefix of a kitty Enter must not complete after admission.
+                master.write_all(b"x\x1b[13").unwrap();
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('x'));
+                wait_until(|| rustix::io::ioctl_fionread(&probe).unwrap() == 0);
+            }
+            reader.discard_typeahead().await.unwrap();
+            master
+                .write_all(if linear { b"no\n" } else { b"u1\r" })
+                .unwrap();
+            let expected: &[TerminalInput] = if linear {
+                &[
+                    TerminalInput::Character('n'),
+                    TerminalInput::Character('o'),
+                    TerminalInput::Submit,
+                ]
+            } else {
+                &[
+                    TerminalInput::Character('u'),
+                    TerminalInput::Character('1'),
+                    TerminalInput::Submit,
+                ]
+            };
+            for expected in expected {
+                assert_eq!(
+                    next_input(&mut reader).await,
+                    *expected,
+                    "linear={linear}: partial records before admission are discarded and later bytes delivered"
+                );
+            }
+            reader.stop();
+        }
+    }
 
     #[test]
     fn cursor_reply_bypasses_full_channel_and_backlog_without_losing_keys() {
@@ -607,10 +798,12 @@ mod tests {
         poll.registry()
             .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)
             .unwrap();
+        let (_admission, mut requests) = InputAdmission::new(&poll).unwrap();
         let (sender, mut receiver) = mpsc::channel(super::super::INPUT_QUEUE_CAPACITY);
         let event = || key(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press).unwrap();
+        let observed = 0;
         for _ in 0..super::super::INPUT_QUEUE_CAPACITY {
-            assert!(sender.try_send(Ok(event())).is_ok());
+            assert!(sender.try_send((observed, Ok(event()))).is_ok());
         }
         let shutdown = Arc::new(AtomicBool::new(false));
         let cursor = CursorQuery::default();
@@ -620,9 +813,16 @@ mod tests {
         let reader = std::thread::spawn(move || {
             let mut outbox = Outbox {
                 sender: &sender,
-                backlog: (0..OUTBOX_LIMIT).map(|_| event()).collect(),
+                backlog: (0..OUTBOX_LIMIT).map(|_| (observed, event())).collect(),
             };
-            let result = read(&mut poll, &mut input, &mut outbox, &stopped, &cursor);
+            let result = read(
+                &mut poll,
+                &mut input,
+                &mut outbox,
+                &stopped,
+                &cursor,
+                &mut requests,
+            );
             (result, outbox.backlog)
         });
         let reply = query.query(&mut Vec::new());
@@ -631,7 +831,7 @@ mod tests {
         result.unwrap();
         assert_eq!(reply.unwrap(), (4, 2));
         assert_eq!(backlog.len(), OUTBOX_LIMIT + 1);
-        for event in backlog {
+        for (_, event) in backlog {
             assert!(matches!(
                 event,
                 ReaderEvent::Event(Event::Key(KeyEvent {
@@ -642,7 +842,7 @@ mod tests {
         }
         for _ in 0..super::super::INPUT_QUEUE_CAPACITY {
             assert!(matches!(
-                receiver.try_recv().unwrap().unwrap(),
+                receiver.try_recv().unwrap().1.unwrap(),
                 ReaderEvent::Event(Event::Key(KeyEvent {
                     code: KeyCode::Char('x'),
                     ..
@@ -651,12 +851,12 @@ mod tests {
         }
         assert!(receiver.try_recv().is_err());
         let (sender, _receiver) = mpsc::channel(1);
-        assert!(sender.try_send(Ok(event())).is_ok());
+        assert!(sender.try_send((observed, Ok(event()))).is_ok());
         let mut outbox = Outbox {
             sender: &sender,
-            backlog: (0..MAX_BACKLOG).map(|_| event()).collect(),
+            backlog: (0..MAX_BACKLOG).map(|_| (observed, event())).collect(),
         };
-        assert!(outbox.push(event()).is_err());
+        assert!(outbox.push(event(), observed).is_err());
         assert_eq!(outbox.backlog.len(), MAX_BACKLOG);
     }
 }

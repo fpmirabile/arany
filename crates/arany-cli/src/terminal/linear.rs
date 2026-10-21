@@ -21,6 +21,7 @@ pub(super) struct LinearState {
     pub(super) last_model_page: Option<(usize, super::ModelCatalogState)>,
     last_setup: Option<(u8, String, String)>,
     last_approval: Option<uuid::Uuid>,
+    unarmed_approval: Option<uuid::Uuid>,
     permission_mode: Option<arany::ApprovalMode>,
     pub(super) line_open: bool,
     pub(super) newline_pending: bool,
@@ -31,16 +32,51 @@ impl LinearState {
         &mut self,
         id: uuid::Uuid,
         lines: &[String],
-        unguarded: bool,
+        choices: &[crate::presentation::ToolApprovalChoice],
+        armed: bool,
     ) -> io::Result<()> {
-        self.draw_permission_prompt(
+        self.write_tool_approval(&mut io::stderr(), id, lines, choices, armed)
+    }
+
+    fn write_tool_approval(
+        &mut self,
+        writer: &mut impl Write,
+        id: uuid::Uuid,
+        lines: &[String],
+        choices: &[crate::presentation::ToolApprovalChoice],
+        armed: bool,
+    ) -> io::Result<()> {
+        let mut lines = lines.to_vec();
+        lines.push("Do you want to proceed?".into());
+        lines.extend(
+            choices
+                .iter()
+                .enumerate()
+                .map(|(index, choice)| format!("{}. {}", index + 1, choice.label())),
+        );
+        if self.unarmed_approval == Some(id) {
+            lines.clear();
+        }
+        if !armed {
+            if self.unarmed_approval == Some(id) || self.last_approval == Some(id) {
+                return Ok(());
+            }
+            if self.newline_pending || self.line_open {
+                writeln!(writer)?;
+            }
+            for line in &lines {
+                writeln!(writer, "{line}")?;
+            }
+            self.newline_pending = false;
+            self.line_open = false;
+            self.unarmed_approval = Some(id);
+            return writer.flush();
+        }
+        self.write_permission_prompt(
+            writer,
             id,
-            lines,
-            if unguarded {
-                "Type allow, always or deny; empty Enter denies:"
-            } else {
-                "Type allow or deny; empty Enter denies:"
-            },
+            &lines,
+            &format!("Select 1-{}, yes or no; empty Enter denies:", choices.len()),
         )
     }
 
@@ -88,6 +124,7 @@ impl LinearState {
             last_model_page: None,
             last_setup: None,
             last_approval: None,
+            unarmed_approval: None,
             permission_mode: None,
             line_open: false,
             newline_pending: false,
@@ -609,6 +646,54 @@ impl LinearState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_approval_linear_corpus_numbers_only_supported_choices() {
+        use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+        for (choices, expected) in [
+            (
+                vec![Yes, No],
+                "1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n",
+            ),
+            (
+                vec![Yes, AutoEdits, No],
+                "1. Yes\n2. Yes, and don't ask again for: file edits\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+            ),
+            (
+                vec![Yes, ExactCommand, No],
+                "1. Yes\n2. Yes, and don't ask again for: this exact command in this project (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+            ),
+        ] {
+            let mut state = LinearState::new("linear");
+            let mut output = Vec::new();
+            let id = uuid::Uuid::now_v7();
+            state
+                .write_tool_approval(
+                    &mut output,
+                    id,
+                    &["Tool approval".into(), "Read src/file".into()],
+                    &choices,
+                    false,
+                )
+                .unwrap();
+            let unarmed = String::from_utf8(output.clone()).unwrap();
+            assert!(unarmed.ends_with("No\n") && !unarmed.contains("Select"));
+            state
+                .write_tool_approval(&mut output, id, &[], &choices, true)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(output.clone()).unwrap(),
+                format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
+            );
+            state
+                .write_tool_approval(&mut output, id, &[], &choices, true)
+                .unwrap();
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
+            );
+        }
+    }
 
     #[test]
     fn rewind_linear_parity_preserves_every_state_choice_and_hostile_path_without_clipping() {

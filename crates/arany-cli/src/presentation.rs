@@ -616,6 +616,50 @@ pub(crate) fn display_commentary(run: &RunView) -> Vec<(u32, u8, String)> {
     items
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ToolApprovalChoice {
+    Yes,
+    AutoEdits,
+    ExactCommand,
+    No,
+}
+
+impl ToolApprovalChoice {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Yes => "Yes",
+            Self::AutoEdits => "Yes, and don't ask again for: file edits",
+            Self::ExactCommand => {
+                "Yes, and don't ask again for: this exact command in this project (unguarded)"
+            }
+            Self::No => "No",
+        }
+    }
+
+    pub fn reply(self) -> arany::ApprovalReply {
+        match self {
+            Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
+            Self::ExactCommand => arany::ApprovalReply::AllowAlwaysInProject,
+            Self::No => arany::ApprovalReply::Deny,
+        }
+    }
+}
+
+pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApprovalChoice> {
+    let mut choices = vec![ToolApprovalChoice::Yes];
+    if approval
+        .unguarded
+        .as_ref()
+        .is_some_and(|prompt| prompt.remember)
+    {
+        choices.push(ToolApprovalChoice::ExactCommand);
+    } else if approval.unguarded.is_none() && approval.allow_auto_edits {
+        choices.push(ToolApprovalChoice::AutoEdits);
+    }
+    choices.push(ToolApprovalChoice::No);
+    choices
+}
+
 pub fn unguarded_approval_lines(
     intent: &arany::EffectIntent,
     prompt: &arany::UnguardedPrompt,
@@ -680,7 +724,7 @@ pub fn unguarded_approval_lines(
 
 pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
     use arany::ToolCall;
-    let mut lines = vec!["Approve this action?".to_owned()];
+    let mut lines = vec!["Proposed action".to_owned()];
     match &intent.call {
         ToolCall::Write {
             path,

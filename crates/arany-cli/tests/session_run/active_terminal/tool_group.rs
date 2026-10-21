@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-fn tls_request(pipe: &mut impl Read) -> Option<Vec<u8>> {
+pub(crate) fn tls_request(pipe: &mut impl Read) -> Option<Vec<u8>> {
     let deadline = Instant::now() + Duration::from_secs(20);
     let mut bytes = Vec::new();
     loop {

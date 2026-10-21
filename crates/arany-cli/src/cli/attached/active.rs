@@ -33,34 +33,20 @@ pub(super) enum CompactionOutcome {
     Shutdown(ShutdownSignal),
 }
 
-fn approval_choices(pending: &Option<arany::ToolApproval>) -> usize {
-    if pending.as_ref().is_some_and(|approval| {
-        approval
-            .unguarded
-            .as_ref()
-            .is_some_and(|prompt| prompt.remember)
-    }) {
-        3
-    } else {
-        2
-    }
-}
-
-fn approval_reply(choice: usize) -> arany::ApprovalReply {
-    match choice {
-        0 => arany::ApprovalReply::Deny,
-        1 => arany::ApprovalReply::AllowOnce,
-        _ => arany::ApprovalReply::AllowAlwaysInProject,
-    }
-}
-
-fn linear_approval_reply(answer: &str, unguarded: bool) -> Option<arany::ApprovalReply> {
-    use arany::ApprovalReply::{AllowAlwaysInProject, AllowOnce, Deny};
-    match (answer, unguarded) {
-        ("" | "deny", _) | ("no", false) => Some(Deny),
-        ("allow", _) | ("yes", false) => Some(AllowOnce),
-        ("always", true) => Some(AllowAlwaysInProject),
-        _ => None,
+fn linear_approval_choice(
+    answer: &str,
+    choices: &[crate::presentation::ToolApprovalChoice],
+) -> Option<crate::presentation::ToolApprovalChoice> {
+    use crate::presentation::ToolApprovalChoice::{No, Yes};
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "no" => Some(No),
+        "yes" => Some(Yes),
+        number => number
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| choices.get(index))
+            .copied(),
     }
 }
 
@@ -196,6 +182,16 @@ fn settle_recorded_note(
         composer.take();
     }
     true
+}
+
+fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
+    view.runs.last().is_some_and(|run| {
+        run.accepted_sequence > starting_sequence
+            && !matches!(
+                run.status,
+                arany::RunStatus::Pending | arany::RunStatus::Active
+            )
+    })
 }
 
 fn active_escape(
@@ -404,6 +400,8 @@ pub(super) async fn submit_objective(
     let mut approval_page = 0usize;
     let mut approval_choice = 0usize;
     let mut approval_answer = Composer::default();
+    let mut approval_unarmed = false;
+    let mut approval_review_notice = false;
     let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
     let execution_settings = super::controls::restore_settings(admission).await?;
     let mut goal = goal_request(view, goal)?;
@@ -459,13 +457,28 @@ pub(super) async fn submit_objective(
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let mut shown_retries = (None, 0usize);
+    let mut exit_after_run = false;
     let shutdown_reason = loop {
         let approval_more = match &pending {
-            Some(approval) => terminal
-                .draw_tool_approval(approval, approval_page, approval_choice)
-                .map_err(|error| error.to_string())?,
+            Some(approval) => match terminal.draw_tool_approval(
+                approval,
+                view,
+                approval_page,
+                (!approval_unarmed).then_some(approval_choice),
+                approval_review_notice,
+            ) {
+                Ok(more) => more,
+                Err(_) => break "terminal rendering failed".to_owned(),
+            },
             None => false,
         };
+        // Only bytes the reader reads after this barrier reach the armed redraw.
+        if std::mem::take(&mut approval_unarmed) {
+            if terminal.discard_approval_typeahead().await.is_err() {
+                break "terminal input admission failed".to_owned();
+            }
+            continue;
+        }
         let (result, mut events) = handle
             .as_mut()
             .map(|handle| (&mut handle.result, &mut handle.events))
@@ -474,7 +487,9 @@ pub(super) async fn submit_objective(
             approval = inbox.next(), if pending.is_none() => {
                 pending = approval;
                 approval_page = 0;
-                approval_choice = 0;
+                approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
+                approval_unarmed = pending.is_some();
+                approval_review_notice = false;
                 approval_answer.clear();
             }
             step = async {
@@ -533,7 +548,7 @@ pub(super) async fn submit_objective(
             },
             preview = previews.changed() => {
                 terminal.set_preview(preview);
-                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
@@ -589,22 +604,25 @@ pub(super) async fn submit_objective(
                 } else {
                     retry.as_deref().map(TerminalNotice::Transient)
                 };
-                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
+                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
             waiting = waiting_hints.waiting_changed() => {
                 terminal.set_waiting_tool(waiting);
-                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
-            input = terminal.next_input() => {
+            input = terminal.next_input(), if !exit_after_run => {
                 let input = match input {
                     Ok(input) => input,
                     Err(_) => break "terminal input failed".to_owned(),
                 };
                 if pending.is_some() && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_)) {
+                    let choices = crate::presentation::tool_approval_choices(pending.as_ref().expect("pending action"));
+                    approval_choice = approval_choice.min(choices.len() - 1);
+                    let mut selected = None;
                     match input {
                         TerminalInput::CycleApprovalMode => {
                             let _ = super::permissions::cycle(composer);
@@ -614,36 +632,47 @@ pub(super) async fn submit_objective(
                             pending.take().expect("pending action").decide(arany::ApprovalReply::Deny);
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
-                        TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % approval_choices(&pending),
+                        TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % choices.len(),
                         TerminalInput::Up if !approval_more && approval_choice == 0 && approval_page > 0 => approval_page -= 1,
                         TerminalInput::Up if !approval_more => approval_choice = approval_choice.saturating_sub(1),
-                        TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(approval_choices(&pending) - 1),
-                        TerminalInput::Down | TerminalInput::PageDown if approval_more => approval_page += 1,
-                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); approval_choice = 0; }
-                        TerminalInput::Resize => { approval_page = 0; approval_choice = 0; }
+                        TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(choices.len() - 1),
+                        TerminalInput::Down | TerminalInput::PageDown if approval_more => { approval_page += 1; approval_review_notice = false; },
+                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); }
+                        TerminalInput::Resize => { approval_page = 0; approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 }; approval_review_notice = false; }
                         TerminalInput::Suspend => {
                             terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
                             approval_page = 0;
-                            approval_choice = 0;
+                            approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 };
                         }
                         TerminalInput::Character(character) if terminal.is_linear() => { approval_answer.apply(TerminalInput::Character(character)); }
                         TerminalInput::Backspace if terminal.is_linear() => { approval_answer.apply(TerminalInput::Backspace); }
+                        TerminalInput::Character(character) if character.is_ascii_digit() => {
+                            if let Some(choice) = character.to_digit(10).and_then(|digit| digit.checked_sub(1)).and_then(|index| choices.get(index as usize)).copied() {
+                                if approval_more && choice != crate::presentation::ToolApprovalChoice::No {
+                                    approval_review_notice = true;
+                                } else { selected = Some(choice); }
+                            }
+                        }
                         TerminalInput::Submit if approval_more => approval_page += 1,
                         TerminalInput::Submit => {
-                            let reply = if terminal.is_linear() {
-                                let answer = approval_answer.text().trim().to_ascii_lowercase();
-                                let Some(reply) = linear_approval_reply(&answer, approval_choices(&pending) == 3) else {
-                                    approval_answer.clear();
-                                    continue;
-                                };
-                                reply
-                            } else {
-                                approval_reply(approval_choice)
-                            };
-                            pending.take().expect("pending action").decide(reply);
-                            terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                            selected = if terminal.is_linear() {
+                                let choice = linear_approval_choice(approval_answer.text(), &choices);
+                                approval_answer.clear();
+                                choice
+                            } else { Some(choices[approval_choice]) };
                         }
                         _ => {}
+                    }
+                    if let Some(choice) = selected {
+                        if choice == crate::presentation::ToolApprovalChoice::AutoEdits {
+                            for _ in 0..2 {
+                                if composer.approval_mode() == Some(arany::ApprovalMode::AutoEdits) { break; }
+                                let _ = super::permissions::cycle(composer);
+                            }
+                            approvals.set_mode(arany::ApprovalMode::AutoEdits);
+                        }
+                        pending.take().expect("pending action").decide(choice.reply());
+                        terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                     }
                     continue;
                 }
@@ -894,6 +923,12 @@ pub(super) async fn submit_objective(
                     }
                     TerminalInput::EndOfInput if !composer.is_empty() || held.is_some() => {
                         Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
+                    }
+                    // The screen already shows the outcome, so exit once the Run returns.
+                    TerminalInput::EndOfInput if run_settled(view, starting_sequence) => {
+                        terminal.defer_input(TerminalInput::EndOfInput);
+                        exit_after_run = true;
+                        None
                     }
                     _ => None,
                 };
@@ -1416,6 +1451,57 @@ mod goal_request_tests {
     }
 
     #[test]
+    fn end_of_input_waits_for_only_the_current_run_to_settle() {
+        let mut view = session_with_goal(false);
+        let starting_sequence = view.last_sequence;
+        assert!(!run_settled(&view, starting_sequence), "no current Run");
+        let mut run = arany::RunView {
+            skill: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Finished,
+            accepted_sequence: starting_sequence,
+            finished_sequence: Some(starting_sequence),
+            failure: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+        };
+        view.runs.push(run.clone());
+        assert!(
+            !run_settled(&view, starting_sequence),
+            "an earlier Run cannot defer exit"
+        );
+        run.accepted_sequence = starting_sequence + 1;
+        for (status, settled) in [
+            (arany::RunStatus::Pending, false),
+            (arany::RunStatus::Active, false),
+            (arany::RunStatus::Finished, true),
+            (arany::RunStatus::Failed, true),
+            (arany::RunStatus::Cancelled, true),
+        ] {
+            run.status = status;
+            *view.runs.last_mut().unwrap() = run.clone();
+            assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
+        }
+    }
+
+    #[test]
     fn continuation_takes_its_file_mentions_from_the_source_objective() {
         let mut view = session_with_goal(true);
         view.goals[0].objective = "Fix @src/lib.rs".into();
@@ -1706,32 +1792,39 @@ mod escape_tests {
 
 #[cfg(test)]
 mod approval_reply_tests {
-    use super::{approval_reply, linear_approval_reply};
-    use arany::ApprovalReply::{AllowAlwaysInProject, AllowOnce, Deny};
+    use super::linear_approval_choice;
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
 
     #[test]
-    fn linear_words_are_exact_and_always_exists_only_for_unguarded_runs() {
-        for (answer, unguarded, expected) in [
-            ("", true, Some(Deny)),
-            ("deny", true, Some(Deny)),
-            ("allow", true, Some(AllowOnce)),
-            ("always", true, Some(AllowAlwaysInProject)),
-            ("yes", true, None),
-            ("no", true, None),
-            ("alway", true, None),
-            ("always", false, None),
-            ("yes", false, Some(AllowOnce)),
-            ("no", false, Some(Deny)),
-            ("allow", false, Some(AllowOnce)),
+    fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
+        for choices in [
+            vec![Yes, No],
+            vec![Yes, AutoEdits, No],
+            vec![Yes, ExactCommand, No],
         ] {
-            assert_eq!(
-                linear_approval_reply(answer, unguarded),
-                expected,
-                "{answer}"
-            );
+            for (index, choice) in choices.iter().enumerate() {
+                assert_eq!(
+                    linear_approval_choice(&(index + 1).to_string(), &choices),
+                    Some(*choice)
+                );
+            }
+            for (answer, expected) in [
+                ("", Some(No)),
+                ("YES", Some(Yes)),
+                ("no", Some(No)),
+                ("allow", None),
+                ("always", None),
+                ("0", None),
+                ("4", None),
+            ] {
+                assert_eq!(linear_approval_choice(answer, &choices), expected);
+            }
         }
-        assert_eq!(approval_reply(0), Deny);
-        assert_eq!(approval_reply(1), AllowOnce);
-        assert_eq!(approval_reply(2), AllowAlwaysInProject);
+        assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
+        assert_eq!(
+            ExactCommand.reply(),
+            arany::ApprovalReply::AllowAlwaysInProject
+        );
+        assert_eq!(No.reply(), arany::ApprovalReply::Deny);
     }
 }

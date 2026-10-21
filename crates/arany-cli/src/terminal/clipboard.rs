@@ -1028,6 +1028,7 @@ mod cleanup_tests {
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,
+            deferred_input: None,
             clipboard_preview: false,
             shutdown_clipboard_on_drop: true,
             requested_screen_reader: false,
