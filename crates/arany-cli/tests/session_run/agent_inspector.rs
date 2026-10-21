@@ -1,7 +1,7 @@
 use super::loopback::{
     ChildGuard, check_profile, read_request, send_response, wait_product, write_profile,
 };
-use super::session_picker::{pump, tail};
+use super::session_picker::{checkpoint_screen, pump, tail, wait_for_screen};
 use arany::{RunStatus, SessionId, SessionView, StateRoot, Store};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{
@@ -352,32 +352,6 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     runtime.block_on(store.close()).expect("close Store");
 }
 
-fn wait_for_pty(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut crate::session_picker::PtyResponses,
-    after: usize,
-    pattern: &[u8],
-) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        pump(output, input, transcript, answered);
-        if transcript[after..]
-            .windows(pattern.len())
-            .any(|part| part == pattern)
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "inline agent inspector stage missing: {}",
-            tail(transcript)
-        );
-        thread::yield_now();
-    }
-}
-
 fn inline_inspector(
     workspace: &std::path::Path,
     state: &std::path::Path,
@@ -409,24 +383,33 @@ fn inline_inspector(
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
+    let mut history = Vec::new();
+    let mut capture_from = 0;
     let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for_pty(
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        0,
-        b"Ask Arany",
+        (0, width.into(), 24),
+        "Ask Arany",
     );
-    let opened_at = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let opened_at = capture_from;
     input.write_all(b"/agents\r").expect("open inspector");
-    wait_for_pty(
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        0,
-        b"current",
+        (opened_at, width.into(), 24),
+        "current",
     );
     // The inspector takes keys only once its armed frame is drawn.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -439,25 +422,46 @@ fn inline_inspector(
         );
         thread::yield_now();
     }
-    let checkpoint = transcript.len();
-    input.write_all(b"\x1b[B").expect("select prior AgentRun");
-    wait_for_pty(
-        &mut output,
-        &mut input,
+    capture_from = checkpoint_screen(
         &mut transcript,
         &mut answered,
-        checkpoint,
-        b"prior",
+        &mut history,
+        (width.into(), 24),
+        capture_from,
     );
-    let checkpoint = transcript.len();
-    input.write_all(b"\x1b").expect("close inspector");
-    wait_for_pty(
+    let checkpoint = capture_from;
+    input.write_all(b"\x1b[B").expect("select prior AgentRun");
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        checkpoint,
-        b"Agent ins",
+        (checkpoint, width.into(), 24),
+        "prior",
+    );
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let checkpoint = capture_from;
+    input.write_all(b"\x1b").expect("close inspector");
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (checkpoint, width.into(), 24),
+        "Agent ins",
+    );
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
     );
     input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -482,7 +486,14 @@ fn inline_inspector(
     pump(&mut output, &mut input, &mut transcript, &mut answered);
     assert!(result.status.success(), "inline inspector exited cleanly");
     assert_eq!(result.stderr, b"");
-    let transcript = String::from_utf8(transcript).expect("inline transcript UTF-8");
+    checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (width.into(), 24),
+        capture_from,
+    );
+    let transcript = String::from_utf8(history).expect("inline transcript UTF-8");
     let before = transcript
         .lines()
         .find_map(|line| line.strip_prefix("TTY_BEFORE:"))

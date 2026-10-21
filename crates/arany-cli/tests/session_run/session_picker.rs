@@ -35,6 +35,49 @@ pub(super) fn screen_contains(
         .contains(needle)
 }
 
+#[track_caller]
+pub(super) fn wait_for_screen(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    (from, columns, rows): (usize, usize, usize),
+    needle: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while transcript.len() == from || !screen_contains(transcript, columns, rows, needle) {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "screen missing {needle}: {}",
+            tail(transcript)
+        );
+        thread::yield_now();
+    }
+}
+
+// Keep unchanged diff cells while bounding each pump capture; retain raw evidence separately.
+pub(super) fn checkpoint_screen(
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    history: &mut Vec<u8>,
+    (columns, rows): (usize, usize),
+    from: usize,
+) -> usize {
+    assert!(
+        history.len() + transcript.len() - from <= 512 * 1024,
+        "bounded PTY history"
+    );
+    history.extend_from_slice(&transcript[from..]);
+    let screen = screen_rows(transcript, columns, rows);
+    transcript.clear();
+    for (row, line) in screen.iter().enumerate() {
+        write!(transcript, "\x1b[{};1H{line}", row + 1).expect("screen checkpoint");
+    }
+    *answered = PtyResponses::default();
+    transcript.len()
+}
+
 pub(super) struct PtyResponses {
     pub(super) cursor_queries: usize,
     consent_from: usize,

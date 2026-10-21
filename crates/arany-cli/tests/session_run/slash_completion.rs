@@ -2,7 +2,7 @@ use super::{
     active_terminal::{ProductGuard, product_child_of, tty_settings},
     loopback::ChildGuard,
     saved_ui_preferences,
-    session_picker::{pump, tail},
+    session_picker::{checkpoint_screen, pump, screen_contains, tail, wait_for_screen},
 };
 use arany::{
     CollaborationPolicy, RecordKind, SessionDefaults, SessionId, StateRoot, Store, list_sessions,
@@ -1151,13 +1151,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss resume picker");
-    wait_for_after(
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        closed_at,
-        b"closed",
+        (closed_at, 40, 24),
+        "closed",
     );
     let menu_at = transcript.len();
     input.write_all(b"/s").expect("ambiguous command prefix");
@@ -2054,15 +2054,25 @@ fn session_picker_close_case(quick: bool) {
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
     let mut transcript = Vec::new();
+    let mut history = Vec::new();
+    let mut capture_from = 0;
     let mut answered = crate::session_picker::PtyResponses::default();
-    wait_for(
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        b"Ask Arany",
+        (0, 40, 24),
+        "Ask Arany",
     );
-    let mut before_picker = transcript.len();
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (40, 24),
+        capture_from,
+    );
+    let mut before_picker = capture_from;
     if quick {
         input.write_all(b"\x0b").expect("quick actions");
         wait_armed(
@@ -2072,55 +2082,49 @@ fn session_picker_close_case(quick: bool) {
             &mut answered,
             before_picker,
         );
-        before_picker = transcript.len();
+        capture_from = checkpoint_screen(
+            &mut transcript,
+            &mut answered,
+            &mut history,
+            (40, 24),
+            capture_from,
+        );
+        before_picker = capture_from;
         input.write_all(b"\x1b[B\x1b[B\r").expect("Session action");
     } else {
         input.write_all(b"/resume\r").expect("Session command");
     }
-    wait_for_after(
+    wait_for_frame(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        before_picker,
-        b"1 in this Workspace",
+        (before_picker, 40, 24),
+        |screen| {
+            screen.iter().any(|row| row.contains("1 in this Workspace"))
+                && screen.iter().any(|row| row.starts_with("› 1."))
+        },
     );
-    let picker_header = before_picker
-        + transcript[before_picker..]
-            .windows(b"1 in this Workspace".len())
-            .position(|part| part == b"1 in this Workspace")
-            .expect("Session picker header");
-    wait_for_after(
-        &mut output,
-        &mut input,
+    capture_from = checkpoint_screen(
         &mut transcript,
         &mut answered,
-        picker_header,
-        b"\x1b[?25l",
+        &mut history,
+        (40, 24),
+        capture_from,
     );
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        before_picker,
-    );
-    let before_close = transcript.len();
+    let before_close = capture_from;
     input.write_all(b"\x1b").expect("close picker");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         let recent = &transcript[before_close..];
         assert!(
-            !recent
-                .windows(b"failed".len())
-                .any(|part| part == b"failed"),
+            !screen_contains(&transcript, 40, 24, "failed"),
             "picker close failed: {}",
             tail(&transcript)
         );
-        if recent
-            .windows(b"closed".len())
-            .any(|part| part == b"closed")
+        if screen_contains(&transcript, 40, 24, "closed")
+            && recent.windows(6).any(|part| part == b"\x1b[?25h")
         {
             break;
         }
@@ -2131,6 +2135,13 @@ fn session_picker_close_case(quick: bool) {
         );
         thread::yield_now();
     }
+    capture_from = checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (40, 24),
+        capture_from,
+    );
     input.write_all(b"/exit\r").expect("exit");
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
@@ -2143,7 +2154,14 @@ fn session_picker_close_case(quick: bool) {
     }
     let status = child.take().wait().expect("process exit");
     assert!(status.success(), "product failed: {}", tail(&transcript));
-    let text = String::from_utf8_lossy(&transcript);
+    checkpoint_screen(
+        &mut transcript,
+        &mut answered,
+        &mut history,
+        (40, 24),
+        capture_from,
+    );
+    let text = String::from_utf8_lossy(&history);
     let marker = |name: &str| {
         text.lines()
             .find_map(|line| line.trim_end_matches('\r').strip_prefix(name))
