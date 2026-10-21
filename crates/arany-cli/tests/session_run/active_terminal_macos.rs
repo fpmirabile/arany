@@ -1446,8 +1446,13 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
                     back_from = from;
                     Some(b"q")
                 }
-                // /exit is refused until the Engine returns the Run; an empty-draft Ctrl+D waits for it.
-                5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some() => Some(b"\x04"),
+                // An active Run drops an empty-draft Ctrl+D, so it waits for the settled `ready`
+                // status; /exit stays refused until the Engine returns the Run, Ctrl+D is held.
+                5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some()
+                    && super::screen_rows(bytes, 80, 24)[23].starts_with("ready") =>
+                {
+                    Some(b"\x04")
+                }
                 _ => None,
             };
             if let Some(keys) = next {

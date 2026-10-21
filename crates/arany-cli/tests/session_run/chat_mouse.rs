@@ -566,8 +566,13 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     chat.assert_active(&CAPTURE, "resumed pager");
     chat.step("pager closed", b"q", &[EMPTY_COMPOSER], &CAPTURE);
 
-    // The pager shows the committed answer before the Engine returns the Run, and /exit is
-    // refused until it does; an empty-draft Ctrl+D exits once the Run has returned.
+    // An active Run drops an empty-draft Ctrl+D, so wait for the settled Run's `ready` status.
+    // /exit stays refused until the Engine returns the Run; the settled Ctrl+D is held until then.
+    chat.wait(
+        0,
+        |bytes| screen_rows(bytes, 80, 24)[23].starts_with("ready"),
+        "settled Run before Ctrl+D",
+    );
     let modes = chat.exit_with(b"\x04");
     assert_eq!(modes.active, Vec::<u32>::new(), "modes restored on exit");
     let mut enabled = modes.enabled;
