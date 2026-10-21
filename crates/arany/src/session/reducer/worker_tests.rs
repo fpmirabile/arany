@@ -444,6 +444,48 @@ impl Fixture {
             },
         });
     }
+    fn compact(&mut self) {
+        self.push(Event::GoalCompactionCallReserved {
+            goal_id: self.goal,
+            run_id: self.run,
+            active_ceiling_ms: 0,
+        });
+        let view = self.view();
+        let run = &view.runs[0];
+        let covered = run.tools.last().unwrap().finished_sequence.unwrap();
+        let mut events = self.envelopes();
+        events.pop();
+        let source_digest = crate::session::prefix_digest(&events, covered).unwrap();
+        self.push(Event::GoalContextCompacted {
+            goal_id: self.goal,
+            run_id: self.run,
+            covered_tool_count: u32::try_from(run.tools.len()).unwrap(),
+            record: crate::session::CompactionRecord {
+                covered_run_id: self.run,
+                covered_sequence: covered,
+                source_digest,
+                provider: "openai".into(),
+                model: "gpt-5.4".into(),
+                prompt_version: 1,
+                schema_version: 1,
+                compiler_version: 3,
+                source_bytes: 1,
+                source_tokens_estimate: 1,
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_input_tokens: None,
+                cache_creation_input_tokens: None,
+                response_id: None,
+                wire_provenance: None,
+                chatgpt_provenance: None,
+                output_token_bound: crate::provider::OutputTokenBound::ProviderEnforced,
+                status: crate::session::CompactionStatus::Failed {
+                    reason: crate::session::CompactionFailure::ProviderUnavailable,
+                },
+            },
+        });
+        self.view();
+    }
     fn close(&mut self) {
         self.call(
             self.primary,
@@ -1698,6 +1740,11 @@ fn worker_protocol_bulk_file_content_and_serialized_bounds() {
 }
 
 pub(crate) fn completed_fixture() -> Fixture {
+    compacted_fixture(false)
+}
+
+// With `compacted`, a Goal compaction covers every Tool of the Run before it closes.
+pub(crate) fn compacted_fixture(compacted: bool) -> Fixture {
     let mut f = fixture();
     f.mutation();
     let data = f.finish_worker();
@@ -1705,6 +1752,9 @@ pub(crate) fn completed_fixture() -> Fixture {
     let i = f.integrate(h, data, ToolDisposition::Succeeded);
     f.release(Some(h), i);
     f.verify();
+    if compacted {
+        f.compact();
+    }
     f.close();
     f
 }

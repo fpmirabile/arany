@@ -17,7 +17,7 @@ const EVENT_SQLITE_OVERHEAD_PAGES: i64 = 16;
 const MAX_HOT_SESSION_PAYLOAD_BYTES: usize = 128 * 1024 * 1024;
 const NEXT_SEQUENCE_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) + 1 FROM events";
 
-const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
+pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
             CREATE TABLE events (
                 sequence INTEGER PRIMARY KEY,
                 session_id TEXT NOT NULL,
@@ -42,8 +42,17 @@ const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 checked_at_ms INTEGER NOT NULL,
                 expires_at_ms INTEGER NOT NULL
             ) STRICT;
-            PRAGMA user_version=4;
+            CREATE TABLE migrations (
+                id TEXT PRIMARY KEY CHECK (length(id) = 36),
+                from_schema INTEGER NOT NULL,
+                to_schema INTEGER NOT NULL,
+                rewritten_events INTEGER NOT NULL CHECK (rewritten_events >= 0),
+                backup TEXT NOT NULL,
+                recorded_at_ms INTEGER NOT NULL
+            ) STRICT;
+            PRAGMA user_version=5;
             COMMIT;";
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
 pub(super) struct HotSession {
     session_id: SessionId,
@@ -142,7 +151,13 @@ const WRITE_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_millis
 const READ_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Connection, StoreError> {
-    let path = root.path().join(DATABASE_FILE);
+    open_database(&root.path().join(DATABASE_FILE), read_only)
+}
+
+pub(super) fn open_database(
+    path: &std::path::Path,
+    read_only: bool,
+) -> Result<Connection, StoreError> {
     let access = if read_only {
         OpenFlags::SQLITE_OPEN_READ_ONLY
     } else {
@@ -165,7 +180,7 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
         && connection.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |row| {
             row.get::<_, i64>(0)
         })? == 0;
-    if version != 4 && !fresh {
+    if version != SCHEMA_VERSION && !fresh {
         return Err(StoreError::InvalidHistory);
     }
     if read_only {
@@ -208,7 +223,7 @@ pub(super) fn open_connection(root: &StateRoot, read_only: bool) -> Result<Conne
     }
     match version {
         0 if !read_only => connection.execute_batch(SCHEMA_SQL)?,
-        4 => {}
+        SCHEMA_VERSION => {}
         _ => return Err(StoreError::InvalidHistory),
     }
     Ok(connection)

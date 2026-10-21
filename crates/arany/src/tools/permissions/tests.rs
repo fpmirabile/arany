@@ -283,6 +283,11 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
         ToolCall::Search {
             path: "private/a".into(),
             query: "x".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         },
         ToolCall::List {
             path: "private/a".into(),
@@ -299,6 +304,11 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             ToolCall::Search {
                 path: "src/a".into(),
                 query: "x".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
             },
         ),
         ("Glob", ToolCall::List { path: "src".into() }),
@@ -1321,7 +1331,7 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     let call = ToolCall::Write {
         path: "notes/a.txt".into(),
         expected_digest: None,
-        content: "x".repeat(super::super::types::MAX_TOOL_ARGUMENT_BYTES / 2),
+        content: "x".repeat(MAX_HOOK_INPUT_BYTES / 2),
     };
     let id = uuid::Uuid::now_v7();
     let input =
@@ -1349,6 +1359,28 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     assert_eq!(value["tool_use_id"], id.to_string());
     assert!(input.len() <= MAX_HOOK_INPUT_BYTES);
     assert!(!input.contains("permissions.json"));
+    // A valid call that cannot fit is refused whole: tool_input is never cut, even with an empty response.
+    let large = ToolCall::Write {
+        path: "notes/a.txt".into(),
+        expected_digest: None,
+        content: "x".repeat(super::super::types::MAX_EDIT_CONTENT_BYTES),
+    };
+    assert!(large.valid());
+    assert!(matches!(
+        pre_tool_use_input("session", PermissionMode::AcceptEdits, &large, id),
+        Err(ConfigError::Limit(_))
+    ));
+    assert!(matches!(
+        super::hooks::post_tool_use_input(
+            "session",
+            PermissionMode::AcceptEdits,
+            &large,
+            id,
+            json!(""),
+            0
+        ),
+        Err(ConfigError::Limit(_))
+    ));
 }
 
 #[test]
@@ -1493,6 +1525,38 @@ fn updated_input_accepts_only_provable_narrowing() {
     let search = |path: &str, query: &str| ToolCall::Search {
         path: path.into(),
         query: query.into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
+    };
+    let page = |path: &str, offset: u32, limit: u32| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset,
+        limit,
+    };
+    let matching = |regex: bool, include: Option<&str>, case_sensitive: bool| ToolCall::Search {
+        path: "src".into(),
+        query: "x".into(),
+        regex,
+        include: include.map(str::to_owned),
+        case_sensitive,
+        offset: 0,
+        limit: 100,
+    };
+    let filtered = |path: &str, include: &str| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: Some(include.into()),
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
     };
     let status = |path: &str| ToolCall::GitStatus { path: path.into() };
     let diff = |path: &str, staged| ToolCall::GitDiff {
@@ -1559,6 +1623,70 @@ fn updated_input_accepts_only_provable_narrowing() {
         (search("src", "x"), search("src", "x*"), false),
         (search("src", "x"), search("..", "x"), false),
         (search(".", "x"), search("a", "x"), true),
+        (page("src", 10, 20), page("src", 10, 20), true),
+        (page("src", 10, 20), page("src", 15, 15), true),
+        (page("src", 10, 20), page("src", 29, 1), true),
+        (page("src", 10, 20), page("src", 15, 16), false),
+        (page("src", 10, 20), page("src", 9, 5), false),
+        (page("src", 10, 20), page("src", 30, 1), false),
+        (page("src", 10, 20), page("src", u32::MAX, 100), false),
+        (search("src", "x"), page("src/a", 0, 50), true),
+        (search("src", "x"), page("src/a", 5, 50), false),
+        (page("src", 5, 50), page("src/a", 0, 50), false),
+        (page("src", 0, 50), page("src/a", 0, 51), false),
+        (page("src/a", 0, 50), page("src", 0, 50), false),
+        (
+            matching(true, Some("**/*.rs"), false),
+            matching(true, Some("**/*.rs"), false),
+            true,
+        ),
+        (
+            matching(false, None, true),
+            matching(true, None, true),
+            false,
+        ),
+        (
+            matching(true, None, true),
+            matching(false, None, true),
+            false,
+        ),
+        (
+            matching(false, None, true),
+            matching(false, Some("*.rs"), true),
+            false,
+        ),
+        (
+            matching(false, Some("*.rs"), true),
+            matching(false, None, true),
+            false,
+        ),
+        (
+            matching(false, Some("*.rs"), true),
+            matching(false, Some("*.r?"), true),
+            false,
+        ),
+        (
+            matching(false, None, true),
+            matching(false, None, false),
+            false,
+        ),
+        (
+            matching(false, None, false),
+            matching(false, None, true),
+            false,
+        ),
+        // `*.rs` under `src` excludes `src/nested/a.rs`; rebased under `src/nested` it would match.
+        (
+            filtered("src", "*.rs"),
+            filtered("src/nested", "*.rs"),
+            false,
+        ),
+        (
+            filtered("src", "**/*.rs"),
+            filtered("src/nested", "**/*.rs"),
+            false,
+        ),
+        (filtered("src", "*.rs"), filtered("src", "*.rs"), true),
         (status("a"), status("a/b"), true),
         (status("a/b"), status("a"), false),
         (status("a"), status("a/../b"), false),

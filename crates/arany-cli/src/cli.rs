@@ -92,6 +92,9 @@ pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
         HistoryRecovery::ArchiveConflict => {
             "an interrupted history archive no longer matches its files; inspect the archive folder in the state directory"
         }
+        HistoryRecovery::MigrationConflict => {
+            "an interrupted history migration no longer matches its files; inspect the migrations folder in the state directory"
+        }
         HistoryRecovery::Busy => "history is in use; close the other Arany and retry",
         HistoryRecovery::Changed => "history changed during recovery; retry",
         HistoryRecovery::StorageFull => "state storage is full; free space and retry",

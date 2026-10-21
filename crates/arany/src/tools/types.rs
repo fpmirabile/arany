@@ -10,7 +10,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use uuid::Uuid;
 
-pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
+// Write content or combined Edit strings, in decoded UTF-8 bytes.
+pub(crate) const MAX_EDIT_CONTENT_BYTES: usize = 64 * 1024;
+// Six escaped bytes per content byte plus room for the path, digest and keys.
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
+// Every operation other than Write and Edit keeps this serialized bound.
+pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
 pub(crate) const MAX_READ_LINE_CHARS: usize = 2000;
@@ -114,7 +119,8 @@ impl CommandChangeset {
                 }
             }
         }
-        serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES - 256)
+        serde_json::to_vec(self)
+            .is_ok_and(|bytes| bytes.len() <= MAX_ORDINARY_TOOL_ARGUMENT_BYTES - 256)
     }
 }
 
@@ -181,9 +187,40 @@ pub enum ToolCall {
         #[serde(deserialize_with = "Option::deserialize")]
         limit: Option<u32>,
     },
+    // Omitted options take their defaults and serialize omitted, so default calls keep one canonical form.
     Search {
         path: String,
         query: String,
+        #[serde(
+            default,
+            skip_serializing_if = "is_false",
+            deserialize_with = "or_default"
+        )]
+        regex: bool,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "required_nullable"
+        )]
+        include: Option<String>,
+        #[serde(
+            default = "yes",
+            skip_serializing_if = "is_true",
+            deserialize_with = "or_true"
+        )]
+        case_sensitive: bool,
+        #[serde(
+            default,
+            skip_serializing_if = "is_zero",
+            deserialize_with = "or_default"
+        )]
+        offset: u32,
+        #[serde(
+            default = "search_limit",
+            skip_serializing_if = "is_search_limit",
+            deserialize_with = "or_search_limit"
+        )]
+        limit: u32,
     },
     Mkdir {
         path: String,
@@ -256,6 +293,47 @@ fn required_nullable<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer)
 }
 
+pub const MAX_SEARCH_ROWS: u32 = 100;
+pub(crate) const MAX_SEARCH_OFFSET: u32 = MAX_SNAPSHOT_BYTES as u32;
+
+fn or_default<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(
+    deserializer: D,
+) -> Result<T, D::Error> {
+    Option::<T>::deserialize(deserializer).map(Option::unwrap_or_default)
+}
+
+fn or_true<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<bool, D::Error> {
+    Option::<bool>::deserialize(deserializer).map(|value| value.unwrap_or(true))
+}
+
+fn or_search_limit<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u32, D::Error> {
+    Option::<u32>::deserialize(deserializer).map(|value| value.unwrap_or(MAX_SEARCH_ROWS))
+}
+
+fn yes() -> bool {
+    true
+}
+
+fn search_limit() -> u32 {
+    MAX_SEARCH_ROWS
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+fn is_search_limit(value: &u32) -> bool {
+    *value == MAX_SEARCH_ROWS
+}
+
 pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolError> {
     let value = super::skills::parse_json(arguments.as_bytes(), 8 * 1024)?;
     if value.is_object() {
@@ -290,8 +368,15 @@ impl ToolCall {
         self.facts().researcher
     }
 
+    pub(crate) fn argument_limit(&self) -> usize {
+        match self {
+            Self::Write { .. } | Self::Edit { .. } => MAX_TOOL_ARGUMENT_BYTES,
+            _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
-        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
+        if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= self.argument_limit()) {
             return false;
         }
         match self.facts().family {

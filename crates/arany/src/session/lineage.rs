@@ -4,6 +4,17 @@ use sha2::{Digest, Sha256};
 #[derive(Clone, Debug)]
 pub(crate) struct PrefixHasher(Sha256);
 
+// Stored Event text as written; the digest at write time covers exactly these bytes.
+pub(crate) struct PrefixRow<'a> {
+    pub(crate) sequence: u64,
+    pub(crate) session_id: &'a str,
+    pub(crate) run_id: Option<&'a str>,
+    pub(crate) agent_run_id: Option<&'a str>,
+    pub(crate) kind: &'a str,
+    pub(crate) payload: &'a str,
+    pub(crate) created_at_ms: i64,
+}
+
 impl Default for PrefixHasher {
     fn default() -> Self {
         Self::new()
@@ -17,12 +28,25 @@ impl PrefixHasher {
     }
 
     pub(crate) fn update(&mut self, envelope: &EventEnvelope) -> Result<(), ReplayError> {
-        self.0.update(envelope.sequence.to_be_bytes());
-        self.0.update(envelope.session_id.to_string().as_bytes());
-        for scope in [
+        let (run_id, agent_run_id) = (
             envelope.run_id.map(|id| id.to_string()),
             envelope.agent_run_id.map(|id| id.to_string()),
-        ] {
+        );
+        self.update_row(&PrefixRow {
+            sequence: envelope.sequence,
+            session_id: &envelope.session_id.to_string(),
+            run_id: run_id.as_deref(),
+            agent_run_id: agent_run_id.as_deref(),
+            kind: envelope.event.kind(),
+            payload: &envelope.event.payload()?,
+            created_at_ms: envelope.created_at_ms,
+        })
+    }
+
+    pub(crate) fn update_row(&mut self, row: &PrefixRow<'_>) -> Result<(), ReplayError> {
+        self.0.update(row.sequence.to_be_bytes());
+        self.0.update(row.session_id.as_bytes());
+        for scope in [row.run_id, row.agent_run_id] {
             match scope {
                 Some(id) => {
                     self.0.update([1]);
@@ -31,21 +55,15 @@ impl PrefixHasher {
                 None => self.0.update([0]),
             }
         }
-        let kind = envelope.event.kind().as_bytes();
-        self.0.update(
-            u32::try_from(kind.len())
-                .map_err(|_| ReplayError::InvalidPayload)?
-                .to_be_bytes(),
-        );
-        self.0.update(kind);
-        let payload = envelope.event.payload()?;
-        self.0.update(
-            u32::try_from(payload.len())
-                .map_err(|_| ReplayError::InvalidPayload)?
-                .to_be_bytes(),
-        );
-        self.0.update(payload.as_bytes());
-        self.0.update(envelope.created_at_ms.to_be_bytes());
+        for field in [row.kind, row.payload] {
+            self.0.update(
+                u32::try_from(field.len())
+                    .map_err(|_| ReplayError::InvalidPayload)?
+                    .to_be_bytes(),
+            );
+            self.0.update(field.as_bytes());
+        }
+        self.0.update(row.created_at_ms.to_be_bytes());
         Ok(())
     }
 
