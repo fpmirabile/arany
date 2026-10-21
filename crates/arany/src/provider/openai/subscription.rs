@@ -7,10 +7,10 @@ use crate::provider::conversation::Conversation;
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
-    CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    OutputTokenBound, PromptRole, Provenance, Provider, ProviderError, ProviderIdentity,
-    ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage, catalog::valid_model_id,
-    render,
+    CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS,
+    MAX_RESPONSE_BYTES, OutputTokenBound, PromptRole, Provenance, Provider, ProviderError,
+    ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage,
+    catalog::valid_model_id, render,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 #[cfg(test)]
@@ -19,11 +19,13 @@ use reqwest::{Client, Url, header};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::time::Duration;
-use tokio::time::timeout;
+use tokio::time::{Instant, timeout, timeout_at};
 
 const MAX_ACCESS_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_EVENTS: usize = 8192;
-const DEADLINE: Duration = Duration::from_secs(120);
+// Codex's `stream_idle_timeout_ms` default; each received event restarts it.
+const STREAM_IDLE: Duration = Duration::from_secs(300);
+const CALL_CEILING: Duration = Duration::from_secs(600);
 const PROBE_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 
@@ -56,7 +58,7 @@ impl ChatGptProvider {
         identity.effort = Some(effort);
         identity.limits = CallLimits {
             output_token_bound: OutputTokenBound::LocalAcceptanceOnly,
-            deadline: DEADLINE,
+            deadline: CALL_CEILING,
             ..CallLimits::default()
         };
         Ok(Self {
@@ -92,26 +94,16 @@ impl Provider for ChatGptProvider {
         if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
-        timeout(
-            DEADLINE,
-            invoke_at_with_preview(
-                &self.client,
-                Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-                &self.access_token,
-                &request,
-                self.effort,
-                crate::provider::request_ceiling(self.context_window_tokens),
-                None,
-            ),
+        invoke_at_with_preview(
+            &self.client,
+            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+            &self.access_token,
+            &request,
+            self.effort,
+            crate::provider::request_ceiling(self.context_window_tokens),
+            None,
         )
         .await
-        .map_err(|_| {
-            failure(
-                Stage::Deadline,
-                ProviderError::Unavailable,
-                StreamCounts::default(),
-            )
-        })?
     }
 
     async fn invoke_with_preview(
@@ -123,20 +115,16 @@ impl Provider for ChatGptProvider {
         if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
-        timeout(
-            DEADLINE,
-            invoke_at_with_preview(
-                &self.client,
-                Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-                &self.access_token,
-                &request,
-                self.effort,
-                crate::provider::request_ceiling(self.context_window_tokens),
-                Some(preview),
-            ),
+        invoke_at_with_preview(
+            &self.client,
+            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+            &self.access_token,
+            &request,
+            self.effort,
+            crate::provider::request_ceiling(self.context_window_tokens),
+            Some(preview),
         )
         .await
-        .map_err(|_| ProviderError::Unavailable)?
     }
 
     async fn compact(
@@ -146,24 +134,14 @@ impl Provider for ChatGptProvider {
         if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
-        timeout(
-            DEADLINE,
-            compact_at(
-                &self.client,
-                Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-                &self.access_token,
-                &request,
-                self.effort,
-            ),
+        compact_at(
+            &self.client,
+            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+            &self.access_token,
+            &request,
+            self.effort,
         )
         .await
-        .map_err(|_| {
-            failure(
-                Stage::Deadline,
-                ProviderError::Unavailable,
-                StreamCounts::default(),
-            )
-        })?
     }
 }
 
@@ -256,7 +234,7 @@ async fn probe_model_at(
 }
 
 fn client() -> Result<Client, ProviderError> {
-    super::super::http_client(DEADLINE)
+    super::super::http_client(CALL_CEILING)
         .https_only(true)
         .build()
         .map_err(|_| ProviderError::Unavailable)
@@ -295,7 +273,11 @@ async fn invoke_at_with_preview(
     }
     let conversation = render::conversation(request)?;
     let body = subscription_body(request, &conversation, effort, max_request_bytes)?;
-    let (completed, counts) = completed_at_with_preview(
+    let CompletedStream {
+        body: completed,
+        counts,
+        reasoning_tokens,
+    } = completed_at_with_preview(
         client,
         endpoint,
         access_token,
@@ -324,6 +306,7 @@ async fn invoke_at_with_preview(
     accept_result(
         result.reflects_secret(access_token),
         result.usage,
+        reasoning_tokens,
         request.max_output_tokens,
         counts,
     )?;
@@ -341,21 +324,28 @@ async fn compact_at(
         return Err(ProviderError::Rejected);
     }
     let body = subscription_compaction_body(request, effort)?;
-    let (completed, counts) = completed_at(client, endpoint, access_token, body).await?;
+    let CompletedStream {
+        body: completed,
+        counts,
+        reasoning_tokens,
+    } = completed_at(client, endpoint, access_token, body).await?;
     let result = wire::decode_streamed_compaction(&completed, &request.model)
         .map_err(|error| response_failure(error, counts))?;
     accept_result(
         result.reflects_secret(access_token),
         result.usage,
+        reasoning_tokens,
         request.max_output_tokens,
         counts,
     )?;
     Ok(result)
 }
 
+// The cap bounds visible output; the reported total also counts reasoning and is kept for charging.
 fn accept_result(
     reflects_secret: bool,
     usage: Usage,
+    reasoning_tokens: u32,
     max_output_tokens: u32,
     counts: StreamCounts,
 ) -> Result<(), ProviderError> {
@@ -369,7 +359,9 @@ fn accept_result(
     if usage
         .input_tokens
         .is_none_or(|count| count == 0 || count > MAX_REPORTED_INPUT_TOKENS)
-        || usage.output_tokens.is_none_or(|count| count == 0)
+        || usage.output_tokens.is_none_or(|count| {
+            count == 0 || count > MAX_REPORTED_OUTPUT_TOKENS || count < reasoning_tokens
+        })
         || !usage.cache_consistent()
     {
         return Err(failure(
@@ -380,7 +372,7 @@ fn accept_result(
     }
     if usage
         .output_tokens
-        .is_some_and(|count| count > max_output_tokens)
+        .is_some_and(|count| count.saturating_sub(reasoning_tokens) > max_output_tokens)
     {
         return Err(failure(
             Stage::LocalOutputLimit,
@@ -391,12 +383,18 @@ fn accept_result(
     Ok(())
 }
 
+struct CompletedStream {
+    body: Vec<u8>,
+    counts: StreamCounts,
+    reasoning_tokens: u32,
+}
+
 async fn completed_at(
     client: &Client,
     endpoint: Url,
     access_token: &str,
     body: Vec<u8>,
-) -> Result<(Vec<u8>, StreamCounts), ProviderError> {
+) -> Result<CompletedStream, ProviderError> {
     completed_at_with_preview(client, endpoint, access_token, body, None).await
 }
 
@@ -406,24 +404,25 @@ async fn completed_at_with_preview(
     access_token: &str,
     body: Vec<u8>,
     preview: Option<(ResponsePreview, &str)>,
-) -> Result<(Vec<u8>, StreamCounts), ProviderError> {
+) -> Result<CompletedStream, ProviderError> {
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
         || !access_token.bytes().all(|byte| byte.is_ascii_graphic())
     {
         return Err(ProviderError::Rejected);
     }
-    let mut response = client
+    let send = client
         .post(endpoint.clone())
         .bearer_auth(access_token)
         .header(header::ACCEPT, "text/event-stream")
         .header(header::CONTENT_TYPE, "application/json")
         .header(header::ACCEPT_ENCODING, "identity")
         .body(body)
-        .send()
-        .await
-        .map_err(|error| {
-            failure(
+        .send();
+    let mut response = match timeout(STREAM_IDLE, send).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(error)) => {
+            return Err(failure(
                 if error.is_timeout() {
                     Stage::Deadline
                 } else {
@@ -431,8 +430,17 @@ async fn completed_at_with_preview(
                 },
                 crate::provider::send_failure(&error),
                 StreamCounts::default(),
-            )
-        })?;
+            ));
+        }
+        // An unanswered request is a send timeout, which never retries.
+        Err(_) => {
+            return Err(failure(
+                Stage::Deadline,
+                ProviderError::Unavailable,
+                StreamCounts::default(),
+            ));
+        }
+    };
     let counts = StreamCounts {
         http_status: Some(response.status().as_u16()),
         ..StreamCounts::default()
@@ -484,29 +492,73 @@ async fn completed_at_with_preview(
         Some((preview, model)) => StreamDecoder::with_preview(access_token, model, Some(preview)),
         None => StreamDecoder::new(access_token),
     };
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        failure(
-            if error.is_timeout() {
-                Stage::Deadline
-            } else {
-                Stage::ReadTransport
-            },
-            ProviderError::PartialTransport,
-            decoder.counts(),
-        )
-    })? {
+    let body = read_events(&mut decoder, &mut response).await?;
+    Ok(CompletedStream {
+        body,
+        counts: decoder.counts(),
+        reasoning_tokens: reasoning_tokens(decoder.output_tokens_details.as_ref())
+            .map_err(|error| failure(Stage::UsageContract, error, decoder.counts()))?,
+    })
+}
+
+// Only a framed event restarts the window, so comments or a trickled partial frame cannot keep a
+// stalled stream alive; the Engine's per-call deadline stays the absolute ceiling.
+async fn read_events(
+    decoder: &mut StreamDecoder<'_>,
+    source: &mut impl ChunkSource,
+) -> Result<Vec<u8>, ProviderError> {
+    let mut idle_until = Instant::now() + STREAM_IDLE;
+    loop {
+        let chunk = match timeout_at(idle_until, source.next_chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => {
+                return Err(failure(
+                    Stage::EndBeforeCompleted,
+                    decoder.framer.end_error(),
+                    decoder.counts(),
+                ));
+            }
+            Ok(Err(stage)) => {
+                return Err(failure(
+                    stage,
+                    ProviderError::PartialTransport,
+                    decoder.counts(),
+                ));
+            }
+            Err(_) => {
+                return Err(failure(
+                    Stage::Deadline,
+                    ProviderError::PartialTransport,
+                    decoder.counts(),
+                ));
+            }
+        };
+        let events = decoder.framer.events;
         if let Some(completed) = decoder
             .feed(&chunk)
             .map_err(|error| failure(decoder.stage, error, decoder.counts()))?
         {
-            return Ok((completed, decoder.counts()));
+            return Ok(completed);
+        }
+        if decoder.framer.events > events {
+            idle_until = Instant::now() + STREAM_IDLE;
         }
     }
-    Err(failure(
-        Stage::EndBeforeCompleted,
-        decoder.framer.end_error(),
-        decoder.counts(),
-    ))
+}
+
+// The response body, or a scripted one with paused time in tests.
+trait ChunkSource {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, Stage>;
+}
+
+impl ChunkSource for reqwest::Response {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, Stage> {
+        match self.chunk().await {
+            Ok(chunk) => Ok(chunk.map(|chunk| chunk.to_vec())),
+            Err(error) if error.is_timeout() => Err(Stage::Deadline),
+            Err(_) => Err(Stage::ReadTransport),
+        }
+    }
 }
 
 fn failure(stage: Stage, error: ProviderError, counts: StreamCounts) -> ProviderError {
@@ -624,6 +676,8 @@ struct StreamDecoder<'a> {
     response_shape: ResponseShape,
     response_id: Option<String>,
     done_items: Vec<(wire::WireItem, Value)>,
+    // Kept raw: only the ChatGPT completion path interprets it, so shared streams stay unchanged.
+    output_tokens_details: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -652,6 +706,7 @@ impl<'a> StreamDecoder<'a> {
             response_shape: ResponseShape::default(),
             response_id: None,
             done_items: Vec::new(),
+            output_tokens_details: None,
         }
     }
 
@@ -718,6 +773,9 @@ impl<'a> StreamDecoder<'a> {
                 if value.get("response").is_none() {
                     return Err(ProviderError::InvalidResponseContract);
                 }
+                self.output_tokens_details = value
+                    .pointer("/response/usage/output_tokens_details")
+                    .cloned();
                 if cfg!(debug_assertions)
                     && let Some(output) =
                         value.pointer("/response/output").and_then(Value::as_array)
@@ -830,6 +888,18 @@ impl<'a> StreamDecoder<'a> {
             response_shape: Some(self.response_shape),
             tool_arguments: None,
         }
+    }
+}
+
+// Absent details count every output token as visible; present details must carry the count.
+fn reasoning_tokens(details: Option<&Value>) -> Result<u32, ProviderError> {
+    match details {
+        None | Some(Value::Null) => Ok(0),
+        Some(details) => details
+            .get("reasoning_tokens")
+            .and_then(Value::as_u64)
+            .and_then(|count| u32::try_from(count).ok())
+            .ok_or(ProviderError::InvalidResponseContract),
     }
 }
 

@@ -486,7 +486,9 @@ impl CompactionRecord {
             || self.source_bytes > 256 * 1024
             || self.source_tokens_estimate != self.source_bytes.div_ceil(4)
             || self.input_tokens.is_some_and(|value| value > 1_000_000)
-            || self.output_tokens.is_some_and(|value| value > 1_000_000)
+            || self
+                .output_tokens
+                .is_some_and(|value| value > crate::provider::MAX_REPORTED_OUTPUT_TOKENS)
             || !self.usage().cache_consistent()
             || self.response_id.as_ref().is_some_and(|value| {
                 value.is_empty()
@@ -524,9 +526,9 @@ impl CompactionRecord {
                 .map_err(|_| ReplayError::InvalidSnapshot)?;
             if *summary_bytes != summary.len() as u32
                 || *summary_tokens_estimate != summary_bytes.div_ceil(4)
-                || self
-                    .output_tokens
-                    .is_some_and(|count| count > super::MAX_COMPACTION_OUTPUT_TOKENS)
+                || !self
+                    .output_token_bound
+                    .admits_reported_output(self.output_tokens, super::MAX_COMPACTION_OUTPUT_TOKENS)
             {
                 return Err(ReplayError::InvalidSnapshot);
             }
@@ -617,7 +619,7 @@ impl ProviderCallRecord {
                 .is_some_and(|count| count > crate::provider::MAX_REPORTED_INPUT_TOKENS)
             || self
                 .output_tokens
-                .is_some_and(|count| count > crate::provider::MAX_OUTPUT_TOKEN_CAP)
+                .is_some_and(|count| count > crate::provider::MAX_REPORTED_OUTPUT_TOKENS)
             || !self.usage().cache_consistent()
             || self.wire_provenance.is_some_and(|provenance| {
                 !provenance.valid_for(

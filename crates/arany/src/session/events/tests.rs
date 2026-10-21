@@ -1131,9 +1131,10 @@ mod provider_call_tests {
         record.input_tokens = Some(crate::provider::MAX_REPORTED_INPUT_TOKENS + 1);
         assert!(record.validate().is_err());
         record.input_tokens = Some(100);
-        record.output_tokens = Some(crate::provider::MAX_OUTPUT_TOKEN_CAP + 1);
+        // A local-acceptance total includes reasoning; the reducer applies each route's cap.
+        record.output_tokens = Some(crate::provider::MAX_REPORTED_OUTPUT_TOKENS + 1);
         assert!(record.validate().is_err());
-        record.output_tokens = Some(crate::provider::MAX_OUTPUT_TOKEN_CAP);
+        record.output_tokens = Some(crate::provider::MAX_REPORTED_OUTPUT_TOKENS);
         assert!(record.validate().is_ok());
         record.output_tokens = None;
         record.disposition = ProviderCallDisposition::Unavailable;

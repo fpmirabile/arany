@@ -178,6 +178,7 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 }
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
+pub(crate) const MAX_REPORTED_OUTPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 pub(crate) const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -1121,6 +1122,17 @@ pub enum OutputTokenBound {
     #[default]
     ProviderEnforced,
     LocalAcceptanceOnly,
+}
+
+impl OutputTokenBound {
+    // A local-acceptance adapter checks visible output itself; its reported total also counts
+    // reasoning, so only the reporting ceiling bounds it here.
+    pub(crate) fn admits_reported_output(self, output_tokens: Option<u32>, cap: u32) -> bool {
+        output_tokens.is_none_or(|count| match self {
+            Self::ProviderEnforced => count <= cap,
+            Self::LocalAcceptanceOnly => count <= MAX_REPORTED_OUTPUT_TOKENS,
+        })
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

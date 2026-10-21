@@ -2089,6 +2089,13 @@ fn session_picker_close_case(quick: bool) {
                 && screen.iter().any(|row| row.starts_with("› 1. "))
         },
     );
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        before_picker,
+    );
     let before_close = transcript.len();
     input.write_all(b"\x1b").expect("close picker");
     let deadline = Instant::now() + Duration::from_secs(5);

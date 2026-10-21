@@ -602,7 +602,11 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                         return Err(ReplayError::InvalidTransition);
                     }
                 };
-                if record.output_tokens.is_some_and(|tokens| tokens > cap) {
+                if !identity
+                    .limits
+                    .output_token_bound
+                    .admits_reported_output(record.output_tokens, cap)
+                {
                     return Err(ReplayError::InvalidTransition);
                 }
             }
