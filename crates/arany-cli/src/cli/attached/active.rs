@@ -194,6 +194,21 @@ fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
     })
 }
 
+// Once the current Run's outcome is committed, /exit waits for the Run to return, as Ctrl+D does.
+fn exits_after_settled_run(
+    composer: &Composer,
+    view: &SessionView,
+    starting_sequence: u64,
+) -> bool {
+    matches!(
+        composer.submission(),
+        Ok(crate::terminal::Submission::Command {
+            command: crate::terminal::InteractiveCommand::Exit,
+            argument: None,
+        })
+    ) && run_settled(view, starting_sequence)
+}
+
 fn active_escape(
     input: TerminalInput,
     menu_open: bool,
@@ -804,6 +819,15 @@ pub(super) async fn submit_objective(
                         if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                             break "terminal rendering failed".to_owned();
                         }
+                        None
+                    }
+                    TerminalInput::Submit if exits_after_settled_run(composer, view, starting_sequence) => {
+                        composer.take();
+                        if terminal.restore_draft_input(0).is_err() {
+                            break "terminal input failed".to_owned();
+                        }
+                        terminal.defer_input(TerminalInput::EndOfInput);
+                        exit_after_run = true;
                         None
                     }
                     TerminalInput::Submit => {
@@ -1501,6 +1525,65 @@ mod goal_request_tests {
             run.status = status;
             *view.runs.last_mut().unwrap() = run.clone();
             assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn exit_waits_for_only_the_current_run_to_settle() {
+        let mut view = session_with_goal(false);
+        let starting_sequence = view.last_sequence;
+        let typed = |text: &str| {
+            let mut composer = Composer::default();
+            for character in text.chars() {
+                composer.apply(TerminalInput::Character(character));
+            }
+            composer
+        };
+        let exit = typed("/exit");
+        assert!(
+            !exits_after_settled_run(&exit, &view, starting_sequence),
+            "no current Run"
+        );
+        let mut run = arany::RunView {
+            skill: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Active,
+            accepted_sequence: starting_sequence + 1,
+            finished_sequence: None,
+            failure: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+        };
+        view.runs.push(run.clone());
+        assert!(
+            !exits_after_settled_run(&exit, &view, starting_sequence),
+            "an active Run keeps /exit refused"
+        );
+        run.status = arany::RunStatus::Finished;
+        *view.runs.last_mut().unwrap() = run;
+        assert!(exits_after_settled_run(&exit, &view, starting_sequence));
+        for other in ["/exit now", "/status", "exit"] {
+            assert!(
+                !exits_after_settled_run(&typed(other), &view, starting_sequence),
+                "{other}"
+            );
         }
     }
 
