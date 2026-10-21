@@ -958,15 +958,13 @@ impl Lock {
                     Ok(next) => directory = next,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                         // A new nested branch needs its directory, as Git creates it.
+                        let parent = directory.try_clone().map_err(|_| ToolError::Operation)?;
                         directory
                             .create_dir(part)
                             .map_err(|_| ToolError::Conflict)?;
+                        created.push((parent, part.to_owned()));
                         // The new directory must survive a crash once its ref is acknowledged.
                         sync_directory(&directory).map_err(|_| ToolError::Operation)?;
-                        created.push((
-                            directory.try_clone().map_err(|_| ToolError::Operation)?,
-                            part.to_owned(),
-                        ));
                         directory = directory
                             .open_dir_nofollow(part)
                             .map_err(|_| ToolError::Conflict)?;

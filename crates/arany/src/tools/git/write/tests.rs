@@ -47,6 +47,14 @@ fn arm(repo: &Repo, stage: Stage, args: &'static [&'static [&'static str]]) {
     ));
 }
 
+fn git_writes_available() -> bool {
+    let available = crate::tools::guard::git_writes_available();
+    if !available {
+        eprintln!("skipping Git-write test: Git confinement requires Landlock ABI 3 or later");
+    }
+    available
+}
+
 fn identity() -> GitIdentity {
     GitIdentity {
         name: "Arany Writer".into(),
@@ -156,6 +164,9 @@ fn switch(name: &str) -> ToolCall {
 
 #[test]
 fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     std::fs::write(repo.workspace.join("notes.md"), "staged notes\n").unwrap();
     host_git(&repo.workspace, &repo.home, &["add", "notes.md"]);
@@ -259,6 +270,9 @@ fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
 
 #[test]
 fn hostile_repository_configuration_never_executes_during_writes() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     let markers = arm_hostile(repo.temp.path(), &repo.workspace);
     let script = |path: PathBuf| {
@@ -333,6 +347,9 @@ fn hostile_repository_configuration_never_executes_during_writes() {
 
 #[test]
 fn switches_refuse_file_directory_transitions_without_reporting_local_changes() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     repo.git(&["stash", "-q", "--include-untracked"]);
     repo.git(&["checkout", "-q", "-b", "file"]);
@@ -355,6 +372,9 @@ fn switches_refuse_file_directory_transitions_without_reporting_local_changes() 
 
 #[test]
 fn refusals_leave_the_repository_and_workspace_unchanged() {
+    if !git_writes_available() {
+        return;
+    }
     type Setup = fn(&Repo);
     let symbolic: Setup = |repo| {
         let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
@@ -577,6 +597,9 @@ fn refusals_leave_the_repository_and_workspace_unchanged() {
 
 #[test]
 fn a_failure_after_the_first_published_effect_is_uncertain() {
+    if !git_writes_available() {
+        return;
+    }
     if rustix::process::geteuid().is_root() {
         return;
     }
@@ -609,6 +632,9 @@ fn a_failure_after_the_first_published_effect_is_uncertain() {
 
 #[test]
 fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
+    if !git_writes_available() {
+        return;
+    }
     type Setup = fn(&Repo);
     type Case = (
         &'static str,
@@ -703,6 +729,9 @@ fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
 
 #[test]
 fn an_edit_racing_the_switch_cleanliness_check_is_never_overwritten() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     {
         let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
@@ -732,6 +761,9 @@ fn an_edit_racing_the_switch_cleanliness_check_is_never_overwritten() {
 
 #[tokio::test]
 async fn the_git_child_cannot_write_the_workspace_directly() {
+    if !git_writes_available() {
+        return;
+    }
     let repo = Repo::new();
     let scratch = scratch(repo.temp.path(), 0);
     let git = super::super::discover().expect("pinned system git");
@@ -781,6 +813,9 @@ async fn the_git_child_cannot_write_the_workspace_directly() {
 
 #[test]
 fn a_branch_start_ref_stays_locked_until_the_branch_publishes() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     host_git(&repo.workspace, &repo.home, &["branch", "older", "HEAD~1"]);
     let older = repo.git(&["rev-parse", "older"]);
@@ -809,6 +844,9 @@ fn a_branch_start_ref_stays_locked_until_the_branch_publishes() {
 
 #[test]
 fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     host_git(&repo.workspace, &repo.home, &["branch", "older", "HEAD~1"]);
     let stash = repo.temp.path().join("stash");
@@ -898,6 +936,9 @@ fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
 
 #[test]
 fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
+    if !git_writes_available() {
+        return;
+    }
     let repo = Repo::new();
     let intent = uuid::Uuid::now_v7();
     let ledger = repo
@@ -926,6 +967,9 @@ fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
 
 #[test]
 fn directories_a_lock_created_go_when_a_later_step_fails() {
+    if !git_writes_available() {
+        return;
+    }
     let repo = Repo::new();
     let git_dir =
         Dir::open_ambient_dir(repo.workspace.join(".git"), cap_std::ambient_authority()).unwrap();
@@ -947,6 +991,9 @@ fn directories_a_lock_created_go_when_a_later_step_fails() {
 
 #[test]
 fn a_switch_refusal_never_names_paths_a_read_rule_hides() {
+    if !git_writes_available() {
+        return;
+    }
     let mut repo = Repo::new();
     {
         let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);

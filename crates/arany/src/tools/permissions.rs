@@ -545,6 +545,7 @@ impl std::io::Write for CallSize {
 struct Rule {
     tool: Tool,
     pattern: Option<Regex>,
+    commit_prefix: Option<String>,
 }
 
 #[derive(Debug)]
@@ -651,6 +652,7 @@ impl Rule {
                     .name,
             ),
         };
+        let mut commit_prefix = None;
         let pattern = match specifier {
             None => None,
             Some("") => return Err("empty specifier"),
@@ -677,7 +679,11 @@ impl Rule {
                 | Tool::Native(
                     "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "git_status"
                     | "git_diff" | "git_log",
-                ) => path_glob(pattern, decision)?,
+                ) => {
+                    let (pattern, prefix) = path_glob(pattern, decision)?;
+                    commit_prefix = prefix;
+                    pattern
+                }
                 Tool::Skill | Tool::Native("skill") => {
                     compile(&format!("\\A{}\\z", command_glob(pattern)))?
                 }
@@ -688,7 +694,11 @@ impl Rule {
                 }
             }),
         };
-        Ok(Self { tool, pattern })
+        Ok(Self {
+            tool,
+            pattern,
+            commit_prefix,
+        })
     }
 
     fn matches_tool(&self, call: &ToolCall, decision: Decision) -> bool {
@@ -701,7 +711,11 @@ impl Rule {
             }
             Tool::Edit => {
                 facts.typed_edit()
-                    || decision != Decision::Allow && matches!(call, ToolCall::GitSwitch { .. })
+                    || decision != Decision::Allow
+                        && matches!(
+                            call,
+                            ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. }
+                        )
             }
             Tool::Write => matches!(call, ToolCall::Write { .. }),
             Tool::Glob => matches!(call, ToolCall::List { .. } | ToolCall::Glob { .. }),
@@ -781,9 +795,16 @@ impl Rule {
                         .iter()
                         .all(|path| path_matches(pattern, path, decision))
                 } else {
-                    paths
-                        .iter()
-                        .any(|path| path_matches(pattern, path, decision))
+                    paths.iter().any(|path| {
+                        path_matches(pattern, path, decision)
+                            || self.commit_prefix.as_ref().is_some_and(|prefix| {
+                                prefix.is_empty()
+                                    || prefix
+                                        .split('/')
+                                        .zip(path.split('/'))
+                                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                            })
+                    })
                 }
             }
             // A staged or whole-repository commit and a switch publish paths unknown before dispatch.
@@ -874,7 +895,7 @@ fn command_glob(pattern: &str) -> String {
         .join(".*")
 }
 
-fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
+fn path_glob(input: &str, decision: Decision) -> Result<(Regex, Option<String>), &'static str> {
     if decision != Decision::Allow && !input.is_ascii() {
         return Err(
             "deny/ask path patterns require ASCII literals; non-ASCII paths conservatively match restrictions",
@@ -902,6 +923,18 @@ fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
             || (decision != Decision::Allow
                 && pattern.ends_with("/**")
                 && pattern.matches('/').count() == 1));
+    // A wildcard suffix may overlap any descendant of its literal directory prefix.
+    let commit_prefix = (decision != Decision::Allow).then(|| {
+        if anywhere {
+            String::new()
+        } else {
+            pattern
+                .split('/')
+                .take_while(|part| !part.contains(['*', '?', '[', '\\']))
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    });
     let mut expression = String::from("\\A");
     if anywhere {
         expression.push_str("(?:.*/)?");
@@ -959,11 +992,12 @@ fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
         segment_start = ch == '/';
     }
     expression.push_str("(?:/.*)?\\z");
-    compile(&if decision == Decision::Allow {
+    let compiled = compile(&if decision == Decision::Allow {
         expression
     } else {
         format!("(?i:{expression})")
-    })
+    })?;
+    Ok((compiled, commit_prefix))
 }
 
 fn compile(pattern: &str) -> Result<Regex, &'static str> {

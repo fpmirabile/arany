@@ -129,6 +129,49 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
 }
 
 #[test]
+fn commit_paths_cannot_bypass_restrictive_descendant_rules() {
+    let cases: &[(&str, &[&str], bool, bool)] = &[
+        ("./src/secrets/**", &["src"], false, true),
+        ("./src/secrets/key", &["src"], false, true),
+        ("./SRC/secrets/**", &["src"], false, true),
+        ("./docs/secrets/**", &["src"], false, false),
+        ("./src-other/secrets/**", &["src"], false, false),
+        ("./src/secrets/**", &["src/public"], false, false),
+        ("**/secret", &["src"], false, true),
+        ("./src/**/secret", &["src/public"], false, true),
+        ("./docs/**/secret", &["src"], false, false),
+        ("./src/s?cret/key", &["src"], false, true),
+        ("./src/s[ae]cret/key", &["src"], false, true),
+        ("./src/secrets/**", &["docs", "src"], false, true),
+        ("./private/**", &["."], false, true),
+        ("./private/**", &[], true, true),
+        ("./private/**", &["s\u{00e9}cret"], false, true),
+    ];
+    for &(pattern, paths, staged, restricted) in cases {
+        let call = ToolCall::GitCommit {
+            message: "m".into(),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            staged,
+        };
+        for tool in ["Read", "Edit"] {
+            for (list, decision) in [("deny", Decision::Deny), ("ask", Decision::Ask)] {
+                let rule = format!("{tool}({pattern})");
+                let parsed = config(json!({"allow": ["git_commit"], (list): [rule]}));
+                assert_eq!(
+                    parsed.decision(&call),
+                    if restricted {
+                        decision
+                    } else {
+                        Decision::Allow
+                    },
+                    "{list} {rule}: {call:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn permission_rule_precedence_is_deny_then_ask_then_allow() {
     for mode in ["default", "acceptEdits", "plan", "auto", "dontAsk"] {
         let mut value = json!({"defaultMode": mode, "allow": ["Read"], "ask": ["Read(./src/**)"], "deny": ["Read(./src/private/**)"]});

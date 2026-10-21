@@ -71,8 +71,7 @@ pub fn report_error(message: impl std::fmt::Display) {
     let _ = writeln!(io::stderr().lock(), "{}", error_line(&message.to_string()));
 }
 
-// Errors can quote repository data, such as recorded lock paths, so they are escaped like any
-// untrusted text before reaching the terminal.
+// Errors can quote untrusted repository data such as lock paths.
 pub(crate) fn error_line(message: &str) -> String {
     format!("error: {}", crate::presentation::escape_terminal(message))
 }

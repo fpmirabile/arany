@@ -167,6 +167,113 @@ mod tests {
     use super::*;
 
     #[test]
+    fn modes_only_preapprove_typed_file_edits_in_auto_edits() {
+        let cases = [
+            (ToolCall::Mkdir { path: "d".into() }, [true, false, true]),
+            (
+                ToolCall::Write {
+                    path: "a".into(),
+                    expected_digest: None,
+                    content: "x".into(),
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::Edit {
+                    path: "a".into(),
+                    expected_digest: "0".repeat(64),
+                    old: "x".into(),
+                    new: "y".into(),
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest: [1; 32],
+                        changeset: super::super::CommandChangeset::default(),
+                    },
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "m".into(),
+                    paths: vec!["src".into()],
+                    staged: false,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "m".into(),
+                    paths: Vec::new(),
+                    staged: true,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitBranch {
+                    name: Some("topic".into()),
+                    start_point: None,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::Command {
+                    program: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::CommandUnguarded {
+                    program: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                    justification: "sandbox failure".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::Read {
+                    path: "a".into(),
+                    offset: None,
+                    limit: Some(1),
+                },
+                [false; 3],
+            ),
+            (ToolCall::GitStatus { path: ".".into() }, [false; 3]),
+            (
+                ToolCall::GitBranch {
+                    name: None,
+                    start_point: None,
+                },
+                [false; 3],
+            ),
+        ];
+        for (call, expected) in cases {
+            for (mode, asks) in [
+                ApprovalMode::Request,
+                ApprovalMode::AutoEdits,
+                ApprovalMode::Auto,
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                assert_eq!(mode.asks(&call), asks, "{mode:?}: {call:?}");
+            }
+        }
+    }
+
+    #[test]
     fn mode_changes_never_restore_human_only_asks() {
         let call = ToolCall::CommandUnguarded {
             program: "x".into(),
