@@ -547,3 +547,24 @@ mod run_steering_tests {
         assert_eq!(poisoned.delivered_notes(), 0);
     }
 }
+
+#[test]
+fn a_ninth_active_child_gets_its_own_refusal() {
+    let steering = RunSteering::new();
+    let (session_id, run_id) = (SessionId::new(), RunId::new());
+    steering.begin_run(session_id, run_id);
+    let target = |_| ChildSteeringTarget {
+        session_id,
+        run_id,
+        agent_run_id: crate::session::AgentRunId::new(),
+    };
+    let children: Vec<_> = (0..9).map(target).collect();
+    for child in &children {
+        steering.register_child(*child);
+    }
+    assert_eq!(steering.offer_child_note(children[7], "ok".into()), Ok(()));
+    assert_eq!(
+        steering.offer_child_note(children[8], "no".into()),
+        Err(SteeringRefused::ChildLimit)
+    );
+}

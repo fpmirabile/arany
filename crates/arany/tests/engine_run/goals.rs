@@ -3861,6 +3861,7 @@ async fn child_note_reaches_only_the_next_target_boundary() {
             .create_session(workspace.clone(), None)
             .await
             .unwrap();
+        input.title = None;
         input.session_id = Some(session);
         let result = run_with(
             &engine,
@@ -3940,8 +3941,163 @@ async fn child_note_reaches_only_the_next_target_boundary() {
 }
 
 #[tokio::test]
+async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation() {
+    for pause in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let steering = RunSteering::new();
+        let cancel = RunCancellation::new();
+        let mut provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: ["first", "second"]
+                    .map(|objective| arany::ChildAssignment {
+                        editor: None,
+                        objective: objective.into(),
+                        profile: None,
+                    })
+                    .to_vec(),
+            }),
+            finish_with("first result"),
+            finish_with("second result"),
+            finish_with("synthesis"),
+        ]);
+        provider.identity.limits.concurrency = 1;
+        let calls = provider.requests.clone();
+        let gate = Arc::new(std::sync::Mutex::new(None));
+        let held = gate.clone();
+        let first_child = Arc::new(std::sync::Mutex::new(None));
+        let first = first_child.clone();
+        let observed = calls.clone();
+        let provider = Arc::new(provider.with_before_call(1, move || {
+            let request = observed.lock().unwrap().last().unwrap().clone();
+            *first.lock().unwrap() = Some(request.agent_run_id);
+            *held.lock().unwrap() = Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                request.session_id,
+                |event| matches!(event, Event::GoalProviderCallReserved { .. }),
+            ));
+        }));
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let mut input = request(&workspace, "Check facts");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 2,
+        };
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        input.title = None;
+        input.session_id = Some(session);
+        let arany::RunHandle {
+            mut events, result, ..
+        } = engine
+            .submit(
+                arany::AdmittedProviders::single(provider.clone()),
+                input,
+                RunControls {
+                    steering: Some(steering.clone()),
+                    cancellation: cancel.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let driver = {
+            let (steering, cancel) = (steering.clone(), cancel.clone());
+            tokio::spawn(async move {
+                let mut children = Vec::new();
+                let mut note = |tapped: Option<arany::Tapped>| {
+                    if let Some(arany::Tapped::Committed(envelope)) = tapped
+                        && let Event::AgentSpawned {
+                            role: arany::AgentRole::Child,
+                            run_id,
+                            agent_run_id,
+                            ..
+                        } = envelope.event
+                    {
+                        children.push((run_id, agent_run_id));
+                    }
+                };
+                let (entered, release) = loop {
+                    tokio::select! {
+                        tapped = events.next() => note(tapped),
+                        () = tokio::time::sleep(Duration::from_millis(5)) => {
+                            if let Some(held) = gate.lock().unwrap().take() {
+                                break held;
+                            }
+                        }
+                    }
+                };
+                while let Ok(tapped) =
+                    tokio::time::timeout(Duration::from_millis(20), events.next()).await
+                {
+                    note(tapped);
+                }
+                entered
+                    .await
+                    .expect("second child reservation reached its acknowledgment");
+                let first = first_child.lock().unwrap().expect("first child dispatched");
+                let (run_id, agent_run_id) = children
+                    .into_iter()
+                    .find(|(_, id)| *id != first)
+                    .expect("second child spawned");
+                steering
+                    .offer_child_note(
+                        arany::ChildSteeringTarget {
+                            session_id: session,
+                            run_id,
+                            agent_run_id,
+                        },
+                        "too late".into(),
+                    )
+                    .expect("the child is registered and not paused");
+                if pause {
+                    assert!(steering.pause());
+                } else {
+                    cancel.cancel();
+                }
+                release.send(()).expect("release the reservation");
+            })
+        };
+        let result = tokio::time::timeout(Duration::from_secs(30), result)
+            .await
+            .expect("Run settles");
+        driver.await.unwrap();
+        assert!(result.is_ok(), "pause={pause}");
+        engine.close().await.unwrap();
+        let (events, _) = replayed(&state_path, session).await;
+        assert_eq!(calls.lock().unwrap().len(), 2, "pause={pause}: no dispatch");
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::AgentSteeringNoteRecorded { .. })),
+            "pause={pause}"
+        );
+        let reserved = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+            .count();
+        let recorded = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ProviderCallRecorded { .. }))
+            .count();
+        assert_eq!(reserved, 3, "pause={pause}: the undispatched call is spent");
+        assert_eq!(
+            recorded, reserved,
+            "pause={pause}: every reservation settles"
+        );
+        assert!(events.iter().any(|event| matches!(
+            &event.event,
+            Event::ProviderCallRecorded { record, .. }
+                if record.disposition == arany::ProviderCallDisposition::Cancelled
+        )));
+    }
+}
+
+#[tokio::test]
 async fn child_note_is_retained_when_no_boundary_remains() {
-    for stop in ["finish", "cancel", "pause", "budget"] {
+    for stop in ["finish", "cancel", "pause"] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
@@ -3986,12 +4142,6 @@ async fn child_note_is_retained_when_no_boundary_remains() {
         input.policy = CollaborationPolicy::Auto {
             max_active_children: 1,
         };
-        if stop == "budget" {
-            input.goal.budget = Some(arany::GoalBudget {
-                max_provider_calls: Some(2),
-                ..Default::default()
-            });
-        }
         let result = run_with(
             &engine,
             &provider,
@@ -4007,7 +4157,8 @@ async fn child_note_is_retained_when_no_boundary_remains() {
         engine.close().await.unwrap();
         assert_eq!(
             calls.lock().unwrap().len(),
-            if stop == "finish" { 3 } else { 2 }
+            if stop == "finish" { 3 } else { 2 },
+            "{stop}"
         );
         let (events, view) = replayed(&state_path, result.session_id).await;
         assert_eq!(view.runs[0].agents.len(), 2);

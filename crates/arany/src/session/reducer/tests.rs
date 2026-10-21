@@ -1762,6 +1762,73 @@ mod goal_replay_tests {
                 .record_agent_steering_note(&goal, &run, &child, "own review")
                 .is_err()
         );
+        prefix.runs[0].agents[1].tools.pop();
+        prefix.runs[0].tools.pop();
+        assert!(
+            prefix
+                .clone()
+                .record_agent_steering_note(&goal, &run, &child, "control")
+                .is_ok()
+        );
+        type Mutate = fn(&mut SessionView, RunId, AgentRunId);
+        let rejections: [(&str, Mutate); 6] = [
+            ("paused goal", |view, _, _| {
+                view.goals[0].status = GoalStatus::Interrupted;
+            }),
+            ("finished goal", |view, _, _| {
+                view.goals[0].status = GoalStatus::Completed;
+            }),
+            ("non-latest run", |view, _, _| {
+                let mut later = view.runs[0].clone();
+                later.id = RunId::new();
+                view.runs.push(later);
+            }),
+            ("workers stop", |view, _, _| {
+                view.runs[0].workers.stop =
+                    Some((1, crate::session::worker::WorkerStopReason::Paused));
+            }),
+            ("hook stop", |view, run, child| {
+                let intent = child_intent(
+                    run,
+                    child,
+                    ToolCall::Command {
+                        program: "sh".into(),
+                        args: Vec::new(),
+                        cwd: String::new(),
+                    },
+                );
+                view.runs[0].lifecycle_hooks.push(HookView {
+                    sequence: 99,
+                    invocation: crate::tools::permissions::HookInvocation {
+                        event: crate::tools::permissions::HookEvent::SubagentStop,
+                        group: 0,
+                        handler: 0,
+                        subject_digest: [0; 32],
+                        intent: intent.clone(),
+                        input_digest: [0; 32],
+                        active_ceiling_ms: None,
+                    },
+                    outcome: Some(crate::tools::permissions::HookOutcome {
+                        observation: observation_for(intent, b""),
+                        result: crate::tools::permissions::HookResult::Stopped { reason: None },
+                        boundary_active_ms: None,
+                    }),
+                    idle: false,
+                });
+            }),
+            ("finished child", |view, _, _| {
+                view.runs[0].agents[1].status = AgentStatus::Finished;
+            }),
+        ];
+        for (name, mutate) in rejections {
+            let mut view = prefix.clone();
+            mutate(&mut view, run, child);
+            assert!(
+                view.record_agent_steering_note(&goal, &run, &child, "x")
+                    .is_err(),
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

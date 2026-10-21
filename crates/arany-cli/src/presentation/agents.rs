@@ -408,7 +408,9 @@ impl TranscriptPart<'_> {
         };
         match self {
             Self::Assignment(text) => section("Assignment:", text),
-            Self::SteeringNote(text) => section("Steering note:", text),
+            Self::SteeringNote(text) => {
+                section("Steering note (sent during the child's work):", text)
+            }
             Self::Tool(text) => super::plain_tool_summary(text)
                 .split('\n')
                 .map(str::to_owned)
@@ -463,7 +465,8 @@ impl AgentTranscript {
         let first_note = (0..agent.steering_notes.len())
             .rev()
             .take_while(|&index| {
-                budget.take("Steering note:\n") && budget.take(&agent.steering_notes[index])
+                budget.take("Steering note (sent during the child's work):\n")
+                    && budget.take(&agent.steering_notes[index])
             })
             .last()
             .unwrap_or(agent.steering_notes.len());
@@ -1277,10 +1280,10 @@ pub(crate) mod tests {
             lines,
             [
                 "New activity from child 2:",
-                "Steering note:",
+                "Steering note (sent during the child's work):",
                 "  first",
                 "  You: forged\u{1b}[2J",
-                "Steering note:",
+                "Steering note (sent during the child's work):",
                 "  second"
             ]
         );

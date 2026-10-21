@@ -2220,6 +2220,7 @@ impl RunLoop<'_> {
             if self.controls.cancellation.is_cancelled()
                 || self.pause_requested()
                 || self.worker_stopped()?
+                || self.hook_requested_stop()?
                 || queue.stop.is_some()
             {
                 let result = CallResult::Cancelled;

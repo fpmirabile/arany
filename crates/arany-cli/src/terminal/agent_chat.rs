@@ -60,7 +60,24 @@ enum ChildOfferState {
     Unknown,
 }
 
+const MAX_CHILD_DRAFTS: usize = 8;
+const DRAFT_CAP_NOTICE: &str =
+    "Eight child drafts are retained; clear one before opening another message";
+
 impl ChildDraft {
+    // An unknown outcome of a child that can no longer take notes would otherwise hold its slot forever.
+    fn clear(&mut self, editable: bool) {
+        self.composer.clear();
+        if !editable
+            && self
+                .offered
+                .as_ref()
+                .is_some_and(|offer| matches!(offer.state, ChildOfferState::Unknown))
+        {
+            self.offered = None;
+        }
+    }
+
     fn acknowledge(&mut self, view: &SessionView) -> bool {
         let Some(offer) = &self.offered else {
             return false;
@@ -455,20 +472,8 @@ impl AttachedTerminal {
             agent_run_id: target.id,
         };
         let editable = selected != 0 && editable_child(view, target);
-        if editable && !self.child_drafts.iter().any(|draft| draft.target == target) {
-            self.child_drafts
-                .retain(|draft| !draft.composer.is_empty() || draft.offered.is_some());
-            if self.child_drafts.len() == 8 {
-                return Ok(AgentChatInput::Notice(
-                    "Eight child drafts are retained; clear one before opening another message",
-                ));
-            }
-            self.child_drafts.push(ChildDraft {
-                target,
-                composer: Composer::text_only(),
-                offered: None,
-                notice: None,
-            });
+        if editable && !self.open_child_draft(target) {
+            return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
         }
         self.cancel_clipboard_paste();
         self.agent_chat = Some(AgentChat {
@@ -652,6 +657,24 @@ impl AttachedTerminal {
         changed
     }
 
+    fn open_child_draft(&mut self, target: ChildSteeringTarget) -> bool {
+        if self.child_drafts.iter().any(|draft| draft.target == target) {
+            return true;
+        }
+        self.child_drafts
+            .retain(|draft| !draft.composer.is_empty() || draft.offered.is_some());
+        if self.child_drafts.len() >= MAX_CHILD_DRAFTS {
+            return false;
+        }
+        self.child_drafts.push(ChildDraft {
+            target,
+            composer: Composer::text_only(),
+            offered: None,
+            notice: None,
+        });
+        true
+    }
+
     async fn edit_child(
         &mut self,
         view: &SessionView,
@@ -665,7 +688,7 @@ impl AttachedTerminal {
             if matches!(input, TerminalInput::Backspace | TerminalInput::Delete)
                 && let Some(draft) = self.selected_child_draft_mut()
             {
-                draft.composer.clear();
+                draft.clear(false);
                 return Ok(AgentChatInput::ChildEdited(target));
             }
             if input == TerminalInput::Paste {
@@ -675,6 +698,9 @@ impl AttachedTerminal {
                 "This child is read-only; draft retained",
             ));
         }
+        if !self.open_child_draft(target) {
+            return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
+        }
         if input == TerminalInput::ClipboardPaste {
             return Ok(match self.request_clipboard_paste() {
                 Ok(()) => AgentChatInput::Handled,
@@ -682,7 +708,9 @@ impl AttachedTerminal {
             });
         }
         if input == TerminalInput::Submit {
-            let draft = self.selected_child_draft().expect("editable child draft");
+            let Some(draft) = self.selected_child_draft() else {
+                return Ok(AgentChatInput::Handled);
+            };
             return Ok(if let Some(offer) = &draft.offered {
                 AgentChatInput::Notice(match offer.state {
                     ChildOfferState::Waiting => "Note waiting for this child's next step",
@@ -705,9 +733,9 @@ impl AttachedTerminal {
         } else {
             None
         };
-        let draft = self
-            .selected_child_draft_mut()
-            .expect("editable child draft");
+        let Some(draft) = self.selected_child_draft_mut() else {
+            return Ok(AgentChatInput::Handled);
+        };
         let before = draft.composer.text().to_owned();
         let edit = match paste {
             Some(text) => match draft.composer.insert_paste(&text) {
@@ -769,7 +797,7 @@ impl AttachedTerminal {
                         || text.len() > super::composer::MAX_DRAFT_BYTES
                     {
                         return Ok(AgentChatInput::Notice(
-                            "Child message is empty or exceeds 8 KiB; draft retained",
+                            "Child message is empty or exceeds 8 KiB; message not offered",
                         ));
                     }
                     let target = chat.target();
@@ -778,16 +806,21 @@ impl AttachedTerminal {
                             "This child is read-only; message not offered",
                         ));
                     };
-                    let draft = self
+                    if !self.open_child_draft(target) {
+                        return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
+                    }
+                    let Some(draft) = self
                         .child_drafts
                         .iter_mut()
                         .find(|draft| draft.target == target)
-                        .expect("editable child draft");
+                    else {
+                        return Ok(AgentChatInput::Handled);
+                    };
                     if draft.offered.is_some()
                         || (!draft.composer.is_empty() && draft.composer.text() != text)
                     {
                         return Ok(AgentChatInput::Notice(
-                            "Child draft retained; /clear clears it before a different message",
+                            "Message not offered; /clear clears the child draft before a different message",
                         ));
                     }
                     if draft.composer.is_empty() {
@@ -799,8 +832,13 @@ impl AttachedTerminal {
                     });
                 }
                 if choice == "/clear" && !invalid {
+                    let editable = self
+                        .agent_chat
+                        .as_ref()
+                        .and_then(AgentChat::target)
+                        .is_some_and(|target| editable_child(view, target));
                     if let Some(draft) = self.selected_child_draft_mut() {
-                        draft.composer.clear();
+                        draft.clear(editable);
                         return Ok(AgentChatInput::ChildEdited(draft.target));
                     }
                     return Ok(AgentChatInput::Handled);
@@ -1208,7 +1246,11 @@ mod tests {
             .unwrap();
         assert_eq!(
             committed,
-            ["New activity from child 2:", "Steering note:", "  /literal"]
+            [
+                "New activity from child 2:",
+                "Steering note (sent during the child's work):",
+                "  /literal"
+            ]
         );
         assert!(
             terminal
@@ -1219,7 +1261,12 @@ mod tests {
                 .is_empty()
         );
         let output = String::from_utf8(output).unwrap();
-        assert_eq!(output.matches("Steering note:").count(), 1);
+        assert_eq!(
+            output
+                .matches("Steering note (sent during the child's work):")
+                .count(),
+            1
+        );
         assert!(output.contains("number opens, n next, p previous, q returns to primary:"));
         assert!(!output.contains(['\r', '\u{1b}']));
         view.runs[0].agents[2].status = arany::AgentStatus::Finished;

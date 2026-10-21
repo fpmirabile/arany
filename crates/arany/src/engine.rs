@@ -500,6 +500,7 @@ pub enum SteeringRefused {
     Empty,
     TooLarge,
     Unavailable,
+    ChildLimit,
 }
 
 impl RunSteering {
@@ -555,8 +556,19 @@ impl RunSteering {
         text: String,
     ) -> Result<(), SteeringRefused> {
         let mut state = self.lock().ok_or(SteeringRefused::Unavailable)?;
-        if self.pause_requested() || !state.child_available(target) {
+        if self.pause_requested() {
             return Err(SteeringRefused::Unavailable);
+        }
+        if !state.child_available(target) {
+            return Err(
+                if state.run == Some((target.session_id, target.run_id))
+                    && state.children.len() >= MAX_STEERING_CHILDREN
+                {
+                    SteeringRefused::ChildLimit
+                } else {
+                    SteeringRefused::Unavailable
+                },
+            );
         }
         if text.trim().is_empty() {
             return Err(SteeringRefused::Empty);

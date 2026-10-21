@@ -167,6 +167,9 @@ fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
         SteeringRefused::TooLarge => "Steering note exceeds 8 KiB; draft retained".into(),
         SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
         SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
+        SteeringRefused::ChildLimit => {
+            "Only eight children accept steering notes at once; draft retained".into()
+        }
     }
 }
 
@@ -519,7 +522,6 @@ pub(super) async fn submit_objective(
             .unzip();
         tokio::select! {
             approval = inbox.next(), if pending.is_none() => {
-                terminal.settle_child_notes(view, &steering, true);
                 pending = approval;
                 approval_page = 0;
                 approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
