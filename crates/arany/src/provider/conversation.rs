@@ -49,7 +49,10 @@ pub struct RunInput {
     pub goal_plan_contract: Option<GoalPlanContract>,
     /// Facts of the first call, or of a call whose steps were all compacted away.
     pub goal_context_facts: Option<GoalContextFacts>,
-    pub workspace_guidance: Option<String>,
+    /// The Workspace instruction file, followed for behavior; it never carries authority.
+    pub workspace_guidance: Option<WorkspaceGuidance>,
+    /// A child's agent definition, worker assignment and source facts; rendered as data.
+    pub assignment_context: Option<String>,
     pub includes: Vec<String>,
     pub history: Vec<HistoryTurn>,
     /// Model-authored derived data; rendered as data, never instructions.
@@ -57,6 +60,13 @@ pub struct RunInput {
     pub child_results: Vec<ChildResult>,
     pub tools: Option<ToolContext>,
     pub last_answer_refused: Option<crate::session::ProposalRefusal>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkspaceGuidance {
+    /// Workspace-relative path of the file, named in the rendered heading.
+    pub path: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,6 +93,7 @@ impl RunInput {
             goal_plan_contract: None,
             goal_context_facts: None,
             workspace_guidance: None,
+            assignment_context: None,
             includes: Vec::new(),
             history: Vec::new(),
             context_summary: None,

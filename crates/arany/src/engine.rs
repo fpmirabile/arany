@@ -2,7 +2,7 @@
 
 use crate::journal::{Journal, Subscription};
 use crate::provider::{
-    AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput,
+    AgentPhase, ImageAttachment, PromptRole, Provider, ProviderRequest, RunInput, WorkspaceGuidance,
 };
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
@@ -1806,10 +1806,7 @@ impl Engine {
             provider_concurrency,
             workspace_device: root_identity.device,
             workspace_inode: root_identity.inode,
-            instruction_digest: inputs
-                .instructions
-                .as_ref()
-                .map(|(_, snapshot)| snapshot.digest),
+            instruction_digest: inputs.instructions.as_ref().map(|snapshot| snapshot.digest),
             include_digests: inputs
                 .includes
                 .iter()
@@ -2050,11 +2047,12 @@ fn root_request(
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
             pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
-            workspace_guidance: input
-                .inputs
-                .instructions
-                .take()
-                .map(|(_, snapshot)| snapshot.content),
+            workspace_guidance: input.inputs.instructions.take().map(|snapshot| {
+                WorkspaceGuidance {
+                    path: snapshot.path,
+                    text: snapshot.content,
+                }
+            }),
             includes: std::mem::take(&mut input.inputs.includes)
                 .into_iter()
                 .map(|snapshot| snapshot.model_include())
