@@ -4,8 +4,8 @@ use super::{
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
-    AgentChatInput, AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError,
-    TerminalInput, TerminalNotice,
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, ShutdownSignal,
+    TerminalError, TerminalInput, TerminalNotice,
 };
 use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
@@ -576,7 +576,8 @@ pub(super) async fn submit_objective(
             },
             preview = previews.changed() => {
                 terminal.set_preview(preview);
-                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                // A child view shows neither the primary's preview nor its waiting hint.
+                if pending.is_none() && !terminal.agent_chat_open() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
@@ -586,25 +587,11 @@ pub(super) async fn submit_objective(
                     None => std::future::pending().await,
                 }
             } => {
-                let mut event = event;
-                let mut drained = 0;
-                let applied = loop {
-                    let Some(tapped) = event else {
-                        break Err("Run event stream closed".to_owned());
-                    };
-                    if apply_tapped(&admission.state_dir, view, tapped).await.is_err() {
-                        break Err("Run history unavailable; check Session history".to_owned());
-                    }
-                    drained += 1;
-                    let Some(events) = events.as_deref_mut().filter(|_| drained < EVENT_DRAIN_LIMIT) else {
-                        break Ok(());
-                    };
-                    match tokio::time::timeout(Duration::ZERO, events.next()).await {
-                        Ok(next) => event = next,
-                        Err(_) => break Ok(()),
-                    }
+                let ready = async || match events.as_deref_mut() {
+                    Some(events) => tokio::time::timeout(Duration::ZERO, events.next()).await.ok(),
+                    None => None,
                 };
-                if let Err(reason) = applied {
+                if let Err(reason) = apply_burst(&admission.state_dir, view, event, ready).await {
                     break reason;
                 }
                 if !user_recorded && let Some(run) = view.runs.last().filter(|run| run.accepted_sequence > starting_sequence) {
@@ -632,13 +619,24 @@ pub(super) async fn submit_objective(
                 } else {
                     retry.as_deref().map(TerminalNotice::Transient)
                 };
-                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
+                let follow = match terminal.follow_agent_chat(view).await {
+                    Ok(follow) => follow,
+                    Err(_) => break "terminal rendering failed".to_owned(),
+                };
+                let notice = match follow {
+                    AgentChatFollow::Closed(text) => Some(TerminalNotice::History(text)),
+                    AgentChatFollow::Unchanged | AgentChatFollow::Redraw => notice,
+                };
+                if pending.is_none()
+                    && (follow != AgentChatFollow::Unchanged || notice.is_some())
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err()
+                {
                     break "terminal rendering failed".to_owned();
                 }
             }
             waiting = waiting_hints.waiting_changed() => {
                 terminal.set_waiting_tool(waiting);
-                if pending.is_none() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                if pending.is_none() && !terminal.agent_chat_open() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                     break "terminal rendering failed".to_owned();
                 }
             }
@@ -1311,6 +1309,33 @@ fn compaction_notice(record: &CompactionRecord) -> String {
 
 const EVENT_DRAIN_LIMIT: usize = 64;
 
+// Applies one burst: `first`, then Events already ready, at most EVENT_DRAIN_LIMIT in commit
+// order, so input is polled again before the next burst.
+async fn apply_burst(
+    state_dir: &std::path::Path,
+    view: &mut SessionView,
+    first: Option<arany::Tapped>,
+    mut ready: impl AsyncFnMut() -> Option<Option<arany::Tapped>>,
+) -> Result<(), String> {
+    let mut event = first;
+    for drained in 1..=EVENT_DRAIN_LIMIT {
+        let Some(tapped) = event else {
+            return Err("Run event stream closed".to_owned());
+        };
+        if apply_tapped(state_dir, view, tapped).await.is_err() {
+            return Err("Run history unavailable; check Session history".to_owned());
+        }
+        if drained == EVENT_DRAIN_LIMIT {
+            break;
+        }
+        match ready().await {
+            Some(next) => event = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
 async fn apply_tapped(
     state_dir: &std::path::Path,
     view: &mut SessionView,
@@ -1445,6 +1470,149 @@ mod tests {
                 )
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod burst_tests {
+    use super::*;
+    use arany::test_support::{
+        engine::{open, run_to_end},
+        scenario::{ScriptedProvider, request},
+    };
+    use arany::{
+        Answer, ChildAssignment, CollaborationPolicy, Delegate, EngineConfig, ProviderOutcome,
+        StateRoot, Store, Tapped,
+    };
+    use std::{collections::VecDeque, sync::Arc};
+
+    // A team Run with two children, then single Runs, so the journal outgrows one burst.
+    async fn committed_team() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Vec<arany::EventEnvelope>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let state_dir = root.path().join("state");
+        let engine = open(
+            StateRoot::admit(&state_dir).unwrap(),
+            EngineConfig::default(),
+        )
+        .unwrap();
+        let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
+        let child = |objective: &str| ChildAssignment {
+            editor: None,
+            objective: objective.into(),
+            profile: None,
+        };
+        let mut responses = vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![child("first task"), child("second task")],
+            }),
+            answer("first result"),
+            answer("second result"),
+            answer("team answer"),
+        ];
+        responses.extend((0..8).map(|_| answer("later answer")));
+        let mut provider = ScriptedProvider::new(responses);
+        // One call at a time, so each child takes its scripted answer in spawn order.
+        provider.identity.limits.concurrency = 1;
+        let provider = Arc::new(provider);
+        let mut team = request(&workspace, "team task");
+        team.policy = CollaborationPolicy::Team {
+            max_active_children: 2,
+        };
+        let session = run_to_end(&engine, &provider, team)
+            .await
+            .unwrap()
+            .session_id;
+        for _ in 0..8 {
+            let mut later = request(&workspace, "later task");
+            later.session_id = Some(session);
+            later.title = None;
+            run_to_end(&engine, &provider, later).await.unwrap();
+        }
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).unwrap()).unwrap();
+        let events = store.load_session(session).await.unwrap();
+        store.close().await.unwrap();
+        (root, state_dir, events)
+    }
+
+    fn tapped(envelope: &arany::EventEnvelope) -> Tapped {
+        Tapped::Committed(Arc::new(envelope.clone()))
+    }
+
+    fn replay(events: &[arany::EventEnvelope]) -> SessionView {
+        SessionView::replay(events[0].session_id, events)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn committed_events_apply_in_bounded_in_order_bursts_and_gaps_reload_the_view() {
+        let (_root, state_dir, events) = committed_team().await;
+        let full = replay(&events);
+
+        // Commit order, one Event at a time, reaches the strictly replayed view.
+        let mut view = replay(&events[..1]);
+        for envelope in &events[1..] {
+            apply_tapped(&state_dir, &mut view, tapped(envelope))
+                .await
+                .unwrap();
+            assert_eq!(view.last_sequence, envelope.sequence);
+        }
+        assert_eq!(view.runs, full.runs);
+
+        // One burst applies at most EVENT_DRAIN_LIMIT ready Events and leaves the rest queued.
+        let mut queue = events[1..].iter().map(tapped).collect::<VecDeque<_>>();
+        assert!(queue.len() > EVENT_DRAIN_LIMIT);
+        let mut view = replay(&events[..1]);
+        let first = queue.pop_front();
+        apply_burst(&state_dir, &mut view, first, async || {
+            queue.pop_front().map(Some)
+        })
+        .await
+        .unwrap();
+        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT].sequence);
+        assert_eq!(queue.len(), events.len() - 1 - EVENT_DRAIN_LIMIT);
+        // Nothing else ready ends the burst after its first Event.
+        let first = queue.pop_front();
+        apply_burst(&state_dir, &mut view, first, async || None)
+            .await
+            .unwrap();
+        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT + 1].sequence);
+
+        // A sequence gap or a resync reloads the whole validated committed view.
+        let gap = tapped(&events[EVENT_DRAIN_LIMIT + 3]);
+        for missed in [Some(gap), Some(Tapped::Resync { missed: 3 })] {
+            let mut view = replay(&events[..=EVENT_DRAIN_LIMIT]);
+            apply_burst(&state_dir, &mut view, missed, async || None)
+                .await
+                .unwrap();
+            assert_eq!(view.last_sequence, full.last_sequence);
+            assert_eq!(view.runs, full.runs);
+        }
+        // A closed stream or unreadable history stops the Run view instead of inventing progress.
+        let mut view = replay(&events[..1]);
+        for (state, event, expected) in [
+            (state_dir.as_path(), None, "Run event stream closed"),
+            (
+                std::path::Path::new("/nonexistent-arany-state"),
+                Some(Tapped::Resync { missed: 1 }),
+                "Run history unavailable; check Session history",
+            ),
+        ] {
+            assert_eq!(
+                apply_burst(state, &mut view, event, async || None).await,
+                Err(expected.to_owned())
+            );
+        }
+        assert_eq!(view.last_sequence, events[0].sequence);
     }
 }
 

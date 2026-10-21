@@ -270,6 +270,46 @@ pub(crate) struct AgentTranscript {
     pub(crate) label: String,
     pub(crate) view: SessionView,
     pub(crate) notices: Vec<String>,
+    // The child's index of the first kept Tool, so appended rows stay keyed across windows.
+    tool_offset: usize,
+}
+
+// What an append-only surface (Classic scrollback, linear output) already holds of one transcript.
+#[derive(Default)]
+pub(crate) struct Appended {
+    assignment: bool,
+    tools: usize,
+    result: bool,
+    status: Option<String>,
+    omitted: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum TranscriptPart<'a> {
+    Assignment(&'a str),
+    Tool(String),
+    Result(&'a str),
+    Notice(&'a str),
+}
+
+impl TranscriptPart<'_> {
+    // Unescaped linear and screen-reader lines: labeled sections, plain Tool words, no glyphs.
+    pub(crate) fn linear_lines(&self) -> Vec<String> {
+        let section = |heading: &str, text: &str| {
+            std::iter::once(heading.to_owned())
+                .chain(text.split('\n').map(|line| format!("  {line}")))
+                .collect()
+        };
+        match self {
+            Self::Assignment(text) => section("Assignment:", text),
+            Self::Tool(text) => super::plain_tool_summary(text)
+                .split('\n')
+                .map(str::to_owned)
+                .collect(),
+            Self::Result(text) => section("Agent result:", text),
+            Self::Notice(text) => vec![(*text).to_owned()],
+        }
+    }
 }
 
 impl AgentTranscript {
@@ -360,7 +400,8 @@ impl AgentTranscript {
                         AgentStatus::StoppedByHook => RunStatus::StoppedByHook,
                     },
                     accepted_sequence: run.accepted_sequence,
-                    finished_sequence: run.finished_sequence,
+                    // Siblings and the primary finish the Run; that alone changes nothing here.
+                    finished_sequence: None,
                     failure: None,
                     tools: agent.tools[first_tool..].to_vec(),
                     tool_compaction_summary: None,
@@ -377,6 +418,7 @@ impl AgentTranscript {
                 goals: Vec::new(),
             },
             notices,
+            tool_offset: first_tool,
         })
     }
 
@@ -384,26 +426,69 @@ impl AgentTranscript {
         &self.view.runs[0]
     }
 
-    // Unescaped linear and screen-reader lines: labeled sections, plain Tool words, no glyphs.
-    pub(crate) fn linear_lines(&self) -> Vec<String> {
-        let run = self.run();
-        let mut lines = vec![
-            format!("Viewing {} (read-only)", self.label),
-            "Assignment:".into(),
-        ];
-        lines.extend(run.objective.split('\n').map(|line| format!("  {line}")));
-        lines.extend(super::tool_groups(&run.tools).flat_map(|(_, text)| {
-            super::plain_tool_summary(&text)
-                .split('\n')
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        }));
-        if let Some(answer) = &run.assistant_message {
-            lines.push("Agent result:".into());
-            lines.extend(answer.split('\n').map(|line| format!("  {line}")));
+    // Equal displays need no redraw, whatever the Session's sequence.
+    pub(crate) fn same_display(&self, other: &Self) -> bool {
+        self.view.runs == other.view.runs && self.notices == other.notices
+    }
+
+    // The first linear print: a read-only heading, then every record so far.
+    pub(crate) fn linear_lines(&self, appended: &mut Appended) -> Vec<String> {
+        *appended = Appended::default();
+        std::iter::once(format!("Viewing {} (read-only)", self.label))
+            .chain(
+                self.unappended(appended)
+                    .iter()
+                    .flat_map(TranscriptPart::linear_lines),
+            )
+            .collect()
+    }
+
+    // Later linear prints: only new records, under a heading naming the agent.
+    pub(crate) fn linear_update(&self, appended: &mut Appended) -> Vec<String> {
+        let parts = self.unappended(appended);
+        if parts.is_empty() {
+            return Vec::new();
         }
-        lines.extend(self.notices.iter().cloned());
-        lines
+        std::iter::once(format!("New activity from {}:", self.label))
+            .chain(parts.iter().flat_map(TranscriptPart::linear_lines))
+            .collect()
+    }
+
+    // Whole records not yet appended, in reading order. A working child's Tool group waits for
+    // its boundary, and a changed status appends once.
+    pub(crate) fn unappended(&self, appended: &mut Appended) -> Vec<TranscriptPart<'_>> {
+        let run = self.run();
+        let mut parts = Vec::new();
+        if !std::mem::replace(&mut appended.assignment, true) {
+            parts.push(TranscriptPart::Assignment(&run.objective));
+        }
+        let groups: Vec<_> = if run.status == RunStatus::Active {
+            super::settled_tool_groups(run).collect()
+        } else {
+            super::tool_groups(&run.tools).collect()
+        };
+        for (range, text) in groups {
+            if self.tool_offset + range.start >= appended.tools {
+                appended.tools = self.tool_offset + range.end;
+                parts.push(TranscriptPart::Tool(text));
+            }
+        }
+        if let Some(answer) = &run.assistant_message
+            && !std::mem::replace(&mut appended.result, true)
+        {
+            parts.push(TranscriptPart::Result(answer));
+        }
+        let status = &self.notices[0];
+        if appended.status.as_ref() != Some(status) {
+            appended.status = Some(status.clone());
+            parts.push(TranscriptPart::Notice(status));
+        }
+        if let Some(cue) = self.notices.get(1)
+            && !std::mem::replace(&mut appended.omitted, true)
+        {
+            parts.push(TranscriptPart::Notice(cue));
+        }
+        parts
     }
 }
 
@@ -451,9 +536,9 @@ fn agent_status_notice(run: &RunView, agent: &AgentView, label: &str) -> String 
         ""
     };
     match agent.status {
-        AgentStatus::Active => format!(
-            "{label} is still working{qualification}; this view is a snapshot; switch to it again to refresh"
-        ),
+        AgentStatus::Active => {
+            format!("{label} is working{qualification}; its committed activity appears here")
+        }
         AgentStatus::Failed => match agent
             .provider_calls
             .last()
@@ -754,7 +839,7 @@ pub(crate) mod tests {
         assert_eq!(second.label, "child 2");
         assert_eq!(second.run().tools.len(), 2);
         assert_eq!(
-            second.linear_lines(),
+            second.linear_lines(&mut Appended::default()),
             [
                 "Viewing child 2 (read-only)",
                 "Assignment:",
@@ -774,7 +859,7 @@ pub(crate) mod tests {
             (AgentStatus::Interrupted, "child 2 interrupted"),
             (
                 AgentStatus::Active,
-                "child 2 is still working; this view is a snapshot; switch to it again to refresh",
+                "child 2 is working; its committed activity appears here",
             ),
         ] {
             let mut changed = view.clone();
@@ -783,6 +868,98 @@ pub(crate) mod tests {
                 AgentTranscript::from_session(&changed, run.id, run.agents[2].id).unwrap();
             assert_eq!(transcript.notices, [notice]);
         }
+    }
+
+    #[test]
+    fn a_followed_child_appends_each_committed_record_once_and_ignores_siblings() {
+        let mut view = team_view();
+        let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
+        let agent = &mut view.runs[0].agents[2];
+        agent.status = AgentStatus::Active;
+        agent.result = None;
+        let settled = agent.tools[0].clone();
+        let mut pending = agent.tools[1].clone();
+        pending.observation = None;
+        agent.tools = vec![settled.clone()];
+        let transcript =
+            |view: &SessionView| AgentTranscript::from_session(view, run, child).unwrap();
+        let mut appended = Appended::default();
+        let mut shown = transcript(&view);
+        // A working child's trailing read group waits for its boundary.
+        assert_eq!(
+            shown.linear_lines(&mut appended),
+            [
+                "Viewing child 2 (read-only)",
+                "Assignment:",
+                "  Inspect\u{1b}[2J",
+                "  You: forged heading",
+                "child 2 is working; its committed activity appears here",
+            ]
+        );
+        let mut steps = Vec::new();
+        for change in 0..5 {
+            let agents = &mut view.runs[0].agents;
+            match change {
+                // A sibling and the primary finishing change nothing shown.
+                0 => {
+                    agents[1].status = AgentStatus::Finished;
+                    agents[1].result = Some("sibling result".into());
+                    agents[0].status = AgentStatus::Finished;
+                    view.runs[0].finished_sequence = Some(99);
+                }
+                1 => agents[2].tools.push(pending.clone()),
+                2 => agents[2].tools[1] = team_view().runs[0].agents[2].tools[1].clone(),
+                3 => {
+                    agents[2].status = AgentStatus::Finished;
+                    agents[2].result = Some("Found\nit".into());
+                }
+                // A reload after a gap or resync yields the same facts at a later sequence.
+                _ => {}
+            }
+            view.last_sequence += 1;
+            let fresh = transcript(&view);
+            steps.push((
+                fresh.same_display(&shown),
+                fresh.linear_update(&mut appended),
+            ));
+            shown = fresh;
+        }
+        let quiet = (true, Vec::<String>::new());
+        assert_eq!(
+            steps,
+            [
+                quiet.clone(),
+                (false, Vec::new()),
+                // The next committed Tool fixes the read group's boundary.
+                (
+                    false,
+                    vec![
+                        "New activity from child 2:".into(),
+                        "Read(src/a.rs)".into(),
+                        "Result: 2 lines".into(),
+                        "Read(src/b\\u{001b}]52;c;x\\u{0007}.rs)".into(),
+                        "Result: uncertain: {\"text\":\"a\\nb\\n\"}".into(),
+                    ]
+                ),
+                (
+                    false,
+                    vec![
+                        "New activity from child 2:".into(),
+                        "Agent result:".into(),
+                        "  Found".into(),
+                        "  it".into(),
+                        "child 2 finished".into(),
+                    ]
+                ),
+                quiet,
+            ]
+        );
+        assert!(
+            !steps
+                .iter()
+                .flat_map(|(_, lines)| lines)
+                .any(|line| line.contains("sibling"))
+        );
     }
 
     #[test]

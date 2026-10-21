@@ -812,7 +812,7 @@ mod tests {
 
     #[test]
     fn linear_agent_chat_lists_numbered_agents_and_prints_an_inert_child_transcript() {
-        use crate::presentation::{AgentTranscript, agent_targets, team_view};
+        use crate::presentation::{AgentTranscript, Appended, agent_targets, team_view};
         let view = team_view();
         let run = &view.runs[0];
         let (_, targets) = agent_targets(&view).unwrap();
@@ -836,7 +836,12 @@ mod tests {
         state.arm(&mut output).unwrap();
         let transcript = AgentTranscript::from_session(&view, run.id, run.agents[2].id).unwrap();
         state
-            .write_agent_chat(&mut output, &transcript.linear_lines(), None, true)
+            .write_agent_chat(
+                &mut output,
+                &transcript.linear_lines(&mut Appended::default()),
+                None,
+                true,
+            )
             .unwrap();
         state
             .write_agent_chat(
