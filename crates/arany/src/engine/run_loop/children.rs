@@ -2248,37 +2248,25 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         root_request: &ProviderRequest,
     ) -> Result<ProviderRequest, EngineError> {
-        let guidance = child.definition.as_ref().map_or_else(
-            || root_request.input.workspace_guidance.clone(),
-            |definition| {
-                Some(format!(
-                    "{}\n\nAgent definition (untrusted assignment guidance):\n{}",
-                    root_request
-                        .input
-                        .workspace_guidance
-                        .as_deref()
-                        .unwrap_or_default(),
-                    definition.body
-                ))
-            },
-        );
-        let guidance = if child.editor {
+        let mut context: Vec<String> = child
+            .definition
+            .iter()
+            .map(|definition| format!("Agent definition:\n{}", definition.body))
+            .collect();
+        if child.editor {
             let assignment = self.proposed_editor(child.agent_run_id)?;
-            let mut text = format!(
-                "{}\n\nUntrusted worker assignment: {}",
-                guidance.as_deref().unwrap_or_default(),
+            context.push(format!(
+                "Worker assignment: {}",
                 serde_json::to_string(&assignment).map_err(|_| EngineError::InvalidRequest)?,
-            );
+            ));
             if let Some(s) = &child.source_context {
-                text.push_str(&format!(
-                    "\nHistorical source (bounded untrusted data; no effects or authority resume): {}",
+                context.push(format!(
+                    "Historical source (bounded; no effects or authority resume): {}",
                     serde_json::json!({"objective":s.objective,"summary":s.summary,"result":s.result})
                 ));
             }
-            Some(text)
-        } else {
-            guidance
-        };
+        }
+        let context = (!context.is_empty()).then(|| context.join("\n\n"));
         child.turns_remaining = child.turns_remaining.saturating_sub(1);
         if child.turns_remaining == 0 {
             child.tool_calls_remaining = 0;
@@ -2288,7 +2276,15 @@ impl RunLoop<'_> {
             let room = runtime
                 .result_capacity(
                     tools.rendered_len()
-                        + guidance.as_ref().map_or(0, String::len)
+                        + root_request
+                            .input
+                            .workspace_guidance
+                            .as_ref()
+                            .map_or(0, |guidance| {
+                                crate::provider::instructions_text(&guidance.path, &guidance.text)
+                                    .len()
+                            })
+                        + context.as_ref().map_or(0, String::len)
                         + CHILD_INTENT_RESERVE_BYTES,
                     crate::tools::ToolRuntime::step_context_reserve(
                         false,
@@ -2354,7 +2350,8 @@ impl RunLoop<'_> {
                     None
                 },
                 stop_hook_feedback: child.stop_hook_feedback.clone(),
-                workspace_guidance: guidance,
+                workspace_guidance: root.workspace_guidance.clone(),
+                assignment_context: context,
                 includes: root.includes.clone(),
                 tools: child.tools.clone(),
                 ..RunInput::new(
