@@ -1076,8 +1076,7 @@ fn ledger_name(intent: uuid::Uuid) -> String {
     format!("arany-locks-{intent}.json")
 }
 
-// Durable ownership of one write's locks in `.git`: if the Guard dies, recovery removes only
-// these exact, unchanged files. Dropping it after the locks removes the record.
+// Durable record of one write's locks: a dead Guard's locks are reported, never removed.
 struct Ledger<'a> {
     git_dir: &'a Dir,
     name: String,
