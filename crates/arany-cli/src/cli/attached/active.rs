@@ -87,8 +87,13 @@ pub(super) fn validate_objective_inputs(
     let paths = objective_includes(admission, objective)?;
     let root = arany::StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    arany::validate_workspace_inputs(&root, &admission.workspace, &paths)
-        .map_err(|error| error.to_string())
+    arany::validate_workspace_inputs(
+        &root,
+        &admission.workspace,
+        std::env::current_dir().ok().as_deref(),
+        &paths,
+    )
+    .map_err(|error| error.to_string())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -444,6 +449,7 @@ pub(super) async fn submit_objective(
         objective,
         images: composer.take_images(),
         workspace: admission.workspace.clone(),
+        launch_directory: std::env::current_dir().ok(),
         include_paths,
         policy: view.defaults.policy,
         goal,

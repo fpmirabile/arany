@@ -139,7 +139,12 @@ fn compaction_context_input(
     serde_json::json!({
         "pinned_goal": {
             "objective": &request.input.objective,
-            "project_instructions": request.input.workspace_guidance.as_ref().map(|guidance| &guidance.text),
+            "project_instructions": request
+                .input
+                .workspace_guidance
+                .iter()
+                .map(|guidance| serde_json::json!({"path": guidance.path, "text": guidance.text}))
+                .collect::<Vec<_>>(),
             "includes": &request.input.includes,
             "budget": budget,
             "plan_contract": plan_contract,

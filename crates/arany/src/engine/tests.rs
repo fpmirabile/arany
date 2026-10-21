@@ -168,6 +168,7 @@ mod goal_workspace_lease_tests {
             objective: "Link the Run before its acknowledgment is lost".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: GoalRequest::default(),
@@ -242,6 +243,7 @@ mod goal_workspace_lease_tests {
             objective: RESUMABLE_OBJECTIVE.into(),
             images: Vec::new(),
             workspace: workspace.to_path_buf(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: GoalRequest {

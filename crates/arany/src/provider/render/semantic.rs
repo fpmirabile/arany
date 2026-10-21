@@ -45,12 +45,16 @@ pub fn input(wire: &Value) -> Value {
     });
     let mut notes = Vec::new();
     for part in parts(wire) {
-        if let Some(text) = part
+        if let Some((path, text)) = part
             .strip_prefix("# AGENTS.md instructions for ")
             .and_then(|rest| rest.split_once("\n\n<INSTRUCTIONS>\n"))
-            .and_then(|(_, body)| body.strip_suffix("\n</INSTRUCTIONS>"))
+            .and_then(|(path, body)| Some((path, body.strip_suffix("\n</INSTRUCTIONS>")?)))
         {
-            semantic["workspace_guidance"] = json!(text);
+            let guidance = json!({"path": path, "text": text});
+            match semantic["workspace_guidance"].as_array_mut() {
+                Some(files) => files.push(guidance),
+                None => semantic["workspace_guidance"] = json!([guidance]),
+            }
         } else if let Some((scope, data)) = scoped(&part) {
             match scope.split(" (").next().unwrap_or_default() {
                 "previous_run" => semantic["history"].as_array_mut().unwrap().push(data),
@@ -171,7 +175,11 @@ mod tests {
                 .map(|turn| json!({"user": turn.user, "assistant": turn.assistant}))
                 .collect::<Vec<_>>(),
             "includes": input.includes,
-            "workspace_guidance": input.workspace_guidance.as_ref().map(|guidance| &guidance.text),
+            "workspace_guidance": input
+                .workspace_guidance
+                .iter()
+                .map(|guidance| json!({"path": guidance.path, "text": guidance.text}))
+                .collect::<Vec<_>>(),
             "derived_context_summary": input.context_summary,
             "child_results": input
                 .child_results

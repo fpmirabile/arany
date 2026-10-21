@@ -36,7 +36,7 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
     let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
-    let inputs = input::WorkspaceInputs::load(&workspace, &state, &[]).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
     let id = SessionId::new();
     let mut view = SessionView::replay(
         id,
@@ -122,7 +122,7 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     }
     // The rendered instruction block, with its heading, wrapper and escapes, is what the budget counts.
     std::fs::write(workspace.join("AGENTS.md"), "</INSTRUCTIONS>").unwrap();
-    let inputs = input::WorkspaceInputs::load(&workspace, &state, &[]).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
     let context = CompiledContext::compile(
         None,
         "next",
@@ -136,4 +136,145 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     .ok()
     .expect("instructions fit");
     assert_eq!(context.context_usage.used_bytes, 4 + 89);
+}
+
+#[cfg(unix)]
+#[test]
+fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
+    use input::{InputError, WorkspaceInputs};
+    use std::os::unix::fs::symlink;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let deep = workspace.join("crates/cli/src");
+    std::fs::create_dir_all(&deep).unwrap();
+    std::fs::create_dir_all(workspace.join("sibling")).unwrap();
+    std::fs::write(temp.path().join("AGENTS.md"), "parent").unwrap();
+    std::fs::write(workspace.join("AGENTS.md"), "root").unwrap();
+    std::fs::write(workspace.join("CLAUDE.md"), "root fallback").unwrap();
+    std::fs::write(workspace.join("crates/CLAUDE.md"), "crates fallback").unwrap();
+    std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
+    std::fs::write(workspace.join("sibling/AGENTS.md"), "sibling").unwrap();
+    symlink(workspace.join("crates"), workspace.join("alias")).unwrap();
+    symlink(temp.path(), workspace.join("outside")).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let load =
+        |launch: Option<&std::path::Path>| WorkspaceInputs::load(&workspace, &state, launch, &[]);
+    let nested = [
+        ("AGENTS.md", "root"),
+        ("crates/CLAUDE.md", "crates fallback"),
+        ("crates/cli/AGENTS.md", "cli"),
+    ];
+    for (case, launch, directory, expected) in [
+        (
+            "deep launch",
+            Some(deep.clone()),
+            "crates/cli/src",
+            &nested[..],
+        ),
+        (
+            "linked launch resolves",
+            Some(workspace.join("alias/cli")),
+            "crates/cli",
+            &nested[..],
+        ),
+        ("root launch", Some(workspace.clone()), "", &nested[..1]),
+        ("no launch", None, "", &nested[..1]),
+        (
+            "outside launch",
+            Some(temp.path().to_path_buf()),
+            "",
+            &nested[..1],
+        ),
+        (
+            "link out of the Workspace",
+            Some(workspace.join("outside")),
+            "",
+            &nested[..1],
+        ),
+    ] {
+        let inputs = load(launch.as_deref()).unwrap();
+        assert_eq!(inputs.launch_directory, directory, "{case}");
+        assert_eq!(
+            inputs
+                .instructions
+                .iter()
+                .map(|file| (file.path.as_str(), file.content.as_str(), file.directory()))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|(path, text)| (
+                    *path,
+                    *text,
+                    path.rsplit_once('/').map_or("", |(dir, _)| dir)
+                ))
+                .collect::<Vec<_>>(),
+            "{case}"
+        );
+    }
+
+    // The shared cap counts every file; one byte over rejects instead of truncating.
+    std::fs::write(
+        workspace.join("crates/cli/AGENTS.md"),
+        vec![b'c'; 64 * 1024 - 19],
+    )
+    .unwrap();
+    assert_eq!(
+        load(Some(&deep))
+            .unwrap()
+            .instructions
+            .iter()
+            .map(|file| file.content.len())
+            .sum::<usize>(),
+        64 * 1024
+    );
+    std::fs::write(
+        workspace.join("crates/cli/AGENTS.md"),
+        vec![b'c'; 64 * 1024 - 18],
+    )
+    .unwrap();
+    assert!(matches!(load(Some(&deep)), Err(InputError::TooLarge)));
+    assert!(load(None).is_ok(), "the root alone fits");
+    std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
+
+    let mut limit = workspace.clone();
+    for _ in 0..31 {
+        limit.push("d");
+    }
+    std::fs::create_dir_all(limit.join("d")).unwrap();
+    assert_eq!(
+        load(Some(&limit))
+            .unwrap()
+            .launch_directory
+            .split('/')
+            .count(),
+        31
+    );
+    assert!(matches!(
+        load(Some(&limit.join("d"))),
+        Err(InputError::TooLarge)
+    ));
+
+    std::fs::remove_file(workspace.join("crates/cli/AGENTS.md")).unwrap();
+    symlink(
+        temp.path().join("AGENTS.md"),
+        workspace.join("crates/cli/AGENTS.md"),
+    )
+    .unwrap();
+    assert!(
+        matches!(load(Some(&deep)), Err(InputError::Io(_))),
+        "nested link refused"
+    );
+    std::fs::remove_file(workspace.join("crates/cli/AGENTS.md")).unwrap();
+    std::fs::hard_link(
+        temp.path().join("AGENTS.md"),
+        workspace.join("crates/cli/AGENTS.md"),
+    )
+    .unwrap();
+    assert!(matches!(
+        load(Some(&deep)),
+        Err(InputError::UnsafeLinkCount)
+    ));
+    std::fs::remove_file(workspace.join("crates/cli/AGENTS.md")).unwrap();
+    std::fs::create_dir(workspace.join("crates/cli/AGENTS.md")).unwrap();
+    assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
 }

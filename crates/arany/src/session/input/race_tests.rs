@@ -50,14 +50,15 @@ fn run_case(position: Position) {
 
     let state = StateRoot::admit(&temp.path().join("state")).expect("private State");
     let include = [PathBuf::from("first/second/facts.txt")];
-    let safe = WorkspaceInputs::load(&workspace, &state, &include).expect("stable safe input");
-    assert!(safe.instructions.is_none());
+    let safe =
+        WorkspaceInputs::load(&workspace, &state, None, &include).expect("stable safe input");
+    assert!(safe.instructions.is_empty());
     assert_eq!(safe.includes.len(), 1);
     assert!(safe.includes[0].content.as_bytes() == SAFE);
     exchange(&active, &spare);
     assert!(
         matches!(
-            WorkspaceInputs::load(&workspace, &state, &include),
+            WorkspaceInputs::load(&workspace, &state, None, &include),
             Err(InputError::Io(_))
         ),
         "{position:?}: stable symlink must be rejected"
@@ -85,9 +86,12 @@ fn run_case(position: Position) {
         let mut overlapped_count = 0;
         for _ in 0..LOAD_ATTEMPTS {
             let before = swaps.load(Ordering::Acquire);
-            match WorkspaceInputs::load(&workspace, &state, &include) {
+            match WorkspaceInputs::load(&workspace, &state, None, &include) {
                 Ok(input) => {
-                    assert!(input.instructions.is_none(), "{position:?}: extra guidance");
+                    assert!(
+                        input.instructions.is_empty(),
+                        "{position:?}: extra guidance"
+                    );
                     assert_eq!(input.includes.len(), 1, "{position:?}: include count");
                     assert!(
                         input.includes[0].content.as_bytes() == SAFE,

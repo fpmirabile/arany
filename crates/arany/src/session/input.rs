@@ -8,7 +8,10 @@ use std::io::{self, Read};
 use std::path::Path;
 use std::path::PathBuf;
 
+// Shared by every instruction file from the Workspace root to the launch directory.
 const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
+// Directories walked for instructions, the Workspace root included.
+pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_INCLUDES: usize = 16;
@@ -49,6 +52,12 @@ pub(crate) struct InputSnapshot {
 }
 
 impl InputSnapshot {
+    pub(crate) fn directory(&self) -> &str {
+        self.path
+            .rsplit_once('/')
+            .map_or("", |(directory, _)| directory)
+    }
+
     pub(crate) fn model_instructions(&self) -> String {
         crate::provider::instructions_text(&self.path, &self.content)
     }
@@ -68,7 +77,10 @@ impl InputSnapshot {
 }
 
 pub(crate) struct WorkspaceInputs {
-    pub instructions: Option<InputSnapshot>,
+    /// Root first, at most one file per directory down to `launch_directory`.
+    pub instructions: Vec<InputSnapshot>,
+    /// Workspace-relative, empty for the root.
+    pub launch_directory: String,
     pub includes: Vec<InputSnapshot>,
     _root: Dir,
 }
@@ -112,14 +124,16 @@ impl WorkspaceInputs {
     pub(crate) fn load(
         workspace: &Path,
         state: &StateRoot,
+        launch: Option<&Path>,
         include_paths: &[PathBuf],
     ) -> Result<Self, InputError> {
-        Self::load_pinned(workspace, state, include_paths, None)
+        Self::load_pinned(workspace, state, launch, include_paths, None)
     }
 
     pub(crate) fn load_pinned(
         workspace: &Path,
         state: &StateRoot,
+        launch: Option<&Path>,
         include_paths: &[PathBuf],
         identity: Option<WorkspaceIdentity>,
     ) -> Result<Self, InputError> {
@@ -131,11 +145,8 @@ impl WorkspaceInputs {
             return Err(InputError::InvalidPath);
         }
 
-        let instructions =
-            match read_relative(&root, Path::new("AGENTS.md"), MAX_INSTRUCTION_BYTES)? {
-                None => read_relative(&root, Path::new("CLAUDE.md"), MAX_INSTRUCTION_BYTES)?,
-                agents => agents,
-            };
+        let launch = launch_components(workspace, launch)?;
+        let instructions = read_instructions(&root, &launch)?;
         let mut includes = Vec::with_capacity(include_paths.len());
         let mut total_bytes = 0_usize;
         for path in include_paths {
@@ -151,6 +162,7 @@ impl WorkspaceInputs {
         }
         Ok(Self {
             instructions,
+            launch_directory: launch.join("/"),
             includes,
             _root: root,
         })
@@ -172,6 +184,79 @@ fn read_relative(
     for name in &names[..names.len() - 1] {
         directory = directory.open_dir_nofollow(name)?;
     }
+    read_file(&directory, names[names.len() - 1], path, limit)
+}
+
+// The launch directory relative to the Workspace root, or the root when it lies outside.
+fn launch_components(workspace: &Path, launch: Option<&Path>) -> Result<Vec<String>, InputError> {
+    let Some(launch) = launch else {
+        return Ok(Vec::new());
+    };
+    let launch = std::fs::canonicalize(launch)?;
+    let Ok(relative) = launch.strip_prefix(std::fs::canonicalize(workspace)?) else {
+        return Ok(Vec::new());
+    };
+    let names = relative
+        .components()
+        .map(|component| match component {
+            std::path::Component::Normal(name) => name
+                .to_str()
+                .map(str::to_owned)
+                .ok_or(InputError::InvalidPath),
+            _ => Err(InputError::InvalidPath),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    if names.len() >= MAX_INSTRUCTION_LEVELS {
+        return Err(InputError::TooLarge);
+    }
+    if names.join("/").len() > 4096 {
+        return Err(InputError::InvalidPath);
+    }
+    Ok(names)
+}
+
+// Each directory takes `AGENTS.md`, else `CLAUDE.md`, opened without following links from the
+// admitted root; a directory that vanished ends the walk.
+fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>, InputError> {
+    let mut directory = root.try_clone()?;
+    let mut prefix = String::new();
+    let mut remaining = MAX_INSTRUCTION_BYTES;
+    let mut found = Vec::new();
+    for name in std::iter::once(None).chain(launch.iter().map(Some)) {
+        if let Some(name) = name {
+            directory = match directory.open_dir_nofollow(name) {
+                Ok(next) => next,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => break,
+                Err(error) => return Err(error.into()),
+            };
+            prefix.push_str(name);
+            prefix.push('/');
+        }
+        let read = |name: &str| {
+            read_file(
+                &directory,
+                std::ffi::OsStr::new(name),
+                format!("{prefix}{name}"),
+                remaining,
+            )
+        };
+        if let Some(snapshot) = match read("AGENTS.md")? {
+            None => read("CLAUDE.md")?,
+            agents => agents,
+        } {
+            remaining -= snapshot.content.len();
+            found.push(snapshot);
+        }
+    }
+    Ok(found)
+}
+
+fn read_file(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+    path: String,
+    limit: usize,
+) -> Result<Option<InputSnapshot>, InputError> {
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
@@ -180,7 +265,7 @@ fn read_relative(
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
     }
-    let file = match directory.open_with(names[names.len() - 1], &options) {
+    let file = match directory.open_with(name, &options) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(InputError::Io(error)),

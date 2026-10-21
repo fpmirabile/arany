@@ -270,6 +270,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
                 objective: "Complete the synthetic coding journey".into(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
@@ -330,7 +331,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             "Complete the synthetic coding journey"
         );
         assert!(
-            request.input.workspace_guidance.is_none()
+            request.input.workspace_guidance.is_empty()
                 && request.input.includes.is_empty()
                 && request.input.history.is_empty()
                 && request.input.context_summary.is_none()
@@ -581,6 +582,7 @@ fn proposal_request(workspace: &Path) -> RunRequest {
         objective: "Guard corpus".into(),
         images: Vec::new(),
         workspace: workspace.into(),
+        launch_directory: None,
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
         goal: arany::GoalRequest::default(),
@@ -1394,7 +1396,7 @@ fn assert_proposal_requests(requests: &[ProviderRequest], count: usize) {
         assert_eq!(request.model, "guard-model");
         assert_eq!(request.input.objective, "Guard corpus");
         assert!(
-            request.input.workspace_guidance.is_none()
+            request.input.workspace_guidance.is_empty()
                 && request.input.includes.is_empty()
                 && request.input.images.is_empty()
                 && request.input.child_results.is_empty()
@@ -1660,7 +1662,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     assert!(timestamp <= current && current - timestamp < 20_000);
                 }
                 assert!(
-                    request.input.workspace_guidance.is_none()
+                    request.input.workspace_guidance.is_empty()
                         && request.input.images.is_empty()
                         && request.input.context_summary.is_none()
                 );
@@ -3200,6 +3202,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
                 objective: "Inspect Git state".into(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),

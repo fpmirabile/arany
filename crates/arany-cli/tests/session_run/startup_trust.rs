@@ -96,7 +96,10 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
             assert_eq!(body["model"], "model-1");
             let input: serde_json::Value = crate::semantic::input(&body);
             if index == 3 {
-                assert_eq!(input["workspace_guidance"], "EXPECTED_ROOT_GUIDANCE");
+                assert_eq!(
+                    input["workspace_guidance"],
+                    serde_json::json!([{"path": "AGENTS.md", "text": "EXPECTED_ROOT_GUIDANCE"}])
+                );
                 assert_eq!(body["input"][0]["role"], "user");
                 assert_eq!(
                     body["input"][0]["content"],
@@ -194,6 +197,167 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
                 "omitted input appeared in a durable or output artifact"
             );
         }
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_pins() {
+    use sha2::{Digest, Sha256};
+    const OMITTED: [&[u8]; 3] = [
+        b"PARENT_INSTRUCTION_CANARY",
+        b"SHADOWED_FALLBACK_CANARY",
+        b"SIBLING_INSTRUCTION_CANARY",
+    ];
+    const FILES: [(&str, &str); 3] = [
+        ("AGENTS.md", "ROOT_RULE"),
+        ("crates/CLAUDE.md", "CRATES_RULE"),
+        ("crates/cli/AGENTS.md", "CLI_RULE"),
+    ];
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    let launch = workspace.join("crates/cli");
+    std::fs::create_dir_all(&launch).expect("launch directory");
+    std::fs::create_dir(workspace.join("sibling")).expect("sibling directory");
+    for (path, text) in FILES {
+        std::fs::write(workspace.join(path), text).expect("instruction file");
+    }
+    std::fs::write(temp.path().join("AGENTS.md"), OMITTED[0]).expect("parent guidance");
+    std::fs::write(launch.join("CLAUDE.md"), OMITTED[1]).expect("shadowed fallback");
+    std::fs::write(workspace.join("sibling/AGENTS.md"), OMITTED[2]).expect("sibling guidance");
+
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
+    loopback::write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).expect("bounded accept");
+        for index in 0..4 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "request {index} missing");
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            };
+            let request = loopback::read_request(&mut stream);
+            for canary in OMITTED {
+                assert!(
+                    !request.windows(canary.len()).any(|part| part == canary),
+                    "omitted input disclosed in request {index}"
+                );
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request).expect("bounded request JSON");
+            let text = match index {
+                0 => serde_json::json!("ok"),
+                1 => {
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
+                }
+                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                _ => {
+                    assert_eq!(body["input"][0]["role"], "user");
+                    assert_eq!(
+                        body["input"][0]["content"],
+                        serde_json::Value::Array(
+                            FILES
+                                .iter()
+                                .map(|(path, text)| serde_json::json!({"type": "input_text", "text": format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")}))
+                                .collect()
+                        ),
+                        "one block per file, root first"
+                    );
+                    assert_eq!(body["input"][1]["role"], "user");
+                    serde_json::json!("nested answer")
+                }
+            };
+            loopback::send_response(&mut stream, index, text);
+        }
+    });
+
+    loopback::check_profile(&workspace, &state);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+    command
+        .env_clear()
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .current_dir(&launch)
+        .args(["exec", "--state-dir"])
+        .arg(&state)
+        .arg("--workspace")
+        .arg(&workspace)
+        .args([
+            "--provider",
+            "custom:local",
+            "--model",
+            "model-1",
+            "--collaboration",
+            "single",
+            "answer",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = loopback::wait_product(command.spawn().expect("product exec process"));
+    server.join().expect("loopback server completed");
+    assert!(output.status.success(), "nested instruction exit");
+    assert_eq!(output.stdout, b"Answer:\n  nested answer\n");
+    let receipt = std::str::from_utf8(&output.stderr).expect("receipt UTF-8");
+    let session_id = SessionId::from_str(
+        receipt
+            .lines()
+            .next()
+            .and_then(|line| line.strip_prefix("Session: "))
+            .expect("Session line"),
+    )
+    .expect("Session ID");
+
+    // Replay reads only the pins; changed files neither reach nor alter the history.
+    for (path, _) in FILES {
+        std::fs::write(workspace.join(path), "CHANGED_AFTER_RUN").expect("changed instruction");
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime");
+    let store = Store::open_read_only(StateRoot::open_existing(&state).expect("existing State"))
+        .expect("read-only State");
+    let events = runtime
+        .block_on(store.load_session(session_id))
+        .expect("canonical Events");
+    let view = SessionView::replay(session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    let config = view.runs[0].config.as_ref().expect("pinned config");
+    assert_eq!(config.launch_directory, "crates/cli");
+    assert_eq!(
+        config.instruction_sources,
+        FILES.map(|(path, text)| arany::InstructionSource {
+            directory: path
+                .rsplit_once('/')
+                .map_or("", |(directory, _)| directory)
+                .into(),
+            digest: Sha256::digest(text.as_bytes()).into(),
+        })
+    );
+    assert_eq!(
+        SessionView::replay(session_id, &events).expect("replay again"),
+        Some(view)
+    );
+    runtime
+        .block_on(store.close())
+        .expect("close read-only State");
+    let database = std::fs::read(state.join("events.sqlite3")).expect("database bytes");
+    let followed: [&[u8]; 2] = [b"ROOT_RULE", b"CLI_RULE"];
+    for canary in OMITTED.into_iter().chain(followed) {
+        assert!(
+            !database.windows(canary.len()).any(|part| part == canary),
+            "instruction text stays out of the journal"
+        );
     }
 }
 

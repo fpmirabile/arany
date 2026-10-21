@@ -53,8 +53,9 @@ impl CompiledContext {
                 .sum::<usize>()
             + inputs
                 .instructions
-                .as_ref()
-                .map_or(0, |value| value.model_instructions().len())
+                .iter()
+                .map(|value| value.model_instructions().len())
+                .sum::<usize>()
             + inputs
                 .includes
                 .iter()

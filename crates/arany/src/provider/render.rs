@@ -30,15 +30,14 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     let tools = catalog
         .as_ref()
         .map(|catalog| specs(catalog, input.role, &input.pinned_budget));
-    let mut messages: Vec<Message> = input
+    let instructions = input
         .workspace_guidance
         .iter()
-        .map(|guidance| {
-            user(vec![Block::Text(instructions_text(
-                &guidance.path,
-                &guidance.text,
-            ))])
-        })
+        .map(|guidance| Block::Text(instructions_text(&guidance.path, &guidance.text)))
+        .collect::<Vec<_>>();
+    let mut messages: Vec<Message> = (!instructions.is_empty())
+        .then(|| user(instructions))
+        .into_iter()
         .chain(input.history.iter().map(history_message))
         .collect();
     let delegate_step = input

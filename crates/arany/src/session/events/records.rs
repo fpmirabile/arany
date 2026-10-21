@@ -142,8 +142,10 @@ pub struct RunConfig {
     pub provider_concurrency: u8,
     pub workspace_device: u64,
     pub workspace_inode: u64,
-    #[serde(deserialize_with = "Option::deserialize")]
-    pub instruction_digest: Option<[u8; 32]>,
+    /// Root first, one per directory that supplied an instruction file.
+    pub instruction_sources: Vec<InstructionSource>,
+    /// Workspace-relative, empty for the root.
+    pub launch_directory: String,
     pub include_digests: Vec<[u8; 32]>,
     pub history_run_ids: Vec<RunId>,
     pub excluded_history_runs: u32,
@@ -157,7 +159,43 @@ pub struct RunConfig {
     pub tool_policy: Option<crate::tools::ToolPolicyReceipt>,
 }
 
+/// The SHA-256 of the raw instruction file one Workspace directory supplied.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstructionSource {
+    /// Workspace-relative, empty for the root.
+    pub directory: String,
+    pub digest: [u8; 32],
+}
+
 impl RunConfig {
+    // Sources name strictly deeper directories on the path from the root to the launch directory.
+    fn instruction_scope_valid(&self) -> bool {
+        let components = |path: &str| -> Vec<String> {
+            path.split('/')
+                .filter(|_| !path.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let launch = components(&self.launch_directory);
+        let mut depths = self.instruction_sources.iter().map(|source| {
+            let directory = components(&source.directory);
+            launch.starts_with(&directory).then_some(directory.len())
+        });
+        self.launch_directory.len() <= 4096
+            && launch.len() < crate::session::input::MAX_INSTRUCTION_LEVELS
+            && launch
+                .iter()
+                .all(|name| !name.is_empty() && *name != "." && *name != "..")
+            && depths
+                .try_fold(None, |previous: Option<usize>, depth| {
+                    depth
+                        .filter(|depth| previous.is_none_or(|previous| *depth > previous))
+                        .map(Some)
+                })
+                .is_some()
+    }
+
     pub fn auto_compaction_due(&self) -> bool {
         self.context_usage.as_ref().is_some_and(|usage| {
             usage.near_limit()
@@ -299,6 +337,7 @@ impl RunConfig {
                 .is_some_and(|policy| !policy.valid())
             || self.provider.starts_with("custom:") && self.tool_policy.is_some()
             || self.include_digests.len() > 16
+            || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS
             || self.compaction_event_sequence.is_some() != self.compaction_content_digest.is_some()
             || self

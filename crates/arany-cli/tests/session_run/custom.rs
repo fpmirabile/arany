@@ -187,7 +187,10 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
                         _ => "root_plan",
                     }
                 );
-                assert_eq!(input["workspace_guidance"], "EXPECTED_WORKSPACE_GUIDANCE");
+                assert_eq!(
+                    input["workspace_guidance"],
+                    serde_json::json!([{"path": "AGENTS.md", "text": "EXPECTED_WORKSPACE_GUIDANCE"}])
+                );
                 if matches!(index, 3 | 4 | 6 | 8) {
                     assert_eq!(input["objective"], "answer");
                 }
@@ -496,7 +499,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
             .iter()
             .find(|line| line["kind"] == "RunStarted")
             .unwrap()["event_version"],
-        18
+        19
     );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
