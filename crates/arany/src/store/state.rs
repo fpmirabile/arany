@@ -78,8 +78,21 @@ impl HistoryReset {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RecordKind {
+// One list generates both the enum and `ALL`, so no variant can be left out of migration.
+macro_rules! record_kinds {
+    ($($kind:ident),+ $(,)?) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub enum RecordKind {
+            $($kind),+
+        }
+
+        impl RecordKind {
+            pub const ALL: &'static [Self] = &[$(Self::$kind),+];
+        }
+    };
+}
+
+record_kinds!(
     ToolsConfig,
     WorkspacePermissions,
     ProviderProfiles,
@@ -92,24 +105,9 @@ pub enum RecordKind {
     ModelPreferences,
     ChatgptRegistration,
     ChatgptAccounts,
-}
+);
 
 impl RecordKind {
-    pub const ALL: [Self; 12] = [
-        Self::ToolsConfig,
-        Self::WorkspacePermissions,
-        Self::ProviderProfiles,
-        Self::ProviderRouting,
-        Self::ProviderRoster,
-        Self::Permissions,
-        Self::UnguardedCommands,
-        Self::SavedAccount,
-        Self::UiPreferences,
-        Self::ModelPreferences,
-        Self::ChatgptRegistration,
-        Self::ChatgptAccounts,
-    ];
-
     // User-authored kinds are read-only to the harness; only a record migration replaces them.
     const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
@@ -838,34 +836,6 @@ mod tests {
                 .collect::<String>()
         );
         crate::test_process::assert_single_test_completed(&output.stdout, "cross-user");
-    }
-
-    const fn all_index(kind: RecordKind) -> usize {
-        match kind {
-            RecordKind::ToolsConfig => 0,
-            RecordKind::WorkspacePermissions => 1,
-            RecordKind::ProviderProfiles => 2,
-            RecordKind::ProviderRouting => 3,
-            RecordKind::ProviderRoster => 4,
-            RecordKind::Permissions => 5,
-            RecordKind::UnguardedCommands => 6,
-            RecordKind::SavedAccount => 7,
-            RecordKind::UiPreferences => 8,
-            RecordKind::ModelPreferences => 9,
-            RecordKind::ChatgptRegistration => 10,
-            RecordKind::ChatgptAccounts => 11,
-        }
-    }
-
-    #[test]
-    fn record_kind_all_lists_every_variant_in_match_order() {
-        assert_eq!(
-            RecordKind::ALL.len(),
-            all_index(RecordKind::ChatgptAccounts) + 1
-        );
-        for (index, kind) in RecordKind::ALL.into_iter().enumerate() {
-            assert_eq!(all_index(kind), index);
-        }
     }
 
     #[test]

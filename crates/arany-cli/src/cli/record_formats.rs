@@ -100,7 +100,7 @@ fn uncovered(
     nested_schemas: &[NestedSchema],
 ) -> Vec<String> {
     let mut problems = Vec::new();
-    for kind in RecordKind::ALL {
+    for &kind in RecordKind::ALL {
         let declared = formats.iter().filter(|format| format.kind == kind).count();
         if declared != usize::from(!UNVERSIONED.contains(&kind)) {
             problems.push(format!("{kind:?} declares {declared} record formats"));
