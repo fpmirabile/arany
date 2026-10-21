@@ -117,7 +117,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             include,
             case_sensitive,
             offset,
-            ..
+            limit,
         } => {
             let mut options = String::new();
             if *regex {
@@ -131,6 +131,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             }
             if *offset > 0 {
                 options.push_str(&format!(", offset {offset}"));
+            }
+            if *limit != arany::MAX_SEARCH_ROWS {
+                options.push_str(&format!(", limit {limit}"));
             }
             format!("Search({query}, {path}{options})")
         }
@@ -2288,6 +2291,19 @@ mod peer_row_tests {
                 },
                 r#"{"entries":[{"path":"src/a.rs","line":1,"text":"fn a"}],"limit":100,"may_be_truncated":true,"next_offset":101}"#,
                 "⏺ Search(fn \\w+, src, regex, include **/*.rs, ignore case, offset 100)\n  ⎿ 1 entry (truncated)",
+            ),
+            (
+                ToolCall::Search {
+                    path: "src".into(),
+                    query: "x".into(),
+                    regex: false,
+                    include: None,
+                    case_sensitive: true,
+                    offset: 0,
+                    limit: 10,
+                },
+                r#"{"entries":[],"limit":10,"may_be_truncated":false,"next_offset":null}"#,
+                "⏺ Search(x, src, limit 10)\n  ⎿ 0 entries",
             ),
             (
                 ToolCall::Skill {

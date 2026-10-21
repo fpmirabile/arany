@@ -437,13 +437,16 @@ impl View {
             std::time::Instant::now()
                 + std::time::Duration::from_millis(u64::from(intent.limits.runtime_ms)),
         );
+        // A refused pattern read nothing, so it is attested like the Workspace refusal and the editor continues.
+        let refused = matches!(result, Err(ToolError::Pattern(_)));
         let (disposition, output, enforcement_cause, limit_cause) =
             super::dispatch::outcome(&intent, result);
-        let attestation =
-            (disposition == ToolDisposition::Succeeded).then(|| Attestation::WorkerRead {
+        let attestation = (disposition == ToolDisposition::Succeeded || refused).then(|| {
+            Attestation::WorkerRead {
                 intent_digest: intent.digest(),
                 guard: None,
-            });
+            }
+        });
         ToolObservation {
             intent,
             disposition,
@@ -1749,6 +1752,11 @@ mod tests {
         let refused = view.read(refused);
         assert_eq!(refused.disposition, ToolDisposition::Failed);
         assert!(refused.valid() && refused.output.contains("invalid or unsupported regex"));
+        assert!(matches!(
+            refused.attestation,
+            Some(Attestation::WorkerRead { .. })
+        ));
+        assert!(!refused.stops_run());
         let handover = view.handover().unwrap();
         assert!(decode_data(&handover, WorkerDataPurpose::Handover).is_ok());
         let final_changes: WorkerChangeset = serde_json::from_slice(&handover).unwrap();

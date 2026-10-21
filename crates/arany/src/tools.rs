@@ -92,10 +92,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, LimitCause, MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall,
-    ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt, ToolRequest,
-    ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep, UnguardedGrant,
-    UnguardedReceipt,
+    FileVersion, GuardReceipt, LimitCause, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal,
+    ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt,
+    ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep,
+    UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]

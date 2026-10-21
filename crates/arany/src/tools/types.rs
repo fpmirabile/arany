@@ -287,7 +287,7 @@ fn required_nullable<'de, D: serde::Deserializer<'de>>(
     Option::<String>::deserialize(deserializer)
 }
 
-pub(crate) const MAX_SEARCH_ROWS: u32 = 100;
+pub const MAX_SEARCH_ROWS: u32 = 100;
 pub(crate) const MAX_SEARCH_OFFSET: u32 = MAX_SNAPSHOT_BYTES as u32;
 
 fn or_default<'de, D: serde::Deserializer<'de>, T: Deserialize<'de> + Default>(
