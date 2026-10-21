@@ -5,6 +5,7 @@ use super::{
 use crate::tools::{CacheUpdate, ToolDisposition};
 
 /// The Goal budget dimension that admitted no next Run.
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GoalLimit {
     Calls,
@@ -14,6 +15,7 @@ pub enum GoalLimit {
 }
 
 /// Why a Run stopped short of completing its Goal, projected from committed facts.
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStop {
     GoalExhausted(GoalLimit),

@@ -344,12 +344,16 @@ impl<'a> RunLoop<'a> {
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
         let end = match self.initialize_definitions(&mut root_request).await {
-            Ok(true) => None,
-            Ok(false) if self.pause_at_boundary() => Some(PrimaryEnd::Stopped(StopCause::Paused)),
-            Ok(false) if self.take_active_time_floor() => {
+            Ok(step::DefinitionInitialization::Ready) => None,
+            Ok(step::DefinitionInitialization::Stopped) if self.pause_at_boundary() => {
+                Some(PrimaryEnd::Stopped(StopCause::Paused))
+            }
+            Ok(step::DefinitionInitialization::Stopped) if self.take_active_time_floor() => {
                 Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
             }
-            Ok(false) => Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid)),
+            Ok(step::DefinitionInitialization::Stopped) => {
+                Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid))
+            }
             Err(EngineError::GoalBudgetExhausted) => {
                 Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
             }
@@ -1551,20 +1555,13 @@ mod decision_tests {
 
     #[test]
     fn primary_calls_decide_by_site_outcome_and_facts() {
-        let open = RunFacts {
-            tokens_within_limit: true,
-            tokens_open: true,
-            calls_left: true,
-            ..RunFacts::default()
-        };
-        let with = |change: fn(&mut RunFacts)| {
-            let mut facts = open;
-            change(&mut facts);
-            facts
-        };
-        let cancel = with(|facts| facts.cancel_requested = true);
-        let lapsed = with(|facts| facts.active_time_exhausted = true);
-        let over_tokens = with(|facts| facts.tokens_within_limit = false);
+        let open = RunFacts::ready().with(|facts| {
+            facts.settleable = false;
+            facts.workers_settled = false;
+        });
+        let cancel = open.with(|facts| facts.cancel_requested = true);
+        let lapsed = open.with(|facts| facts.active_time_exhausted = true);
+        let over_tokens = open.with(|facts| facts.tokens_within_limit = false);
         let wave = PrimarySite::Wave {
             queue_stopped: false,
         };
@@ -1617,7 +1614,7 @@ mod decision_tests {
                 loop_,
                 answer(),
                 ok,
-                with(|facts| {
+                open.with(|facts| {
                     facts.cancel_requested = true;
                     facts.active_time_exhausted = true;
                 }),
@@ -1652,7 +1649,7 @@ mod decision_tests {
                 loop_,
                 delegate(),
                 ok,
-                with(|facts| facts.tokens_open = false),
+                open.with(|facts| facts.tokens_open = false),
                 Kind::Stop(StopCause::Budget),
                 false,
             ),
@@ -1660,7 +1657,7 @@ mod decision_tests {
                 loop_,
                 delegate(),
                 ok,
-                with(|facts| facts.calls_left = false),
+                open.with(|facts| facts.calls_left = false),
                 Kind::Delegate,
                 true,
             ),
@@ -1668,7 +1665,7 @@ mod decision_tests {
                 loop_,
                 tools(1),
                 ok,
-                with(|facts| facts.calls_left = false),
+                open.with(|facts| facts.calls_left = false),
                 Kind::Stop(StopCause::Budget),
                 false,
             ),
@@ -1720,7 +1717,7 @@ mod decision_tests {
                 wave,
                 tools(1),
                 ok,
-                with(|facts| facts.calls_left = false),
+                open.with(|facts| facts.calls_left = false),
                 Kind::ToolStep,
                 true,
             ),
@@ -1754,7 +1751,7 @@ mod decision_tests {
                 wave,
                 tools(1),
                 ok,
-                with(|facts| {
+                open.with(|facts| {
                     facts.tokens_within_limit = false;
                     facts.cancel_requested = true;
                 }),

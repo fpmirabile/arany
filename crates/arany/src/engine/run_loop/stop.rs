@@ -4,6 +4,7 @@ use crate::provider::Answer;
 use crate::session::{AgentStatus, GoalStatus, ProposalRefusalCause, RunFailure, RunStatus};
 use crate::tools::ToolDisposition;
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StopCause {
     Uncertain,
@@ -53,6 +54,7 @@ pub(super) enum StepEnd {
     Stopped(StopCause),
 }
 
+#[must_use]
 pub(super) enum SizingRefusal {
     DelegationDeadline,
     ActiveTime,
@@ -192,6 +194,7 @@ impl RunFacts {
     }
 }
 
+#[must_use]
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum PrimaryEnd {
     Finished(Answer),
@@ -301,6 +304,25 @@ fn stopped(cause: StopCause, facts: &RunFacts) -> Settlement {
 }
 
 #[cfg(test)]
+impl RunFacts {
+    pub(super) fn ready() -> Self {
+        Self {
+            settleable: true,
+            tokens_within_limit: true,
+            tokens_open: true,
+            calls_left: true,
+            workers_settled: true,
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn with(mut self, update: impl FnOnce(&mut Self)) -> Self {
+        update(&mut self);
+        self
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -357,17 +379,13 @@ mod tests {
 
     fn facts(bits: [bool; 5]) -> RunFacts {
         let [cancelled, hook_stop, uncertain, budget_closed, settleable] = bits;
-        RunFacts {
-            cancel_requested: cancelled,
-            hook_stop,
-            uncertain,
-            settleable,
-            tokens_within_limit: true,
-            tokens_open: !budget_closed,
-            calls_left: true,
-            workers_settled: true,
-            ..RunFacts::default()
-        }
+        RunFacts::ready().with(|facts| {
+            facts.cancel_requested = cancelled;
+            facts.hook_stop = hook_stop;
+            facts.uncertain = uncertain;
+            facts.settleable = settleable;
+            facts.tokens_open = !budget_closed;
+        })
     }
 
     fn combinations() -> impl Iterator<Item = [bool; 5]> {
@@ -425,16 +443,11 @@ mod tests {
 
     #[test]
     fn answers_failures_and_lapsed_active_time_settle_by_their_rows() {
-        let open = facts([false, false, false, false, true]);
+        let open = RunFacts::ready();
         let answer = || Answer {
             text: "done".into(),
         };
-        let with = |change: fn(&mut RunFacts)| {
-            let mut facts = open;
-            change(&mut facts);
-            facts
-        };
-        let lapsed = with(|facts| facts.active_time_exhausted = true);
+        let lapsed = open.with(|facts| facts.active_time_exhausted = true);
         let rows: [(PrimaryEnd, RunFacts, Settlement); 22] = [
             (
                 PrimaryEnd::Finished(answer()),
@@ -448,37 +461,37 @@ mod tests {
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.action_cancelled = true),
+                open.with(|facts| facts.action_cancelled = true),
                 Settlement::Cancel,
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.hook_stop = true),
+                open.with(|facts| facts.hook_stop = true),
                 Settlement::HookStop,
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.uncertain = true),
+                open.with(|facts| facts.uncertain = true),
                 Settlement::Unknown,
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.settleable = false),
+                open.with(|facts| facts.settleable = false),
                 Settlement::Unsettleable,
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.workers_settled = false),
+                open.with(|facts| facts.workers_settled = false),
                 Settlement::failed(RunFailure::WorkersUnverified),
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| facts.criterion_closed = true),
+                open.with(|facts| facts.criterion_closed = true),
                 Settlement::failed(RunFailure::CriterionUnmet),
             ),
             (
                 PrimaryEnd::Finished(answer()),
-                with(|facts| {
+                open.with(|facts| {
                     facts.criterion_closed = true;
                     facts.autonomous = true;
                 }),
@@ -494,7 +507,7 @@ mod tests {
             ),
             (
                 PrimaryEnd::Failed(RunFailure::ProviderCall),
-                with(|facts| facts.tokens_open = false),
+                open.with(|facts| facts.tokens_open = false),
                 Settlement::failed(RunFailure::ProviderCall),
             ),
             (
@@ -504,7 +517,7 @@ mod tests {
             ),
             (
                 PrimaryEnd::Failed(RunFailure::ProviderCall),
-                with(|facts| facts.cancel_requested = true),
+                open.with(|facts| facts.cancel_requested = true),
                 Settlement::Cancel,
             ),
             (
@@ -514,17 +527,17 @@ mod tests {
             ),
             (
                 PrimaryEnd::Failed(RunFailure::DefinitionInvalid),
-                with(|facts| facts.tokens_open = false),
+                open.with(|facts| facts.tokens_open = false),
                 Settlement::BUDGET,
             ),
             (
                 PrimaryEnd::Failed(RunFailure::DefinitionInvalid),
-                with(|facts| facts.calls_left = false),
+                open.with(|facts| facts.calls_left = false),
                 Settlement::failed(RunFailure::DefinitionInvalid),
             ),
             (
                 PrimaryEnd::Failed(RunFailure::DefinitionInvalid),
-                with(|facts| facts.action_cancelled = true),
+                open.with(|facts| facts.action_cancelled = true),
                 Settlement::Cancel,
             ),
             (
@@ -549,7 +562,7 @@ mod tests {
             ),
             (
                 PrimaryEnd::Stopped(StopCause::ToolStopped),
-                with(|facts| facts.action_cancelled = true),
+                open.with(|facts| facts.action_cancelled = true),
                 Settlement::Cancel,
             ),
         ];

@@ -440,6 +440,7 @@ pub enum WorkerDisposition {
     Lost,
     PrivateUncertain,
 }
+#[must_use]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkerCause {
