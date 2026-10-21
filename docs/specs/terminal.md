@@ -244,6 +244,8 @@ Clipboard transports come only from checked local OS metadata: standard Wayland 
 
 Idle `/copy` copies the latest committed answer's escaped display text; it is locked during a Run. The copy goes to the first destination that works, trying each at most once: a native client when the session is local (no `SSH_CONNECTION`, `SSH_CLIENT` or `SSH_TTY`), which is `wl-copy` (Wayland) or `xclip` (X11) on Linux and `pbcopy` with `LANG=en_US.UTF-8` on macOS; then, inside tmux, `tmux -S SOCKET load-buffer -w -` (tmux 3.2 or later) after `$TMUX`'s socket is checked to be absolute, a socket and owned by the user in a private canonical directory whose every ancestor is owned by root or the user and is not group- or world-writable unless sticky; its device and inode are checked again before and after the client runs, and a change fails that destination; then OSC 52. `xsel` is not used, because its daemon calls `setsid()` and leaves the owned process group. Copy clients come from the same admitted root-owned directories as paste clients, so Homebrew tmux on macOS is never used, and they read only the payload on stdin. Copied text is never journaled, sent to a Provider or recorded in diagnostics.
 
+OSC 52 depends on the emulator: Terminal.app and VTE do not write the clipboard through it; iTerm2 requires "Applications in terminal may access clipboard". Over SSH, Terminal.app users need Fn-drag or Classic. Inside Homebrew tmux on macOS, OSC 52 needs `set -g set-clipboard on`. Kitty, foot, WezTerm, Ghostty and Alacritty provide OSC 52 destinations; interoperability still requires the [owner-run checks](../../NEXT_STEPS.md#terminal).
+
 Admitted PNG bytes are kept unchanged, including metadata, without local decompression. Admission checks structure, chunk CRCs and dimensions. Animated PNG and unknown critical chunks reject. Dimension admission is not raster decoding or proof of vision support. Filenames, URLs and terminal image escapes are never admitted.
 
 ## Interruption, suspension and restoration
@@ -284,6 +286,8 @@ Restore raw mode, cursor, wrapping, echo and every enabled mode, including mouse
 | Agent inspection | 16 most recent Runs; bounded previews, complete export through `show` |
 | Inline model selection | Below 16×8 only resize and close; initial unsafe or short geometry selects linear presentation |
 | Unterminated inline record | Ten-second deadline, then terminal ownership fails closed |
+
+Keyboard text selection (Shift+arrows) and an external-editor transcript export are unsupported; use `/copy`, Classic native selection, the transcript dump or `arany show`. Disabling alternate scroll on release can also disable an emulator's default, such as xterm's `alternateScroll`.
 
 Markdown, HTML, SVG, files, links and model output are inert by default, restricted to admitted formats and isolated from privileged APIs. A future browser Client requires CSP, safe templating, origin isolation and a new threat model before privileged operations; browser Clients remain [deferred](../architecture/system-overview.md#14-explicitly-deferred).
 

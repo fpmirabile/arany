@@ -27,6 +27,7 @@ The goal: one normal engineering day in this repository (explore, multi-file edi
 10. **Tool ergonomics.** Regex and glob Search beyond 64 rows, a Glob Tool, larger Write/Edit, MultiEdit, typed delete and move; parallel reads with Pursue item 10.
 11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
 12. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
+13. **Terminal: live evidence.** Owner: run the [terminal checks](#terminal); remaining feature work is in [Terminal follow-ups](#terminal-follow-ups).
 
 Exit: a week of dogfooding with every fallback to another harness recorded here; done when a full day passes without one.
 
@@ -57,6 +58,11 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 - **Engine stop channels.** The [decision rule](./agents/arany.md#engine-loop-decisions) still has exceptions: `intent_observation` in `run_loop/step.rs` converts ActiveTime and Capacity back to errors, and `begin_worker_inner` and `complete_worker_inner` in `run_loop/worker.rs` use budget/limit errors for control flow. Carry closed stop/admission values through those helpers and their callers, preserving journal ordering and the existing stop/replay tables.
 - **Conditional loop refinements.** Revisit RAII `ActiveSegment`, a typed `ChildQueue` state machine or a repeated-call stop only if dogfooding demonstrates remaining pain. First identify the failing lifecycle or repetition case; accept a contract before adding a stop beyond the existing proposal-refusal cap.
 
+### Terminal follow-ups
+
+- **Guarded remember rules.** Add "don't ask again" for commands and MCP alongside Daily use first item 9, under the [permission-rule contract](./docs/specs/tools.md#permission-rules). The current [approval choices](./docs/specs/terminal.md#interactive-commands-and-completion) remain authoritative until then.
+- **Other terminal hosts (deferred).** Zellij and VS Code's xterm.js need Codex's insertion without partial scroll regions; `tmux -CC` needs forced Classic like Claude Code. Accept a contract and obtain native evidence before claiming support.
+
 ### Frozen areas
 
 The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
@@ -78,13 +84,25 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 ## Terminal continuity evidence
 
 - On disposable projects, the owner runs native Linux/macOS capture and guarded rewind journeys (including APFS case aliases and the 1.5 MiB Guard stack canary), private-state Store/Engine and rewind crash-prefix gates, and `rewind_serve_guarded_corpus_restores_refuses_drift_keeps_overwrites_and_blocks_uncertain`. Local private-state failures require outside-sandbox verification. With explicit live usage consent, exercise `/rewind`, Esc Esc, code/conversation/both, Compare, both drift choices and partial/Uncertain receipts after real edits. Review those panels at narrow widths in Classic/Fullscreen on macOS and Linux, and with real screen readers. These native, live and assistive-technology claims remain unverified; compilation and synthetic frames establish none of them. Contracts: [Terminal](./docs/specs/terminal.md#rewind), [Serve](./docs/specs/serve.md#rewind), [Tools](./docs/specs/tools.md#checkpoints-and-rewind).
-- Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 
 ## ChatGPT coding loop: owner-run live checks
 
 Owner: use a ChatGPT-plan account with explicit usage consent, a new Session and attached chat in a trusted disposable project. Follow [Provider encoding](./docs/specs/provider.md#structured-outcomes-and-tool-encoding), [Tools](./docs/specs/tools.md#limits-and-failure-behavior) and [terminal output](./docs/specs/terminal.md#conversation-progress-and-history). Synthetic fixtures do not establish live or native support.
+
+### Terminal
+
+Owner: use macOS Terminal.app and iTerm2 and a native Linux terminal, locally, over SSH and inside tmux; include WSL2 separately. These emulator and clipboard checks remain unverified. Synthetic PTYs do not emulate native scrollback. Follow [terminal continuity](./docs/specs/terminal.md#terminal-continuity-and-provisional-text), [selectors](./docs/specs/terminal.md#selectors) and [clipboard compatibility](./docs/specs/terminal.md#paste-and-attachments).
+
+1. Classic: wheel and Shift+PageUp scroll natively; drag and the terminal's copy key round-trip text; PageUp leaves Arany unchanged. Ctrl+T and Ctrl+O append details without an alternate screen, and the terminal's find locates older text.
+2. Classic: idle, streaming, completion menus, approval, trust, setup, selectors, pickers and rewind take only their content height, up to the screen. Grow/shrink and narrow resize/reflow leave no stale rows, blank gap or duplicate history. A 200-line streamed answer stays readable. Idle `/settings` view changes preserve draft, caret and reading position.
+3. Approval is inline and numbered: `1` approves a short action, a long action requires PgDn before Yes, and Escape denies. `/settings`, `/model`, `/resume`, `/help`, `/agents` and Ctrl+K appear inline; their linear/screen-reader forms work without mouse input. Real assistive-technology evidence stays in [Terminal continuity evidence](#terminal-continuity-evidence).
+4. Fullscreen: wheel, drag, double-click and triple-click work; selection survives streaming and resize, and copied text joins wraps without headings or rails. Paste elsewhere and check the destination cue. Shift-drag (Option in iTerm2, Fn in Terminal.app) selects natively; enable emulator mouse reporting and tmux `mouse on` where needed.
+5. Round-trip `/copy` and selection copies through local `wl-copy`/`xclip`, macOS `pbcopy`/`pbpaste` with non-ASCII text, tmux 3.2+ and SSH OSC 52. Confirm Linux serving clients exit when another application takes the selection. Check ignored OSC 52 in Terminal.app/VTE and native-selection recovery, iTerm2's clipboard permission and Homebrew tmux's `set-clipboard on` fallback; a send cue alone is not delivery evidence.
+6. `ARANY_DISABLE_MOUSE=1`: native selection works and wheel input scrolls history with an empty composer; check Mouse `wheel only` and `off` too. Exit, suspend/resume, signals and view switches restore terminal modes.
+7. Ctrl+O/Ctrl+T pager: `/`, `n`/`N`, movement and close keys work; `[` releases capture and the alternate screen, dumps bounded text to native/tmux scrollback and waits for Enter. A Run keeps streaming without redraw, Enter returns, and the dump survives exit.
+8. An answer containing OSC 52 renders inert and leaves the clipboard unchanged before a copy gesture. Oversized or unavailable copies give the specified notice, keep selection and never retry automatically.
 
 ### Tool protocol
 
@@ -100,7 +118,7 @@ Owner: use a ChatGPT-plan account with explicit usage consent, a new Session and
 
 ### Tool output limits
 
-In this repository, repeat the task `work on planning/terminal-parity` from a new Session:
+In this repository, repeat a documentation task from a new Session using the [terminal contract](./docs/specs/terminal.md#terminal-continuity-and-provisional-text):
 
 1. Grouped Command reads of the task's guidance files show a line count and truncation if needed, without a result-limit failure.
 2. Read `agents/testing.md`: all current lines fit in one page, including after earlier Tool steps.
@@ -160,10 +178,8 @@ to the user's credential store or clipboard.
    behavior, modal discard and rejection without submission. Test native
    Wayland/X11 service interoperability and deliberately authorized image-only/
    text-plus-image Runs with closed replay. Confirm metadata-only human history,
-   private image-bearing JSONL and lossy pixel compaction. Run `/copy` locally
-   (`wl-copy` or `xclip`), inside tmux 3.2 or later and over SSH in an
-   OSC 52 terminal, paste elsewhere, and confirm the serving client exits once
-   another application takes the selection. Follow
+   private image-bearing JSONL and lossy pixel compaction. Copy transport and
+   serving-client checks live under [Terminal](#terminal). Follow
    [Terminal spec](./docs/specs/terminal.md).
 7. **Real coding workflow.** Review private grants on a disposable small project,
    then inspect/edit, run an offline check, load pinned Skill data and call local
