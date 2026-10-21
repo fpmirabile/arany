@@ -2294,6 +2294,24 @@ mod peer_row_tests {
                 expected
             );
         }
+        // Receipt names are repository data: escaped, and bounded to their row.
+        let hostile = format!("\u{202e}evil\u{1b}[2J{}", "b".repeat(400));
+        let created = tool_summary(&tool_fixture(
+            ToolCall::GitBranch {
+                name: Some("topic".into()),
+                start_point: None,
+            },
+            &serde_json::json!({"branch": hostile, "oid": oid}).to_string(),
+        ));
+        assert!(
+            created.contains("created \\u{202e}evil\\u{001b}[2J"),
+            "{created}"
+        );
+        assert!(!created.contains('\u{202e}') && !created.contains('\u{1b}'));
+        assert!(
+            created.lines().nth(1).unwrap().chars().count() < 200,
+            "{created}"
+        );
         let long = format!(".git/refs/heads/{}.lock", "deeply/nested/branch".repeat(6));
         let locks = format!(
             "Git locks left by an interrupted write: .git/index.lock, {long}, .git/packed-refs.lock; remove them after checking that no git process is running. Guard execution unconfirmed; effects may have occurred. Do not retry automatically."

@@ -898,3 +898,24 @@ fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
         );
     }
 }
+
+#[test]
+fn directories_a_lock_created_go_when_a_later_step_fails() {
+    let repo = Repo::new();
+    let git_dir =
+        Dir::open_ambient_dir(repo.workspace.join(".git"), cap_std::ambient_authority()).unwrap();
+    // `new` is created, then the overlong next component cannot be opened or created.
+    let path = format!("refs/heads/new/{}/leaf", "x".repeat(300));
+    assert!(matches!(
+        Lock::acquire(&git_dir, &path),
+        Err(ToolError::Conflict)
+    ));
+    assert!(!repo.workspace.join(".git/refs/heads/new").exists());
+    // The lock-file step fails too: an overlong leaf.
+    let path = format!("refs/heads/other/{}", "y".repeat(252));
+    assert!(matches!(
+        Lock::acquire(&git_dir, &path),
+        Err(ToolError::Conflict)
+    ));
+    assert!(!repo.workspace.join(".git/refs/heads/other").exists());
+}

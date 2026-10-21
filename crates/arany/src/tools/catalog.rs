@@ -625,6 +625,22 @@ mod tests {
     }
 
     #[test]
+    fn mutating_git_operations_need_the_write_grant() {
+        let offered = |write: bool| -> Vec<String> {
+            catalog_call_schemas(&json!({
+                "write": write,
+                "git": {"operations": ["git_status", "git_commit", "git_branch", "git_switch"]}
+            }))
+            .iter()
+            .filter_map(|call| facts_of(call).map(|facts| facts.name.to_owned()))
+            .filter(|name| matches!(name.as_str(), "git_commit" | "git_branch" | "git_switch"))
+            .collect()
+        };
+        assert!(offered(false).is_empty());
+        assert_eq!(offered(true), ["git_commit", "git_branch", "git_switch"]);
+    }
+
+    #[test]
     fn the_facts_table_is_a_permutation_of_the_call_enum() {
         let samples = samples();
         assert_eq!(samples.len(), ALL.len());
