@@ -2609,6 +2609,14 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
             "search",
         ),
         (
+            arany::ToolCall::Glob {
+                pattern: "*.md".into(),
+                path: "notes".into(),
+                limit: 100,
+            },
+            "search",
+        ),
+        (
             arany::ToolCall::Skill {
                 name: "guide".into(),
                 resource: None,

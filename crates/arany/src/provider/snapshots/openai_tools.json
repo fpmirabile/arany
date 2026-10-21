@@ -461,6 +461,41 @@
       "type": "function"
     },
     {
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "name": "arany_glob",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
       "description": "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.",
       "name": "arany_plan",
       "parameters": {
@@ -956,6 +991,41 @@
       "type": "function"
     },
     {
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "name": "arany_glob",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
       "description": "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.",
       "name": "arany_plan",
       "parameters": {
@@ -1257,6 +1327,41 @@
         },
         "required": [
           "server"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+      "name": "arany_glob",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "limit": {
+            "description": "Maximum entries, 1 through 100; null returns up to 100. When may_be_truncated is true, narrow pattern or path.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "Workspace-relative directory to search; null searches the whole Workspace.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "pattern": {
+            "description": "Glob matched against each regular file's path relative to path, case-sensitively. * and ? stay within one path component; a whole ** component crosses zero or more directories, so use **/ for deeper files; {a,b} lists at most 16 alternatives in total. Bracket classes, backslash escapes, a leading !, absolute or ~ prefixes and . or .. components are refused.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pattern",
+          "path",
+          "limit"
         ],
         "type": "object"
       },

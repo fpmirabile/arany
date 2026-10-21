@@ -4923,8 +4923,8 @@ mod goal_replay_tests {
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
             for (event, version) in [
-                (started(intent.digest(), &hook_intent), 3),
-                (finished(hook_observation.clone(), deny.clone()), 8),
+                (started(intent.digest(), &hook_intent), 4),
+                (finished(hook_observation.clone(), deny.clone()), 9),
             ] {
                 assert_eq!(event.version(), version);
                 let payload = event.payload().unwrap();
@@ -6323,6 +6323,46 @@ mod goal_replay_tests {
             }
         ));
         apply(&mut view, tool_finished(run, agent, &write, b"after")).expect("Guard receipt");
+    }
+
+    #[test]
+    fn a_glob_replays_only_its_recorded_in_process_observation() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let glob = child_intent(
+            run,
+            agent,
+            ToolCall::Glob {
+                pattern: "**/*.rs".into(),
+                path: "src".into(),
+                limit: 100,
+            },
+        );
+        apply(&mut view, reserve_child_call(goal, run, agent)).expect("primary call");
+        apply(&mut view, requesting_step(run, agent, 1)).expect("one-request step");
+        apply(&mut view, tool_started(run, agent, &glob)).expect("glob starts");
+        let mut guarded = observation_for(glob.clone(), b"");
+        guarded.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: glob.digest(),
+                enforcement_digest: glob.enforcement_digest,
+                limits: glob.limits.clone(),
+            },
+        ));
+        let finished = |observation| Event::ToolFinished {
+            checkpoint: None,
+            run_id: run,
+            agent_run_id: agent,
+            observation,
+        };
+        assert!(rejected(&view, finished(guarded)));
+        let mut recorded = observation_for(glob.clone(), b"");
+        recorded.output =
+            r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":100,"may_be_truncated":false}"#
+                .into();
+        apply(&mut view, finished(recorded.clone())).expect("in-process attestation");
+        let tool = view.runs[0].tools.last().unwrap();
+        assert_eq!(tool.observation.as_ref(), Some(&recorded));
     }
 
     #[test]

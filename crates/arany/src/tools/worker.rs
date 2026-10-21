@@ -1110,6 +1110,25 @@ fn inspect(image: &Image, call: &ToolCall, result_bytes: usize) -> Result<String
             };
             fs::read_page(content.as_ref(), *offset, *limit, result_bytes)
         }
+        ToolCall::Glob { path, .. } => {
+            if path != "." && !image.entries.iter().any(|(p, _)| contains(path, p)) {
+                return Err(ToolError::NotFound);
+            }
+            if matches!(image.entries.get(path), Some(Entry::File { .. })) {
+                return Err(ToolError::Operation);
+            }
+            super::glob::inspect_files(
+                image
+                    .entries
+                    .iter()
+                    .filter_map(|(name, entry)| match entry {
+                        Entry::File { content, .. } => Some((name.as_str(), content.len())),
+                        Entry::Directory | Entry::Absent => None,
+                    }),
+                call,
+                result_bytes,
+            )
+        }
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let mut rows = Vec::new();
             for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
@@ -1485,6 +1504,7 @@ mod tests {
                 WorkerTool::Read,
                 WorkerTool::List,
                 WorkerTool::Search,
+                WorkerTool::Glob,
                 WorkerTool::Write,
                 WorkerTool::Edit,
                 WorkerTool::Mkdir,
@@ -1680,6 +1700,27 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&listing.output).unwrap()["may_be_truncated"],
             false
         );
+        // Glob sees only this assignment's image, including its acknowledged edit.
+        for (actor, bytes) in [(&view, 7), (&sibling, 8)] {
+            let found = actor.read(intent(
+                &runtime,
+                actor,
+                ToolCall::Glob {
+                    pattern: "**".into(),
+                    path: "owned".into(),
+                    limit: 100,
+                },
+            ));
+            assert!(found.valid());
+            assert!(matches!(
+                found.attestation,
+                Some(Attestation::WorkerRead { .. })
+            ));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&found.output).unwrap(),
+                json!({"entries":[{"path":"owned/a","bytes":bytes}],"limit":100,"may_be_truncated":false})
+            );
+        }
         let handover = view.handover().unwrap();
         assert!(decode_data(&handover, WorkerDataPurpose::Handover).is_ok());
         let final_changes: WorkerChangeset = serde_json::from_slice(&handover).unwrap();

@@ -48,6 +48,5 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Write and Edit content up to 64 KiB](./large-file-edits/README.md) | One slice: larger typed edits through bounded decoding, journal admission, hooks and Guard publication |
 | [Search with regex, file filtering and paging](./search-regex/README.md) | One slice: regex/include/case controls and deterministic pages of at most 100 rows |
-| [Read-only Glob Tool](./glob-tool/README.md) | One slice: bounded in-process file discovery with regex-backed glob matching and deterministic path order |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.

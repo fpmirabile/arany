@@ -16,6 +16,14 @@ fn read(path: &str) -> ToolCall {
     }
 }
 
+fn glob(path: &str) -> ToolCall {
+    ToolCall::Glob {
+        pattern: "**/*.rs".into(),
+        path: path.into(),
+        limit: 100,
+    }
+}
+
 fn write(path: &str) -> ToolCall {
     ToolCall::Write {
         path: path.into(),
@@ -287,6 +295,7 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
         ToolCall::List {
             path: "private/a".into(),
         },
+        glob("private/a"),
     ] {
         assert_eq!(parsed.decision(&call), Decision::Deny, "{call:?}");
     }
@@ -302,6 +311,10 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             },
         ),
         ("Glob", ToolCall::List { path: "src".into() }),
+        ("Glob", glob("src")),
+        ("glob(./src/**)", glob("src/a")),
+        ("Read(./src/**)", glob("src/a")),
+        ("Read", glob(".")),
         (
             "Skill(guide*)",
             ToolCall::Skill {
@@ -325,6 +338,20 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             "{rule}"
         );
     }
+    // The native name selects only its own operation; the peer Glob also keeps List.
+    assert_eq!(
+        config(json!({"deny":["glob"]})).decision(&ToolCall::List { path: "src".into() }),
+        Decision::Allow
+    );
+    assert_eq!(
+        config(json!({"ask":["glob"]})).decision(&glob("src")),
+        Decision::Ask
+    );
+    assert_eq!(
+        config(json!({"deny":["Read(./private/**)"]})).decision(&glob("src")),
+        Decision::Allow
+    );
+    assert!(PermissionConfig::parse(br#"{"permissions":{"deny":["Glob(./src/**)"]}}"#).is_err());
     assert_eq!(
         config(json!({"ask":["Read"]})).decision(&write("src/a")),
         Decision::Ask
@@ -601,6 +628,20 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
         }
         assert!(group.matches_tool(&read("bad\npath")).is_err());
     }
+    let peer = hooks(
+        "PreToolUse",
+        json!("Glob"),
+        json!({"type":"command","command":"x"}),
+    )
+    .unwrap();
+    let group = &peer.hooks().groups(HookEvent::PreToolUse)[0];
+    assert!(group.matches_tool(&glob(".")).unwrap());
+    assert!(
+        group
+            .matches_tool(&ToolCall::List { path: ".".into() })
+            .unwrap()
+    );
+    assert!(!group.matches_tool(&read("a")).unwrap());
     for matcher in ["", "*"] {
         let parsed = hooks(
             "PreCompact",
@@ -1494,6 +1535,11 @@ fn updated_input_accepts_only_provable_narrowing() {
         path: path.into(),
         query: query.into(),
     };
+    let glob_call = |pattern: &str, path: &str, limit| ToolCall::Glob {
+        pattern: pattern.into(),
+        path: path.into(),
+        limit,
+    };
     let status = |path: &str| ToolCall::GitStatus { path: path.into() };
     let diff = |path: &str, staged| ToolCall::GitDiff {
         path: path.into(),
@@ -1559,6 +1605,52 @@ fn updated_input_accepts_only_provable_narrowing() {
         (search("src", "x"), search("src", "x*"), false),
         (search("src", "x"), search("..", "x"), false),
         (search(".", "x"), search("a", "x"), true),
+        (
+            glob_call("*.rs", ".", 100),
+            glob_call("*.rs", "src", 100),
+            true,
+        ),
+        (
+            glob_call("*.rs", "src", 100),
+            glob_call("*.rs", "src", 10),
+            true,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("*.rs", "src/a", 10),
+            true,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("*.rs", "src", 11),
+            false,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("**/*.rs", "src", 10),
+            false,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("*.r?", "src", 10),
+            false,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("*.rs", ".", 10),
+            false,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("*.rs", "srcx", 10),
+            false,
+        ),
+        (
+            glob_call("*.rs", "src", 10),
+            glob_call("[a].rs", "src", 10),
+            false,
+        ),
+        (glob_call("*.rs", "src", 10), list("src"), false),
         (status("a"), status("a/b"), true),
         (status("a/b"), status("a"), false),
         (status("a"), status("a/../b"), false),

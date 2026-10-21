@@ -156,7 +156,9 @@ impl ToolArgumentShape {
             nul_args_count: None,
         };
         let path = match call {
-            ToolCall::List { path } | ToolCall::Search { path, .. } => Some((path, true)),
+            ToolCall::List { path }
+            | ToolCall::Search { path, .. }
+            | ToolCall::Glob { path, .. } => Some((path, true)),
             ToolCall::Read { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
@@ -193,6 +195,7 @@ impl ToolArgumentShape {
             }
             ToolCall::Write { content, .. } => shape.text_bytes = Some(content.len()),
             ToolCall::Search { query, .. } => shape.text_bytes = Some(query.len()),
+            ToolCall::Glob { pattern, .. } => shape.text_bytes = Some(pattern.len()),
             ToolCall::McpCall { arguments, .. } => shape.text_bytes = Some(arguments.len()),
             ToolCall::Command { program, args, .. } => {
                 shape.program_chars = Some(program.chars().count());

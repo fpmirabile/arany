@@ -307,7 +307,7 @@ impl PermissionConfig {
 // Provable narrowing only: a window or subtree strictly inside the original. Argv, arguments and content
 // have no order, so every other operation is a new intent the model must propose.
 pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
-    use ToolCall::{GitDiff, GitLog, GitStatus, List, Read, Search};
+    use ToolCall::{GitDiff, GitLog, GitStatus, Glob, List, Read, Search};
     if !updated.valid() {
         return false;
     }
@@ -349,6 +349,18 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
                 query: new_query,
             },
         ) => query == new_query && within(path, new_path),
+        (
+            Glob {
+                pattern,
+                path,
+                limit,
+            },
+            Glob {
+                pattern: new_pattern,
+                path: new_path,
+                limit: new_limit,
+            },
+        ) => pattern == new_pattern && new_limit <= limit && within(path, new_path),
         (
             GitDiff {
                 path,
@@ -533,7 +545,7 @@ impl Rule {
                 | Tool::Edit
                 | Tool::Grep
                 | Tool::Native(
-                    "list" | "read" | "search" | "mkdir" | "write" | "edit" | "git_status"
+                    "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "git_status"
                     | "git_diff" | "git_log",
                 ) => path_glob(pattern, decision)?,
                 Tool::Skill | Tool::Native("skill") => {
@@ -564,7 +576,7 @@ impl Rule {
             }
             Tool::Edit => facts.family == Family::File && facts.mutates,
             Tool::Write => matches!(call, ToolCall::Write { .. }),
-            Tool::Glob => matches!(call, ToolCall::List { .. }),
+            Tool::Glob => matches!(call, ToolCall::List { .. } | ToolCall::Glob { .. }),
             Tool::Grep => matches!(call, ToolCall::Search { .. }),
             Tool::Skill => facts.family == Family::Skill,
             Tool::Native(name) => facts.name == *name,
@@ -667,6 +679,7 @@ fn path_of(call: &ToolCall) -> Option<&str> {
         ToolCall::List { path }
         | ToolCall::Read { path, .. }
         | ToolCall::Search { path, .. }
+        | ToolCall::Glob { path, .. }
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
@@ -689,7 +702,7 @@ fn peer_operation_name(name: &str) -> &str {
     match name {
         "command" | "command_unguarded" => "Bash",
         "read" => "Read",
-        "list" => "Glob",
+        "list" | "glob" => "Glob",
         "search" => "Grep",
         "write" => "Write",
         "mkdir" | "edit" | "apply_changeset" => "Edit",

@@ -8,5 +8,6 @@
   {"operation": "command", "program": "bash", "args": ["src/check.sh"], "cwd": ""},
   {"operation": "skill", "name": "example", "resource": null},
   {"operation": "mcp_list", "server": "example"},
-  {"operation": "mcp_call", "server": "example", "tool": "echo", "schema_digest": "0000000000000000000000000000000000000000000000000000000000000000", "arguments": "{\"value\":42}"}
+  {"operation": "mcp_call", "server": "example", "tool": "echo", "schema_digest": "0000000000000000000000000000000000000000000000000000000000000000", "arguments": "{\"value\":42}"},
+  {"operation": "glob", "pattern": "**/*.rs", "path": null, "limit": null}
 ]

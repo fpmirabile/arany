@@ -571,6 +571,7 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         crate::tools::ToolCall::Read { path, .. }
         | crate::tools::ToolCall::List { path }
         | crate::tools::ToolCall::Search { path, .. }
+        | crate::tools::ToolCall::Glob { path, .. }
         | crate::tools::ToolCall::Mkdir { path }
         | crate::tools::ToolCall::Write { path, .. }
         | crate::tools::ToolCall::Edit { path, .. } => format!("{} {path}", call.label()),

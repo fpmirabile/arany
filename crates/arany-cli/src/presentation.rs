@@ -111,6 +111,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::List { path } => format!("List({path})"),
         ToolCall::Read { path, .. } => format!("Read({path})"),
         ToolCall::Search { path, query } => format!("Search({query}, {path})"),
+        ToolCall::Glob { pattern, path, .. } => format!("Glob({pattern}, {path})"),
         ToolCall::Mkdir { path } => format!("Create folder({path})"),
         ToolCall::Write { path, .. } => format!("Write({path})"),
         ToolCall::Edit { path, .. } => format!("Edit({path})"),
@@ -350,6 +351,7 @@ fn read_operation(tool: &arany::ToolView) -> bool {
         ToolCall::List { .. }
             | ToolCall::Read { .. }
             | ToolCall::Search { .. }
+            | ToolCall::Glob { .. }
             | ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }
             | ToolCall::GitLog { .. }
@@ -383,7 +385,7 @@ fn group_label(tools: &[arany::ToolView]) -> String {
     );
     let kinds: [Kind; 6] = [
         (
-            |c| matches!(c, ToolCall::Search { .. }),
+            |c| matches!(c, ToolCall::Search { .. } | ToolCall::Glob { .. }),
             "searched for",
             "pattern",
             "patterns",
@@ -2243,6 +2245,15 @@ mod peer_row_tests {
                 ToolCall::List { path: ".".into() },
                 r#"{"entries":[]}"#,
                 "⏺ List(.)\n  ⎿ 0 entries",
+            ),
+            (
+                ToolCall::Glob {
+                    pattern: "**/*.rs".into(),
+                    path: "src".into(),
+                    limit: 1,
+                },
+                r#"{"entries":[{"bytes":3,"path":"src/a.rs"}],"limit":1,"may_be_truncated":true}"#,
+                "⏺ Glob(**/*.rs, src)\n  ⎿ 1 entry (truncated)",
             ),
             (
                 ToolCall::Read {

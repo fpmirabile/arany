@@ -245,7 +245,9 @@ fn tool_failure_stage(
         return Stage::OutcomeToolArgumentSize;
     }
     let path = match call {
-        ToolCall::List { path } | ToolCall::Search { path, .. } => Some((path, true)),
+        ToolCall::List { path } | ToolCall::Search { path, .. } | ToolCall::Glob { path, .. } => {
+            Some((path, true))
+        }
         ToolCall::Read { path, .. }
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
@@ -270,6 +272,9 @@ fn tool_failure_stage(
         }
         ToolCall::Write { content, .. } if content.len() > 8 * 1024 => Stage::OutcomeToolTextSize,
         ToolCall::Search { query, .. } if query.is_empty() || query.len() > 512 => {
+            Stage::OutcomeToolTextSize
+        }
+        ToolCall::Glob { pattern, .. } if pattern.is_empty() || pattern.len() > 512 => {
             Stage::OutcomeToolTextSize
         }
         ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. }

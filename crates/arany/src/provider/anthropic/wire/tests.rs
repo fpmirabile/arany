@@ -126,6 +126,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_command",
             "arany_mcp_call",
             "arany_command_unguarded",
+            "arany_glob",
             "arany_plan"
         ]
     );
@@ -1232,7 +1233,8 @@ fn child_research_request_offers_only_read_only_tools_and_text_at_exhaustion() {
             "arany_read",
             "arany_search",
             "arany_skill",
-            "arany_mcp_list"
+            "arany_mcp_list",
+            "arany_glob"
         ]
     );
     assert!(rendered["tools"].as_array().unwrap().iter().all(|tool| {
@@ -1289,13 +1291,20 @@ fn git_reads_join_the_native_tools_when_cataloged() {
             "arany_git_status",
             "arany_git_diff",
             "arany_git_log",
+            "arany_glob",
             "arany_plan"
         ]
     );
     let plain = with_catalog(&mut request, json!("unavailable"));
     assert_eq!(
         tool_names(&plain),
-        ["arany_list", "arany_read", "arany_search", "arany_plan"]
+        [
+            "arany_list",
+            "arany_read",
+            "arany_search",
+            "arany_glob",
+            "arany_plan"
+        ]
     );
 }
 

@@ -84,7 +84,7 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 17] = [
+pub(crate) static ALL: [OperationFacts; 18] = [
     read_row(
         "list",
         Family::File,
@@ -197,6 +197,12 @@ pub(crate) static ALL: [OperationFacts; 17] = [
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
     facts_row("prepare_worker", Family::Preparation, 16, ""),
+    read_row(
+        "glob",
+        Family::File,
+        17,
+        "Find Workspace regular files whose path relative to path matches a glob. Returns up to limit paths in path order with byte sizes; it reads no file contents, so use read for content and SHA-256.",
+    ),
 ];
 
 static WORKER_BASE: OperationFacts = OperationFacts {
@@ -236,6 +242,7 @@ impl ToolCall {
             Self::GitStatus { .. } => &ALL[11],
             Self::GitDiff { .. } => &ALL[12],
             Self::GitLog { .. } => &ALL[13],
+            Self::Glob { .. } => &ALL[17],
         }
     }
 }
@@ -543,6 +550,11 @@ mod tests {
                     max_chunks: 1,
                 },
             },
+            ToolCall::Glob {
+                pattern: "**/*.rs".into(),
+                path: path(),
+                limit: 1,
+            },
         ]
     }
 
@@ -578,7 +590,7 @@ mod tests {
             .filter(|facts| facts.site == Site::InProcess)
             .map(|facts| facts.name)
             .collect();
-        assert_eq!(in_process, ["list", "read", "search"]);
+        assert_eq!(in_process, ["list", "read", "search", "glob"]);
         assert!(
             ALL.iter()
                 .filter(|facts| facts.site == Site::InProcess)

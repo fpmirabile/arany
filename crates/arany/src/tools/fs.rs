@@ -50,6 +50,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && old.len() + new.len() <= 8 * 1024
         }
         ToolCall::ApplyChangeset { source } => source.valid(),
+        ToolCall::Glob { .. } => super::glob::valid(call),
         _ => false,
     }
 }
@@ -70,6 +71,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
         ],
         "search" => vec![path, ("query", string())],
+        "glob" => super::glob::schema(),
         "write" => vec![path, ("expected_digest", nullable()), ("content", string())],
         "edit" => vec![
             path,
@@ -1139,6 +1141,7 @@ pub(super) fn inspect(
             }
             read_page(file, *offset, *limit, result_bytes)
         }
+        ToolCall::Glob { .. } => super::glob::inspect(root, call, config, result_bytes),
         ToolCall::List { path } | ToolCall::Search { path, .. } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] && matches!(call, ToolCall::List { .. }) {

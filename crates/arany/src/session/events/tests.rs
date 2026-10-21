@@ -772,7 +772,7 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(17));
+        assert_eq!(payload_version("RunStarted"), Some(18));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(13));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -1410,7 +1410,7 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(11));
+        assert_eq!(payload_version(child.kind()), Some(12));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1616,9 +1616,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(19));
+        assert_eq!(payload_version("ToolFinished"), Some(20));
         assert_eq!(
-            Event::decode("ToolFinished", 19, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 20, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1626,7 +1626,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                19,
+                20,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1638,14 +1638,14 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 19, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 20, &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
         assert!(
             Event::decode(
                 "ToolFinished",
-                19,
+                20,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1658,14 +1658,14 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                19,
+                20,
                 &unknown.to_string(),
                 Some(run),
                 Some(agent)
             )
             .is_err()
         );
-        for previous in [18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1718,7 +1718,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(13));
+        assert_eq!(payload_version("ToolStarted"), Some(14));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
     }
 
@@ -1861,8 +1861,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 17,
-                Event::ToolStarted { .. } => 13,
+                Event::RunStarted { .. } => 18,
+                Event::ToolStarted { .. } => 14,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
             };
@@ -2182,7 +2182,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(17));
+    assert_eq!(payload_version("RunStarted"), Some(18));
 }
 
 #[test]
