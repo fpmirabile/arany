@@ -105,10 +105,8 @@ fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
         .collect()
 }
 
-// The latest Classic composer caret after `from`, located on the decoded screen by the
-// composer border instead of a fixed row, since the content-sized viewport moves.
-// Returns the 1-based caret column and the decoded screen.
-#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+// Found by the composer border, not a fixed row, because the Classic viewport moves.
+#[cfg(target_os = "linux")]
 fn composer_caret(
     bytes: &[u8],
     from: usize,
