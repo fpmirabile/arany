@@ -103,7 +103,7 @@ All fields shown at the envelope and permissions levels are optional with empty 
 |---|---|
 | `Bash` | `command`; the subject uses its admitted logical program identifier and argv, not an inferred executable basename. |
 | `Read` | `list`, `read`, `search`, `glob`; deny and ask also cover `git_status`, `git_diff` and `git_log` paths, Skill files inside the Workspace, and [Git writes](#typed-git-writes): commit paths and potentially covered descendants, and every staged or whole-repository commit and every switch, whose paths are unknown before dispatch. A deny also covers typed mutations and changeset paths to prevent writing through a read denial. |
-| `Edit` | `mkdir`, `write`, `edit`, `apply_changeset`; deny and ask also cover commit paths and potentially covered descendants, every staged or whole-repository commit, and every `git_switch`. |
+| `Edit` | `mkdir`, `write`, `edit`, `apply_changeset`; deny and ask also cover the same [Git writes](#typed-git-writes) as `Read`. |
 | `Write`, `Glob` | Bare `write`, and bare `list` and `glob`, respectively; path specifiers reject in favor of `Edit` and `Read`. |
 | `Grep`, `Skill` | `search` path and admitted `skill` name respectively. Skill wildcards match names, not authority or resource discovery. |
 | `mcp__<server>__<tool>` | `mcp_call` matched against separate server and tool fields; the Tool segment supports `*`. `mcp__<server>` also covers that server's catalog listing and all calls; `mcp__*` covers all servers for deny/ask. |

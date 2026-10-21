@@ -936,9 +936,6 @@ fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
 
 #[test]
 fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
-    if !git_writes_available() {
-        return;
-    }
     let repo = Repo::new();
     let intent = uuid::Uuid::now_v7();
     let ledger = repo
@@ -967,9 +964,6 @@ fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
 
 #[test]
 fn directories_a_lock_created_go_when_a_later_step_fails() {
-    if !git_writes_available() {
-        return;
-    }
     let repo = Repo::new();
     let git_dir =
         Dir::open_ambient_dir(repo.workspace.join(".git"), cap_std::ambient_authority()).unwrap();
