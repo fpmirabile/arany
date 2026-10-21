@@ -35,6 +35,9 @@ pub(super) struct ClassicProjection {
 pub(super) enum MessageKind {
     User,
     Assistant,
+    // A child's assignment and result in a read-only agent transcript.
+    Assignment,
+    AgentResult,
     Notice,
     Error,
     Preview,
@@ -125,9 +128,18 @@ pub(super) struct History {
     preview_dirty: bool,
     preview: Option<arany::DisplayUpdate>,
     selection: Option<Selection>,
+    agent: bool,
 }
 
 impl History {
+    // Labels the objective and answer as a child's assignment and result.
+    pub(super) fn agent() -> Self {
+        Self {
+            agent: true,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn sync(&mut self, view: &SessionView, width: usize, height: usize) {
         let width = width.min(MAX_ROW_CELLS);
         let last_run = view.runs.last().map(|run| run.id);
@@ -203,16 +215,17 @@ impl History {
             }
             let counts = full.then(|| run_row_counts(&view.runs, width));
             for (index, run) in view.runs.iter().enumerate().skip(first) {
+                let (user, assistant) = if self.agent {
+                    (MessageKind::Assignment, MessageKind::AgentResult)
+                } else {
+                    (MessageKind::User, MessageKind::Assistant)
+                };
                 if let Some(counts) = &counts {
-                    self.push_count(
-                        MessageSource::User(index),
-                        MessageKind::User,
-                        counts[index].0,
-                    );
+                    self.push_count(MessageSource::User(index), user, counts[index].0);
                 } else {
                     self.push(
                         MessageSource::User(index),
-                        MessageKind::User,
+                        user,
                         &image_message_text(&run.objective, &run.images),
                         width,
                     );
@@ -289,16 +302,11 @@ impl History {
                     if let Some(counts) = &counts {
                         self.push_count(
                             MessageSource::Assistant(index),
-                            MessageKind::Assistant,
+                            assistant,
                             counts[index].1.expect("accepted answer"),
                         );
                     } else {
-                        self.push(
-                            MessageSource::Assistant(index),
-                            MessageKind::Assistant,
-                            answer,
-                            width,
-                        );
+                        self.push(MessageSource::Assistant(index), assistant, answer, width);
                     }
                 } else {
                     let live = self
@@ -1585,9 +1593,9 @@ fn selected_cells(
 
 pub(super) fn native_marker(kind: MessageKind, heading: bool) -> &'static str {
     match (kind, heading) {
-        (MessageKind::User, true) => "› ",
-        (MessageKind::Assistant, true) => "● ",
-        (MessageKind::User, false) => "│ ",
+        (MessageKind::User | MessageKind::Assignment, true) => "› ",
+        (MessageKind::Assistant | MessageKind::AgentResult, true) => "● ",
+        (MessageKind::User | MessageKind::Assignment, false) => "│ ",
         _ => "",
     }
 }
@@ -1596,6 +1604,8 @@ fn message_heading(kind: MessageKind) -> &'static str {
     match kind {
         MessageKind::User => "You:",
         MessageKind::Assistant => "Arany:",
+        MessageKind::Assignment => "Assignment:",
+        MessageKind::AgentResult => "Agent result:",
         MessageKind::Notice => "Arany · notice:",
         MessageKind::Error => "Arany · error:",
         MessageKind::Preview => "Arany · provisional:",

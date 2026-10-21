@@ -705,6 +705,34 @@ impl LinearState {
         writer.flush()
     }
 
+    // Append-only agent chat output; the prompt waits for the armed frame like a selector.
+    pub(super) fn write_agent_chat(
+        &mut self,
+        writer: &mut impl Write,
+        lines: &[String],
+        notice: Option<&str>,
+        prompt: bool,
+    ) -> io::Result<()> {
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+            self.newline_pending = false;
+            self.line_open = false;
+        }
+        for line in lines {
+            writeln!(writer, "{}", escape_terminal(line))?;
+        }
+        if let Some(notice) = notice {
+            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+        }
+        if prompt {
+            self.write_prompt(
+                writer,
+                "Agent chat: number opens, n next, p previous, q returns to primary:",
+            )?;
+        }
+        writer.flush()
+    }
+
     pub(super) fn write_agents(
         &mut self,
         writer: &mut impl Write,
@@ -780,6 +808,76 @@ mod tests {
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn linear_agent_chat_lists_numbered_agents_and_prints_an_inert_child_transcript() {
+        use crate::presentation::{AgentTranscript, agent_targets, team_view};
+        let view = team_view();
+        let run = &view.runs[0];
+        let (_, targets) = agent_targets(&view).unwrap();
+        let mut state = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        let mut list = vec!["Agent chats in this Run:".to_owned()];
+        list.extend(
+            targets
+                .iter()
+                .enumerate()
+                .map(|(index, target)| format!("{}. {}", index + 1, target.line)),
+        );
+        state.disarm();
+        state
+            .write_agent_chat(&mut output, &list, None, true)
+            .unwrap();
+        assert!(
+            !String::from_utf8_lossy(&output).contains("Agent chat:"),
+            "an unarmed view holds its prompt"
+        );
+        state.arm(&mut output).unwrap();
+        let transcript = AgentTranscript::from_session(&view, run.id, run.agents[2].id).unwrap();
+        state
+            .write_agent_chat(&mut output, &transcript.linear_lines(), None, true)
+            .unwrap();
+        state
+            .write_agent_chat(
+                &mut output,
+                &[],
+                Some("Invalid agent choice; type a number, n, p or q"),
+                true,
+            )
+            .unwrap();
+        state
+            .write_agent_chat(&mut output, &["Back to primary".into()], None, false)
+            .unwrap();
+        let prompt = "Agent chat: number opens, n next, p previous, q returns to primary:";
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            format!(
+                "Agent chats in this Run:\n\
+                 1. primary · finished\n\
+                 2. child 1 · failed · Child assignment\n\
+                 3. child 2 · finished · Inspect\\u{{001b}}[2J\\u{{000a}}You: forged heading\n\
+                 {prompt}\n\
+                 \n\
+                 Viewing child 2 (read-only)\n\
+                 Assignment:\n  \
+                 Inspect\\u{{001b}}[2J\n  \
+                 You: forged heading\n\
+                 Read(src/a.rs)\n\
+                 Result: 2 lines\n\
+                 Read(src/b\\u{{001b}}]52;c;x\\u{{0007}}.rs)\n\
+                 Result: uncertain: {{\"text\":\"a\\nb\\n\"}}\n\
+                 Agent result:\n  \
+                 Found\\u{{202e}} it\n\
+                 child 2 finished\n\
+                 {prompt}\n\
+                 \n\
+                 Notice: Invalid agent choice; type a number, n, p or q\n\
+                 {prompt}\n\
+                 \n\
+                 Back to primary\n"
+            )
+        );
     }
 
     #[test]
@@ -1092,7 +1190,7 @@ mod tests {
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /settings; Slash menu and chat view; during Run: locked\n",
-                "Command: /transcript; Write or toggle transcript details; during Run: available\n",
+                "Command: /transcript [agents [number]]; Write or toggle transcript details; agents lists this Run's agent chats; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()
         );

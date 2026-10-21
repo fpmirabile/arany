@@ -348,6 +348,7 @@ fn narrow_classic_history_cue_keeps_export_action_visible() {
         setup_required: false,
         draft_action: DraftAction::Retain,
         empty_chat: false,
+        agent_switch: false,
     };
     let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("narrow terminal");
     terminal
@@ -789,6 +790,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     for (width, height) in [(16, 8), (40, 12), (80, 24)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("test terminal");
@@ -867,6 +869,7 @@ fn unconfigured_session_draws_typed_draft_in_the_composer() {
         setup_required: true,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     let mut composer = Composer::default();
     for character in "visible draft".chars() {
@@ -905,6 +908,7 @@ fn classic_content_height_keeps_bottom_controls_and_completion_visible() {
                 setup_required: false,
                 draft_action: DraftAction::Submit,
                 empty_chat: false,
+                agent_switch: false,
             };
             let mut composer = Composer::default();
             for (draft, expected) in [
@@ -966,6 +970,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
             setup_required: false,
             draft_action: DraftAction::InspectRun,
             empty_chat: true,
+            agent_switch: false,
         };
         terminal
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -1021,6 +1026,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
         setup_required: false,
         draft_action: DraftAction::InspectRun,
         empty_chat: true,
+        agent_switch: false,
     };
     terminal
         .draw(|frame| {
@@ -1066,6 +1072,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         setup_required: false,
                         draft_action,
                         empty_chat: true,
+                        agent_switch: false,
                     };
                     let mut composer = Composer::default();
                     for character in text.chars() {
@@ -1156,6 +1163,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         setup_required: false,
         draft_action: DraftAction::InspectRun,
         empty_chat: true,
+        agent_switch: false,
     };
     let rows = vec![
         HistoryRow {
@@ -1220,6 +1228,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         setup_required: false,
         draft_action: DraftAction::InspectRun,
         empty_chat: true,
+        agent_switch: false,
     };
     for color in [false, true] {
         let mut wide = Terminal::new(TestBackend::new(80, 12)).expect("wide terminal");
@@ -1429,6 +1438,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
             setup_required: false,
             draft_action: DraftAction::InspectRun,
             empty_chat: true,
+            agent_switch: false,
         };
         terminal
             .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -1471,6 +1481,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         setup_required: false,
         draft_action: DraftAction::InspectRun,
         empty_chat: true,
+        agent_switch: false,
     };
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -1539,6 +1550,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
                 setup_required: false,
                 draft_action: DraftAction::Retain,
                 empty_chat: true,
+                agent_switch: false,
             };
             terminal
                 .draw(|frame| draw_frame(frame, &preparing, &composer, None, Palette { color }))
@@ -1577,6 +1589,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     let mut composer = Composer::default();
     for character in "/provider ".chars() {
@@ -2040,6 +2053,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     for width in [16, 40, 80] {
         for color in [true, false] {
@@ -2327,6 +2341,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     terminal
         .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -2679,6 +2694,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     for width in [16, 20, 24, 40, 50, 79, 80, 120] {
         for height in [8, 12, 24] {
@@ -2811,6 +2827,7 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: true,
+        agent_switch: false,
     };
     for width in [16, 24, 40, 50, 80] {
         for (filter, empty) in [("", false), ("MODEL", false), ("missing", true)] {
@@ -3289,6 +3306,7 @@ fn fullscreen_history_cue_stays_visible_behind_a_long_state() {
             setup_required: false,
             draft_action: DraftAction::Retain,
             empty_chat: false,
+            agent_switch: false,
         };
         terminal
             .draw(|frame| {
@@ -3325,6 +3343,7 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
         setup_required: false,
         draft_action: DraftAction::InspectRun,
         empty_chat: true,
+        agent_switch: false,
     };
     let composer = Composer::default();
     terminal
@@ -3513,6 +3532,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: false,
+        agent_switch: false,
     };
     for width in [16, 40, 80, 120, 160] {
         for color in [false, true] {
@@ -3590,6 +3610,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
         setup_required: false,
         draft_action: DraftAction::Submit,
         empty_chat: false,
+        agent_switch: false,
     };
     for width in [80, 120] {
         let rows = super::super::history::display_rows(
@@ -3820,6 +3841,155 @@ fn pager_frame_gives_history_every_row_above_one_inert_footer() {
                     .iter()
                     .any(|row| row.contains("hostile \\u{001b}]52"))
             );
+        }
+    }
+}
+
+#[test]
+fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
+    use crate::presentation::{AgentTranscript, team_view};
+    use crate::terminal::{TerminalNotice, history::History};
+    let view = team_view();
+    let run = &view.runs[0];
+    let transcript = AgentTranscript::from_session(&view, run.id, run.agents[2].id).unwrap();
+    let palette = Palette { color: false };
+    for width in [80, 50, 16] {
+        for fullscreen in [true, false] {
+            for armed in [false, true] {
+                // A Classic viewport is exactly the panel; its transcript went to native scrollback.
+                let height = if fullscreen { 24 } else { AGENT_CHAT_ROWS };
+                let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+                let mut history = History::agent();
+                history.sync(
+                    &transcript.view,
+                    usize::from(width),
+                    usize::from(height - AGENT_CHAT_ROWS),
+                );
+                for notice in &transcript.notices {
+                    history.record_notice(TerminalNotice::History(notice));
+                }
+                terminal
+                    .draw(|frame| {
+                        let area = crate::terminal::dialog_area(
+                            frame.area(),
+                            AGENT_CHAT_ROWS,
+                            !fullscreen,
+                        );
+                        if fullscreen {
+                            crate::terminal::draw_history_above(
+                                frame,
+                                &mut history,
+                                &transcript.view,
+                                area.y,
+                                palette,
+                            );
+                        }
+                        draw_agent_chat_frame(
+                            frame,
+                            area,
+                            &transcript.label,
+                            armed,
+                            None,
+                            fullscreen,
+                            palette,
+                        );
+                    })
+                    .unwrap();
+                let rows = (0..height)
+                    .map(|y| buffer_row(terminal.backend().buffer(), y))
+                    .collect::<Vec<_>>();
+                let context =
+                    format!("{width} cols, fullscreen {fullscreen}, armed {armed}: {rows:?}");
+                let panel = &rows[rows.len() - 3..];
+                assert!(
+                    panel[0].starts_with(if width >= 50 {
+                        "viewing child 2 (read-only)"
+                    } else {
+                        "child 2 read-on…"
+                    }),
+                    "{context}"
+                );
+                assert!(panel[1].starts_with("> Read-only"), "{context}");
+                // The key hint is the arming cue; the disabled composer shows no caret or draft.
+                assert_eq!(panel[2].contains("Esc"), armed, "{context}");
+                assert_eq!(
+                    panel[2].contains("PgUp/PgDn"),
+                    armed && fullscreen && width >= 60,
+                    "{context}"
+                );
+                assert!(rows.iter().all(|row| !row.contains('\u{1b}')), "{context}");
+                if fullscreen {
+                    let history = rows[..rows.len() - 3].join("\n");
+                    // At 16 columns the tail follows the newest rows and wraps the status.
+                    let needles: &[&str] = if width >= 50 {
+                        &[
+                            "Assignment:",
+                            "Agent result:",
+                            "child 2 finished",
+                            "\\u{001b}",
+                        ]
+                    } else {
+                        &["Agent result:", "\\u{"]
+                    };
+                    for needle in needles {
+                        assert!(history.contains(needle), "{needle} in {context}");
+                    }
+                    // Forged headings stay quoted body text under the trusted Assignment rail.
+                    assert!(
+                        rows.iter()
+                            .all(|row| !row.starts_with("› You:") && !row.starts_with("● Arany:")),
+                        "{context}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn empty_composer_names_agent_keys_only_when_the_run_has_children() {
+    for (width, children, draft, expected) in [
+        (80, true, "", Some("Alt+Left/Right agents")),
+        (50, true, "", Some("Alt+Left/Right agents")),
+        (30, true, "", Some("Alt+←/→ agents")),
+        (16, true, "", None),
+        (80, false, "", None),
+        (80, true, "x", None),
+    ] {
+        let model = PresentationModel {
+            status_line: "ready".into(),
+            activity_lines: Vec::new(),
+            setup_required: false,
+            draft_action: DraftAction::Submit,
+            empty_chat: false,
+            agent_switch: children,
+        };
+        let mut composer = Composer::default();
+        for character in draft.chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_frame_with_history(
+                    frame,
+                    &model,
+                    &composer,
+                    None,
+                    Palette { color: false },
+                    &[],
+                    None,
+                );
+            })
+            .unwrap();
+        let rows = (0..12)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let context = format!("{width} cols, children {children}, draft {draft:?}: {rows}");
+        match expected {
+            Some(hint) => assert!(rows.contains(hint), "{context}"),
+            None => assert!(!rows.contains("agents"), "{context}"),
         }
     }
 }

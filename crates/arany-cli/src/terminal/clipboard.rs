@@ -1074,6 +1074,7 @@ pub(super) mod cleanup_tests {
             kept_tools: None,
             secret_echo: None,
             agent_panel: None,
+            agent_chat: None,
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,

@@ -2,8 +2,8 @@ use super::provider::select::ProviderArg;
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{
-    AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission, TerminalInput,
-    invoked_objective,
+    AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission,
+    TerminalInput, invoked_objective, transcript_agents,
 };
 use arany::{
     CollaborationPolicy, Effort, Engine, EngineError, RunOutcome, RunStatus, SessionDefaults,
@@ -729,6 +729,18 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             terminal.help_input(input);
             continue;
         }
+        match terminal
+            .agent_chat_input(&view, input, &composer)
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            AgentChatInput::Pass => {}
+            AgentChatInput::Handled | AgentChatInput::Returned => continue,
+            AgentChatInput::Notice(text) => {
+                notice = Some(Feedback::Transient(text.into()));
+                continue;
+            }
+        }
         if terminal
             .handle_transcript_input(input, &view)
             .map_err(|error| error.to_string())?
@@ -1058,9 +1070,20 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 Err(error) => Feedback::History(error),
                             });
                         } else if command == InteractiveCommand::Transcript {
-                            terminal
-                                .toggle_transcript(&view)
-                                .map_err(|error| error.to_string())?;
+                            match argument.and_then(transcript_agents) {
+                                Some(number) => {
+                                    if let AgentChatInput::Notice(text) = terminal
+                                        .open_agent_chats(&view, number)
+                                        .await
+                                        .map_err(|error| error.to_string())?
+                                    {
+                                        notice = Some(Feedback::Transient(text.into()));
+                                    }
+                                }
+                                None => terminal
+                                    .toggle_transcript(&view)
+                                    .map_err(|error| error.to_string())?,
+                            }
                         } else if command == InteractiveCommand::Settings {
                             notice = Some(Feedback::History(
                                 controls::settings(

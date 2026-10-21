@@ -7,6 +7,7 @@ use crate::cli::provider::select::ProviderArg;
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
     InteractiveCommand, MouseMode, PointerSettings, Submission, TerminalInput, TerminalMode,
+    transcript_agents,
 };
 use arany::RecordKind;
 use arany::{
@@ -622,6 +623,8 @@ pub(super) async fn select_model(
     }
 }
 
+const TRANSCRIPT_USAGE: &str = "Usage: /transcript [agents [number]]";
+
 pub(super) enum ActiveSubmission {
     SteeringNote(String),
     Pause,
@@ -630,6 +633,7 @@ pub(super) enum ActiveSubmission {
     OpenAgents,
     OpenHelp,
     OpenTranscript,
+    OpenAgentChats(Option<usize>),
     ReadClipboard,
 }
 
@@ -645,6 +649,16 @@ pub(super) fn handle_active_submission(
         }) => {
             composer.take();
             return ActiveSubmission::OpenTranscript;
+        }
+        Ok(Submission::Command {
+            command: InteractiveCommand::Transcript,
+            argument: Some(argument),
+        }) => {
+            let Some(number) = transcript_agents(argument) else {
+                return ActiveSubmission::Rejected(TRANSCRIPT_USAGE.into());
+            };
+            composer.take();
+            return ActiveSubmission::OpenAgentChats(number);
         }
         Ok(Submission::Objective(text)) => return ActiveSubmission::SteeringNote(text.to_owned()),
         Ok(Submission::Skill { name, .. }) => {
@@ -740,6 +754,11 @@ pub(super) fn validate_idle_command(
         }
         InteractiveCommand::Cache if !matches!(argument, Some("clear" | "clear all")) => {
             Err(CACHE_USAGE)
+        }
+        InteractiveCommand::Transcript
+            if argument.is_some_and(|argument| transcript_agents(argument).is_none()) =>
+        {
+            Err(TRANSCRIPT_USAGE)
         }
         _ => Ok(()),
     }

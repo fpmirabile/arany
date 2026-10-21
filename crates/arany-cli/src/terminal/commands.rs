@@ -167,9 +167,30 @@ const COMMANDS: [CommandSpec; 21] = [
         &["clear"],
     ),
     spec("settings", InteractiveCommand::Settings, None, &[]),
-    spec("transcript", InteractiveCommand::Transcript, None, &[]),
+    spec(
+        "transcript",
+        InteractiveCommand::Transcript,
+        Some("[agents [number]]"),
+        &["agents"],
+    ),
     spec("exit", InteractiveCommand::Exit, None, &[]),
 ];
+
+// `/transcript agents [N]` opens agent chat N (1 is the primary); None rejects other arguments.
+pub fn transcript_agents(argument: &str) -> Option<Option<usize>> {
+    let mut words = argument.split_whitespace();
+    if words.next()? != "agents" {
+        return None;
+    }
+    let number = match words.next() {
+        None => None,
+        Some(word) if word.len() <= 3 && word.bytes().all(|byte| byte.is_ascii_digit()) => {
+            Some(word.parse().ok().filter(|number| *number > 0)?)
+        }
+        Some(_) => return None,
+    };
+    words.next().is_none().then_some(number)
+}
 
 pub(super) struct HelpEntry {
     pub command: InteractiveCommand,
@@ -188,7 +209,9 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
         InteractiveCommand::Settings => "Slash menu and chat view",
-        InteractiveCommand::Transcript => "Write or toggle transcript details",
+        InteractiveCommand::Transcript => {
+            "Write or toggle transcript details; agents lists this Run's agent chats"
+        }
         InteractiveCommand::Paste => "Paste clipboard into draft",
         InteractiveCommand::Copy => "Copy the latest answer to the clipboard",
         InteractiveCommand::Status => "Session status",
@@ -690,6 +713,23 @@ fn edit_distance(left: &str, right: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transcript_agents_accepts_only_a_bounded_positive_agent_number() {
+        for (argument, expected) in [
+            ("agents", Some(None)),
+            ("  agents   3 ", Some(Some(3))),
+            ("agents 999", Some(Some(999))),
+            ("agents 0", None),
+            ("agents 1000", None),
+            ("agents +2", None),
+            ("agents 2 3", None),
+            ("agent 2", None),
+            ("details", None),
+        ] {
+            assert_eq!(transcript_agents(argument), expected, "{argument:?}");
+        }
+    }
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
