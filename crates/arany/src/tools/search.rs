@@ -5,8 +5,6 @@ use serde_json::{Value, json};
 use std::time::Instant;
 
 const MAX_PATTERN_BYTES: usize = 512;
-const MAX_GLOB_EXPRESSION_BYTES: usize = 8 * 1024;
-const MAX_GLOB_ALTERNATIVES: usize = 16;
 const PREVIEW_CHARS: usize = 512;
 
 // Every refusal fits the 128-byte minimum result budget after its fixed prefix and suffix.
@@ -156,71 +154,12 @@ fn compile(pattern: &str, ignore_case: bool) -> Result<Regex, regex::Error> {
         .build()
 }
 
-// The closed discovery glob grammar: `*`, `?`, whole-component `**` and single-level `{a,b}`.
-pub(super) fn glob(pattern: &str) -> Result<Regex, ToolError> {
-    let invalid = || ToolError::Pattern(INVALID_GLOB);
-    if pattern.is_empty() || pattern.len() > MAX_PATTERN_BYTES || pattern.starts_with(['~', '!']) {
-        return Err(invalid());
-    }
-    let mut expression = String::from(r"\A");
-    let mut alternatives = 0usize;
-    let components: Vec<_> = pattern.split('/').collect();
-    for (index, component) in components.iter().enumerate() {
-        let last = index + 1 == components.len();
-        if component.is_empty() || matches!(*component, "." | "..") {
-            return Err(invalid());
-        }
-        if *component == "**" {
-            expression.push_str(if last { ".*" } else { "(?:[^/]+/)*" });
-            continue;
-        }
-        if component.contains("**") {
-            return Err(invalid());
-        }
-        let mut group = false;
-        let mut empty = false;
-        for character in component.chars() {
-            match character {
-                '*' => expression.push_str("[^/]*"),
-                '?' => expression.push_str("[^/]"),
-                '{' if !group => {
-                    group = true;
-                    alternatives += 1;
-                    expression.push_str("(?:");
-                }
-                ',' | '}' if group => {
-                    if empty {
-                        return Err(invalid());
-                    }
-                    if character == ',' {
-                        alternatives += 1;
-                        expression.push('|');
-                    } else {
-                        group = false;
-                        expression.push(')');
-                    }
-                }
-                '{' | '}' | '[' | ']' | '\\' => return Err(invalid()),
-                character if character.is_control() => return Err(invalid()),
-                character => {
-                    expression.push_str(&regex::escape(character.encode_utf8(&mut [0; 4])))
-                }
-            }
-            empty = matches!(character, '{' | ',') && group;
-        }
-        if group {
-            return Err(invalid());
-        }
-        if !last {
-            expression.push('/');
-        }
-    }
-    expression.push_str(r"\z");
-    if alternatives > MAX_GLOB_ALTERNATIVES || expression.len() > MAX_GLOB_EXPRESSION_BYTES {
-        return Err(ToolError::Pattern(LARGE_GLOB));
-    }
-    compile(&expression, false).map_err(|error| match error {
-        regex::Error::CompiledTooBig(_) => ToolError::Pattern(LARGE_GLOB),
-        _ => invalid(),
+// Include filters share the discovery grammar and bounds of the glob Tool.
+fn glob(pattern: &str) -> Result<Regex, ToolError> {
+    super::glob::matcher(pattern).map_err(|error| {
+        ToolError::Pattern(match error {
+            super::glob::PatternError::Alternatives | super::glob::PatternError::Size => LARGE_GLOB,
+            _ => INVALID_GLOB,
+        })
     })
 }

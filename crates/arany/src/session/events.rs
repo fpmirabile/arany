@@ -137,15 +137,15 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 6),
+    ("GoalPlanContractRecorded", 7),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 11),
+    ("AgentSpawned", 12),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 13),
+    ("ProviderCallRecorded", 14),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -163,14 +163,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 4),
-    ("HookStarted", 3),
-    ("HookFinished", 8),
-    ("ToolFinished", 19),
-    ("RunStarted", 17),
+    ("HookStarted", 4),
+    ("HookFinished", 9),
+    ("ToolFinished", 20),
+    ("RunStarted", 18),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 13),
+    ("ToolStarted", 14),
     ("ContextCompacted", 7),
 ];
 
@@ -1408,6 +1408,41 @@ impl Event {
         };
         event.validate()?;
         Ok(event)
+    }
+}
+
+// The typed text a payload had before its kind only gained the glob variants, or `None`
+// when it names them (they did not exist) or does not parse.
+pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
+        serialize(&parse::<T>(payload).ok()?).ok()
+    }
+    let text = match kind {
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
+        "ToolFinished" => again::<ToolFinishedPayload>(payload),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
+        "RunStarted" => again::<RunStartedPayload>(payload),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        _ => None,
+    }?;
+    (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
+}
+
+fn mentions_glob(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
+            (key == "operation" && (field == "glob" || field == "arany_glob"))
+                || (key == "tools"
+                    && field
+                        .as_array()
+                        .is_some_and(|tools| tools.iter().any(|tool| tool == "glob")))
+                || mentions_glob(field)
+        }),
+        serde_json::Value::Array(items) => items.iter().any(mentions_glob),
+        _ => false,
     }
 }
 

@@ -373,13 +373,14 @@ struct Frontmatter {
 fn supported_tool(name: &str) -> Option<Vec<&str>> {
     Some(match name {
         "Read" => vec!["read"],
-        "Glob" => vec!["list"],
+        // As in the permission mapping, the peer Glob covers List too.
+        "Glob" => vec!["glob", "list"],
         "Grep" => vec!["search"],
         "Edit" => vec!["edit"],
         "Write" => vec!["write"],
         "Skill" => vec!["skill"],
         "Bash" => vec!["command"],
-        "list" | "read" | "search" | "edit" | "write" | "mkdir" | "skill" | "mcp_list"
+        "list" | "read" | "search" | "glob" | "edit" | "write" | "mkdir" | "skill" | "mcp_list"
         | "command" => {
             vec![name]
         }
@@ -1180,6 +1181,15 @@ mod tests {
             assert!(!definition.allows(&write));
         }
         assert!(!definition("tools: Glob\n").allows(&read));
+        let glob = ToolCall::Glob {
+            pattern: "**".into(),
+            path: ".".into(),
+            limit: 100,
+        };
+        assert!(definition("tools: Glob\n").allows(&glob));
+        assert!(definition("tools: glob\n").allows(&glob));
+        assert!(!definition("tools: Read, Grep\n").allows(&glob));
+        assert!(!definition("disallowedTools: Glob\n").allows(&glob));
         assert!(!definition("disallowedTools: Read\n").allows(&read));
         assert!(definition("tools: Read, Edit\n").editor());
         assert!(definition("isolation: worktree\n").editor());

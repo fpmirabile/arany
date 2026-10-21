@@ -1120,6 +1120,40 @@ fn inspect(
             };
             fs::read_page(content.as_ref(), *offset, *limit, result_bytes)
         }
+        ToolCall::Glob { path, .. } => {
+            // An absent leased root is recorded as a marker, not a directory.
+            if path != "."
+                && !image
+                    .entries
+                    .iter()
+                    .any(|(p, entry)| *entry != Entry::Absent && contains(path, p))
+            {
+                return Err(ToolError::NotFound);
+            }
+            if matches!(image.entries.get(path), Some(Entry::File { .. })) {
+                return Err(ToolError::Operation);
+            }
+            let base = if path == "." { "" } else { path.as_str() };
+            super::glob::inspect_files(
+                image
+                    .entries
+                    .iter()
+                    // Like a whole-project Workspace walk, skip ignored directories below the path.
+                    .filter(|(name, _)| {
+                        !name
+                            .strip_prefix(base)
+                            .unwrap_or(name)
+                            .split('/')
+                            .any(fs::ignored_directory)
+                    })
+                    .filter_map(|(name, entry)| match entry {
+                        Entry::File { content, .. } => Some((name.as_str(), content.len())),
+                        Entry::Directory | Entry::Absent => None,
+                    }),
+                call,
+                result_bytes,
+            )
+        }
         ToolCall::List { path } => {
             let mut rows = Vec::new();
             for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
@@ -1503,6 +1537,7 @@ mod tests {
                 WorkerTool::Read,
                 WorkerTool::List,
                 WorkerTool::Search,
+                WorkerTool::Glob,
                 WorkerTool::Write,
                 WorkerTool::Edit,
                 WorkerTool::Mkdir,
@@ -1698,6 +1733,53 @@ mod tests {
             serde_json::from_str::<serde_json::Value>(&listing.output).unwrap()["may_be_truncated"],
             false
         );
+        let mut ignored = view.current.clone();
+        for path in [
+            "owned/target/out.rs",
+            "owned/node_modules/x.rs",
+            "owned/src/lib.rs",
+        ] {
+            ignored
+                .entries
+                .insert(path.into(), Entry::file(b"x", false));
+        }
+        let found = inspect(
+            &ignored,
+            &ToolCall::Glob {
+                pattern: "**/*.rs".into(),
+                path: "owned".into(),
+                limit: 100,
+            },
+            64 * 1024,
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&found).unwrap()["entries"],
+            json!([{"path":"owned/src/lib.rs","bytes":1}]),
+            "ignored directories stay out of worker Glob results"
+        );
+        // Glob sees only this assignment's image, including its acknowledged edit.
+        for (actor, bytes) in [(&view, 7), (&sibling, 8)] {
+            let found = actor.read(intent(
+                &runtime,
+                actor,
+                ToolCall::Glob {
+                    pattern: "**".into(),
+                    path: "owned".into(),
+                    limit: 100,
+                },
+            ));
+            assert!(found.valid());
+            assert!(matches!(
+                found.attestation,
+                Some(Attestation::WorkerRead { .. })
+            ));
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&found.output).unwrap(),
+                json!({"entries":[{"path":"owned/a","bytes":bytes}],"limit":100,"may_be_truncated":false})
+            );
+        }
         let search = |query: &str, include: Option<&str>, case_sensitive: bool, offset: u32| {
             view.read(intent(
                 &runtime,
@@ -2640,6 +2722,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view.base.entries.get("owned/new"), Some(&Entry::Absent));
+        let absent = view.read(intent(
+            &runtime,
+            &view,
+            ToolCall::Glob {
+                pattern: "**".into(),
+                path: "owned/new".into(),
+                limit: 100,
+            },
+        ));
+        assert_eq!(absent.disposition, ToolDisposition::Failed);
+        assert!(absent.output.contains("File or directory not found"));
         let mkdir = intent(
             &runtime,
             &view,
