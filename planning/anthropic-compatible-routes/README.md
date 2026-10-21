@@ -179,8 +179,10 @@ compaction or alternative schema representation is authorized.
    Platform is eligible after exact conformance: its OpenAPI documents the
    existing `output_config.format` schema shape. Code stays **UNAVAILABLE**
    pending endpoint-specific strict-compaction evidence; synthetic Code success
-   proves adapter mechanics only. No transport or stored-format change,
-   migration or check-version bump is required. Separate profiles
+   proves adapter mechanics only. The shared Messages decoder admits the
+   documented nested cache-creation total; native/custom check contract versions
+   invalidate older evidence. Transport and stored formats remain unchanged;
+   no migration is required. Separate profiles
    and keys: platform base `https://api.moonshot.ai/anthropic` with `kimi-k3`
    (other documented platform models only after exact checks); subscription base
    `https://api.kimi.com/coding/` with the plan console key and a tier-visible

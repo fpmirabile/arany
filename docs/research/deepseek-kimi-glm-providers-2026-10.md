@@ -75,8 +75,13 @@ output. `input_tokens` excludes cache reads and cache writes; total input adds
 `cache_read_input_tokens` and `cache_creation_input_tokens`. Its example also
 includes `output_tokens_details.thinking_tokens`. Preserve these distinctions
 when testing usage accounting; optional thinking-token details must not be
-added to the output total again.
-([Messages API](https://platform.kimi.ai/docs/api/messages))
+added to the output total again. The same reference and OpenAPI document
+`cache_creation` with required `ephemeral_5m_input_tokens` and
+`ephemeral_1h_input_tokens`. Anthropic documents their sum as equal to the flat
+creation total; Arany's [usage contract](../specs/provider.md#usage-provenance-and-reliability)
+owns normalization and disagreement rejection.
+([Messages API](https://platform.kimi.ai/docs/api/messages),
+[Anthropic cache usage](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#mixing-different-ttls))
 
 Checked 2026-10-21: the official OpenAPI `MessagesRequest.output_config.format`
 accepts `{ "type": "json_schema", "schema": … }` and promises schema-constrained

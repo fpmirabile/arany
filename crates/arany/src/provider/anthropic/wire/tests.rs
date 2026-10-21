@@ -592,6 +592,108 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
     assert_eq!(usage.cache_creation_input_tokens, None);
     assert_eq!(usage.input_tokens, Some(12));
     assert_eq!(usage.output_tokens, Some(8));
+    for model in [MODEL, "kimi-k3"] {
+        let request = read_only_request(model);
+        for flat in [None, Some(3)] {
+            let mut fixture = response("end_turn", json!([text_block(answer_text())]));
+            fixture["model"] = json!(model);
+            let usage = fixture["usage"].as_object_mut().unwrap();
+            usage.remove("cache_creation_input_tokens");
+            if let Some(flat) = flat {
+                usage.insert("cache_creation_input_tokens".into(), json!(flat));
+            }
+            usage.insert(
+                "cache_creation".into(),
+                json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2}),
+            );
+            let expected = decode(&request, &fixture).unwrap().usage;
+            assert_eq!(expected.input_tokens, Some(19));
+            assert_eq!(expected.cache_creation_input_tokens, Some(3));
+            assert_eq!(expected.cache_read_input_tokens, Some(4));
+            assert_eq!(expected.output_tokens, Some(8));
+            let (publisher, _) = crate::provider::ResponsePreview::new();
+            let streamed = run_stream_for(
+                &render::semantic::messages_stream(&fixture),
+                model,
+                publisher,
+            )
+            .unwrap()
+            .unwrap();
+            let streamed: Value = serde_json::from_slice(&streamed).unwrap();
+            assert_eq!(decode(&request, &streamed).unwrap().usage, expected);
+            fixture["content"] = json!([text_block(r#"{"summary":"short"}"#)]);
+            assert_eq!(
+                decode_compaction(&serde_json::to_vec(&fixture).unwrap(), model, 1024)
+                    .unwrap()
+                    .usage,
+                expected
+            );
+        }
+    }
+    for flat in [None, Some(3)] {
+        for nested in [
+            json!({}),
+            json!({"ephemeral_5m_input_tokens":1}),
+            json!({"ephemeral_1h_input_tokens":2}),
+            json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2,"unexpected":0}),
+            json!({"ephemeral_5m_input_tokens":u32::MAX,"ephemeral_1h_input_tokens":1}),
+            json!({"ephemeral_5m_input_tokens":u32::MAX,"ephemeral_1h_input_tokens":0}),
+            json!(false),
+            json!([]),
+        ]
+        .into_iter()
+        .chain(
+            ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]
+                .into_iter()
+                .flat_map(|field| {
+                    [
+                        json!(-1),
+                        json!(1.5),
+                        json!("2"),
+                        json!(null),
+                        json!(u64::from(u32::MAX) + 1),
+                    ]
+                    .into_iter()
+                    .map(move |value| {
+                        let mut nested =
+                            json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2});
+                        nested[field] = value;
+                        nested
+                    })
+                }),
+        ) {
+            let mut fixture = response("end_turn", json!([text_block(answer_text())]));
+            fixture["usage"]
+                .as_object_mut()
+                .unwrap()
+                .remove("cache_creation_input_tokens");
+            if let Some(flat) = flat {
+                fixture["usage"]["cache_creation_input_tokens"] = json!(flat);
+            }
+            fixture["usage"]["cache_creation"] = nested;
+            assert!(matches!(
+                decode(&read_only_request(MODEL), &fixture),
+                Err(ProviderError::InvalidOutcome)
+            ));
+        }
+    }
+    let mut inconsistent = response("end_turn", json!([text_block(answer_text())]));
+    inconsistent["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":1});
+    assert!(matches!(
+        decode(&read_only_request(MODEL), &inconsistent),
+        Err(ProviderError::InvalidOutcome)
+    ));
+    let mut zero = response("end_turn", json!([text_block(answer_text())]));
+    zero["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_creation_input_tokens");
+    zero["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0});
+    let usage = decode(&read_only_request(MODEL), &zero).unwrap().usage;
+    assert_eq!(usage.cache_creation_input_tokens, Some(0));
+    assert_eq!(usage.input_tokens, Some(16));
     for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
         for invalid in [
             json!(-1),

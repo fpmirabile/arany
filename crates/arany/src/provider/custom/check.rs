@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v32";
+const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v33";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -987,6 +987,45 @@ mod tests {
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
             Err(CustomProfileError::CredentialUnavailable)
         ));
+        let mut legacy = Sha256::new();
+        for field in [
+            env!("CARGO_PKG_VERSION"),
+            "custom-protocol-schema-challenge-conformance-effort-stream-v32",
+            profile.name(),
+            profile.endpoint(),
+            profile.model(),
+            profile.credential_env(),
+            "2",
+            "anthropic-messages",
+            "http://127.0.0.1:9321/anthropic",
+            "native_tools",
+            "x-api-key",
+            "user_authorized",
+            "4096",
+        ] {
+            legacy.update(u64::try_from(field.len()).unwrap().to_be_bytes());
+            legacy.update(field.as_bytes());
+        }
+        legacy.update(2_u32.to_be_bytes());
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        store
+            .record_provider_evidence(ProviderEvidenceRecord {
+                digest: legacy.finalize().into(),
+                ..evidence.clone()
+            })
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::EvidenceUnavailable)
+        ));
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        store
+            .record_provider_evidence(evidence.clone())
+            .await
+            .unwrap();
+        store.close().await.unwrap();
         for (field, value) in [
             ("base_url", json!("http://127.0.0.1:9321/other")),
             ("base_url", json!("http://127.0.0.1:9322/anthropic")),
