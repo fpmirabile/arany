@@ -19,7 +19,6 @@ fn screen_reader_agent_inspector_opens_and_closes_without_provider_access() {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
     command
@@ -119,7 +118,6 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     std::fs::write(workspace.join("private.txt"), b"OMITTED_CANARY")
         .expect("omitted Workspace input");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     write_profile(&state, port);

@@ -239,8 +239,8 @@ fn session_fixture(fullscreen: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    if fullscreen {
-        crate::seed_fullscreen(&state);
+    if !fullscreen {
+        crate::seed_classic(&state);
     }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -256,8 +256,9 @@ fn session_fixture(fullscreen: bool) -> (tempfile::TempDir, PathBuf, PathBuf) {
 }
 
 #[test]
-fn fullscreen_chat_captures_exact_mouse_modes_and_copies_a_drag_selection() {
+fn default_fullscreen_chat_captures_exact_mouse_modes_and_copies_a_drag_selection() {
     let (temp, state, workspace) = session_fixture(true);
+    assert!(!state.join("ui-preferences.json").exists());
     // A remote session skips native clipboards, so a copy can only be one OSC 52 sequence.
     let mut chat = Chat::start(
         temp.path(),
@@ -457,7 +458,6 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let id = crate::seed_transcript_session(&state, &workspace);
     let provider = super::loopback::held_stream_provider(&state, ANSWER);
     super::loopback::check_profile(&workspace, &state);

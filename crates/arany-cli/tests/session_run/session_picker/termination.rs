@@ -38,7 +38,6 @@ fn run_picker_signal_case(signal: Signal, suspend: bool, columns: u16, rows: u16
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");
@@ -252,7 +251,6 @@ fn run_picker_renderer_failure_case(columns: u16, rows: u16, attached_entry: boo
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");

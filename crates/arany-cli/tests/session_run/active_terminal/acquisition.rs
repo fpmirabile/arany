@@ -113,7 +113,7 @@ fn drain_nonblocking(reader: &mut impl Read, bytes: &mut Vec<u8>) {
 }
 
 #[test]
-fn startup_without_cursor_replies_restores_raw_mode_without_session() {
+fn default_fullscreen_startup_without_cursor_replies_restores_raw_mode_without_session() {
     for (case, signal) in [
         ("no signal", None),
         ("SIGINT", Some(Signal::INT)),
@@ -138,7 +138,7 @@ fn startup_case(case: &str, signal: Option<Signal>) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
+    arany::StateRoot::admit(&state).unwrap();
     let seeded = state_entries(&state);
     let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut attached =
@@ -245,6 +245,22 @@ fn startup_case(case: &str, signal: Option<Signal>) {
             .any(|part| part == b"\x1b[6n"),
         "fullscreen startup must not query the cursor: {case}"
     );
+    for mode in [1049, 1000, 1002, 1006] {
+        assert!(
+            transcript.contains(&format!("\x1b[?{mode}h")),
+            "default Fullscreen enables {mode}: {case}"
+        );
+        assert!(
+            transcript.contains(&format!("\x1b[?{mode}l")),
+            "default Fullscreen restores {mode}: {case}"
+        );
+    }
+    for mode in [1003, 1007, 1015] {
+        assert!(
+            !transcript.contains(&format!("\x1b[?{mode}h")),
+            "default Fullscreen must not enable {mode}: {case}"
+        );
+    }
     assert!(!transcript.contains("Status:"), "no Run receipt: {case}");
     assert!(!transcript.contains("Answer:"), "no Run answer: {case}");
     assert!(
