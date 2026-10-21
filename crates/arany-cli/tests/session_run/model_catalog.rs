@@ -522,10 +522,7 @@ fn inline_model_catalog_at_width(width: u16) {
     );
     let before_edit = capture_from;
     input.write_all(b"X").expect("edit returned draft");
-    // The composer is found by its border on the decoded screen and its caret column proves
-    // draft restoration, wherever the Classic viewport places the composer row.
-    // The catalog redraws the retained composer, caret included, before hiding the cursor,
-    // so a caret frame counts only once the catalog's navigation hint has left the screen.
+    // The catalog redraws the composer caret too, so wait until its hint is gone.
     let composer_ready = |transcript: &[u8], from: usize, draft: &str, column: usize| {
         crate::composer_caret(transcript, from, width.into(), 24).is_some_and(|(caret, screen)| {
             caret == column
