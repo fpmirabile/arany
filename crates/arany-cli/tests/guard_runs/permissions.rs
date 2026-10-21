@@ -2963,6 +2963,148 @@ async fn a_64_kib_write_and_edit_publish_unhooked_and_a_hook_that_cannot_receive
     }
 }
 
+#[tokio::test]
+async fn maximum_size_stale_or_ambiguous_edits_are_refused_with_the_file_preserved() {
+    let half = 32 * 1024;
+    let path = "notes/large.txt";
+    // `old` below occurs twice, so the digest-current Edit is ambiguous.
+    let original = format!("{}|{}", "x".repeat(half), "x".repeat(half));
+    let stale = hash(b"stale");
+    let calls = [
+        arany::ToolCall::Write {
+            path: path.into(),
+            expected_digest: Some(stale.clone()),
+            content: "y".repeat(2 * half),
+        },
+        arany::ToolCall::Edit {
+            path: path.into(),
+            expected_digest: stale,
+            old: "x".repeat(half),
+            new: "y".repeat(half),
+        },
+        arany::ToolCall::Edit {
+            path: path.into(),
+            expected_digest: hash(original.as_bytes()),
+            old: "x".repeat(half),
+            new: "y".repeat(half),
+        },
+    ];
+    // One Run per case: three 64 KiB proposals would otherwise need context compaction.
+    for call in calls {
+        let fixture = Fixture::new(
+            Some(&json!({"permissions": {"defaultMode": "acceptEdits"}})),
+            true,
+        );
+        std::fs::write(fixture.workspace.join(path), &original).unwrap();
+        let (result, _, _) = fixture
+            .run(
+                vec![tool_outcome(call.clone()), finish("answer")],
+                None,
+                false,
+            )
+            .await;
+        assert_eq!(
+            std::fs::read(fixture.workspace.join(path)).unwrap(),
+            original.as_bytes()
+        );
+        let (_, view) = fixture.reopen(result.session_id).await;
+        let tool = &view.runs[0].tools[0];
+        assert_eq!(tool.intent.call, call);
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(
+            observation.disposition,
+            arany::ToolDisposition::Conflict,
+            "{}",
+            observation.output
+        );
+        assert!(observation.output.len() < 1024, "no content echo");
+    }
+}
+
+// A lost completion after GO leaves a maximum-size Write unknown: no retry, no further call.
+#[tokio::test]
+async fn a_lost_maximum_size_write_completion_stays_uncertain_across_reopen() {
+    let fixture = Fixture::new(Some(&json!({"permissions": {}})), true);
+    let write = arany::ToolCall::Write {
+        path: "notes/large.txt".into(),
+        expected_digest: None,
+        // Two-byte escapes: six-byte ones would not fit the default Run context with the proposal.
+        content: "\"".repeat(64 * 1024),
+    };
+    let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(write.clone())]));
+    let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+    let mut input = request(&fixture.workspace, "Inspect and complete the task");
+    input.include_paths.clear();
+    input.policy = CollaborationPolicy::Single;
+    input.goal.budget = Some(budget());
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: Some(approvals),
+        ..Default::default()
+    };
+    let outcome = {
+        let running = run_with(&fixture.engine, &provider, input, controls);
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                biased;
+                outcome = &mut running => break outcome,
+                Some(approval) = inbox.next() => {
+                    arany::FaultPlan::lose_guard_receipt(approval.intent.id);
+                    approval.decide(true);
+                }
+            }
+        }
+    };
+    assert!(
+        matches!(
+            outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ),
+        "{:?}",
+        outcome.as_ref().map(|outcome| (
+            outcome.run.status,
+            outcome.run.agents[0]
+                .provider_calls
+                .iter()
+                .map(|call| format!(
+                    "{:?} {:?} {:?}",
+                    call.disposition, call.failure_reason, call.refusal
+                ))
+                .collect::<Vec<_>>()
+        ))
+    );
+    assert_eq!(
+        provider.requests.lock().unwrap().len(),
+        1,
+        "no Provider call follows"
+    );
+    let listed = arany::list_sessions(
+        StateRoot::open_existing(&fixture.state).unwrap(),
+        fixture.workspace.clone(),
+    )
+    .await
+    .unwrap();
+    let (events, view) = fixture.reopen(listed[0].id).await;
+    let started = events
+        .iter()
+        .filter(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+        .count();
+    assert_eq!(started, 1, "never retried");
+    assert!(
+        !events
+            .iter()
+            .any(|envelope| matches!(envelope.event, Event::RunFinished { .. }))
+    );
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    let tool = &view.runs[0].tools[0];
+    assert_eq!(tool.intent.call, write);
+    assert_eq!(
+        tool.observation.as_ref().unwrap().disposition,
+        arany::ToolDisposition::Uncertain
+    );
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {

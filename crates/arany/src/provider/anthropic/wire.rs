@@ -1,5 +1,5 @@
 use crate::provider::conversation::{Block, Conversation, Role};
-use crate::provider::decode::{review_outcome, tool_function};
+use crate::provider::decode::{argument_limit, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
 use crate::provider::tool_specs::{NAME_PREFIX, ToolSpec, outcome_specs};
 use crate::provider::{
@@ -9,7 +9,6 @@ use crate::provider::{
 };
 use crate::provider::{compaction_input, summary_schema};
 use crate::tools::ToolContext;
-use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -184,12 +183,7 @@ impl<'a> MessageStream<'a> {
                         .and_then(Value::as_str)
                         .ok_or_else(invalid)?;
                     if block.get("type").and_then(Value::as_str) != Some("tool_use")
-                        || self.tool_input.len() + fragment.len()
-                            > if block["name"] == "arany_delegate" {
-                                crate::store::MAX_EVENT_BYTES
-                            } else {
-                                MAX_TOOL_ARGUMENT_BYTES
-                            }
+                        || self.tool_input.len() + fragment.len() > tool_argument_limit(block)
                     {
                         return Err(ProviderError::InvalidStream);
                     }
@@ -248,11 +242,7 @@ impl<'a> MessageStream<'a> {
                     } else {
                         crate::tools::parse_json(
                             self.tool_input.as_bytes(),
-                            if block["name"] == "arany_delegate" {
-                                crate::store::MAX_EVENT_BYTES
-                            } else {
-                                MAX_TOOL_ARGUMENT_BYTES
-                            },
+                            tool_argument_limit(block),
                         )
                         .map_err(|_| ProviderError::InvalidStream)?
                     };
@@ -355,6 +345,15 @@ pub(super) struct RunScope<'a> {
     pub(super) secret: &'a str,
     pub(super) offered: &'a [ToolSpec],
     pub(super) review: bool,
+}
+
+fn tool_argument_limit(block: &Value) -> usize {
+    argument_limit(
+        block["name"]
+            .as_str()
+            .and_then(|name| name.strip_prefix(NAME_PREFIX))
+            .unwrap_or_default(),
+    )
 }
 
 pub(super) fn decode_run(

@@ -692,10 +692,7 @@ pub(super) async fn execute(
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
     #[cfg(any(test, feature = "test-support"))]
-    if result.is_ok()
-        && (runtime.worker.is_some() || runtime.handover.is_some())
-        && crate::fault::FaultPlan::worker_receipt_lost(intent.id)
-    {
+    if result.is_ok() && crate::fault::FaultPlan::guard_receipt_lost(intent.id) {
         return Err(ToolError::Uncertain);
     }
     dispatch_result(intent, dispatched, result)

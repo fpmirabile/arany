@@ -1081,6 +1081,79 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
     );
 }
 
+// The ordinary bound applies to the raw argument text, before parsing compacts whitespace or escapes.
+fn padded_read_arguments(escaped: bool, len: usize) -> String {
+    let path = if escaped {
+        r#""\u0052\u0045ADME.md""#
+    } else {
+        r#""README.md""#
+    };
+    let body = format!(r#""path":{path},"offset":null,"limit":null}}"#);
+    let arguments = format!("{{{}{body}", " ".repeat(len - 1 - body.len()));
+    assert_eq!(arguments.len(), len);
+    arguments
+}
+
+#[test]
+fn ordinary_call_arguments_are_bounded_as_raw_text_before_parsing() {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    let request = primary_request(MODEL);
+    let limit = crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES;
+    for escaped in [false, true] {
+        for (len, accepted) in [(limit, true), (limit + 1, false)] {
+            let arguments = padded_read_arguments(escaped, len);
+            let fixture = response(
+                "completed",
+                json!([function_call_raw("arany_read", &arguments)]),
+            );
+            let case = format!("escaped={escaped} len={len}");
+            assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{case}");
+            assert_eq!(
+                decode_streamed(&request, &fixture).is_ok(),
+                accepted,
+                "{case}"
+            );
+            if !accepted {
+                let bytes =
+                    serde_json::to_vec(&json!({"type":"response.completed","response":fixture}))
+                        .unwrap();
+                assert_eq!(
+                    outcome_failure_stage(&bytes, MODEL),
+                    Stage::OutcomeToolArgumentSize
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn escape_heavy_write_and_edit_decode_at_the_content_ceiling() {
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
+    let path = "\"".repeat(512);
+    for (name, arguments) in [
+        (
+            "arany_write",
+            json!({"path":path,"expected_digest":"0".repeat(64),"content":"\u{1}".repeat(ceiling)}),
+        ),
+        (
+            "arany_edit",
+            json!({"path":path,"expected_digest":"0".repeat(64),"old":"\u{1}".repeat(ceiling / 2),"new":"\u{1}".repeat(ceiling / 2)}),
+        ),
+    ] {
+        assert!(arguments.to_string().len() > 6 * ceiling);
+        let fixture = response("completed", json!([function_call(name, &arguments)]));
+        assert!(
+            matches!(
+                decode_streamed(&request, &fixture).unwrap().outcome,
+                ProviderOutcome::Tools(_)
+            ),
+            "{name}"
+        );
+    }
+}
+
 #[test]
 fn native_write_and_edit_decode_at_the_content_ceiling() {
     let request = primary_request(MODEL);

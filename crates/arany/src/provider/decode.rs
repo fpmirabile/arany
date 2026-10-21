@@ -53,6 +53,15 @@ pub(crate) fn function_outcome(
     structured_outcome(&json!({"outcome": fields}).to_string())
 }
 
+// Chosen by operation before buffering or parsing, so whitespace or escapes that parsing compacts never widen an ordinary call.
+pub(crate) fn argument_limit(operation: &str) -> usize {
+    match operation {
+        "delegate" => crate::store::MAX_EVENT_BYTES,
+        "write" | "edit" => MAX_TOOL_ARGUMENT_BYTES,
+        _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
+    }
+}
+
 pub(crate) fn tool_function(
     id: ToolUseId,
     operation: &str,
@@ -66,9 +75,7 @@ pub(crate) fn tool_function(
         return function_outcome(operation, fields);
     }
     if operation == "plan" {
-        if !serde_json::to_vec(&input)
-            .is_ok_and(|bytes| bytes.len() <= MAX_ORDINARY_TOOL_ARGUMENT_BYTES)
-        {
+        if !serde_json::to_vec(&input).is_ok_and(|bytes| bytes.len() <= argument_limit(operation)) {
             return Err(ProviderError::InvalidOutcome);
         }
         let contract = serde_json::from_value(input).map_err(|_| ProviderError::InvalidOutcome)?;
@@ -89,7 +96,7 @@ pub(crate) fn tool_request(
     let Value::Object(mut fields) = input else {
         return Err(ProviderError::InvalidOutcome);
     };
-    if serde_json::to_vec(&fields).map_err(invalid)?.len() > MAX_TOOL_ARGUMENT_BYTES {
+    if serde_json::to_vec(&fields).map_err(invalid)?.len() > argument_limit(operation) {
         return Err(ProviderError::InvalidOutcome);
     }
     if fields

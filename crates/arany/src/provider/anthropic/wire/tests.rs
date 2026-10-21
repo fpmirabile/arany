@@ -1115,7 +1115,7 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         ],
         vec![
             json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"t","name":"arany_read","input":{}}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"x".repeat(MAX_TOOL_ARGUMENT_BYTES + 1)}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"x".repeat(crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES + 1)}}),
         ],
     ] {
         let mut events = vec![message_start()];
@@ -1145,14 +1145,10 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
     );
 }
 
-#[test]
-fn streamed_write_at_the_content_ceiling_assembles_and_decodes() {
-    let content = "x".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES);
-    let arguments =
-        json!({"path": "src/new.rs", "expected_digest": null, "content": content}).to_string();
+fn streamed_tool_use(name: &str, arguments: &str) -> Result<Option<Vec<u8>>, ProviderError> {
     let mut events = vec![
         message_start(),
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"arany_write","input":{}}}),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":name,"input":{}}}),
     ];
     events.extend(arguments.as_bytes().chunks(4096).map(|fragment| {
         json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":std::str::from_utf8(fragment).unwrap()}})
@@ -1163,22 +1159,80 @@ fn streamed_write_at_the_content_ceiling_assembles_and_decodes() {
         json!({"type":"message_stop"}),
     ]);
     let (publisher, _) = crate::provider::ResponsePreview::new();
-    let assembled = run_stream(&sse(&events), publisher).unwrap().unwrap();
-    let request = primary_request("model-1");
+    run_stream(&sse(&events), publisher)
+}
+
+fn decode_streamed_tool(
+    assembled: &[u8],
+    max_output_tokens: u32,
+) -> Result<ProviderResponse, ProviderError> {
+    let mut request = primary_request("model-1");
+    request.max_output_tokens = max_output_tokens;
     let conversation = render::conversation(&request).unwrap();
-    let scope = RunScope {
-        model: "model-1",
-        output_cap: request.max_output_tokens,
-        secret: KEY,
-        offered: conversation.tools.as_deref().unwrap(),
-        review: false,
-    };
-    let ProviderOutcome::Tools(requests) = decode_run(&assembled, &scope).unwrap().outcome else {
-        panic!("one Tool request");
-    };
-    assert!(
-        matches!(&requests[0].call, crate::tools::ToolCall::Write { content: decoded, .. } if *decoded == content)
-    );
+    decode_run(
+        assembled,
+        &RunScope {
+            model: "model-1",
+            output_cap: max_output_tokens,
+            secret: KEY,
+            offered: conversation.tools.as_deref().unwrap(),
+            review: false,
+        },
+    )
+}
+
+#[test]
+fn streamed_ordinary_arguments_are_bounded_as_raw_text_before_parsing() {
+    let limit = crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES;
+    for path in [r#""src/main.rs""#, r#""\u0073rc/main.rs""#] {
+        let body = format!(r#""path":{path},"offset":null,"limit":null}}"#);
+        for (len, accepted) in [(limit, true), (limit + 1, false)] {
+            let arguments = format!("{{{}{body}", " ".repeat(len - 1 - body.len()));
+            assert_eq!(arguments.len(), len);
+            let streamed = streamed_tool_use("arany_read", &arguments);
+            let case = format!("{path} len={len}");
+            if accepted {
+                let assembled = streamed.unwrap().unwrap();
+                assert!(
+                    matches!(
+                        decode_streamed_tool(&assembled, 4096).unwrap().outcome,
+                        ProviderOutcome::Tools(_)
+                    ),
+                    "{case}"
+                );
+            } else {
+                assert!(
+                    matches!(streamed, Err(ProviderError::InvalidStream)),
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn streamed_writes_at_the_content_ceiling_assemble_and_decode() {
+    let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
+    // Escape-heavy input needs a turn allowance above the 4096-token fixture's 96 KiB.
+    for (path, content, max_output_tokens) in [
+        ("src/new.rs".to_owned(), "x".repeat(ceiling), 4096),
+        ("\"".repeat(512), "\u{1}".repeat(ceiling), 128_000),
+    ] {
+        let arguments =
+            json!({"path": path, "expected_digest": null, "content": content}).to_string();
+        let assembled = streamed_tool_use("arany_write", &arguments)
+            .unwrap()
+            .unwrap();
+        let ProviderOutcome::Tools(requests) = decode_streamed_tool(&assembled, max_output_tokens)
+            .unwrap()
+            .outcome
+        else {
+            panic!("one Tool request");
+        };
+        assert!(
+            matches!(&requests[0].call, crate::tools::ToolCall::Write { content: decoded, .. } if *decoded == content)
+        );
+    }
 }
 
 const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
