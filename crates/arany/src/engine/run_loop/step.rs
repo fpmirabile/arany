@@ -126,8 +126,13 @@ struct Resolution {
     approved: bool,
     source: PermissionSource,
     active_time_exhausted: bool,
-    unsaved_rule: bool,
-    save_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
+    save: Option<RuleSave>,
+}
+
+#[derive(Clone, Copy)]
+enum RuleSave {
+    Prefix(crate::tools::permissions::TypedGitPrefix),
+    ExactCommand,
 }
 
 #[derive(Clone, Copy)]
@@ -1149,7 +1154,6 @@ impl RunLoop<'_> {
             Some(mode) => Some(
                 Box::pin(self.ask(
                     grant,
-                    runtime,
                     &intent,
                     mode,
                     AskOptions {
@@ -1163,9 +1167,7 @@ impl RunLoop<'_> {
             ),
             None => None,
         };
-        let save_prefix = approval
-            .as_ref()
-            .and_then(|resolution| resolution.save_prefix);
+        let save = approval.as_ref().and_then(|resolution| resolution.save);
         let decided = decide_dispatch(
             &facts,
             &AfterAsk {
@@ -1240,7 +1242,7 @@ impl RunLoop<'_> {
             })
             .await?;
         }
-        let verdict = self.save_remembered_rule(runtime, site, verdict, save_prefix)?;
+        let verdict = self.save_remembered_rule(runtime, site, verdict, save)?;
         Ok(verdict)
     }
 
@@ -1250,17 +1252,20 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         site: DispatchSite,
         verdict: Verdict,
-        save_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
+        save: Option<RuleSave>,
     ) -> Result<Verdict, EngineError> {
-        Ok(match (verdict, save_prefix) {
+        Ok(match (verdict, save) {
             (
                 Verdict::Dispatch {
                     intent,
                     queue_pause,
                 },
-                Some(prefix),
+                Some(save),
             ) => {
-                let saved = runtime.record_typed_prefix_rule(prefix);
+                let saved = match save {
+                    RuleSave::Prefix(prefix) => runtime.record_typed_prefix_rule(prefix),
+                    RuleSave::ExactCommand => runtime.record_exact_command_rule(&intent.call),
+                };
                 if saved.is_ok() {
                     Verdict::Dispatch {
                         intent,
@@ -1305,7 +1310,6 @@ impl RunLoop<'_> {
     async fn ask(
         &self,
         grant: &Grant<'_>,
-        runtime: &ToolRuntime,
         intent: &EffectIntent,
         mode: ApprovalMode,
         options: AskOptions,
@@ -1331,7 +1335,6 @@ impl RunLoop<'_> {
                     &[Resolver::Human]
                 };
                 self.resolve_ask(
-                    runtime,
                     intent,
                     chain,
                     AskSite::Primary {
@@ -1365,7 +1368,6 @@ impl RunLoop<'_> {
                     &[Resolver::Human]
                 };
                 self.resolve_ask(
-                    runtime,
                     intent,
                     chain,
                     AskSite::Delegated {
@@ -1411,13 +1413,12 @@ impl RunLoop<'_> {
 
     async fn human_reply(
         &self,
-        runtime: &ToolRuntime,
         approvals: &crate::tools::ToolApprovals,
         intent: &EffectIntent,
         prompt: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
         remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
-    ) -> (ApprovalReply, bool) {
+    ) -> ApprovalReply {
         let mut cancellation = self.controls.cancellation.clone();
         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
         let reply = tokio::select! {
@@ -1434,22 +1435,14 @@ impl RunLoop<'_> {
                 }
             }) => result.unwrap_or(ApprovalReply::Deny),
         };
-        // The rule is durable before the verdict, so a crash cannot leave a recorded approval without it.
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
-        let unsaved = match (reply, remember_prefix) {
-            (ApprovalReply::AllowAlwaysInProject, _) if remember => {
-                runtime.record_exact_command_rule(&intent.call).is_err()
-            }
-            _ => false,
-        };
-        let reply = match reply {
+        match reply {
             ApprovalReply::AllowAlwaysInProject if !remember => ApprovalReply::AllowOnce,
             ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
                 ApprovalReply::AllowOnce
             }
             reply => reply,
-        };
-        (reply, unsaved)
+        }
     }
 
     async fn dispatch_primary(
@@ -1737,7 +1730,6 @@ impl RunLoop<'_> {
 
     async fn resolve_ask(
         &self,
-        runtime: &ToolRuntime,
         intent: &EffectIntent,
         chain: &[Resolver<'_>],
         site: AskSite,
@@ -1747,8 +1739,7 @@ impl RunLoop<'_> {
             approved: false,
             source: PermissionSource::UnavailableApproval,
             active_time_exhausted: false,
-            unsaved_rule: false,
-            save_prefix: None,
+            save: None,
         };
         for resolver in chain {
             match resolver {
@@ -1831,9 +1822,8 @@ impl RunLoop<'_> {
                         {
                             match self.reserve_active_pause() {
                                 Ok(pause) => {
-                                    let (reply, unsaved) = self
+                                    let reply = self
                                         .human_reply(
-                                            runtime,
                                             approvals,
                                             intent,
                                             unguarded_prompt.clone(),
@@ -1842,13 +1832,17 @@ impl RunLoop<'_> {
                                         )
                                         .await;
                                     resolution.source = PermissionSource::Human;
-                                    resolution.approved = reply != ApprovalReply::Deny && !unsaved;
-                                    resolution.unsaved_rule = unsaved;
-                                    // The rule is saved only after this human verdict is committed.
-                                    resolution.save_prefix = (resolution.approved
-                                        && reply == ApprovalReply::AllowPrefixInFolder)
-                                        .then_some(*remember_prefix)
-                                        .flatten();
+                                    resolution.approved = reply != ApprovalReply::Deny;
+                                    // A remembered rule is saved only after this human verdict is committed.
+                                    resolution.save = match reply {
+                                        ApprovalReply::AllowAlwaysInProject => {
+                                            Some(RuleSave::ExactCommand)
+                                        }
+                                        ApprovalReply::AllowPrefixInFolder => {
+                                            remember_prefix.map(RuleSave::Prefix)
+                                        }
+                                        ApprovalReply::Deny | ApprovalReply::AllowOnce => None,
+                                    };
                                     let resume_at = resolution.approved.then(Instant::now);
                                     self.settle_active_pause(pause, resume_at)?;
                                 }
@@ -2381,20 +2375,18 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             source,
         };
     }
-    let (approved, source, active_time_exhausted, unsaved_rule) =
-        match (&after.approval, facts.site) {
-            (Some(resolution), _) => (
-                resolution.approved,
-                resolution.source,
-                resolution.active_time_exhausted,
-                resolution.unsaved_rule,
-            ),
-            (None, DispatchSite::Primary) => (true, facts.unresolved_source(), false, false),
-            (None, DispatchSite::Researcher) if facts.permission.approval.is_some() => {
-                (false, PermissionSource::UnavailableApproval, false, false)
-            }
-            (None, DispatchSite::Researcher) => (true, facts.permission.basis, false, false),
-        };
+    let (approved, source, active_time_exhausted) = match (&after.approval, facts.site) {
+        (Some(resolution), _) => (
+            resolution.approved,
+            resolution.source,
+            resolution.active_time_exhausted,
+        ),
+        (None, DispatchSite::Primary) => (true, facts.unresolved_source(), false),
+        (None, DispatchSite::Researcher) if facts.permission.approval.is_some() => {
+            (false, PermissionSource::UnavailableApproval, false)
+        }
+        (None, DispatchSite::Researcher) => (true, facts.permission.basis, false),
+    };
     let refused = |reason| {
         Err(refuse(
             reason,
@@ -2423,7 +2415,6 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             Err(refuse(NotDispatched::TokenBudget, None))
         }
         DispatchSite::Primary if approved => Ok(Dispatch::Direct),
-        DispatchSite::Primary if unsaved_rule => refused(NotDispatched::UnsavedRule),
         DispatchSite::Primary
             if !facts.interactive
                 && facts
@@ -3233,8 +3224,7 @@ mod tests {
             approved,
             source,
             active_time_exhausted: false,
-            unsaved_rule: false,
-            save_prefix: None,
+            save: None,
         }
     }
 
@@ -3337,10 +3327,6 @@ mod tests {
             active_time_exhausted: true,
             ..resolution(false, S::Human)
         });
-        let unsaved = Some(Resolution {
-            unsaved_rule: true,
-            ..resolution(false, S::Human)
-        });
         let timeout = || N::TimeoutLimit {
             requested: 9_000,
             maximum: 5_000,
@@ -3377,7 +3363,6 @@ mod tests {
             (decide(Primary, asks(Request), &none, &[TokensSpent], None), None, no(N::TokenBudget, None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Auto), &none, &[TokensSpentAfterAsk], ok(true, S::AiReview)), Some(Auto), no(N::TokenBudget, None), ask_, S::AiReview),
             (decide(Primary, asks(Request), &none, &[Paused], exhausted_ask), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
-            (decide(Primary, asks(Request), &none, &[Offered], unsaved), Some(Request), no(N::UnsavedRule, Some(StopCause::ToolStopped)), ask_, S::Human),
             (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::Cancelled)), ask_, S::Human),
             (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),

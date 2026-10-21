@@ -389,6 +389,16 @@ fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
     Ok(record.preferences)
 }
 
+const SETTINGS_UNCONFIRMED: &str = "settings change not confirmed; check /settings";
+
+fn save_failure_notice(error: &str) -> String {
+    if error == SETTINGS_UNCONFIRMED {
+        format!("Error: {error}")
+    } else {
+        format!("Error: {error}; current settings kept")
+    }
+}
+
 async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
     if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
         return Err("invalid settings".into());
@@ -406,7 +416,10 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
             root.record(RecordKind::UiPreferences).replace(&record)
         })
         .map_err(|_| "display settings busy or unsafe")?
-        .map_err(|_| "could not save display settings")
+        .map_err(|error| match error {
+            arany::StoreError::ReplaceUnconfirmed => SETTINGS_UNCONFIRMED,
+            _ => "could not save display settings",
+        })
     })
     .await
     .map_err(|_| "display settings unavailable".to_owned())?
@@ -535,7 +548,7 @@ pub(super) async fn settings(
                     },
                 )
             }
-            Err(error) => format!("Error: {error}; current settings kept"),
+            Err(error) => save_failure_notice(&error),
         },
     };
     terminal
@@ -1885,6 +1898,41 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_settings_replacement_is_not_reported_as_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let admission = Admission {
+            roster: None,
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
+            workspace,
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        arany::FaultPlan::fail_record_sync(admission.state_dir.clone(), "ui-preferences.json");
+        let unconfirmed = save_settings(&admission, Preferences::default())
+            .await
+            .unwrap_err();
+        assert_eq!(unconfirmed, SETTINGS_UNCONFIRMED);
+        assert!(!save_failure_notice(&unconfirmed).contains("kept"));
+        assert!(
+            save_failure_notice("could not save display settings")
+                .ends_with("current settings kept")
+        );
     }
 
     #[tokio::test]
