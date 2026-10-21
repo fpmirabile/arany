@@ -209,6 +209,19 @@ fn exits_after_settled_run(
     ) && run_settled(view, starting_sequence)
 }
 
+// An explicit /exit abandons what the settled Run would hand back (a held linear draft or an
+// undelivered note), so the deferred Ctrl+D meets an empty composer and exits.
+fn abandon_drafts_for_exit(
+    composer: &mut Composer,
+    held: &mut Option<HeldDraft>,
+    steering: &RunSteering,
+) {
+    composer.take();
+    composer.take_images();
+    *held = None;
+    let _ = steering.withdraw_note();
+}
+
 fn active_escape(
     input: TerminalInput,
     menu_open: bool,
@@ -822,7 +835,8 @@ pub(super) async fn submit_objective(
                         None
                     }
                     TerminalInput::Submit if exits_after_settled_run(composer, view, starting_sequence) => {
-                        composer.take();
+                        abandon_drafts_for_exit(composer, &mut held, &steering);
+                        offered = None;
                         if terminal.restore_draft_input(0).is_err() {
                             break "terminal input failed".to_owned();
                         }
@@ -1585,6 +1599,27 @@ mod goal_request_tests {
                 "{other}"
             );
         }
+    }
+
+    #[test]
+    fn exit_abandons_a_held_linear_draft_and_waiting_note() {
+        let mut composer = Composer::default();
+        for character in "refused draft".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut held = hold_draft(&mut composer);
+        assert!(held.is_some(), "a refused linear draft is held");
+        let steering = RunSteering::default();
+        steering
+            .offer_note("waiting note".into())
+            .expect("note waits");
+        for character in "/exit".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        abandon_drafts_for_exit(&mut composer, &mut held, &steering);
+        assert!(composer.is_empty());
+        // Run end hands back nothing, so the deferred Ctrl+D exits instead of retaining a draft.
+        assert!(retained_linear_draft(steering.withdraw_note(), held.take()).is_none());
     }
 
     #[test]
