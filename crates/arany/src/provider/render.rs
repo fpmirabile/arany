@@ -112,8 +112,7 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     system
 }
 
-// Codex's AGENTS.md framing. File text cannot open or close a wrapper or start a heading that
-// passes for a new block; the replacements add no `<` or line-leading `#`, so none rematches.
+// Replacements add no `<` or line-leading `#`, so escaped file text never rematches.
 pub(crate) fn instructions_text(path: &str, text: &str) -> String {
     static TAG: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)<(\s*/?\s*instructions)").expect("static instruction tag pattern")
