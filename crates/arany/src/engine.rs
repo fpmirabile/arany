@@ -184,8 +184,6 @@ pub struct RunRequest {
     pub objective: String,
     pub images: Vec<ImageAttachment>,
     pub workspace: PathBuf,
-    /// Where the user launched Arany; instruction files load from the Workspace root down to it.
-    /// `None`, or a directory outside the Workspace, loads the root's only.
     pub launch_directory: Option<PathBuf>,
     pub include_paths: Vec<PathBuf>,
     pub policy: CollaborationPolicy,
@@ -1802,6 +1800,7 @@ impl Engine {
                 .iter()
                 .map(|snapshot| InstructionSource {
                     directory: snapshot.directory().to_owned(),
+                    file: snapshot.instruction_file(),
                     digest: snapshot.digest,
                 })
                 .collect(),

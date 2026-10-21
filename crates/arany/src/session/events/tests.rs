@@ -795,6 +795,7 @@ mod account_default_tests {
         config.output_token_cap = 4096;
         let source = |directory: &str| crate::session::InstructionSource {
             directory: directory.into(),
+            file: Some(crate::session::InstructionFile::Agents),
             digest: [3; 32],
         };
         let deep = vec!["d"; 31].join("/");

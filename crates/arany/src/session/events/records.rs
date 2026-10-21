@@ -142,9 +142,7 @@ pub struct RunConfig {
     pub provider_concurrency: u8,
     pub workspace_device: u64,
     pub workspace_inode: u64,
-    /// Root first, one per directory that supplied an instruction file.
     pub instruction_sources: Vec<InstructionSource>,
-    /// Workspace-relative, empty for the root.
     pub launch_directory: String,
     pub include_digests: Vec<[u8; 32]>,
     pub history_run_ids: Vec<RunId>,
@@ -159,13 +157,36 @@ pub struct RunConfig {
     pub tool_policy: Option<crate::tools::ToolPolicyReceipt>,
 }
 
-/// The SHA-256 of the raw instruction file one Workspace directory supplied.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InstructionSource {
-    /// Workspace-relative, empty for the root.
     pub directory: String,
+    // Null only for a source migrated from version 18, which journaled the digest alone.
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub file: Option<InstructionFile>,
     pub digest: [u8; 32],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum InstructionFile {
+    #[serde(rename = "AGENTS.override.md")]
+    AgentsOverride,
+    #[serde(rename = "AGENTS.md")]
+    Agents,
+    #[serde(rename = "CLAUDE.md")]
+    Claude,
+}
+
+impl InstructionFile {
+    pub const DISCOVERY: [Self; 3] = [Self::AgentsOverride, Self::Agents, Self::Claude];
+
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::AgentsOverride => "AGENTS.override.md",
+            Self::Agents => "AGENTS.md",
+            Self::Claude => "CLAUDE.md",
+        }
+    }
 }
 
 impl RunConfig {

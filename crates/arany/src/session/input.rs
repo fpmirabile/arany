@@ -1,4 +1,4 @@
-use crate::session::WorkspaceIdentity;
+use crate::session::{InstructionFile, WorkspaceIdentity};
 use crate::store::{StateRoot, StoreError};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
@@ -10,8 +10,9 @@ use std::path::PathBuf;
 
 // Shared by every instruction file from the Workspace root to the launch directory.
 const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
-// Directories walked for instructions, the Workspace root included.
 pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
+// Entries scanned to confirm an instruction file's exact spelling.
+const MAX_DIRECTORY_ENTRIES: usize = 1 << 16;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_INCLUDES: usize = 16;
@@ -58,6 +59,13 @@ impl InputSnapshot {
             .map_or("", |(directory, _)| directory)
     }
 
+    pub(crate) fn instruction_file(&self) -> Option<InstructionFile> {
+        let name = self.path.rsplit('/').next()?;
+        InstructionFile::DISCOVERY
+            .into_iter()
+            .find(|file| file.name() == name)
+    }
+
     pub(crate) fn model_instructions(&self) -> String {
         crate::provider::instructions_text(&self.path, &self.content)
     }
@@ -77,9 +85,7 @@ impl InputSnapshot {
 }
 
 pub(crate) struct WorkspaceInputs {
-    /// Root first, at most one file per directory down to `launch_directory`.
     pub instructions: Vec<InputSnapshot>,
-    /// Workspace-relative, empty for the root.
     pub launch_directory: String,
     pub includes: Vec<InputSnapshot>,
     _root: Dir,
@@ -215,8 +221,7 @@ fn launch_components(workspace: &Path, launch: Option<&Path>) -> Result<Vec<Stri
     Ok(names)
 }
 
-// Each directory takes `AGENTS.md`, else `CLAUDE.md`, opened without following links from the
-// admitted root; a directory that vanished ends the walk.
+// A directory that vanished after the launch path resolved ends the walk.
 fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>, InputError> {
     let mut directory = root.try_clone()?;
     let mut prefix = String::new();
@@ -232,23 +237,51 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
             prefix.push_str(name);
             prefix.push('/');
         }
-        let read = |name: &str| {
-            read_file(
-                &directory,
-                std::ffi::OsStr::new(name),
-                format!("{prefix}{name}"),
-                remaining,
-            )
-        };
-        if let Some(snapshot) = match read("AGENTS.md")? {
-            None => read("CLAUDE.md")?,
-            agents => agents,
-        } {
+        for file in InstructionFile::DISCOVERY {
+            let name = file.name();
+            let Some(opened) = open_nofollow(&directory, std::ffi::OsStr::new(name))? else {
+                continue;
+            };
+            let metadata = opened.metadata()?;
+            if !exact_entry(&directory, name, &metadata)? {
+                continue;
+            }
+            let snapshot = snapshot(opened, &metadata, format!("{prefix}{name}"), remaining)?;
             remaining -= snapshot.content.len();
             found.push(snapshot);
+            break;
         }
     }
     Ok(found)
+}
+
+// Case-insensitive volumes open `agents.md` for `AGENTS.md`; only the exact, unreplaced entry counts.
+fn exact_entry(
+    directory: &Dir,
+    name: &str,
+    opened: &cap_std::fs::Metadata,
+) -> Result<bool, InputError> {
+    for (index, entry) in directory.entries()?.enumerate() {
+        if index == MAX_DIRECTORY_ENTRIES {
+            return Err(InputError::TooLarge);
+        }
+        let entry = entry?;
+        if entry.file_name().as_os_str() != std::ffi::OsStr::new(name) {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use cap_std::fs::MetadataExt;
+            let listed = entry.metadata()?;
+            if (listed.dev(), listed.ino()) != (opened.dev(), opened.ino()) {
+                return Err(InputError::Io(io::Error::other(
+                    "instruction file was replaced",
+                )));
+            }
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 fn read_file(
@@ -257,6 +290,17 @@ fn read_file(
     path: String,
     limit: usize,
 ) -> Result<Option<InputSnapshot>, InputError> {
+    let Some(file) = open_nofollow(directory, name)? else {
+        return Ok(None);
+    };
+    let metadata = file.metadata()?;
+    snapshot(file, &metadata, path, limit).map(Some)
+}
+
+fn open_nofollow(
+    directory: &Dir,
+    name: &std::ffi::OsStr,
+) -> Result<Option<cap_std::fs::File>, InputError> {
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
@@ -265,12 +309,19 @@ fn read_file(
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
     }
-    let file = match directory.open_with(name, &options) {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(InputError::Io(error)),
-    };
-    let metadata = file.metadata()?;
+    match directory.open_with(name, &options) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(InputError::Io(error)),
+    }
+}
+
+fn snapshot(
+    file: cap_std::fs::File,
+    metadata: &cap_std::fs::Metadata,
+    path: String,
+    limit: usize,
+) -> Result<InputSnapshot, InputError> {
     if !metadata.is_file() {
         return Err(InputError::NotRegular);
     }
@@ -291,11 +342,11 @@ fn read_file(
     }
     let digest = Sha256::digest(&bytes).into();
     let content = String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)?;
-    Ok(Some(InputSnapshot {
+    Ok(InputSnapshot {
         content,
         path,
         digest,
-    }))
+    })
 }
 
 #[cfg(unix)]

@@ -237,6 +237,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .instruction_sources,
             [arany::InstructionSource {
                 directory: String::new(),
+                file: Some(arany::InstructionFile::Agents),
                 digest: instruction_digest
             }]
         );

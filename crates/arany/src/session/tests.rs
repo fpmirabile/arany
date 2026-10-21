@@ -141,6 +141,7 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
 #[cfg(unix)]
 #[test]
 fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
+    use crate::session::InstructionFile;
     use input::{InputError, WorkspaceInputs};
     use std::os::unix::fs::symlink;
     let temp = tempfile::tempdir().unwrap();
@@ -235,6 +236,39 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(matches!(load(Some(&deep)), Err(InputError::TooLarge)));
     assert!(load(None).is_ok(), "the root alone fits");
     std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
+
+    // An override wins in its directory; `agents.md` must not count on a case-insensitive volume.
+    std::fs::write(
+        workspace.join("crates/AGENTS.override.md"),
+        "crates override",
+    )
+    .unwrap();
+    std::fs::write(deep.join("agents.md"), "lower case").unwrap();
+    std::fs::write(deep.join("CLAUDE.md"), "src fallback").unwrap();
+    let inputs = load(Some(&deep)).unwrap();
+    assert_eq!(
+        inputs
+            .instructions
+            .iter()
+            .map(|file| (file.path.as_str(), file.instruction_file()))
+            .collect::<Vec<_>>(),
+        [
+            ("AGENTS.md", Some(InstructionFile::Agents)),
+            (
+                "crates/AGENTS.override.md",
+                Some(InstructionFile::AgentsOverride)
+            ),
+            ("crates/cli/AGENTS.md", Some(InstructionFile::Agents)),
+            ("crates/cli/src/CLAUDE.md", Some(InstructionFile::Claude)),
+        ]
+    );
+    for name in [
+        "crates/AGENTS.override.md",
+        "crates/cli/src/agents.md",
+        "crates/cli/src/CLAUDE.md",
+    ] {
+        std::fs::remove_file(workspace.join(name)).unwrap();
+    }
 
     let mut limit = workspace.clone();
     for _ in 0..31 {

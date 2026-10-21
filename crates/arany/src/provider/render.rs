@@ -120,6 +120,18 @@ pub(crate) fn instructions_text(path: &str, text: &str) -> String {
         Regex::new(r"(?im)^([ \t]*)(#+[ \t]*agents\.md[ \t]+instructions)")
             .expect("static instruction heading pattern")
     });
+    // Directory names are file data too: the heading keeps them on one inert line.
+    let path: String = path
+        .chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '\u{2028}' | '\u{2029}') {
+                character.escape_default().to_string()
+            } else {
+                character.to_string()
+            }
+        })
+        .collect();
+    let path = TAG.replace_all(&path, "&lt;$1");
     let text = TAG.replace_all(text, "&lt;$1");
     let text = HEADING.replace_all(&text, "$1\\$2");
     format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")

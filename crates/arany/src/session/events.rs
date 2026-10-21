@@ -21,7 +21,7 @@ pub(crate) use goal::{GoalSuccessState, GoalUsage, STORE_ACTION_OVERHEAD_MS};
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
+    DisplayChunk, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
     MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunFailure,
     SessionDefaults,
@@ -1432,8 +1432,7 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
 }
 
-// Version 18 pinned the root file's digest alone; it read no nested file, so that digest is
-// the root's only source and its launch directory is the root.
+// Version 18 read only the root, so its digest becomes the root source with an unknown name.
 pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_json::Value> {
     let serde_json::Value::Object(mut payload) = value else {
         return None;
@@ -1443,7 +1442,7 @@ pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_j
     };
     let sources = match config.remove("instruction_digest")? {
         serde_json::Value::Null => serde_json::json!([]),
-        digest => serde_json::json!([{"directory": "", "digest": digest}]),
+        digest => serde_json::json!([{"directory": "", "file": null, "digest": digest}]),
     };
     if config.contains_key("instruction_sources") || config.contains_key("launch_directory") {
         return None;
@@ -1453,8 +1452,7 @@ pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_j
     Some(serde_json::Value::Object(payload))
 }
 
-// The text version 18 replay hashed: the current text with the root-only sources written back
-// as the single digest in the same field position.
+// Version 18's hashed text: the current text with the sources written back as one digest.
 pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
     let value = run_started_v18_to_v19(serde_json::from_str(payload).ok()?)?;
     let typed = parse::<RunStartedPayload>(&value.to_string()).ok()?;

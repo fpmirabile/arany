@@ -337,6 +337,11 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
     assert_eq!(
         config.instruction_sources,
         FILES.map(|(path, text)| arany::InstructionSource {
+            file: Some(if path.ends_with("CLAUDE.md") {
+                arany::InstructionFile::Claude
+            } else {
+                arany::InstructionFile::Agents
+            }),
             directory: path
                 .rsplit_once('/')
                 .map_or("", |(directory, _)| directory)
