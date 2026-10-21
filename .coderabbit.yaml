@@ -42,8 +42,9 @@ reviews:
         - Journal admission bounds (Action::max_events_for) smaller than the Events a step can append.
         - Wall-clock-sensitive tests that will flake on slow macOS debug runners.
         Rules: English only; no comments by default, at most one short `//` line for a non-obvious reason, no
-        `//!` or multi-line `///` in internal code; no historical residue, compatibility readers or migrations
-        (pre-beta keeps one current format and rejects older stored formats without changing data); every
+        `//!` or multi-line `///` in internal code; no historical residue or runtime compatibility readers
+        (one current format; every stored format version bump ships a store::migrate step and fixture, and
+        state below the migration floor is archived intact, never silently altered); every
         queue, buffer, output, retry and concurrency has an explicit bound and overflow behavior; `unsafe`
         only behind a safe interface with documented invariants; never read or print `.env`.
         Coding style: review Rust against agents/skills/rust-clean-code/SKILL.md and its references/
