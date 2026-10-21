@@ -9,7 +9,9 @@ use unicode_width::UnicodeWidthStr;
 mod agents;
 mod model;
 pub mod rewind;
-pub(crate) use agents::AgentInspectorModel;
+#[cfg(test)]
+pub(crate) use agents::tests::team_view;
+pub(crate) use agents::{AgentInspectorModel, AgentTarget, AgentTranscript, agent_targets};
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,

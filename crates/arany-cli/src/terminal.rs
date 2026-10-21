@@ -21,6 +21,7 @@ use std::collections::HashSet;
 use std::io::{self, IsTerminal, Stderr, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 
+mod agent_chat;
 mod agents;
 mod backend;
 mod clipboard;
@@ -32,13 +33,15 @@ mod linear;
 mod rewind;
 pub use rewind::RewindPanelError;
 mod view;
+use agent_chat::AgentChat;
+pub use agent_chat::AgentChatInput;
 use agents::{AgentPanel, PanelUpdate};
 use backend::TerminalBackend;
 use clipboard::{ClipboardContent, ClipboardRead};
 use commands::help_len;
 pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
-    invoked_objective, parse_submission, skill_invocation,
+    invoked_objective, parse_submission, skill_invocation, transcript_agents,
 };
 pub use composer::{CompletionLayout, Composer, ComposerEdit};
 use history::History;
@@ -441,6 +444,7 @@ pub struct AttachedTerminal {
     #[cfg(unix)]
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
+    agent_chat: Option<AgentChat>,
     help_selected: Option<usize>,
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
@@ -618,6 +622,8 @@ impl AttachedTerminal {
         review_notice: bool,
     ) -> Result<bool, TerminalError> {
         self.cancel_clipboard_paste();
+        // Approval owns the primary authority surface and arms through its own barrier.
+        self.end_agent_chat()?;
         let lines = match &approval.unguarded {
             Some(prompt) => crate::presentation::unguarded_approval_lines(&approval.intent, prompt),
             None => crate::presentation::tool_approval_lines(&approval.intent),
@@ -750,6 +756,7 @@ impl AttachedTerminal {
             #[cfg(unix)]
             secret_echo: None,
             agent_panel: None,
+            agent_chat: None,
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,
@@ -1636,6 +1643,9 @@ impl AttachedTerminal {
         if self.agent_panel.is_some() {
             return self.draw_agents(view);
         }
+        if self.agent_chat_shown(view) {
+            return self.draw_agent_chat(view, notice);
+        }
         if let Some(linear) = &mut self.linear {
             if std::mem::take(&mut self.clipboard_preview) {
                 linear
@@ -2144,6 +2154,9 @@ impl AttachedTerminal {
         if self.agent_panel.is_some() {
             return self.draw_agents(view);
         }
+        if self.agent_chat_shown(view) {
+            return self.draw_agent_chat(view, notice);
+        }
         if let Some(linear) = &mut self.linear {
             if std::mem::take(&mut self.clipboard_preview) {
                 linear
@@ -2581,6 +2594,7 @@ impl AttachedTerminal {
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.dialog_armed = self.dialog_armed;
+        replacement.agent_chat = self.agent_chat.take();
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {

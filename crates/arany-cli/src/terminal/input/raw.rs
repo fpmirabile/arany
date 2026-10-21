@@ -324,6 +324,14 @@ impl Decoder {
                     };
                     None
                 }
+                b' '..=b'~' => {
+                    self.reset();
+                    key(
+                        KeyCode::Char(char::from(byte)),
+                        KeyModifiers::ALT,
+                        KeyEventKind::Press,
+                    )
+                }
                 _ => {
                     self.reset();
                     None

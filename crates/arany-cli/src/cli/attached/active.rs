@@ -4,8 +4,8 @@ use super::{
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
-    AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError, TerminalInput,
-    TerminalNotice,
+    AgentChatInput, AttachedTerminal, Composer, ComposerEdit, ShutdownSignal, TerminalError,
+    TerminalInput, TerminalNotice,
 };
 use arany::{
     CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
@@ -736,6 +736,20 @@ pub(super) async fn submit_objective(
                 {
                     break "terminal input cleanup failed".to_owned();
                 }
+                // A child view takes Escape before Run cancellation; Ctrl+C passes through.
+                let agent_notice = match terminal.agent_chat_input(view, input, composer).await {
+                    Ok(AgentChatInput::Pass) => None,
+                    Ok(AgentChatInput::Handled) => continue,
+                    Ok(AgentChatInput::Returned) => Some(None),
+                    Ok(AgentChatInput::Notice(text)) => Some(Some(TerminalNotice::Transient(text))),
+                    Err(_) => break "terminal rendering failed".to_owned(),
+                };
+                if let Some(notice) = agent_notice {
+                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
+                        break "terminal rendering failed".to_owned();
+                    }
+                    continue;
+                }
                 if terminal.ignores_page_key(input) {
                     continue;
                 }
@@ -923,6 +937,11 @@ pub(super) async fn submit_objective(
                                 }
                                 None
                             }
+                            ActiveSubmission::OpenAgentChats(number) => match terminal.open_agent_chats(view, number).await {
+                                Ok(AgentChatInput::Notice(text)) => Some(Feedback::Transient(text.into())),
+                                Ok(_) => None,
+                                Err(_) => break "terminal rendering failed".to_owned(),
+                            },
                             ActiveSubmission::OpenTranscript => {
                                 if terminal.toggle_transcript(view).is_err()
                                     || draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err()
