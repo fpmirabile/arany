@@ -80,6 +80,7 @@ impl Grant<'_> {
 }
 
 #[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ToolReviewDecision {
     Approve,
     Deny,
@@ -1857,18 +1858,22 @@ impl RunLoop<'_> {
         } else {
             self.ledger().active_time_exhausted()
         };
-        if exhausted {
-            return Ok(ToolReviewDecision::Deny);
+        Ok(tool_review_decision(&result, valid, exhausted))
+    }
+}
+
+fn tool_review_decision(result: &CallResult, valid: bool, exhausted: bool) -> ToolReviewDecision {
+    if exhausted {
+        return ToolReviewDecision::Deny;
+    }
+    match result {
+        CallResult::Response(ProviderResponse {
+            outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve),
+            ..
+        }) if valid => ToolReviewDecision::Approve,
+        CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
+            ToolReviewDecision::Deny
         }
-        Ok(match &result {
-            CallResult::Response(ProviderResponse {
-                outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve),
-                ..
-            }) if valid => ToolReviewDecision::Approve,
-            CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
-                ToolReviewDecision::Deny
-            }
-        })
     }
 }
 
@@ -2784,6 +2789,59 @@ pub(super) fn intent_observation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_review_requires_valid_approval_without_exhaustion() {
+        use ToolReviewDecision::{Approve, Deny};
+
+        let response = |outcome| {
+            CallResult::Response(ProviderResponse {
+                outcome,
+                turn: ProviderTurn::scripted(),
+                response_id: None,
+                usage: crate::provider::Usage::default(),
+                wire_provenance: None,
+            })
+        };
+        let rows = [
+            (
+                "approve",
+                response(ProviderOutcome::Review(crate::ReviewVerdict::Approve)),
+                [Approve, Deny, Deny, Deny],
+            ),
+            (
+                "ask",
+                response(ProviderOutcome::Review(crate::ReviewVerdict::Ask)),
+                [Deny; 4],
+            ),
+            (
+                "non-review outcome",
+                response(ProviderOutcome::Answer(crate::provider::Answer {
+                    text: "answer".into(),
+                })),
+                [Deny; 4],
+            ),
+            (
+                "failure",
+                CallResult::Failed(super::super::CallFailure::Timeout),
+                [Deny; 4],
+            ),
+            ("cancelled", CallResult::Cancelled, [Deny; 4]),
+        ];
+        for (name, result, expected) in rows {
+            for ((valid, exhausted), expected) in
+                [(true, false), (false, false), (true, true), (false, true)]
+                    .into_iter()
+                    .zip(expected)
+            {
+                assert_eq!(
+                    tool_review_decision(&result, valid, exhausted),
+                    expected,
+                    "{name}, valid={valid}, exhausted={exhausted}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn skill_read_outcomes_are_closed_before_egress() {
