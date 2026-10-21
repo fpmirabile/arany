@@ -197,7 +197,7 @@ impl AgentInspectorModel {
         match selected.map(|index| (index, rows[index])) {
             Some((index, AgentRow::Agent(..))) => {
                 let (_, run, agent, _) = shown[index];
-                lines.extend(agent_lines(view, run, agent, index, rows.len()));
+                lines.extend(agent_lines(view, run, agent, index, shown.len()));
             }
             Some((_, AgentRow::Idle)) => lines.push(format!(
                 "{} collapsed; Enter or its number shows them",
@@ -881,6 +881,19 @@ pub(crate) mod tests {
         }
         view.runs.push(run);
         view
+    }
+
+    #[test]
+    fn picker_detail_counts_only_visible_agents() {
+        let view = large_team();
+        for (query, expected) in [
+            (AgentQuery::default(), "Agent 1/5: primary; active"),
+            (focused(&view, 0, 4), "Agent 5/5: child 4; finished"),
+        ] {
+            let model = AgentInspectorModel::from_session(&view, &query, 80, true);
+            assert_eq!(model.rows.last(), Some(&AgentRow::Idle));
+            assert_eq!(model.lines[model.header], expected);
+        }
     }
 
     #[test]
