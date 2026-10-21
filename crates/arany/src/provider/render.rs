@@ -10,7 +10,9 @@ use crate::tools::types::{
     MAX_TOOL_CATALOG_BYTES, cleared_model_result, model_call, model_observation, model_result,
 };
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
+use regex::Regex;
 use serde_json::{Value, json};
+use std::sync::LazyLock;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod semantic;
@@ -105,14 +107,21 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     system
 }
 
-// Codex's AGENTS.md framing; a literal closing tag in the file cannot end the block early.
+// Codex's AGENTS.md framing. File text cannot open or close a wrapper or start a heading that
+// passes for a new block; the replacements add no `<` or line-leading `#`, so none rematches.
 fn instructions_block(guidance: &WorkspaceGuidance) -> Block {
+    static TAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)<(\s*/?\s*instructions)").expect("static instruction tag pattern")
+    });
+    static HEADING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?im)^([ \t]*)(#+[ \t]*agents\.md[ \t]+instructions)")
+            .expect("static instruction heading pattern")
+    });
+    let text = TAG.replace_all(&guidance.text, "&lt;$1");
+    let text = HEADING.replace_all(&text, "$1\\$2");
     Block::Text(format!(
-        "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+        "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>",
         guidance.path,
-        guidance
-            .text
-            .replace("</INSTRUCTIONS>", "<\\/INSTRUCTIONS>")
     ))
 }
 
