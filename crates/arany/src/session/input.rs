@@ -11,8 +11,6 @@ use std::path::PathBuf;
 // Shared by every instruction file from the Workspace root to the launch directory.
 const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
-// Entries scanned to confirm an instruction file's exact spelling.
-const MAX_DIRECTORY_ENTRIES: usize = 1 << 16;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
 const MAX_INCLUDES: usize = 16;
@@ -237,102 +235,19 @@ fn read_instructions(root: &Dir, launch: &[String]) -> Result<Vec<InputSnapshot>
             prefix.push_str(name);
             prefix.push('/');
         }
-        let folds = folds_case(&directory)?;
         for file in InstructionFile::DISCOVERY {
             let name = file.name();
-            let Some(opened) = open_nofollow(&directory, std::ffi::OsStr::new(name))? else {
-                continue;
-            };
-            let metadata = opened.metadata()?;
-            #[cfg(test)]
-            entry_hook();
-            if folds && !exact_entry(&directory, name, &metadata)? {
-                continue;
+            let path = format!("{prefix}{name}");
+            if let Some(snapshot) =
+                read_file(&directory, std::ffi::OsStr::new(name), path, remaining)?
+            {
+                remaining -= snapshot.content.len();
+                found.push(snapshot);
+                break;
             }
-            let snapshot = snapshot(opened, &metadata, format!("{prefix}{name}"), remaining)?;
-            remaining -= snapshot.content.len();
-            found.push(snapshot);
-            break;
         }
     }
     Ok(found)
-}
-
-// Without case folding an exact-name open is exact; macOS volumes may fold, so they always check.
-fn folds_case(directory: &Dir) -> Result<bool, InputError> {
-    #[cfg(target_os = "linux")]
-    {
-        use rustix::io::Errno;
-        const FS_CASEFOLD_FL: u32 = 0x4000_0000;
-        use rustix::fs::{Mode, OFlags};
-        // The capability handle may be `O_PATH`, which takes no ioctl; reopen the directory itself.
-        let readable = rustix::fs::openat(
-            directory,
-            ".",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-            Mode::empty(),
-        )
-        .map_err(|error| InputError::Io(error.into()))?;
-        match rustix::fs::ioctl_getflags(&readable) {
-            Ok(flags) => Ok(flags.bits() & FS_CASEFOLD_FL != 0),
-            Err(Errno::NOTTY | Errno::OPNOTSUPP | Errno::INVAL | Errno::NOSYS) => Ok(false),
-            Err(error) => Err(InputError::Io(error.into())),
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let _ = directory;
-        Ok(true)
-    }
-}
-
-// Case-insensitive volumes open `agents.md` for `AGENTS.md`; only the exact, unreplaced entry counts.
-fn exact_entry(
-    directory: &Dir,
-    name: &str,
-    opened: &cap_std::fs::Metadata,
-) -> Result<bool, InputError> {
-    for (index, entry) in directory.entries()?.enumerate() {
-        if index == MAX_DIRECTORY_ENTRIES {
-            return Err(InputError::TooLarge);
-        }
-        let entry = entry?;
-        if entry.file_name().as_os_str() != std::ffi::OsStr::new(name) {
-            continue;
-        }
-        // The readdir record's inode, never a fresh lookup of a name that may have moved.
-        #[cfg(unix)]
-        {
-            use cap_std::fs::MetadataExt;
-            use std::os::unix::fs::DirEntryExt;
-            let listed = entry.ino();
-            #[cfg(test)]
-            entry_hook();
-            if (directory.dir_metadata()?.dev(), listed) != (opened.dev(), opened.ino()) {
-                return Err(InputError::Io(io::Error::other(
-                    "instruction file was replaced",
-                )));
-            }
-        }
-        return Ok(true);
-    }
-    Ok(false)
-}
-
-#[cfg(test)]
-thread_local! {
-    // Runs after an instruction file opens and again once its directory entry is listed.
-    pub(crate) static ENTRY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
-        const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(test)]
-fn entry_hook() {
-    ENTRY_HOOK.with(|hook| {
-        if let Some(hook) = hook.borrow_mut().as_mut() {
-            hook();
-        }
-    });
 }
 
 fn read_file(
@@ -341,17 +256,6 @@ fn read_file(
     path: String,
     limit: usize,
 ) -> Result<Option<InputSnapshot>, InputError> {
-    let Some(file) = open_nofollow(directory, name)? else {
-        return Ok(None);
-    };
-    let metadata = file.metadata()?;
-    snapshot(file, &metadata, path, limit).map(Some)
-}
-
-fn open_nofollow(
-    directory: &Dir,
-    name: &std::ffi::OsStr,
-) -> Result<Option<cap_std::fs::File>, InputError> {
     let mut options = OpenOptions::new();
     options.read(true);
     options.follow(FollowSymlinks::No);
@@ -360,19 +264,12 @@ fn open_nofollow(
         use cap_std::fs::OpenOptionsExt;
         options.custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32);
     }
-    match directory.open_with(name, &options) {
-        Ok(file) => Ok(Some(file)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(InputError::Io(error)),
-    }
-}
-
-fn snapshot(
-    file: cap_std::fs::File,
-    metadata: &cap_std::fs::Metadata,
-    path: String,
-    limit: usize,
-) -> Result<InputSnapshot, InputError> {
+    let file = match directory.open_with(name, &options) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(InputError::Io(error)),
+    };
+    let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(InputError::NotRegular);
     }
@@ -393,11 +290,11 @@ fn snapshot(
     }
     let digest = Sha256::digest(&bytes).into();
     let content = String::from_utf8(bytes).map_err(|_| InputError::InvalidUtf8)?;
-    Ok(InputSnapshot {
+    Ok(Some(InputSnapshot {
         content,
         path,
         digest,
-    })
+    }))
 }
 
 #[cfg(unix)]

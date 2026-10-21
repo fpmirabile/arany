@@ -237,13 +237,12 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     assert!(load(None).is_ok(), "the root alone fits");
     std::fs::write(workspace.join("crates/cli/AGENTS.md"), "cli").unwrap();
 
-    // An override wins in its directory; `agents.md` must not count on a case-insensitive volume.
+    // An override wins in its directory, as in Codex.
     std::fs::write(
         workspace.join("crates/AGENTS.override.md"),
         "crates override",
     )
     .unwrap();
-    std::fs::write(deep.join("agents.md"), "lower case").unwrap();
     std::fs::write(deep.join("CLAUDE.md"), "src fallback").unwrap();
     let inputs = load(Some(&deep)).unwrap();
     assert_eq!(
@@ -262,11 +261,7 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
             ("crates/cli/src/CLAUDE.md", Some(InstructionFile::Claude)),
         ]
     );
-    for name in [
-        "crates/AGENTS.override.md",
-        "crates/cli/src/agents.md",
-        "crates/cli/src/CLAUDE.md",
-    ] {
+    for name in ["crates/AGENTS.override.md", "crates/cli/src/CLAUDE.md"] {
         std::fs::remove_file(workspace.join(name)).unwrap();
     }
 
@@ -311,50 +306,4 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     std::fs::remove_file(workspace.join("crates/cli/AGENTS.md")).unwrap();
     std::fs::create_dir(workspace.join("crates/cli/AGENTS.md")).unwrap();
     assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
-}
-
-#[cfg(unix)]
-#[test]
-fn instruction_entry_check_binds_the_listed_inode_to_the_opened_file() {
-    use input::{ENTRY_HOOK, InputError, WorkspaceInputs};
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    std::fs::write(workspace.join("AGENTS.md"), "hostile").unwrap();
-    std::fs::write(workspace.join("benign.md"), "benign").unwrap();
-    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
-    let root = workspace.clone();
-    let mut stage = 0;
-    // The opened file moves away while a benign one is listed, then returns before the check.
-    ENTRY_HOOK.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move || {
-            stage += 1;
-            if stage == 1 {
-                std::fs::rename(root.join("AGENTS.md"), root.join("kept.md")).unwrap();
-                std::fs::rename(root.join("benign.md"), root.join("AGENTS.md")).unwrap();
-            } else {
-                std::fs::rename(root.join("kept.md"), root.join("AGENTS.md")).unwrap();
-            }
-        }));
-    });
-    let swapped = WorkspaceInputs::load(&workspace, &state, None, &[]);
-    ENTRY_HOOK.with(|hook| hook.borrow_mut().take());
-    if cfg!(target_os = "macos") {
-        assert!(
-            matches!(swapped, Err(InputError::Io(_))),
-            "a volume that may fold case rejects the replaced entry"
-        );
-    } else {
-        // Linux without casefold: the exact-name open stands even though the listing now differs.
-        assert_eq!(swapped.unwrap().instructions[0].content, "hostile");
-        std::fs::rename(workspace.join("kept.md"), workspace.join("AGENTS.md")).unwrap();
-    }
-    assert_eq!(
-        WorkspaceInputs::load(&workspace, &state, None, &[])
-            .unwrap()
-            .instructions[0]
-            .content,
-        "hostile",
-        "the restored file loads on a fresh turn"
-    );
 }
