@@ -1,6 +1,7 @@
 use super::clipboard::{COPY_TOO_LARGE, MAX_COPY_BYTES, display_bytes, display_text};
 use crate::presentation::{
-    escape_terminal, escaped_terminal_width, image_message_text, safe_truncate,
+    escape_terminal, escaped_terminal_bytes, escaped_terminal_width, image_message_text,
+    safe_truncate,
 };
 use arany::{RunId, RunView, SessionId, SessionView};
 use std::borrow::Cow;
@@ -1041,6 +1042,62 @@ impl History {
         }
         visible
     }
+}
+
+pub(super) const SCROLLBACK_RETURN_CUE: &str = "Enter returns to Arany";
+const SCROLLBACK_HEADING: &str = "Arany transcript:";
+const SCROLLBACK_OMITTED: &str = "Earlier Runs omitted; arany show prints the whole conversation";
+
+// The pager's `[` text: the newest whole Runs read like chat (objective, details, committed
+// answer), escaped line by line with CRLF endings, within the Run and byte bounds.
+pub(super) fn scrollback_transcript(view: &SessionView) -> String {
+    let emitted = |indent: &str, text: &str| indent.len() + escaped_terminal_bytes(text) + 2;
+    let mut remaining = MAX_CLASSIC_HISTORY_BYTES
+        - emitted("", SCROLLBACK_HEADING)
+        - emitted("", SCROLLBACK_OMITTED)
+        - emitted("", SCROLLBACK_RETURN_CUE);
+    let mut blocks = Vec::new();
+    for run in view.runs.iter().rev().take(MAX_CLASSIC_HISTORY_RUNS) {
+        let objective = image_message_text(&run.objective, &run.images);
+        let details = super::linear::transcript_details(run);
+        let mut lines = vec![("", "You:")];
+        lines.extend(objective.split('\n').map(|text| ("  ", text)));
+        lines.extend(
+            details
+                .iter()
+                .flat_map(|part| part.split('\n'))
+                .map(|text| ("", text)),
+        );
+        if let Some(answer) = &run.assistant_message {
+            lines.push(("", "Arany:"));
+            lines.extend(answer.split('\n').map(|text| ("  ", text)));
+        }
+        lines.push(("", ""));
+        // Sizes are measured before escaping allocates, so an oversized Run costs no copy.
+        let bytes = lines
+            .iter()
+            .map(|(indent, text)| emitted(indent, text))
+            .sum::<usize>();
+        if bytes > remaining {
+            break;
+        }
+        remaining -= bytes;
+        blocks.push(
+            lines
+                .iter()
+                .map(|(indent, text)| format!("{indent}{}\r\n", escape_terminal(text)))
+                .collect::<String>(),
+        );
+    }
+    let mut text = format!("{SCROLLBACK_HEADING}\r\n");
+    if blocks.len() < view.runs.len() {
+        text.push_str(SCROLLBACK_OMITTED);
+        text.push_str("\r\n");
+    }
+    text.extend(blocks.into_iter().rev());
+    text.push_str(SCROLLBACK_RETURN_CUE);
+    text.push_str("\r\n");
+    text
 }
 
 pub(super) fn notice_kind(text: &str) -> (MessageKind, &str) {
@@ -2577,6 +2634,50 @@ mod tests {
             history.sync(&view, width, 10);
             assert_eq!(history.pager_status(), footer);
             assert!(escaped_terminal_width(footer) <= width, "{width}");
+        }
+    }
+
+    #[test]
+    fn scrollback_transcript_keeps_newest_whole_runs_escaped_within_bounds() {
+        let mut view = session();
+        for index in 0..18 {
+            view.runs.push(run(
+                &format!("objective {index}\nsecond line"),
+                &format!("answer {index} \u{1b}]52;c;eA==\u{7}"),
+            ));
+        }
+        let text = scrollback_transcript(&view);
+        assert!(!text.contains(['\u{1b}', '\u{7}']), "{text}");
+        let lines = text.split("\r\n").collect::<Vec<_>>();
+        assert!(lines.iter().all(|line| !line.contains(['\r', '\n'])));
+        assert_eq!(lines[..2], ["Arany transcript:", SCROLLBACK_OMITTED]);
+        assert_eq!(
+            lines[2..8],
+            [
+                "You:",
+                "  objective 2",
+                "  second line",
+                "Arany:",
+                "  answer 2 \\u{001b}]52;c;eA==\\u{0007}",
+                "",
+            ]
+        );
+        assert_eq!(lines.iter().filter(|line| **line == "You:").count(), 16);
+        assert!(text.ends_with(
+            "  answer 17 \\u{001b}]52;c;eA==\\u{0007}\r\n\r\nEnter returns to Arany\r\n"
+        ));
+
+        // CRLF endings and indents count against the byte bound, so line-heavy Runs stop early.
+        for (newlines, kept) in [(10_000, true), (20_000, false)] {
+            let mut view = session();
+            view.runs.push(run("older", "small"));
+            view.runs.push(run("newest", &"\n".repeat(newlines)));
+            let text = scrollback_transcript(&view);
+            assert!(text.len() <= MAX_CLASSIC_HISTORY_BYTES, "{newlines}");
+            assert_eq!(text.contains("  newest\r\n"), kept, "{newlines}");
+            assert_eq!(text.contains("  older\r\n"), kept, "{newlines}");
+            assert_eq!(text.contains(SCROLLBACK_OMITTED), !kept, "{newlines}");
+            assert!(text.ends_with("Enter returns to Arany\r\n"));
         }
     }
 

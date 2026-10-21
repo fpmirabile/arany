@@ -1361,41 +1361,44 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
             crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
             let tail = &bytes[from..];
             let footer = |bytes: &[u8]| super::screen_rows(bytes, 80, 24)[23].starts_with(FOOTER);
-            // The decoded primary screen after `[` left the alternate screen.
+            // The lines `[` appended after leaving the alternate screen, decoded tall enough to
+            // keep the scrolled-off part, once the last one is the return cue.
             let dumped = |bytes: &[u8]| {
                 let start = find(bytes, b"\x1b[?1049l")?;
-                let rows = super::screen_rows(&bytes[start..], 80, 24);
-                rows.iter()
-                    .any(|row| row.trim_end() == "Enter returns to Arany")
-                    .then_some((start, rows))
+                let mut lines = super::screen_rows(&bytes[start..], 80, 512)
+                    .into_iter()
+                    .map(|row| row.trim_end().to_owned())
+                    .collect::<Vec<_>>();
+                let end = lines.iter().rposition(|line| !line.is_empty())?;
+                lines.truncate(end + 1);
+                (lines[end] == "Enter returns to Arany").then_some((start, lines))
             };
             let dump = (stage == 2).then(|| dumped(tail)).flatten();
             let next: Option<&[u8]> = match stage {
                 0 if provider.streaming.try_recv().is_ok() => Some(b"\x0f"),
                 1 if footer(bytes) => Some(b"["),
                 2 if dump.is_some() => {
-                    let (start, rows) = dump.expect("dumped rows");
+                    let (start, lines) = dump.expect("dumped lines");
                     let released = find(tail, b"\x1b[?1000l").expect("capture released");
                     assert!(released < start, "capture is released before the text");
-                    let text = rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>();
-                    let heading = text
-                        .iter()
-                        .position(|row| *row == "Transcript details:")
-                        .expect("dump heading");
-                    // 17 seeded Runs and the active one: the 16 newest are shown, then the limit cue.
                     assert_eq!(
-                        text.iter()
-                            .filter(
-                                |row| row.contains("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}")
-                            )
-                            .count(),
-                        15
+                        lines[..2],
+                        [
+                            "Arany transcript:",
+                            "Earlier Runs omitted; arany show prints the whole conversation"
+                        ]
                     );
-                    let cue = text
+                    // 17 seeded Runs and the active one: the 16 newest whole Runs, read like chat.
+                    let count =
+                        |expected: &str| lines.iter().filter(|line| *line == expected).count();
+                    assert_eq!(count("You:"), 16);
+                    assert_eq!(count("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}"), 15);
+                    assert_eq!(count("  Synthetic answer"), 15);
+                    let active = lines
                         .iter()
-                        .position(|row| row.starts_with("Transcript detail limit reached"))
-                        .expect("limit cue");
-                    assert!(heading < cue && text[cue + 1] == "Enter returns to Arany");
+                        .rposition(|line| line == "You:")
+                        .expect("active Run");
+                    assert_eq!(lines[active + 1], "  stream");
                     assert_eq!(find(tail, b"\x1b]52"), None);
                     dump_from = from;
                     provider.release.send(()).unwrap();

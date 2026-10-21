@@ -393,18 +393,24 @@ fn position(bytes: &[u8], needle: &[u8]) -> Option<usize> {
     bytes.windows(needle.len()).position(|part| part == needle)
 }
 
-// The decoded rows `[` wrote on the primary screen, or None until its return cue is shown.
-fn dumped_rows(bytes: &[u8]) -> Option<Vec<String>> {
-    let rows = screen_rows(&bytes[position(bytes, b"\x1b[?1049l")?..], 80, 24);
-    rows.iter()
-        .any(|row| row.trim_end() == "Enter returns to Arany")
-        .then_some(rows)
+const OMITTED: &str = "Earlier Runs omitted; arany show prints the whole conversation";
+
+// The lines `[` appended to the primary screen, decoded tall enough to keep the scrolled-off
+// part, or None until the last line is the return cue.
+fn dumped_lines(bytes: &[u8]) -> Option<Vec<String>> {
+    let start = position(bytes, b"\x1b[?1049l")?;
+    let mut lines = screen_rows(&bytes[start..], 80, 512)
+        .into_iter()
+        .map(|row| row.trim_end().to_owned())
+        .collect::<Vec<_>>();
+    let end = lines.iter().rposition(|line| !line.is_empty())?;
+    lines.truncate(end + 1);
+    (lines[end] == "Enter returns to Arany").then_some(lines)
 }
 
 // Checks the dump: capture and the alternate screen end before the bounded, escaped text.
-fn assert_bounded_dump(bytes: &[u8], answer: &str) {
-    let rows = dumped_rows(bytes).expect("dump return cue");
-    let text = rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>();
+fn assert_bounded_dump(bytes: &[u8]) {
+    let lines = dumped_lines(bytes).expect("dump return cue");
     let released = [b"\x1b[?1049l".as_slice(), b"\x1b[?1000l"]
         .into_iter()
         .map(|mode| position(bytes, mode).expect("mode released by the dump"))
@@ -413,31 +419,24 @@ fn assert_bounded_dump(bytes: &[u8], answer: &str) {
     assert!(
         !screen_rows(&bytes[..released], 80, 24)
             .iter()
-            .any(|row| row.contains("Transcript details:")),
+            .any(|row| row.contains("Arany transcript:")),
         "modes are released before the text"
     );
-    let heading = text
+    assert_eq!(lines[..2], ["Arany transcript:", OMITTED], "{lines:#?}");
+    // 17 seeded Runs and the active one: the 16 newest whole Runs, read like chat.
+    let count = |expected: &str| lines.iter().filter(|line| *line == expected).count();
+    assert_eq!(count("You:"), 16, "{lines:#?}");
+    assert_eq!(count("  Synthetic objective"), 15);
+    assert_eq!(count("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}"), 15);
+    assert_eq!(count("  Synthetic answer"), 15);
+    let active = lines
         .iter()
-        .position(|row| *row == "Transcript details:")
-        .unwrap_or_else(|| panic!("dump heading: {text:#?}"));
-    // 17 seeded Runs and the active one: the 16 newest are shown, then the limit cue.
-    assert_eq!(
-        text.iter()
-            .filter(|row| row.contains("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}"))
-            .count(),
-        15,
-        "{text:#?}"
-    );
-    let cue = text
-        .iter()
-        .position(|row| row.starts_with("Transcript detail limit reached"))
-        .unwrap_or_else(|| panic!("limit cue: {text:#?}"));
-    assert!(heading < cue && text[cue + 1] == "Enter returns to Arany");
+        .rposition(|line| line == "You:")
+        .expect("active Run");
+    assert_eq!(lines[active + 1], "  stream");
     assert!(
-        text[heading..cue]
-            .iter()
-            .all(|row| !row.contains(answer) || row.starts_with("Arany · incomplete:")),
-        "only bounded detail lines: {text:#?}"
+        lines[active..].iter().all(|line| line != "Arany:"),
+        "the active Run has no committed answer: {lines:#?}"
     );
     assert_eq!(
         position(bytes, b"\x1b]52"),
@@ -492,10 +491,10 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     chat.assert_active(&CAPTURE, "pager during the Run");
     chat.fresh();
     let from = chat.send(b"[");
-    chat.wait(from, |bytes| dumped_rows(bytes).is_some(), "dump");
+    chat.wait(from, |bytes| dumped_lines(bytes).is_some(), "dump");
     chat.pump();
     chat.assert_active(&[], "dump released capture");
-    assert_bounded_dump(&chat.transcript, ANSWER);
+    assert_bounded_dump(&chat.transcript);
 
     // The Run finishes its stream while the dump waits; nothing redraws until Enter.
     provider.release.send(()).expect("release the stream");
@@ -534,7 +533,7 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     // Suspension during a dump restores the shell and returns to the pager on SIGCONT.
     chat.fresh();
     let from = chat.send(b"[");
-    chat.wait(from, |bytes| dumped_rows(bytes).is_some(), "second dump");
+    chat.wait(from, |bytes| dumped_lines(bytes).is_some(), "second dump");
     chat.pump();
     chat.assert_active(&[], "second dump released capture");
     let suspended_at = chat.send(b"\x1a");

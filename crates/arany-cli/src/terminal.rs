@@ -1013,7 +1013,7 @@ impl AttachedTerminal {
 
     // `[` in the pager: leave capture and the alternate screen, then append the bounded transcript.
     fn dump_to_scrollback(&mut self, view: &SessionView) -> Result<(), TerminalError> {
-        let text = bounded_transcript(view)?;
+        let text = history::scrollback_transcript(view);
         if let Some(mut modes) = self.pointer_modes.take() {
             modes.release()?;
         }
@@ -1025,12 +1025,9 @@ impl AttachedTerminal {
             .as_mut()
             .expect("owned terminal")
             .show_cursor()?;
+        // Raw mode turns off output processing, so the text carries its own carriage returns.
         let mut output = io::stderr().lock();
-        // Raw mode turns off output processing, so each line needs its own carriage return.
-        for line in text.lines().chain(["Enter returns to Arany"]) {
-            output.write_all(line.as_bytes())?;
-            output.write_all(b"\r\n")?;
-        }
+        output.write_all(text.as_bytes())?;
         output.flush()?;
         Ok(())
     }
@@ -1042,7 +1039,11 @@ impl AttachedTerminal {
         self.alternate = Some(AlternateScreen::acquire()?);
         self.scrollback_dump = false;
         self.pointer_modes = pointer_modes(self.mode, false, self.pointer.mouse.effective())?;
-        self.terminal.as_mut().expect("owned terminal").clear()?;
+        // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
+        terminal.resize(area)?;
+        terminal.backend_mut().set_area(area);
         Ok(())
     }
 
@@ -1058,6 +1059,13 @@ impl AttachedTerminal {
         input: TerminalInput,
         view: &SessionView,
     ) -> Result<bool, TerminalError> {
+        let pager =
+            self.mode == TerminalMode::Fullscreen && self.transcript_open && !self.is_linear();
+        // The hidden composer must not change, so a paste or clipboard result is discarded.
+        if input == TerminalInput::Paste && (pager || self.scrollback_dump) {
+            let _ = self.take_paste();
+            return Ok(true);
+        }
         if self.scrollback_dump {
             return match input {
                 TerminalInput::Submit => self.end_scrollback_dump().map(|()| true),
@@ -1067,7 +1075,7 @@ impl AttachedTerminal {
                 _ => Ok(true),
             };
         }
-        if self.mode == TerminalMode::Fullscreen && self.transcript_open && !self.is_linear() {
+        if pager {
             // Escape clears a selection before it closes the pager.
             if input == TerminalInput::Escape
                 && self.history.has_selection()
@@ -3115,7 +3123,56 @@ mod insert_rows_tests {
 
 #[cfg(all(test, unix))]
 mod pointer_tests {
-    use super::{Composer, TerminalInput, TerminalMode, TerminalNotice};
+    use super::{ClipboardContent, Composer, TerminalInput, TerminalMode, TerminalNotice};
+
+    #[test]
+    fn pager_and_scrollback_dump_discard_pastes_and_keep_the_hidden_draft() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let view = arany::SessionView {
+                    rewinds: Default::default(),
+                    id: arany::SessionId::new(),
+                    title: "Pager".into(),
+                    title_is_explicit: true,
+                    inherited_title: None,
+                    workspace_identity: None,
+                    defaults: Default::default(),
+                    created_sequence: 1,
+                    last_sequence: 1,
+                    lineage: None,
+                    runs: Vec::new(),
+                    compactions: Vec::new(),
+                    goals: Vec::new(),
+                };
+                let mut composer = Composer::default();
+                for character in "kept".chars() {
+                    composer.apply(TerminalInput::Character(character));
+                }
+                let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+                terminal.mode = TerminalMode::Fullscreen;
+                for (pager, dump) in [(true, false), (false, true)] {
+                    terminal.transcript_open = pager;
+                    terminal.scrollback_dump = dump;
+                    terminal.clipboard_paste = Some(Ok(ClipboardContent::Text("pasted".into())));
+                    assert!(
+                        terminal
+                            .handle_transcript_input(TerminalInput::Paste, &view)
+                            .unwrap(),
+                        "pager {pager}, dump {dump}"
+                    );
+                    assert!(
+                        terminal.clipboard_paste.is_none(),
+                        "the payload is consumed"
+                    );
+                    assert!(terminal.paste_into(&mut composer).is_err());
+                    assert_eq!(composer.text(), "kept");
+                }
+                terminal.scrollback_dump = false;
+            });
+    }
 
     #[test]
     fn ctrl_c_with_a_selection_reaches_cancellation_during_work() {
