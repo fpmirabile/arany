@@ -41,16 +41,10 @@ impl From<io::Error> for InputError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum InstructionSource {
-    Agents,
-    Claude,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct InputSnapshot {
     pub content: String,
-    path: String,
+    pub path: String,
     pub digest: [u8; 32],
 }
 
@@ -70,7 +64,7 @@ impl InputSnapshot {
 }
 
 pub(crate) struct WorkspaceInputs {
-    pub instructions: Option<(InstructionSource, InputSnapshot)>,
+    pub instructions: Option<InputSnapshot>,
     pub includes: Vec<InputSnapshot>,
     _root: Dir,
 }
@@ -135,9 +129,8 @@ impl WorkspaceInputs {
 
         let instructions =
             match read_relative(&root, Path::new("AGENTS.md"), MAX_INSTRUCTION_BYTES)? {
-                Some(snapshot) => Some((InstructionSource::Agents, snapshot)),
-                None => read_relative(&root, Path::new("CLAUDE.md"), MAX_INSTRUCTION_BYTES)?
-                    .map(|snapshot| (InstructionSource::Claude, snapshot)),
+                None => read_relative(&root, Path::new("CLAUDE.md"), MAX_INSTRUCTION_BYTES)?,
+                agents => agents,
             };
         let mut includes = Vec::with_capacity(include_paths.len());
         let mut total_bytes = 0_usize;

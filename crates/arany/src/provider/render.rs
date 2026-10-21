@@ -2,8 +2,8 @@ use super::conversation::{Block, Conversation, Message, Role, SystemBlock};
 use super::prompts;
 use super::tool_specs::specs;
 use super::{
-    AgentPhase, HistoryTurn, PromptRole, ProviderError, ProviderRequest, outcome_schema,
-    restrict_outcome_schema,
+    AgentPhase, HistoryTurn, PromptRole, ProviderError, ProviderRequest, WorkspaceGuidance,
+    outcome_schema, restrict_outcome_schema,
 };
 use crate::session::RunView;
 use crate::tools::types::{
@@ -28,7 +28,12 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     let tools = catalog
         .as_ref()
         .map(|catalog| specs(catalog, input.role, &input.pinned_budget));
-    let mut messages: Vec<Message> = input.history.iter().map(history_message).collect();
+    let mut messages: Vec<Message> = input
+        .workspace_guidance
+        .iter()
+        .map(|guidance| user(vec![instructions_block(guidance)]))
+        .chain(input.history.iter().map(history_message))
+        .collect();
     let delegate_step = input
         .tools
         .as_ref()
@@ -85,9 +90,7 @@ fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, 
 fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     let prompt = match request.input.role {
         PromptRole::Primary => prompts::PRIMARY_INSTRUCTIONS,
-        PromptRole::Editor => {
-            "Work in the assigned private view using only the offered Tools and admitted commands. Verify the assignment criterion there before answering with a bounded report. Your changes remain private until the primary integrates and verifies them. Never delegate."
-        }
+        PromptRole::Editor => prompts::EDITOR_INSTRUCTIONS,
         PromptRole::Researcher => prompts::RESEARCH_INSTRUCTIONS,
         PromptRole::ReadOnly => prompts::READ_ONLY_INSTRUCTIONS,
         PromptRole::ToolReview => prompts::TOOL_REVIEW_INSTRUCTIONS,
@@ -100,6 +103,17 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
         system.push(SystemBlock::Policy(request.collaboration));
     }
     system
+}
+
+// Codex's AGENTS.md framing; a literal closing tag in the file cannot end the block early.
+fn instructions_block(guidance: &WorkspaceGuidance) -> Block {
+    Block::Text(format!(
+        "# AGENTS.md instructions for {}\n\n<INSTRUCTIONS>\n{}\n</INSTRUCTIONS>",
+        guidance.path,
+        guidance
+            .text
+            .replace("</INSTRUCTIONS>", "<\\/INSTRUCTIONS>")
+    ))
 }
 
 pub(crate) fn data_block(scope: &str, data: Value) -> Block {
@@ -155,11 +169,8 @@ fn current_message(
 ) -> Message {
     let input = &request.input;
     let mut blocks = Vec::new();
-    if let Some(guidance) = &input.workspace_guidance {
-        blocks.push(data_block(
-            "workspace_guidance (untrusted)",
-            json!(guidance),
-        ));
+    if let Some(context) = &input.assignment_context {
+        blocks.push(data_block("assignment_context (untrusted)", json!(context)));
     }
     if !input.includes.is_empty() {
         blocks.push(data_block("includes (untrusted)", json!(input.includes)));

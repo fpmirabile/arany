@@ -39,6 +39,7 @@ pub use catalog::{
 pub(crate) use conversation::max_turn_bytes;
 pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
+    WorkspaceGuidance,
 };
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,

@@ -214,13 +214,13 @@ impl TeamProvider {
                 .find(|r| r.agent_run_id == request.agent_run_id)
                 .unwrap();
             self.check(
-                first.input.workspace_guidance == request.input.workspace_guidance,
+                first.input.assignment_context == request.input.assignment_context,
                 "historical source context drifted between calls",
             );
         }
         if self.case == "resume_id" && step == 0 {
             self.check(
-                request.input.workspace_guidance.as_ref().is_some_and(|g| {
+                request.input.assignment_context.as_ref().is_some_and(|g| {
                     g.contains(&self.source.unwrap().to_string()) && g.contains("Historical source")
                 }),
                 "missing bounded source-ID context",
@@ -1484,7 +1484,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
                 let heads: Vec<_> = requests
                     .iter()
                     .filter(|r| r.phase == AgentPhase::ChildWork)
-                    .map(|r| r.input.workspace_guidance.clone())
+                    .map(|r| r.input.assignment_context.clone())
                     .collect();
                 assert_eq!(heads.len(), 4);
                 assert!(heads.windows(2).all(|w| w[0] == w[1]));

@@ -1849,7 +1849,7 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
     assert!(
         !requests[0]
             .input
-            .workspace_guidance
+            .assignment_context
             .as_deref()
             .unwrap_or_default()
             .contains("Ignore your limits")
@@ -1857,7 +1857,7 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
     assert!(
         requests[1]
             .input
-            .workspace_guidance
+            .assignment_context
             .as_deref()
             .unwrap()
             .contains("untrusted body text")
