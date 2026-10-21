@@ -2605,6 +2605,11 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
             arany::ToolCall::Search {
                 path: "notes".into(),
                 query: "x".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
             },
             "search",
         ),

@@ -633,6 +633,11 @@ async fn native_file_journey_helper() {
         ToolCall::Search {
             path: "src/main.txt".into(),
             query: "after".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         },
         ToolCall::Skill {
             name: "synthetic".into(),

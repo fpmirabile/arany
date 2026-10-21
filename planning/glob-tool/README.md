@@ -49,7 +49,7 @@ Result: `{entries: [{path, bytes}], limit, may_be_truncated}` for regular files 
 
 ## Chosen direction
 
-Ponytail: extend the existing closed filesystem Tool family and in-process site. Reuse handle-relative traversal and result fitting, adding only a bounded metadata walk and glob-to-regex translation. Keep permission-pattern translation's policy behavior separate. [Search include filtering](../search-regex/README.md#chosen-direction) uses the same discovery matcher when present; whichever feature lands first supplies that private helper. Neither feature requires the other's catalog entry. No globset, ripgrep process, filesystem index, plugin trait or new crate.
+Ponytail: extend the existing closed filesystem Tool family and in-process site. Reuse handle-relative traversal and result fitting, adding only a bounded metadata walk and glob-to-regex translation. Keep permission-pattern translation's policy behavior separate. [Search include filtering](../../docs/specs/tools.md#limits-and-failure-behavior) already supplies the private discovery-glob helper in `crates/arany/src/tools/search.rs`; reuse it. Neither feature requires the other's catalog entry. No globset, ripgrep process, filesystem index, plugin trait or new crate.
 
 The discovery grammar is deliberately closed:
 
