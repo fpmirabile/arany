@@ -303,13 +303,26 @@ pub(super) async fn restore_settings(admission: &Admission) -> Result<Preference
 pub(super) async fn restore_settings_at(
     state_dir: &std::path::Path,
 ) -> Result<Preferences, String> {
+    Ok(saved_settings(state_dir).await??)
+}
+
+// An unsupported or invalid record leaves defaults in force until /settings replaces it.
+pub(super) async fn settings_or_defaults(admission: &Admission) -> Result<Preferences, String> {
+    Ok(saved_settings(&admission.state_dir)
+        .await?
+        .unwrap_or_default())
+}
+
+async fn saved_settings(
+    state_dir: &std::path::Path,
+) -> Result<Result<Preferences, &'static str>, String> {
     let path = state_dir.to_owned();
     tokio::task::spawn_blocking(move || {
         let root = match StateRoot::open_existing(&path) {
             Ok(root) => root,
             Err(arany::StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
                 if matches!(std::fs::symlink_metadata(&path), Err(error) if error.kind() == std::io::ErrorKind::NotFound) {
-                    return Ok(Preferences::default());
+                    return Ok(Ok(Preferences::default()));
                 }
                 return Err("display settings unavailable or unsafe".into());
             }
@@ -321,22 +334,27 @@ pub(super) async fn restore_settings_at(
     .map_err(|_| "display settings unavailable".to_owned())?
 }
 
-fn read_settings(root: &StateRoot) -> Result<Preferences, String> {
+fn read_settings(root: &StateRoot) -> Result<Result<Preferences, &'static str>, String> {
     let Some(record) = root
         .record(RecordKind::UiPreferences)
         .read()
         .map_err(|_| "display settings unavailable or unsafe")?
     else {
-        return Ok(Preferences::default());
+        return Ok(Ok(Preferences::default()));
     };
+    Ok(decode_settings(&record))
+}
+
+fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
     let invalid = "invalid display settings; use /settings to replace them";
-    let version: RecordVersion = serde_json::from_slice(&record).map_err(|_| invalid)?;
+    let unsupported = "unsupported settings; use /settings to replace them";
+    let version: RecordVersion = serde_json::from_slice(record).map_err(|_| invalid)?;
     if version.version != UI_PREFERENCES_VERSION {
-        return Err("unsupported settings; use /settings to replace them".into());
+        return Err(unsupported);
     }
-    let record: UiPreferences = serde_json::from_slice(&record).map_err(|_| invalid)?;
+    let record: UiPreferences = serde_json::from_slice(record).map_err(|_| invalid)?;
     if record.preferences.goal_budget.validate().is_err() || !record.preferences.resources.valid() {
-        return Err("unsupported settings; use /settings to replace them".into());
+        return Err(unsupported);
     }
     Ok(record.preferences)
 }
@@ -449,7 +467,7 @@ pub(super) async fn settings(
     view: &SessionView,
 ) -> Result<String, String> {
     let linear = terminal.is_linear();
-    let mut current = restore_settings(admission).await?;
+    let mut current = settings_or_defaults(admission).await?;
     current.completion = composer.completion_layout();
     current.view = *saved_view;
     let notice = match choose_settings(terminal, current, view).await? {
@@ -1728,6 +1746,10 @@ mod tests {
                 .unwrap();
             assert!(restore_settings(&admission).await.is_err());
             assert_eq!(
+                settings_or_defaults(&admission).await.unwrap(),
+                Preferences::default()
+            );
+            assert_eq!(
                 root.record(RecordKind::UiPreferences)
                     .read()
                     .unwrap()
@@ -1753,6 +1775,11 @@ mod tests {
         assert_eq!(
             restore_settings(&admission).await.unwrap_err(),
             "unsupported settings; use /settings to replace them"
+        );
+        // /settings and new tasks keep working on defaults so the record can be replaced.
+        assert_eq!(
+            settings_or_defaults(&admission).await.unwrap(),
+            Preferences::default()
         );
         assert_eq!(
             root.record(RecordKind::UiPreferences)

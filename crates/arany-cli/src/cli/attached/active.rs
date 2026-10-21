@@ -431,7 +431,7 @@ pub(super) async fn submit_objective(
     let mut approval_unarmed = false;
     let mut approval_review_notice = false;
     let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
-    let execution_settings = super::controls::restore_settings(admission).await?;
+    let execution_settings = super::controls::settings_or_defaults(admission).await?;
     let mut goal = goal_request(view, goal)?;
     if goal.id.is_none() {
         goal.budget = Some(execution_settings.goal_budget);

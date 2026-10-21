@@ -280,7 +280,7 @@ Restore raw mode, cursor, wrapping, echo and every enabled mode, including mouse
 | Classic cold projection | bounds in [Conversation, progress and history](#conversation-progress-and-history) |
 | Hidden native API key | At most 512 printable ASCII characters; secret content never reaches presentation |
 | Slash-name suggestions | At most 20 entry rows plus a header, clipped to available geometry |
-| Display and execution preferences | Strict version 4, 1 KiB private `ui-preferences.json` record plus one atomic pending replacement; unsupported (including version 3) or invalid records are refused without conversion or overwrite |
+| Display and execution preferences | Strict version 4, 1 KiB private `ui-preferences.json` record plus one atomic pending replacement; unsupported (including version 3) or invalid records are refused without conversion or overwrite; chat, task submission and `/settings` keep working on defaults until `/settings` saves a replacement |
 | Agent inspection | 16 most recent Runs; bounded previews, complete export through `show` |
 | Inline model selection | Below 16×8 only resize and close; initial unsafe or short geometry selects linear presentation |
 | Unterminated inline record | Ten-second deadline, then terminal ownership fails closed |
