@@ -1257,7 +1257,7 @@ mod tests {
             committed,
             [
                 "New activity from child 2:",
-                "Steering note (sent during the child's work):",
+                crate::presentation::STEERING_NOTE_HEADING,
                 "  /literal"
             ]
         );
@@ -1272,7 +1272,7 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert_eq!(
             output
-                .matches("Steering note (sent during the child's work):")
+                .matches(crate::presentation::STEERING_NOTE_HEADING)
                 .count(),
             1
         );

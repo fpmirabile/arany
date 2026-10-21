@@ -5,6 +5,7 @@ use arany::{
     AgentRole, AgentRunId, AgentStatus, AgentView, RunId, RunStatus, RunView, SessionView,
 };
 
+pub(crate) const STEERING_NOTE_HEADING: &str = "Steering note (sent during the child's work):";
 pub(crate) const MAX_RECENT_RUNS: usize = 16;
 const MAX_AGENTS_PER_RUN: usize = 9;
 const MAX_EXPANDED_IDLE: usize = 3;
@@ -409,9 +410,7 @@ impl TranscriptPart<'_> {
         };
         match self {
             Self::Assignment(text) => section("Assignment:", text),
-            Self::SteeringNote(text) => {
-                section("Steering note (sent during the child's work):", text)
-            }
+            Self::SteeringNote(text) => section(STEERING_NOTE_HEADING, text),
             Self::Tool(text) => super::plain_tool_summary(text)
                 .split('\n')
                 .map(str::to_owned)
@@ -466,7 +465,7 @@ impl AgentTranscript {
         let first_note = (0..agent.steering_notes.len())
             .rev()
             .take_while(|&index| {
-                budget.take("Steering note (sent during the child's work):\n")
+                budget.take(&format!("{STEERING_NOTE_HEADING}\n"))
                     && budget.take(&agent.steering_notes[index])
             })
             .last()
@@ -1281,10 +1280,10 @@ pub(crate) mod tests {
             lines,
             [
                 "New activity from child 2:",
-                "Steering note (sent during the child's work):",
+                STEERING_NOTE_HEADING,
                 "  first",
                 "  You: forged\u{1b}[2J",
-                "Steering note (sent during the child's work):",
+                STEERING_NOTE_HEADING,
                 "  second"
             ]
         );

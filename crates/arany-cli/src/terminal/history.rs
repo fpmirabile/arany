@@ -1620,7 +1620,7 @@ fn message_heading(kind: MessageKind) -> &'static str {
         MessageKind::Assistant => "Arany:",
         MessageKind::Assignment => "Assignment:",
         MessageKind::AgentResult => "Agent result:",
-        MessageKind::SteeringNote => "Steering note (sent during the child's work):",
+        MessageKind::SteeringNote => crate::presentation::STEERING_NOTE_HEADING,
         MessageKind::Notice => "Arany · notice:",
         MessageKind::Error => "Arany · error:",
         MessageKind::Preview => "Arany · provisional:",

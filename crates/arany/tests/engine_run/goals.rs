@@ -3965,18 +3965,18 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
         ]);
         provider.identity.limits.concurrency = 1;
         let calls = provider.requests.clone();
-        let gate = Arc::new(std::sync::Mutex::new(None));
-        let held = gate.clone();
-        let first_child = Arc::new(std::sync::Mutex::new(None));
-        let first = first_child.clone();
+        let (publish, published) = tokio::sync::oneshot::channel();
+        let publish = Arc::new(std::sync::Mutex::new(Some(publish)));
         let observed = calls.clone();
         let provider = Arc::new(provider.with_before_call(1, move || {
             let request = observed.lock().unwrap().last().unwrap().clone();
-            *first.lock().unwrap() = Some(request.agent_run_id);
-            *held.lock().unwrap() = Some(arany::FaultPlan::gate_goal_append_acknowledgment(
-                request.session_id,
-                |event| matches!(event, Event::GoalProviderCallReserved { .. }),
-            ));
+            let gate =
+                arany::FaultPlan::gate_goal_append_acknowledgment(request.session_id, |event| {
+                    matches!(event, Event::GoalProviderCallReserved { .. })
+                });
+            if let Some(publish) = publish.lock().unwrap().take() {
+                let _ = publish.send((request.agent_run_id, gate));
+            }
         }));
         let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
         let mut input = request(&workspace, "Check facts");
@@ -4006,9 +4006,10 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
         let driver = {
             let (steering, cancel) = (steering.clone(), cancel.clone());
             tokio::spawn(async move {
+                let (first, (entered, release)) = published.await.expect("first child dispatched");
                 let mut children = Vec::new();
-                let mut note = |tapped: Option<arany::Tapped>| {
-                    if let Some(arany::Tapped::Committed(envelope)) = tapped
+                while children.len() < 2 {
+                    if let Some(arany::Tapped::Committed(envelope)) = events.next().await
                         && let Event::AgentSpawned {
                             role: arany::AgentRole::Child,
                             run_id,
@@ -4018,26 +4019,10 @@ async fn child_note_is_not_taken_when_the_run_stops_after_the_call_reservation()
                     {
                         children.push((run_id, agent_run_id));
                     }
-                };
-                let (entered, release) = loop {
-                    tokio::select! {
-                        tapped = events.next() => note(tapped),
-                        () = tokio::time::sleep(Duration::from_millis(5)) => {
-                            if let Some(held) = gate.lock().unwrap().take() {
-                                break held;
-                            }
-                        }
-                    }
-                };
-                while let Ok(tapped) =
-                    tokio::time::timeout(Duration::from_millis(20), events.next()).await
-                {
-                    note(tapped);
                 }
                 entered
                     .await
                     .expect("second child reservation reached its acknowledgment");
-                let first = first_child.lock().unwrap().expect("first child dispatched");
                 let (run_id, agent_run_id) = children
                     .into_iter()
                     .find(|(_, id)| *id != first)
