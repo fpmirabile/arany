@@ -1054,6 +1054,7 @@ pub(super) mod cleanup_tests {
             classic_pinned: false,
             alternate: None,
             transcript_open: false,
+            scrollback_dump: false,
             native: Default::default(),
             active_run: None,
             history: Default::default(),

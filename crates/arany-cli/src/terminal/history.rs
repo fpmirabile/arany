@@ -17,6 +17,14 @@ pub(super) const MAX_CLASSIC_HISTORY_ROWS: usize = 4096;
 const MAX_NOTICES: usize = 32;
 const MAX_NOTICE_BYTES: usize = 8192;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Pager {
+    Handled,
+    Close,
+    Dump,
+    Pass,
+}
+
 pub(super) struct ClassicProjection {
     pub(super) first_run_index: Option<usize>,
     pub(super) omitted_history: bool,
@@ -106,6 +114,7 @@ pub(super) struct History {
     unseen_new_content: bool,
     find: Option<String>,
     find_failed: bool,
+    last_find: Option<String>,
     matched_row: Option<usize>,
     notices: VecDeque<Notice>,
     next_notice: u64,
@@ -161,6 +170,7 @@ impl History {
                 self.unseen_new_content = false;
                 self.selection = None;
                 self.find = None;
+                self.last_find = None;
                 self.matched_row = None;
                 self.notices.clear();
                 self.preview = None;
@@ -399,6 +409,8 @@ impl History {
         if self.details != details {
             self.details = details;
             self.dirty = true;
+            // The rows change, so a highlighted match would mark the wrong row.
+            self.matched_row = None;
         }
     }
 
@@ -544,6 +556,8 @@ impl History {
                     self.find_failed = !self.search(view, &query);
                     if self.find_failed {
                         self.find = Some(query);
+                    } else {
+                        self.last_find = Some(query);
                     }
                 }
                 TerminalInput::Escape => {
@@ -832,14 +846,128 @@ impl History {
                 } else {
                     message_row_count(&text[..byte], self.width).saturating_sub(2)
                 };
-                let row = message.start + offset;
-                self.top = row.saturating_sub(1).min(self.tail());
-                self.follow_tail = false;
-                self.matched_row = Some(row);
+                self.show_match(message.start + offset);
                 return true;
             }
         }
         false
+    }
+
+    fn show_match(&mut self, row: usize) {
+        self.top = row.saturating_sub(1).min(self.tail());
+        self.follow_tail = false;
+        self.matched_row = Some(row);
+    }
+
+    // Moves to the nearest match of the last query above (`older`) or below the current match.
+    fn step_match(&mut self, view: &SessionView, older: bool) -> bool {
+        let Some(query) = self.last_find.clone() else {
+            return false;
+        };
+        let Some(current) = self.matched_row else {
+            return self.search(view, &query);
+        };
+        let rows = |message: &MessageIndex| {
+            let text = message_text(view, message, &self.notices);
+            if !text.contains(query.as_str()) {
+                return Vec::new();
+            }
+            let rows = message_rows(message.kind, &text, self.width);
+            text.match_indices(query.as_str())
+                .map(|(byte, _)| {
+                    message.start
+                        + rows
+                            .partition_point(|row| row.source_byte <= byte)
+                            .saturating_sub(1)
+                })
+                .collect::<Vec<_>>()
+        };
+        let found = if older {
+            self.messages
+                .iter()
+                .rev()
+                .filter(|message| message.start < current)
+                .find_map(|message| rows(message).into_iter().rev().find(|row| *row < current))
+        } else {
+            self.messages
+                .iter()
+                .filter(|message| message.start + message.rows > current + 1)
+                .find_map(|message| rows(message).into_iter().find(|row| *row > current))
+        };
+        found.inspect(|row| self.show_match(*row)).is_some()
+    }
+
+    // The transcript pager's less-style keys; find typing, pointer and process input pass through.
+    pub(super) fn pager_input(&mut self, input: super::TerminalInput, view: &SessionView) -> Pager {
+        use super::TerminalInput as Key;
+        if self.find.is_some() {
+            return if self.handle(input, view) {
+                Pager::Handled
+            } else {
+                Pager::Pass
+            };
+        }
+        let half = (self.height / 2).max(1);
+        match input {
+            Key::Character('q') | Key::Escape | Key::Transcript => return Pager::Close,
+            Key::Character('[') => return Pager::Dump,
+            Key::Character('/') | Key::HistoryFind => {
+                self.handle(Key::HistoryFind, view);
+            }
+            Key::Character(next @ ('n' | 'N')) => {
+                self.step_match(view, next == 'n');
+            }
+            Key::Character('j') | Key::Down => {
+                self.scroll(false, 1);
+            }
+            Key::Character('k') | Key::Up => {
+                self.scroll(true, 1);
+            }
+            Key::Character('g') | Key::Home => {
+                self.scroll(true, usize::MAX);
+            }
+            Key::Character('G') | Key::End | Key::HistoryLive => {
+                self.scroll(false, usize::MAX);
+            }
+            Key::HalfPageUp => {
+                self.scroll(true, half);
+            }
+            Key::EndOfInput => {
+                self.scroll(false, half);
+            }
+            Key::PageUp | Key::PageDown => {
+                self.handle(input, view);
+            }
+            Key::Character(_)
+            | Key::Newline
+            | Key::Backspace
+            | Key::Delete
+            | Key::Left
+            | Key::Right
+            | Key::WordLeft
+            | Key::WordRight
+            | Key::BackspaceWord
+            | Key::Tab
+            | Key::Submit
+            | Key::CycleApprovalMode
+            | Key::QuickActions
+            | Key::ClipboardPaste => {}
+            _ => return Pager::Pass,
+        }
+        Pager::Handled
+    }
+
+    pub(super) fn pager_status(&self) -> String {
+        if let Some(status) = self.status().filter(|_| self.find.is_some()) {
+            return status;
+        }
+        match self.width {
+            0..=23 => "q close · [ dump",
+            24..=49 => "/ n N · [ dump · q close",
+            50..=79 => "/ find · n/N · j/k · g/G · [ scrollback · q close",
+            _ => "Transcript · / find · n/N · j/k · g/G · Ctrl+U/D · [ scrollback · q close",
+        }
+        .to_owned()
     }
 
     pub(super) fn find_open(&self) -> bool {
@@ -2326,6 +2454,130 @@ mod tests {
                 .any(|row| row.text.contains("Terminal resumed")),
             "persistent category must survive wording formerly classified as transient"
         );
+    }
+
+    #[test]
+    fn pager_keys_scroll_find_step_and_close_like_less() {
+        use super::super::TerminalInput as Key;
+        let mut view = session();
+        for index in 0..6 {
+            view.runs.push(run(
+                &format!("objective {index}"),
+                &format!("needle {index}\nline a\nline b\nneedle again {index}"),
+            ));
+        }
+        let mut history = History::default();
+        history.sync(&view, 40, 10);
+        assert_eq!((history.top, history.tail()), (44, 44));
+        for (input, action, top) in [
+            (Key::Character('n'), Pager::Handled, 44),
+            (Key::Character('k'), Pager::Handled, 43),
+            (Key::Up, Pager::Handled, 42),
+            (Key::Character('j'), Pager::Handled, 43),
+            (Key::Down, Pager::Handled, 44),
+            (Key::HalfPageUp, Pager::Handled, 39),
+            (Key::EndOfInput, Pager::Handled, 44),
+            (Key::PageUp, Pager::Handled, 35),
+            (Key::PageDown, Pager::Handled, 44),
+            (Key::Character('g'), Pager::Handled, 0),
+            (Key::Character('x'), Pager::Handled, 0),
+            (Key::Submit, Pager::Handled, 0),
+            (Key::Backspace, Pager::Handled, 0),
+            (Key::End, Pager::Handled, 44),
+            (Key::Home, Pager::Handled, 0),
+            (Key::Character('G'), Pager::Handled, 44),
+            (Key::Character('q'), Pager::Close, 44),
+            (Key::Escape, Pager::Close, 44),
+            (Key::Transcript, Pager::Close, 44),
+            (Key::Character('['), Pager::Dump, 44),
+            (Key::Interrupt, Pager::Pass, 44),
+            (Key::CopySelection, Pager::Pass, 44),
+            (Key::Suspend, Pager::Pass, 44),
+            (Key::Resize, Pager::Pass, 44),
+            (Key::Paste, Pager::Pass, 44),
+            (Key::PointerScrollUp { column: 0, row: 0 }, Pager::Pass, 44),
+            (
+                Key::PointerClick {
+                    column: 0,
+                    row: 0,
+                    clicks: 1,
+                },
+                Pager::Pass,
+                44,
+            ),
+        ] {
+            assert_eq!(history.pager_input(input, &view), action, "{input:?}");
+            assert_eq!(history.top, top, "{input:?}");
+        }
+        assert!(history.follow_tail, "G returns to the live end");
+
+        // `/` finds the newest match; `n` steps to older matches and `N` back to newer ones.
+        let matched = |history: &History| {
+            history
+                .visible(&view)
+                .into_iter()
+                .find(|row| row.matched)
+                .map(|row| row.text)
+        };
+        assert_eq!(
+            history.pager_input(Key::Character('/'), &view),
+            Pager::Handled
+        );
+        for character in "needle".chars() {
+            assert_eq!(
+                history.pager_input(Key::Character(character), &view),
+                Pager::Handled
+            );
+        }
+        assert_eq!(history.pager_input(Key::Submit, &view), Pager::Handled);
+        assert_eq!(matched(&history).as_deref(), Some("  needle 5"));
+        for (key, expected) in [
+            ('n', "  needle again 4"),
+            ('n', "  needle 4"),
+            ('N', "  needle again 4"),
+            ('N', "  needle 5"),
+            ('N', "  needle again 5"),
+            ('N', "  needle again 5"),
+        ] {
+            assert_eq!(
+                history.pager_input(Key::Character(key), &view),
+                Pager::Handled
+            );
+            assert_eq!(matched(&history).as_deref(), Some(expected), "{key}");
+        }
+
+        // Ctrl+F is `/`; while find is open, letters type and Escape closes only the find.
+        assert_eq!(history.pager_input(Key::HistoryFind, &view), Pager::Handled);
+        assert_eq!(
+            history.pager_input(Key::Character('q'), &view),
+            Pager::Handled
+        );
+        assert!(history.pager_status().starts_with("Find: q"));
+        assert_eq!(history.pager_input(Key::Escape, &view), Pager::Handled);
+        assert!(!history.find_open());
+        assert_eq!(
+            history.pager_input(Key::Character('/'), &view),
+            Pager::Handled
+        );
+        assert_eq!(history.pager_input(Key::Interrupt, &view), Pager::Pass);
+        assert!(
+            !history.find_open(),
+            "Ctrl+C closes find and keeps its meaning"
+        );
+
+        for (width, footer) in [
+            (16, "q close · [ dump"),
+            (24, "/ n N · [ dump · q close"),
+            (50, "/ find · n/N · j/k · g/G · [ scrollback · q close"),
+            (
+                80,
+                "Transcript · / find · n/N · j/k · g/G · Ctrl+U/D · [ scrollback · q close",
+            ),
+        ] {
+            history.sync(&view, width, 10);
+            assert_eq!(history.pager_status(), footer);
+            assert!(escaped_terminal_width(footer) <= width, "{width}");
+        }
     }
 
     #[test]

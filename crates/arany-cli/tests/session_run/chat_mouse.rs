@@ -69,8 +69,26 @@ struct Chat {
 
 impl Chat {
     fn start(root: &Path, state: &Path, workspace: &Path, env: &[(&str, &str)]) -> Self {
-        let command = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; exit \"$exit_code\"";
-        let mut attached = crate::isolation::isolated_script(root);
+        Self::launch(root, state, workspace, env, "--resume", false)
+    }
+
+    // `arguments` follow the State and Workspace flags; `network` keeps loopback for a Provider.
+    fn launch(
+        root: &Path,
+        state: &Path,
+        workspace: &Path,
+        env: &[(&str, &str)],
+        arguments: &str,
+        network: bool,
+    ) -> Self {
+        let command = format!(
+            "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" {arguments}; exit_code=$?; exit \"$exit_code\""
+        );
+        let mut attached = if network {
+            crate::isolation::account_isolated_script(root)
+        } else {
+            crate::isolation::isolated_script(root)
+        };
         attached
             .env_clear()
             .env("ARANY_TEST_EXE", "/arany")
@@ -80,7 +98,7 @@ impl Chat {
             .env("TERM", "xterm")
             .envs(env.iter().copied())
             .current_dir(workspace)
-            .args(["-q", "-e", "-c", command, "/dev/null"])
+            .args(["-q", "-e", "-c", &command, "/dev/null"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
@@ -369,4 +387,185 @@ fn disabled_mouse_fullscreen_uses_alternate_scroll_only() {
     let modes = chat.exit();
     assert_eq!(modes.active, Vec::<u32>::new(), "alternate scroll restored");
     assert_eq!(modes.enabled, [1007], "no mouse reporting mode");
+}
+
+fn position(bytes: &[u8], needle: &[u8]) -> Option<usize> {
+    bytes.windows(needle.len()).position(|part| part == needle)
+}
+
+// The decoded rows `[` wrote on the primary screen, or None until its return cue is shown.
+fn dumped_rows(bytes: &[u8]) -> Option<Vec<String>> {
+    let rows = screen_rows(&bytes[position(bytes, b"\x1b[?1049l")?..], 80, 24);
+    rows.iter()
+        .any(|row| row.trim_end() == "Enter returns to Arany")
+        .then_some(rows)
+}
+
+// Checks the dump: capture and the alternate screen end before the bounded, escaped text.
+fn assert_bounded_dump(bytes: &[u8], answer: &str) {
+    let rows = dumped_rows(bytes).expect("dump return cue");
+    let text = rows.iter().map(|row| row.trim_end()).collect::<Vec<_>>();
+    let released = [b"\x1b[?1049l".as_slice(), b"\x1b[?1000l"]
+        .into_iter()
+        .map(|mode| position(bytes, mode).expect("mode released by the dump"))
+        .max()
+        .expect("released modes");
+    assert!(
+        !screen_rows(&bytes[..released], 80, 24)
+            .iter()
+            .any(|row| row.contains("Transcript details:")),
+        "modes are released before the text"
+    );
+    let heading = text
+        .iter()
+        .position(|row| *row == "Transcript details:")
+        .unwrap_or_else(|| panic!("dump heading: {text:#?}"));
+    // 17 seeded Runs and the active one: the 16 newest are shown, then the limit cue.
+    assert_eq!(
+        text.iter()
+            .filter(|row| row.contains("DETAIL_CANARY \\u{001b}]52;c;inert\\u{0007}"))
+            .count(),
+        15,
+        "{text:#?}"
+    );
+    let cue = text
+        .iter()
+        .position(|row| row.starts_with("Transcript detail limit reached"))
+        .unwrap_or_else(|| panic!("limit cue: {text:#?}"));
+    assert!(heading < cue && text[cue + 1] == "Enter returns to Arany");
+    assert!(
+        text[heading..cue]
+            .iter()
+            .all(|row| !row.contains(answer) || row.starts_with("Arany · incomplete:")),
+        "only bounded detail lines: {text:#?}"
+    );
+    assert_eq!(
+        position(bytes, b"\x1b]52"),
+        None,
+        "no raw clipboard sequence"
+    );
+    assert_eq!(
+        position(bytes, b"\x1b[?1049h"),
+        None,
+        "no redraw during the dump"
+    );
+}
+
+#[test]
+fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams() {
+    const ANSWER: &str = "STREAM_CANARY";
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("Workspace");
+    let state = temp.path().join("state");
+    crate::seed_fullscreen(&state);
+    let id = crate::seed_transcript_session(&state, &workspace);
+    let provider = super::loopback::held_stream_provider(&state, ANSWER);
+    super::loopback::check_profile(&workspace, &state);
+    let mut chat = Chat::launch(
+        temp.path(),
+        &state,
+        &workspace,
+        &[("ARANY_PROVIDER_LOCAL_KEY", "test-key")],
+        &format!("--resume {id} --provider custom:local --model model-1 stream"),
+        true,
+    );
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while provider.streaming.try_recv().is_err() {
+        chat.pump();
+        assert!(
+            Instant::now() < deadline,
+            "streamed Run call: {}",
+            tail(&chat.transcript)
+        );
+        thread::yield_now();
+    }
+    let pid = chat.adopt_product(&state);
+
+    // The pager replaces the composer with detailed History above its key footer.
+    let pager = |bytes: &[u8]| {
+        screen_rows(bytes, 80, 24)[23].starts_with("Transcript · / find · n/N · j/k · g/G")
+    };
+    chat.send(b"\x0f");
+    chat.wait(0, pager, "pager footer");
+    chat.pump();
+    chat.assert_active(&CAPTURE, "pager during the Run");
+    chat.fresh();
+    let from = chat.send(b"[");
+    chat.wait(from, |bytes| dumped_rows(bytes).is_some(), "dump");
+    chat.pump();
+    chat.assert_active(&[], "dump released capture");
+    assert_bounded_dump(&chat.transcript, ANSWER);
+
+    // The Run finishes its stream while the dump waits; nothing redraws until Enter.
+    provider.release.send(()).expect("release the stream");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while provider.consumed.try_recv().is_err() {
+        chat.pump();
+        assert!(
+            Instant::now() < deadline,
+            "Run consumed its stream during the dump: {}",
+            tail(&chat.transcript)
+        );
+        thread::yield_now();
+    }
+    chat.pump();
+    assert_eq!(position(&chat.transcript, b"\x1b[?1049h"), None);
+    chat.assert_active(&[], "dump waits for Enter");
+
+    let back = chat.send(b"\r");
+    chat.wait(
+        back,
+        |bytes| {
+            let rows = screen_rows(bytes, 80, 24);
+            position(bytes, b"\x1b[?1049h").is_some()
+                && pager(bytes)
+                && rows.iter().enumerate().skip(1).any(|(index, row)| {
+                    row.trim_end() == format!("  {ANSWER}")
+                        && rows[index - 1].trim_end() == "● Arany:"
+                })
+        },
+        "pager returns with the finished answer",
+    );
+    chat.pump();
+    chat.assert_active(&CAPTURE, "Enter reacquires capture");
+    provider.peer.join().expect("held stream Provider");
+
+    // Suspension during a dump restores the shell and returns to the pager on SIGCONT.
+    chat.fresh();
+    let from = chat.send(b"[");
+    chat.wait(from, |bytes| dumped_rows(bytes).is_some(), "second dump");
+    chat.pump();
+    chat.assert_active(&[], "second dump released capture");
+    let suspended_at = chat.send(b"\x1a");
+    wait_stopped(pid);
+    chat.pump();
+    chat.assert_active(&[], "stopped during the dump");
+    let resumed_at = chat.transcript.len();
+    assert_eq!(
+        position(&chat.transcript[suspended_at..], b"\x1b[2J"),
+        None,
+        "suspension leaves the dump on the primary screen"
+    );
+    kill_process(pid, Signal::CONT).expect("resume chat");
+    // The resumed footer names the resume, so detail rows show that the pager reopened.
+    chat.wait(
+        resumed_at,
+        |bytes| {
+            position(bytes, b"\x1b[?1049h").is_some()
+                && screen_rows(bytes, 80, 24)
+                    .iter()
+                    .any(|row| row.starts_with("Arany · commentary:"))
+        },
+        "pager after SIGCONT",
+    );
+    chat.pump();
+    chat.assert_active(&CAPTURE, "resumed pager");
+    chat.step("pager closed", b"q", &[EMPTY_COMPOSER], &CAPTURE);
+
+    let modes = chat.exit();
+    assert_eq!(modes.active, Vec::<u32>::new(), "modes restored on exit");
+    let mut enabled = modes.enabled;
+    enabled.sort_unstable();
+    assert_eq!(enabled, CAPTURE, "never 1003, 1015 or 1007");
 }
