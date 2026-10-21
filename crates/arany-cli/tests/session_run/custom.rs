@@ -709,6 +709,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
             "test-key",
             "OMITTED_WORKSPACE_CANARY",
             "EXPECTED_WORKSPACE_GUIDANCE",
+            "EXPECTED_USER_GUIDANCE",
             "verified answer",
             "team answer",
             "model-1",
