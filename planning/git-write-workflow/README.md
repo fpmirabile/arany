@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: `fpmirabile`; the implementation lead owns delivery and evidence for each slice.
 - Last updated: `2026-10-21`
 
@@ -114,12 +114,10 @@ At most one Git write/publication per Workspace is in flight; use existing bound
 
 3. **S3 — Push and open a PR with a separate human-approved host class (one PR, on S2).** Resolve the owner authentication questions below before implementation. Land the exact AGENTS.md amendment quoted above in this slice. Ship typed `git_push` and `gh_pr_create` from catalog/grant through canonical intent with exact destination and payload → policy/rules and mandatory human approval in every permitted mode → committed host verdict → supervised pinned host Git/gh using inert private config and admitted credentials → host receipt/observation → consistent `host` markings in terminal, transcript, exec/show and Goal report. Reject unsupported auth/transport, missing humans and hostile routing before dispatch; pin `gh --repo/--head/--base` so PR creation cannot implicitly push/fork or discover a different repository. Update tools.md and execution.md, including migrations for new host variants/provenance and reducer rejection of Guard/unguarded receipts or rule/AI-only host approvals. Extend the success, missing-human, credential-canary and uncertain-remote scenarios above. This completes the usable local-change → commit → branch → approved push → separately approved PR workflow without a Guard proxy.
 
-## Open questions
+## Decided defaults (owner directive: working first, protections later)
 
-The overall plan stays Draft. These are S3 authentication decisions for **fpmirabile (owner)** with the implementation lead; they do not reopen the approved exception, rule source, signing or commit-approval defaults. S1/S2 can proceed after their stated dependency; S3's Plan gate remains closed until these are answered.
-
-- **Git credentials and transport:** which minimal HTTPS and/or SSH adapter should v1 admit? May it invoke a pinned, explicitly selected user credential helper/agent, or should the first route use an Arany-owned credential adapter? Specify helper argv/environment, socket access, host verification, secrets disclosure and how to handle authentication expiry without executing repository-selected helpers or interactive prompts.
-- **GitHub authentication:** may pinned `gh` use an explicitly admitted user-owned gh credential store/keyring, or should Arany provide a narrowly scoped token? Decide the allowed GitHub host(s), private gh config/HOME, pager/alias/extension/editor suppression and the Git transport credentials used if gh spawns Git. Do not assume Arany Provider credentials are GitHub credentials. Missing auth must refuse with a user setup action; token creation/login is not an implicit Tool effect.
+- **Git credentials and transport (S3):** use the user's existing credentials the way peers do, through the user's configured credential helper or the ssh-agent socket from the launching environment, with the pinned `git` binary and inert repository config. Arany adds no credential adapter in v1. Hardening (an Arany-owned adapter, narrower helper argv and environment) is a later protection.
+- **GitHub authentication (S3):** the pinned `gh` uses the user's own existing `gh` auth store. Pager, alias, extension and editor stay suppressed, and the allowed host is github.com unless the user config names another. A narrowly scoped Arany token is a later protection.
 
 ## Exit criteria
 
