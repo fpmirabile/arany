@@ -895,6 +895,104 @@ fn long_listings_never_block_concurrent_appends() {
 }
 
 #[test]
+fn listing_retries_busy_reads_at_the_same_watermark_and_stops_at_the_bound() {
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static WRITER: RefCell<Option<(Connection, SessionId)>> = const { RefCell::new(None) };
+        static RELEASE_AT: Cell<usize> = const { Cell::new(0) };
+        static BUSY: Cell<usize> = const { Cell::new(0) };
+    }
+
+    let temp = tempfile::tempdir().expect("journal fixture");
+    let path = temp.path().join(DATABASE_FILE);
+    Connection::open(&path).expect("create journal");
+    let mut writer = open_database(&path, false).expect("writer");
+    let mine = WorkspaceIdentity {
+        device: 1,
+        inode: 1,
+    };
+    let target = seed_session(&mut writer, &mut None, mine, 0);
+    writer
+        .busy_timeout(std::time::Duration::ZERO)
+        .expect("nonblocking writer");
+    let reader = open_database(&path, true).expect("reader");
+    reader
+        .busy_handler(Some(|_| {
+            BUSY.set(BUSY.get() + 1);
+            if BUSY.get() == RELEASE_AT.get() {
+                WRITER.with(|slot| {
+                    let mut slot = slot.borrow_mut();
+                    let (writer, target) = slot.as_mut().expect("writer at commit gate");
+                    writer.execute_batch("COMMIT").expect("release commit lock");
+                    append(
+                        writer,
+                        &mut None,
+                        *target,
+                        Event::SessionRenamed {
+                            title: "committed during contention".into(),
+                        },
+                    )
+                    .expect("reader holds no lock while retrying");
+                });
+            }
+            false
+        }))
+        .expect("deterministic busy boundary");
+    WRITER.with(|slot| *slot.borrow_mut() = Some((writer, target)));
+
+    for iteration in 0..30 {
+        let watermark: i64 = reader
+            .query_row(WATERMARK_SQL, [], |row| row.get(0))
+            .expect("watermark");
+        let watermark = u64::try_from(watermark).expect("nonnegative sequence");
+        BUSY.set(0);
+        let busy_reads = iteration % 3 + 1;
+        RELEASE_AT.set(busy_reads);
+        let result = list_page_in_snapshot(&reader, mine, None, 10, usize::MAX, None, || {
+            WRITER.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .expect("writer")
+                    .0
+                    .execute_batch("BEGIN EXCLUSIVE")
+                    .expect("hold commit lock")
+            });
+        });
+        let (page, sequence) = result.expect("page survives a completed busy wait");
+        assert_eq!(BUSY.get(), busy_reads);
+        assert_eq!(sequence, watermark);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].last_sequence, watermark);
+    }
+
+    BUSY.set(0);
+    RELEASE_AT.set(0);
+    WRITER.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .expect("writer")
+            .0
+            .execute_batch("BEGIN EXCLUSIVE")
+            .expect("hold commit lock")
+    });
+    let refused = list_all_sessions(&reader, mine);
+    WRITER.with(|slot| {
+        slot.borrow_mut()
+            .take()
+            .expect("writer")
+            .0
+            .execute_batch("COMMIT")
+            .expect("release commit lock")
+    });
+    assert!(matches!(refused,
+        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(failure, _)))
+            if failure.code == rusqlite::ErrorCode::DatabaseBusy
+    ));
+    assert_eq!(BUSY.get(), 4, "one attempt and three retries");
+}
+
+#[test]
 fn listing_holds_no_reader_lock_while_decoding() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};

@@ -13,6 +13,7 @@ const MAX_FORK_DEPTH: usize = 8;
 const MAX_DISCOVERED_SESSIONS: usize = 65_536;
 pub(super) const MAX_LIST_SCAN_EVENTS: usize = 262_144;
 const LIST_HEAD_CHUNK: usize = 1024;
+const MAX_LIST_BUSY_RETRIES: usize = 3;
 pub(super) const WATERMARK_SQL: &str = "SELECT COALESCE(MAX(sequence), 0) FROM events";
 pub(super) const NEXT_HEAD_SQL: &str =
     "SELECT session_id FROM events WHERE session_id > ?1 ORDER BY session_id LIMIT 1";
@@ -196,10 +197,31 @@ fn discover_session_heads(
     workspace_identity: WorkspaceIdentity,
     watermark: Option<u64>,
 ) -> Result<SessionListing, StoreError> {
-    let watermark: i64 = match watermark {
-        Some(sequence) => i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
-        None => connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?,
-    };
+    let watermark = retry_listing_read(|| match watermark {
+        Some(sequence) => i64::try_from(sequence).map_err(|_| StoreError::InvalidHistory),
+        None => Ok(connection.query_row(WATERMARK_SQL, [], |row| row.get(0))?),
+    })?;
+    retry_listing_read(|| discover_session_heads_at(connection, workspace_identity, watermark))
+}
+
+fn retry_listing_read<T>(mut read: impl FnMut() -> Result<T, StoreError>) -> Result<T, StoreError> {
+    let mut result = read();
+    for _ in 0..MAX_LIST_BUSY_RETRIES {
+        if !matches!(&result, Err(StoreError::Sqlite(error))
+            if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy))
+        {
+            break;
+        }
+        result = read();
+    }
+    result
+}
+
+fn discover_session_heads_at(
+    connection: &Connection,
+    workspace_identity: WorkspaceIdentity,
+    watermark: i64,
+) -> Result<SessionListing, StoreError> {
     let mut tails = HashMap::<SessionId, u64>::new();
     let mut roots = HashMap::<SessionId, (Option<WorkspaceIdentity>, Option<SessionId>)>::new();
     let mut next_head = connection.prepare(NEXT_HEAD_SQL)?;
@@ -285,6 +307,16 @@ fn discover_session_heads(
 
 impl SessionListing {
     fn page(
+        &self,
+        connection: &Connection,
+        start: usize,
+        limit: usize,
+        budget: usize,
+    ) -> Result<SessionPage, StoreError> {
+        retry_listing_read(|| self.page_once(connection, start, limit, budget))
+    }
+
+    fn page_once(
         &self,
         connection: &Connection,
         start: usize,
