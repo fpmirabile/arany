@@ -1047,6 +1047,8 @@ impl History {
 pub(super) const SCROLLBACK_RETURN_CUE: &str = "Enter returns to Arany";
 const SCROLLBACK_HEADING: &str = "Arany transcript:";
 const SCROLLBACK_OMITTED: &str = "Earlier Runs omitted; arany show prints the whole conversation";
+const SCROLLBACK_NONE_FIT: &str =
+    "The newest Run exceeds the transcript limit; arany show prints the whole conversation";
 
 // The pager's `[` text: the newest whole Runs read like chat (objective, details, committed
 // answer), escaped line by line with CRLF endings, within the Run and byte bounds.
@@ -1054,7 +1056,7 @@ pub(super) fn scrollback_transcript(view: &SessionView) -> String {
     let emitted = |indent: &str, text: &str| indent.len() + escaped_terminal_bytes(text) + 2;
     let mut remaining = MAX_CLASSIC_HISTORY_BYTES
         - emitted("", SCROLLBACK_HEADING)
-        - emitted("", SCROLLBACK_OMITTED)
+        - emitted("", SCROLLBACK_OMITTED).max(emitted("", SCROLLBACK_NONE_FIT))
         - emitted("", SCROLLBACK_RETURN_CUE);
     let mut blocks = Vec::new();
     for run in view.runs.iter().rev().take(MAX_CLASSIC_HISTORY_RUNS) {
@@ -1090,8 +1092,13 @@ pub(super) fn scrollback_transcript(view: &SessionView) -> String {
         );
     }
     let mut text = format!("{SCROLLBACK_HEADING}\r\n");
+    let cue = if blocks.is_empty() {
+        SCROLLBACK_NONE_FIT
+    } else {
+        SCROLLBACK_OMITTED
+    };
     if blocks.len() < view.runs.len() {
-        text.push_str(SCROLLBACK_OMITTED);
+        text.push_str(cue);
         text.push_str("\r\n");
     }
     text.extend(blocks.into_iter().rev());
@@ -2676,7 +2683,8 @@ mod tests {
             assert!(text.len() <= MAX_CLASSIC_HISTORY_BYTES, "{newlines}");
             assert_eq!(text.contains("  newest\r\n"), kept, "{newlines}");
             assert_eq!(text.contains("  older\r\n"), kept, "{newlines}");
-            assert_eq!(text.contains(SCROLLBACK_OMITTED), !kept, "{newlines}");
+            assert!(!text.contains(SCROLLBACK_OMITTED), "{newlines}");
+            assert_eq!(text.contains(SCROLLBACK_NONE_FIT), !kept, "{newlines}");
             assert!(text.ends_with("Enter returns to Arany\r\n"));
         }
     }

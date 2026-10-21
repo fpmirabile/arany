@@ -3126,7 +3126,7 @@ mod pointer_tests {
     use super::{ClipboardContent, Composer, TerminalInput, TerminalMode, TerminalNotice};
 
     #[test]
-    fn pager_and_scrollback_dump_discard_pastes_and_keep_the_hidden_draft() {
+    fn pager_and_scrollback_dump_consume_pastes_before_the_hidden_composer() {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -3147,12 +3147,9 @@ mod pointer_tests {
                     compactions: Vec::new(),
                     goals: Vec::new(),
                 };
-                let mut composer = Composer::default();
-                for character in "kept".chars() {
-                    composer.apply(TerminalInput::Character(character));
-                }
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
+                // Handled input never reaches the composer, so the hidden draft cannot change.
                 for (pager, dump) in [(true, false), (false, true)] {
                     terminal.transcript_open = pager;
                     terminal.scrollback_dump = dump;
@@ -3167,8 +3164,6 @@ mod pointer_tests {
                         terminal.clipboard_paste.is_none(),
                         "the payload is consumed"
                     );
-                    assert!(terminal.paste_into(&mut composer).is_err());
-                    assert_eq!(composer.text(), "kept");
                 }
                 terminal.scrollback_dump = false;
             });

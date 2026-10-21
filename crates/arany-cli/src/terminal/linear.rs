@@ -29,13 +29,22 @@ pub(super) struct LinearState {
     held_prompt: Option<&'static str>,
 }
 
-// A Run's unescaped detail parts: incomplete answer, public commentary, limit cue, Tools and verdicts.
+// A Run's unescaped detail parts: provisional or incomplete answer, public commentary, limit cue, Tools and verdicts.
 pub(super) fn transcript_details(run: &arany::RunView) -> Vec<String> {
     let mut parts = Vec::new();
     if run.assistant_message.is_none()
         && let Some(answer) = crate::presentation::display_answer(run)
     {
-        parts.push(format!("Arany · incomplete:\n{answer}"));
+        // Text of a Run still streaming is provisional; only a settled Run's text is incomplete.
+        let label = if matches!(
+            run.status,
+            arany::RunStatus::Pending | arany::RunStatus::Active
+        ) {
+            "Arany · provisional:"
+        } else {
+            "Arany · incomplete:"
+        };
+        parts.push(format!("{label}\n{answer}"));
     }
     parts.extend(
         crate::presentation::display_commentary(run)
