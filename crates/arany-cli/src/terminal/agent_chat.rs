@@ -49,8 +49,7 @@ pub(super) enum Step {
     Select(usize),
 }
 
-// `viewing` is the shown target; `admitted` means an empty composer with no popup or dialog.
-// Target 0 is the primary; the others follow committed spawn order and wrap.
+// Target 0 is the primary; `admitted` means an empty composer with no popup or dialog.
 pub(super) fn agent_key(
     input: TerminalInput,
     viewing: Option<usize>,

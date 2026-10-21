@@ -610,8 +610,7 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
     }
     linear_agent_chats(&workspace, &state, session_id);
 
-    // Viewing reads committed history only: the reopened journal keeps every earlier Event, and
-    // resuming adds just the inherited defaults, never a Run, note, cancellation or child Event.
+    // Only resume's inherited defaults may follow; viewing adds no Run, note or child Event.
     let (after_events, after) = replayed(&state, session_id);
     assert_eq!(after_events[..events.len()], events[..]);
     assert!(
@@ -663,8 +662,7 @@ fn agent_chat_journey(
     let mut answered = crate::session_picker::PtyResponses::default();
     let mut capture_from = 0;
     let context = if classic { "Classic" } else { "Fullscreen" };
-    // Each step sends keys, then waits until the decoded frame shows every needle and none of the
-    // absent text, since a frame can arrive in several reads; then it resets the capture.
+    // Decoding stops at the last cursor hide or show that ends a Ratatui frame, so a partial one never releases keys.
     let mut step = |keys: &[u8], needles: &[&str], absent: &[&str]| {
         capture_from = checkpoint_screen(
             &mut transcript,
@@ -675,27 +673,26 @@ fn agent_chat_journey(
         );
         let from = capture_from;
         input.write_all(keys).expect("PTY keys");
-        wait_for_screen(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            (from, size.0, size.1),
-            needles[0],
-        );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
-            let screen = screen_rows(&transcript, size.0, size.1).join("\n");
-            if needles.iter().all(|needle| screen.contains(needle))
-                && !absent.iter().any(|text| screen.contains(text))
-            {
-                break screen;
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            let frame_end = transcript[from..]
+                .windows(6)
+                .rposition(|part| part == b"\x1b[?25l" || part == b"\x1b[?25h")
+                .map(|offset| from + offset + 6);
+            let screen =
+                frame_end.map(|end| screen_rows(&transcript[..end], size.0, size.1).join("\n"));
+            if let Some(screen) = screen.as_ref().filter(|screen| {
+                needles.iter().all(|needle| screen.contains(needle))
+                    && !absent.iter().any(|text| screen.contains(text))
+            }) {
+                break screen.clone();
             }
             assert!(
                 Instant::now() < deadline,
-                "{context} missing {needles:?} or showing {absent:?}: {screen}"
+                "{context} missing {needles:?} or showing {absent:?}: {screen:?} {}",
+                tail(&transcript[from..])
             );
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
             thread::yield_now();
         }
     };

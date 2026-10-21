@@ -236,8 +236,7 @@ pub(crate) fn agent_label(agent: &AgentView) -> String {
     }
 }
 
-// The active or else the latest Run's agents: primary first, then children in committed spawn
-// order, which replay pins to their ordinals, so completion never reorders them.
+// Replay pins children to their spawn ordinals, so completion never reorders them.
 pub(crate) fn agent_targets(view: &SessionView) -> Option<(RunId, Vec<AgentTarget>)> {
     let run = view.runs.last()?;
     Some((
@@ -266,8 +265,7 @@ pub(crate) fn agent_targets(view: &SessionView) -> Option<(RunId, Vec<AgentTarge
     ))
 }
 
-// A child's committed assignment, newest whole Tool rows and result as a one-Run view, so the
-// ordinary History renderer escapes and lays it out; status and cues follow as notices.
+// A one-Run view, so the ordinary History renderer escapes and lays out the child's records.
 pub(crate) struct AgentTranscript {
     pub(crate) label: String,
     pub(crate) view: SessionView,
@@ -288,11 +286,17 @@ impl AgentTranscript {
             .find(|agent| agent.id == agent_id && agent.role == AgentRole::Child)?;
         let label = agent_label(agent);
         let status = agent_status_notice(run, agent, &label);
+        // The status, the cue and up to two text replacements are reserved before any record.
+        let reserved = [
+            status.as_str(),
+            TRANSCRIPT_OMITTED,
+            TEXT_OMITTED,
+            TEXT_OMITTED,
+        ]
+        .map(narrow_cost);
         let mut budget = Budget {
-            bytes: MAX_TRANSCRIPT_BYTES
-                - narrow_cost(&status).0
-                - narrow_cost(TRANSCRIPT_OMITTED).0,
-            rows: MAX_TRANSCRIPT_ROWS - narrow_cost(&status).1 - narrow_cost(TRANSCRIPT_OMITTED).1,
+            bytes: MAX_TRANSCRIPT_BYTES - reserved.iter().map(|cost| cost.0).sum::<usize>(),
+            rows: MAX_TRANSCRIPT_ROWS - reserved.iter().map(|cost| cost.1).sum::<usize>(),
         };
         let mut omitted = false;
         let mut bounded = |text: &str| {
@@ -787,13 +791,15 @@ pub(crate) mod tests {
         let mut run = run(0);
         let child = &mut run.agents[1];
         child.status = AgentStatus::Finished;
+        child.objective = Some("y".repeat(MAX_TRANSCRIPT_BYTES + 1));
         child.result = Some("x".repeat(MAX_TRANSCRIPT_BYTES + 1));
         child.tools = (0..3000)
             .map(|index| {
+                // Uncertain rows never collapse, so each kept Tool costs its own row.
                 read(
                     child.id,
                     &format!("file-{index}"),
-                    arany::ToolDisposition::Succeeded,
+                    arany::ToolDisposition::Uncertain,
                 )
             })
             .collect();

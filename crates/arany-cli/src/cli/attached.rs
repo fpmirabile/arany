@@ -735,8 +735,14 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .map_err(|error| error.to_string())?
         {
             AgentChatInput::Pass => {}
-            AgentChatInput::Handled | AgentChatInput::Returned => continue,
+            AgentChatInput::Handled | AgentChatInput::Returned => {
+                idle_escape = None;
+                empty_interrupt = None;
+                continue;
+            }
             AgentChatInput::Notice(text) => {
+                idle_escape = None;
+                empty_interrupt = None;
                 notice = Some(Feedback::Transient(text.into()));
                 continue;
             }
