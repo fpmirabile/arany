@@ -7,8 +7,25 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// One (kind, from, input, expected) row per production step. The glob steps keep payload bytes.
-const EVENT_FIXTURES: [EventFixture<'static>; 10] = [
+// One (kind, from, input, expected) row per production step. The glob and Git write steps keep
+// payload bytes; one shape is canonical for both source versions.
+const EVENT_FIXTURES: [EventFixture<'static>; 16] = [
+    ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 9, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        7,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        14,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
     ("ToolStarted", 13, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 19, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 3, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -261,7 +278,6 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
     });
 }
 
-// Rewrites each RunStarted row to its version-19 bytes and re-pins every prefix reference.
 fn downgrade_run_started(connection: &Connection) {
     repin(connection, |row| {
         if row.kind == "RunStarted" {
@@ -1030,6 +1046,16 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     let step = REGISTRY.event_step("ToolStarted", 13).unwrap();
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    // Version 14 may name glob but not the later Git writes.
+    let git_step = REGISTRY.event_step("ToolStarted", 14).unwrap();
+    assert!((git_step.canonical)(&forged).is_some());
+    let forged_git = GLOB_TOOLSTARTED.replace(
+        r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,
+        r#"{"operation":"git_switch","branch":"topic"}"#,
+    );
+    assert_ne!(forged_git, GLOB_TOOLSTARTED);
+    assert!((git_step.canonical)(&forged_git).is_none());
+    assert!((git_step.transform)(serde_json::from_str(&forged_git).unwrap()).is_none());
     // A version-18 row that already pins nested sources is forged; one without instructions pins none.
     let step = REGISTRY.event_step("RunStarted", 18).unwrap();
     let forged = ROOT_RUNSTARTED.replace(

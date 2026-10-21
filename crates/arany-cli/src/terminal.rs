@@ -1,6 +1,6 @@
 use crate::presentation::{
-    AgentInspectorModel, DraftAction, PresentationModel, image_message_lines, render_answer,
-    user_message_lines,
+    AgentInspectorModel, DraftAction, MAX_AGENT_ROWS, PresentationModel, image_message_lines,
+    render_answer, user_message_lines,
 };
 use arany::{Effort, ModelEntry};
 use arany::{RunStatus, SessionListItem, SessionView};
@@ -35,7 +35,7 @@ pub use rewind::RewindPanelError;
 mod view;
 use agent_chat::AgentChat;
 pub use agent_chat::{AgentChatFollow, AgentChatInput};
-use agents::{AgentPanel, PanelUpdate};
+use agents::{AgentPanel, PanelUpdate, window_start};
 use backend::TerminalBackend;
 use clipboard::{ClipboardContent, ClipboardRead};
 use commands::help_len;
@@ -49,11 +49,12 @@ use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
 use linear::LinearState;
 use view::{
-    Palette, agent_detail_lines, agent_detail_rows, agent_picker_index, bottom_area,
-    completion_height, composer_height, draw_agent_inspector_frame, draw_frame_with_history,
-    draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
-    draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
-    draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
+    AGENT_PICKER_ROWS, Palette, agent_detail_lines, agent_detail_rows, agent_picker_index,
+    bottom_area, completion_height, composer_height, draw_agent_inspector_frame,
+    draw_frame_with_history, draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame,
+    draw_session_picker_frame, draw_settings_frame, draw_setup_choices_frame, draw_setup_frame,
+    draw_setup_text_frame, draw_setup_warning_frame, history_top_padding, screen_terminal,
+    session_picker_index,
 };
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
@@ -68,7 +69,12 @@ const BRACKETED_PASTE: [&[u8]; 2] = [b"\x1b[?2004h", b"\x1b[?2004l"];
 static SELECTION_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn report_error(message: impl std::fmt::Display) {
-    let _ = writeln!(io::stderr().lock(), "error: {message}");
+    let _ = writeln!(io::stderr().lock(), "{}", error_line(&message.to_string()));
+}
+
+// Errors can quote untrusted repository data such as lock paths.
+pub(crate) fn error_line(message: &str) -> String {
+    format!("error: {}", crate::presentation::escape_terminal(message))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -1463,7 +1469,7 @@ impl AttachedTerminal {
         let mut panel = self.agent_panel.take();
         let help_selected = self.help_selected.take();
         if let Some(panel) = &mut panel {
-            panel.last_linear = None;
+            panel.printed = None;
         }
         let reading_panel = self.transcript_open;
         self.release()?;
@@ -2425,53 +2431,78 @@ impl AttachedTerminal {
         self.close_agents()
     }
 
-    pub fn agent_input(
+    // Enter opens the focused agent's chat; the caller then draws whichever view owns input.
+    pub async fn agent_input(
         &mut self,
         view: &SessionView,
         input: TerminalInput,
-    ) -> Result<(), TerminalError> {
+    ) -> Result<Option<&'static str>, TerminalError> {
         if matches!(
             input,
             TerminalInput::LineRejected | TerminalInput::LineContinued
         ) {
             self.discard_draft_input();
         }
-        let count = AgentInspectorModel::recent_agent_count(view);
-        let selected = self
-            .agent_panel
-            .as_ref()
-            .expect("open agent panel")
-            .selected;
+        let model = self.agent_model(view)?;
         let target = match input {
             TerminalInput::PointerMove { column, row }
             | TerminalInput::PointerClick { column, row, .. }
             | TerminalInput::PointerScrollUp { column, row }
-            | TerminalInput::PointerScrollDown { column, row } => self
-                .agent_picker_area
-                .and_then(|area| agent_picker_index(area, column, row, selected, count)),
+            | TerminalInput::PointerScrollDown { column, row } => {
+                self.agent_picker_area.and_then(|area| {
+                    agent_picker_index(area, column, row, model.selected, model.rows.len())
+                })
+            }
             _ => None,
         };
         let panel = self.agent_panel.as_mut().expect("open agent panel");
         let update = match input {
             TerminalInput::PointerMove { .. } | TerminalInput::PointerClick { .. } => {
-                target.map_or(PanelUpdate::Unchanged, |index| panel.select(index, count))
+                target.map_or(PanelUpdate::Unchanged, |index| panel.focus(&model, index))
             }
             TerminalInput::PointerScrollUp { .. } if target.is_some() => {
-                panel.handle(TerminalInput::Up, count, false)
+                panel.handle(TerminalInput::Up, &model, false)
             }
             TerminalInput::PointerScrollDown { .. } if target.is_some() => {
-                panel.handle(TerminalInput::Down, count, false)
+                panel.handle(TerminalInput::Down, &model, false)
             }
             TerminalInput::PointerScrollUp { .. } | TerminalInput::PointerScrollDown { .. } => {
                 PanelUpdate::Unchanged
             }
-            _ => panel.handle(input, count, self.linear.is_some()),
+            _ => panel.handle(input, &model, self.linear.is_some()),
         };
         match update {
-            PanelUpdate::Unchanged => Ok(()),
-            PanelUpdate::Redraw => self.draw_agents(view),
-            PanelUpdate::Closed => self.close_agents(),
+            PanelUpdate::Unchanged => Ok(None),
+            PanelUpdate::Redraw => self.draw_agents(view).map(|()| None),
+            PanelUpdate::Rearm => {
+                self.begin_dialog();
+                self.draw_agents(view)?;
+                if let Err(error) = self.arm_dialog().await {
+                    let _ = self.close_agents();
+                    return Err(error);
+                }
+                self.draw_agents(view).map(|()| None)
+            }
+            PanelUpdate::Closed => self.close_agents().map(|()| None),
+            PanelUpdate::Open(run, agent) => {
+                self.close_agents()?;
+                self.open_agent(view, run, agent).await
+            }
         }
+    }
+
+    fn agent_model(&mut self, view: &SessionView) -> Result<AgentInspectorModel, TerminalError> {
+        let width = match &mut self.terminal {
+            Some(terminal) if self.linear.is_none() => terminal.size()?.width,
+            _ => 120,
+        };
+        let panel = self.agent_panel.as_ref().expect("open agent panel");
+        Ok(AgentInspectorModel::from_session(
+            view,
+            &panel.query,
+            width,
+            panel.locked,
+        ))
     }
 
     fn draw_agents(&mut self, view: &SessionView) -> Result<(), TerminalError> {
@@ -2483,17 +2514,16 @@ impl AttachedTerminal {
     }
 
     fn draw_agents_inner(&mut self, view: &SessionView) -> Result<(), TerminalError> {
-        let panel = self.agent_panel.as_ref().expect("open agent panel");
-        let selected = panel.selected;
-        let locked = panel.locked;
+        let model = self.agent_model(view)?;
+        let panel = self.agent_panel.as_mut().expect("open agent panel");
+        panel.query.focus = model.shown_focus(panel.query.focus);
         if let Some(linear) = &mut self.linear {
-            let model = AgentInspectorModel::from_session(view, selected, 120, locked);
-            let panel = self.agent_panel.as_mut().expect("open agent panel");
-            panel.selected = model.selected;
-            if panel.last_linear != Some((view.last_sequence, model.selected)) {
-                linear.write_agents(&mut io::stderr(), &model, panel.invalid_notice)?;
-                panel.invalid_notice = false;
-                panel.last_linear = Some((view.last_sequence, model.selected));
+            // Committed changes never renumber printed choices; only a user action reprints.
+            if panel.printed.is_none() {
+                let start = window_start(model.selected, MAX_AGENT_ROWS);
+                linear.write_agents(&mut io::stderr(), &model, start, panel.notice.take())?;
+                let rows = model.rows.iter().skip(start).take(MAX_AGENT_ROWS);
+                panel.printed = Some((start, rows.copied().collect()));
             }
             return Ok(());
         }
@@ -2503,23 +2533,22 @@ impl AttachedTerminal {
             .expect("inline terminal")
             .size()?
             .width;
-        let model = AgentInspectorModel::from_session(view, selected, width, locked);
-        let panel = self.agent_panel.as_mut().expect("open agent panel");
-        panel.selected = model.selected;
         let (_, screen_height) = size()?;
         let detail_lines = agent_detail_lines(&model, width).len();
-        let height = u16::try_from(detail_lines.saturating_add(2 + model.choices.len().min(4)))
-            .unwrap_or(u16::MAX)
-            .min(14)
-            .min(screen_height);
+        let height =
+            u16::try_from(detail_lines.saturating_add(3 + model.choices.len().min(MAX_AGENT_ROWS)))
+                .unwrap_or(u16::MAX)
+                .min(AGENT_PICKER_ROWS)
+                .min(screen_height);
         panel.scroll = panel
             .scroll
             .min(detail_lines.saturating_sub(agent_detail_rows(height, model.choices.len())));
         let scroll = panel.scroll;
+        let notice = panel.notice;
         let palette = self.palette();
         let armed = self.dialog_armed;
         let area = self.draw_dialog(Some(view), height, |frame, area| {
-            draw_agent_inspector_frame(frame, area, &model, scroll, armed, palette);
+            draw_agent_inspector_frame(frame, area, &model, scroll, armed, notice, palette);
         })?;
         self.agent_picker_area = Some(area);
         Ok(())
@@ -3362,5 +3391,16 @@ mod pointer_tests {
                     "Escape clears the selection"
                 );
             });
+    }
+}
+
+#[cfg(test)]
+mod error_line_tests {
+    #[test]
+    fn errors_quoting_repository_data_are_escaped_at_the_terminal_boundary() {
+        assert_eq!(
+            super::error_line("locks: .git/refs/heads/\u{202e}kcol.x\u{1b}[2J; remove them"),
+            "error: locks: .git/refs/heads/\\u{202e}kcol.x\\u{001b}[2J; remove them"
+        );
     }
 }

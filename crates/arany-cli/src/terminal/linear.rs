@@ -1,6 +1,6 @@
 use crate::presentation::{
-    AgentInspectorModel, escape_terminal, image_message_lines, linear_session_lines, safe_truncate,
-    user_message_lines,
+    AgentInspectorModel, MAX_AGENT_ROWS, escape_terminal, image_message_lines,
+    linear_session_lines, safe_truncate, user_message_lines,
 };
 #[cfg(test)]
 use arany::ModelEntry;
@@ -733,26 +733,50 @@ impl LinearState {
         writer.flush()
     }
 
+    // Choice numbers continue from `start`, so they bind to the rows printed here.
     pub(super) fn write_agents(
         &mut self,
         writer: &mut impl Write,
         model: &AgentInspectorModel,
-        invalid: bool,
+        start: usize,
+        notice: Option<&str>,
     ) -> io::Result<()> {
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
             self.newline_pending = false;
             self.line_open = false;
         }
-        if invalid {
-            writeln!(writer, "Notice: invalid agent selection")?;
+        if let Some(notice) = notice {
+            writeln!(writer, "Notice: {notice}")?;
         }
-        for line in &model.lines {
+        for line in &model.lines[..model.header] {
+            writeln!(writer, "{line}")?;
+        }
+        writeln!(writer, "{}", model.search)?;
+        let shown = model.choices.iter().skip(start).take(MAX_AGENT_ROWS);
+        if shown.len() > 0 {
+            writeln!(
+                writer,
+                "Choices {}-{} of {}:",
+                start + 1,
+                start + shown.len(),
+                model.choices.len()
+            )?;
+        }
+        for (index, choice) in shown.enumerate() {
+            let focus = if model.selected == Some(start + index) {
+                " (focused)"
+            } else {
+                ""
+            };
+            writeln!(writer, "{}. {choice}{focus}", start + index + 1)?;
+        }
+        for line in &model.lines[model.header..] {
             writeln!(writer, "{line}")?;
         }
         self.write_prompt(
             writer,
-            "Agent choice: n next, p previous, number select, q close:",
+            "Agent choice: n next, p previous, number select, o open, /TEXT search, q close:",
         )?;
         writer.flush()
     }
@@ -761,6 +785,7 @@ impl LinearState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::presentation::AgentQuery;
 
     #[test]
     fn tool_approval_linear_corpus_numbers_only_supported_choices() {
@@ -808,6 +833,62 @@ mod tests {
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn linear_agent_picker_numbers_its_window_and_marks_focus_in_words() {
+        let view = crate::presentation::team_view();
+        let query = AgentQuery {
+            filter: "child".into(),
+            ..AgentQuery::default()
+        };
+        let model = AgentInspectorModel::from_session(&view, &query, 120, false);
+        let mut state = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        state
+            .write_agents(&mut output, &model, 1, Some("invalid agent selection"))
+            .unwrap();
+        let text = String::from_utf8(output).unwrap();
+        let lines = text.lines().collect::<Vec<_>>();
+        assert_eq!(
+            lines[..8],
+            [
+                "Notice: invalid agent selection",
+                "Last Run: 3 agents; children: 2",
+                "History: 3 agents in 1 recent Runs; 0 older Runs",
+                "Next Run: single",
+                "Set next Run: /agents single|auto N|team N",
+                "Search: child · 2 of 3 agents",
+                "Choices 2-2 of 2:",
+                "2. Run 1: child 2; finished · Inspect\\u{001b}[2J\\u{000a}You: forged heading",
+            ]
+        );
+        assert_eq!(lines[8], "Agent 1/2: child 1; failed");
+        assert_eq!(
+            lines.last(),
+            Some(
+                &"Agent choice: n next, p previous, number select, o open, /TEXT search, q close:"
+            )
+        );
+        assert!(!text.contains(['\u{1b}', '\r']));
+        let none = AgentInspectorModel::from_session(
+            &view,
+            &AgentQuery {
+                filter: "zz".into(),
+                ..AgentQuery::default()
+            },
+            120,
+            false,
+        );
+        let mut output = Vec::new();
+        state.write_agents(&mut output, &none, 0, None).unwrap();
+        let text = String::from_utf8(output).unwrap();
+        assert!(
+            text.contains(
+                "\nSearch: zz · no matching agents\nNo matching agents; edit the search\n"
+            )
+        );
+        assert!(!text.contains("Choices") && !text.contains("(focused)"));
     }
 
     #[test]
@@ -1252,12 +1333,12 @@ mod tests {
             .expect("partial choice does not fuse with notice");
         assert_eq!(invalid, b"\nNotice: invalid Session selection\n");
 
-        let model = AgentInspectorModel::from_session(&view, 0, 120, true);
+        let model = AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, true);
         let agent_id = view.runs[0].agents[0].id;
         let mut inspector = LinearState::new("screen-reader");
         let mut detail = Vec::new();
         inspector
-            .write_agents(&mut detail, &model, false)
+            .write_agents(&mut detail, &model, 0, None)
             .expect("linear agent details");
         assert_eq!(
             String::from_utf8(detail.clone()).expect("UTF-8 agent details"),
@@ -1266,12 +1347,15 @@ mod tests {
                  History: 1 agents in 1 recent Runs; 0 older Runs\n\
                  Next Run: auto · up to 3 children\n\
                  Current Run: admission in progress; topology locked\n\
+                 Type to search 1 agent\n\
+                 Choices 1-1 of 1:\n\
+                 1. Run 1: primary; active · Question (focused)\n\
                  Agent 1/1: primary; active\n\
                  Session: {}\n\
                  Run: {run_id}\n\
                  AgentRun: {agent_id}\n\
                  Objective: Question\n\
-                 Agent choice: n next, p previous, number select, q close:\n",
+                 Agent choice: n next, p previous, number select, o open, /TEXT search, q close:\n",
                 view.id
             )
         );
@@ -1280,7 +1364,7 @@ mod tests {
 
         let mut refreshed = Vec::new();
         inspector
-            .write_agents(&mut refreshed, &model, false)
+            .write_agents(&mut refreshed, &model, 0, None)
             .expect("progress redraw after partial choice");
         assert!(refreshed.starts_with(b"\nCurrent Run:"));
 
@@ -1327,10 +1411,11 @@ mod tests {
         assert_eq!(output, b"Transcript details:\nSupervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken\n");
         view.runs[0].supervisor =
             crate::presentation::supervisor_fixture(view.runs[0].agents[0].id, 256);
-        let inspector = AgentInspectorModel::from_session(&view, 0, 120, false);
+        let inspector =
+            AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, false);
         let mut inspected = Vec::new();
         linear
-            .write_agents(&mut inspected, &inspector, false)
+            .write_agents(&mut inspected, &inspector, 0, None)
             .unwrap();
         let inspected = String::from_utf8(inspected).unwrap();
         assert_eq!(inspected.matches("Supervisor (shadow):").count(), 256);

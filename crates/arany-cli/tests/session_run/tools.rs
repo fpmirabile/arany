@@ -3270,7 +3270,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
-        json!(["git_status", "git_diff", "git_log"])
+        json!(["git_status", "git_diff", "git_log", "git_branch"])
     );
     let after = tree_snapshot(&workspace);
     let changed: Vec<_> = before

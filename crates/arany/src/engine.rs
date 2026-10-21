@@ -611,6 +611,41 @@ fn goal_context_metadata_reservation(
         .ok_or(EngineError::ContextTooLarge)
 }
 
+// Locks a dead Guard's Git write left are reported, with their paths, before admission refuses
+// to resume past its unsettled effect; nothing is moved or retried.
+async fn report_stale_git_locks(
+    view: &crate::SessionView,
+    goal: crate::session::GoalId,
+    tools: bool,
+    workspace: &std::path::Path,
+) -> Result<(), EngineError> {
+    let Some(goal) = view.goal(goal) else {
+        return Ok(());
+    };
+    let git_writes: Vec<_> = view
+        .runs
+        .iter()
+        .filter(|r| goal.run_ids.contains(&r.id))
+        .flat_map(|r| &r.tools)
+        .filter(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop())
+        .map(|t| t.intent.id)
+        .collect();
+    if git_writes.is_empty() {
+        return Ok(());
+    }
+    if !tools {
+        return Err(EngineError::GoalUnavailable);
+    }
+    crate::tools::worker::recover_private(&git_writes).await?;
+    for id in git_writes {
+        let workspace = workspace.to_owned();
+        tokio::task::spawn_blocking(move || crate::tools::report_git_locks(&workspace, id))
+            .await
+            .map_err(|_| crate::tools::ToolError::Operation)??;
+    }
+    Ok(())
+}
+
 fn resolve_goal_admission(
     request: &RunRequest,
     history: Option<&crate::session::SessionView>,
@@ -1529,6 +1564,13 @@ impl Engine {
         };
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity)?;
+        }
+        if entry == GoalEntry::Resume
+            && let Some(view) = &history
+            && let Some(goal) = request.goal.id
+        {
+            report_stale_git_locks(view, goal, submission.tools.is_some(), &request.workspace)
+                .await?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         if goal.entry == GoalEntry::Resume {

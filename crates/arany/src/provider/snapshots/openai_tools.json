@@ -538,6 +538,87 @@
       "type": "function"
     },
     {
+      "description": "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
+      "name": "arany_git_commit",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "message": {
+            "description": "Commit message: non-blank UTF-8, at most 8192 bytes; newlines and tabs allowed, no other control characters.",
+            "type": "string"
+          },
+          "paths": {
+            "description": "Up to 128 distinct Workspace-relative literal paths (\".\" for every change) whose working-tree contents to commit; empty when staged is true.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "staged": {
+            "description": "true commits exactly the staged index and requires empty paths.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "message",
+          "paths",
+          "staged"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
+      "name": "arany_git_branch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "description": "null lists local branches; otherwise the new branch name: letters, digits, '.', '_', '-' and '/' separators, at most 128 bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start_point": {
+            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "name",
+          "start_point"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
+      "description": "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
+      "name": "arany_git_switch",
+      "parameters": {
+        "additionalProperties": false,
+        "properties": {
+          "branch": {
+            "description": "Existing local branch name.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "branch"
+        ],
+        "type": "object"
+      },
+      "strict": true,
+      "type": "function"
+    },
+    {
       "description": "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.",
       "name": "arany_plan",
       "parameters": {

@@ -53,19 +53,31 @@ pub(super) struct Registry<'a> {
     pub(super) event_steps: &'a [EventStep],
 }
 
-// The glob Tool only added a call variant and a worker Tool label, so older payloads keep
-// their bytes; one that names glob is forged and refuses.
-macro_rules! glob_step {
-    ($kind:literal, $from:literal) => {
+// The glob Tool and the typed Git writes only added call variants (glob also a worker Tool
+// label), so older payloads keep their bytes; one naming a variant its version lacked is forged
+// and refuses.
+macro_rules! variant_step {
+    ($kind:literal, $from:literal, $before:path) => {
         EventStep {
             kind: $kind,
             from: $from,
             transform: |value| {
-                crate::session::pre_glob_payload($kind, &value.to_string())
-                    .and_then(|text| serde_json::from_str(&text).ok())
+                $before($kind, &value.to_string()).and_then(|text| serde_json::from_str(&text).ok())
             },
-            canonical: |payload| crate::session::pre_glob_payload($kind, payload),
+            canonical: |payload| $before($kind, payload),
         }
+    };
+}
+
+macro_rules! glob_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_glob_payload)
+    };
+}
+
+macro_rules! git_write_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_git_write_payload)
     };
 }
 
@@ -128,6 +140,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             canonical: crate::session::run_started_v19_payload,
         },
         glob_step!("ProviderCallRecorded", 13),
+        git_write_step!("ToolStarted", 14),
+        git_write_step!("ToolFinished", 20),
+        git_write_step!("HookStarted", 4),
+        git_write_step!("HookFinished", 9),
+        git_write_step!("GoalPlanContractRecorded", 7),
+        git_write_step!("ProviderCallRecorded", 14),
     ],
 };
 
