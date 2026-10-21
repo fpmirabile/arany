@@ -124,7 +124,7 @@ impl ChatGptSetupAccount {
 pub(super) enum HistoryAdmission {
     Ready,
     Reset,
-    Archived(std::path::PathBuf),
+    Archived(arany::ArchivedHistory),
     Exit,
 }
 
@@ -175,6 +175,9 @@ pub(super) async fn admit_history(
             match reset.as_ref().err().unwrap_or(&error).history_recovery() {
                 HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
                 HistoryRecovery::Damaged => "Saved history is damaged.",
+                HistoryRecovery::ArchiveConflict => {
+                    "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
+                }
                 HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
                 HistoryRecovery::Changed => "History changed during recovery; retry.",
                 HistoryRecovery::StorageFull => "Storage is full; free space and retry.",

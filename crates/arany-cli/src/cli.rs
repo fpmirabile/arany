@@ -70,23 +70,27 @@ pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
     use arany::HistoryRecovery;
     let error = match state.archive_incompatible_history() {
         Ok(None) => return Ok(()),
-        Ok(Some(path)) => {
+        Ok(Some(archived)) => {
             use std::io::Write;
-            return std::io::stderr()
+            std::io::stderr()
                 .write_all(
                     format!(
                         "warning: {}; started a new history\n",
-                        archived_history_notice(&path)
+                        archived_history_notice(archived.path())
                     )
                     .as_bytes(),
                 )
-                .map_err(|_| "history notice output failed".to_owned());
+                .map_err(|_| "history notice output failed".to_owned())?;
+            return archived.acknowledge().map_err(|error| error.to_string());
         }
         Err(error) => error,
     };
     Err(match error.history_recovery() {
         HistoryRecovery::InvalidHistory | HistoryRecovery::Damaged => {
             "saved history is incompatible or damaged; run `arany` to reset history"
+        }
+        HistoryRecovery::ArchiveConflict => {
+            "an interrupted history archive no longer matches its files; inspect the archive folder in the state directory"
         }
         HistoryRecovery::Busy => "history is in use; close the other Arany and retry",
         HistoryRecovery::Changed => "history changed during recovery; retry",

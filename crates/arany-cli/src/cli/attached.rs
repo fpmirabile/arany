@@ -357,7 +357,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
     }
     let mut composer = Composer::default();
     let mut setup_notice = None;
-    if admit_startup(
+    let ControlFlow::Continue(mut archived_history) = admit_startup(
         &mut terminal,
         &mut admission,
         &mut composer,
@@ -365,10 +365,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         selected,
     )
     .await?
-    .is_break()
-    {
+    else {
         return Ok(());
-    }
+    };
     if !native_protection_supported() {
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
@@ -702,7 +701,12 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
-        notice = None;
+        notice = archived_history
+            .take()
+            .and_then(|archived| archived.acknowledge().err())
+            .map(|error| {
+                Feedback::History(format!("Error: {error}; the archive notice may show again"))
+            });
         let input = loop {
             let input = terminal
                 .next_input()
@@ -1870,7 +1874,7 @@ async fn admit_startup(
     composer: &mut Composer,
     setup_notice: &mut Option<String>,
     selected: Option<super::provider::roster::SelectedRoster>,
-) -> Result<ControlFlow<()>, String> {
+) -> Result<ControlFlow<(), Option<arany::ArchivedHistory>>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
             for notice in access.stale_runtime_notices() {
@@ -1904,7 +1908,7 @@ async fn admit_startup(
     }
     let archived =
         match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
-            Ok(setup::HistoryAdmission::Ready) => return Ok(ControlFlow::Continue(())),
+            Ok(setup::HistoryAdmission::Ready) => return Ok(ControlFlow::Continue(None)),
             Ok(setup::HistoryAdmission::Reset) => None,
             Ok(setup::HistoryAdmission::Archived(path)) => Some(path),
             Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
@@ -1921,10 +1925,13 @@ async fn admit_startup(
         setup_notice,
         "Starting a new conversation; saved accounts and folder trust kept.",
     );
-    if let Some(path) = archived {
-        append_notice(setup_notice, &super::archived_history_notice(&path));
+    if let Some(archived) = &archived {
+        append_notice(
+            setup_notice,
+            &super::archived_history_notice(archived.path()),
+        );
     }
-    Ok(ControlFlow::Continue(()))
+    Ok(ControlFlow::Continue(archived))
 }
 
 async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
