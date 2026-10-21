@@ -2975,9 +2975,7 @@ mod insert_rows_tests {
         }
     }
 
-    // A width change with keep_top recovers the top from the cursor and keeps the adjacent
-    // history directly above the viewport. Short rows do not rewrap, so the narrower
-    // terminal shows the same rows; TestBackend::resize would reshape its flat cells.
+    // Rows are rebuilt by hand because TestBackend::resize would reshape its flat cells.
     fn assert_reflow_keeps_adjacent_history(
         terminal: &mut Terminal<TestBackend>,
         height: u16,
