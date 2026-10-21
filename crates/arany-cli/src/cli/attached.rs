@@ -600,7 +600,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         skills_supported,
     );
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
-    let mut notice = if setup_notice.is_some() {
+    let notice = if setup_notice.is_some() {
         setup_notice
     } else if admission.setup_requested
         && admission.defaults.provider.as_deref() == Some("chatgpt")
