@@ -840,6 +840,34 @@ mod tests {
         crate::test_process::assert_single_test_completed(&output.stdout, "cross-user");
     }
 
+    const fn all_index(kind: RecordKind) -> usize {
+        match kind {
+            RecordKind::ToolsConfig => 0,
+            RecordKind::WorkspacePermissions => 1,
+            RecordKind::ProviderProfiles => 2,
+            RecordKind::ProviderRouting => 3,
+            RecordKind::ProviderRoster => 4,
+            RecordKind::Permissions => 5,
+            RecordKind::UnguardedCommands => 6,
+            RecordKind::SavedAccount => 7,
+            RecordKind::UiPreferences => 8,
+            RecordKind::ModelPreferences => 9,
+            RecordKind::ChatgptRegistration => 10,
+            RecordKind::ChatgptAccounts => 11,
+        }
+    }
+
+    #[test]
+    fn record_kind_all_lists_every_variant_in_match_order() {
+        assert_eq!(
+            RecordKind::ALL.len(),
+            all_index(RecordKind::ChatgptAccounts) + 1
+        );
+        for (index, kind) in RecordKind::ALL.into_iter().enumerate() {
+            assert_eq!(all_index(kind), index);
+        }
+    }
+
     #[test]
     fn read_only_record_kinds_refuse_replace_and_remove() {
         let temp = tempfile::tempdir().expect("test root");
