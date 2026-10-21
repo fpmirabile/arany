@@ -43,6 +43,37 @@ impl Drop for NamespaceLock {
 #[cfg(unix)]
 struct AccountLock(File);
 
+#[cfg(unix)]
+thread_local! {
+    // The State directory whose account lock this thread holds, so a record upgrade inside it reuses the lock.
+    static HELD_ACCOUNT_LOCK: std::cell::Cell<Option<(u64, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(unix)]
+struct HeldAccountLock {
+    _lock: AccountLock,
+    previous: Option<(u64, u64)>,
+}
+
+#[cfg(unix)]
+impl HeldAccountLock {
+    fn acquire(state: &StateRoot) -> Result<Self, StoreError> {
+        let identity = super::directory_identity(&state.dir)?;
+        let lock = lock_account(state)?;
+        Ok(Self {
+            _lock: lock,
+            previous: HELD_ACCOUNT_LOCK.replace(Some(identity)),
+        })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for HeldAccountLock {
+    fn drop(&mut self) {
+        HELD_ACCOUNT_LOCK.set(self.previous);
+    }
+}
+
 pub(crate) struct HistoryLock(pub(super) File);
 
 impl Drop for HistoryLock {
@@ -141,12 +172,32 @@ impl StateRoot {
         {
             let workspace = Dir::open_ambient_dir(workspace, ambient_authority())?;
             self.ensure_outside_workspace(&workspace)?;
-            let _lock = lock_account(self)?;
+            let _lock = HeldAccountLock::acquire(self)?;
             Ok(operation())
         }
         #[cfg(not(unix))]
         {
             let _ = (workspace, operation);
+            Err(StoreError::InvalidStateDirectory)
+        }
+    }
+
+    // Record upgrades serialize with every harness record writer under the account lock.
+    pub(in crate::store) fn with_record_upgrade_lock<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, StoreError>,
+    ) -> Result<T, StoreError> {
+        #[cfg(unix)]
+        {
+            if HELD_ACCOUNT_LOCK.get() == Some(super::directory_identity(&self.dir)?) {
+                return operation();
+            }
+            let _lock = HeldAccountLock::acquire(self)?;
+            operation()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = operation;
             Err(StoreError::InvalidStateDirectory)
         }
     }

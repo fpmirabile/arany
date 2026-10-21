@@ -1,6 +1,5 @@
 use super::{AuthorizationAttempt, AuthorizationError, CodeExchange, account, valid_client_id};
-use arany::RecordKind;
-use arany::StateRoot;
+use arany::{RecordFormat, RecordKind, StateRoot};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::{Uuid, Variant, Version};
@@ -13,6 +12,15 @@ struct Record {
     #[serde(deserialize_with = "Option::deserialize")]
     issued_client_id: Option<String>,
 }
+
+pub(crate) const CHATGPT_REGISTRATION: RecordFormat = RecordFormat {
+    kind: RecordKind::ChatgptRegistration,
+    field: "schema",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| Record::decode(bytes).is_ok(),
+};
 
 impl Record {
     fn validate(&self) -> Result<(), AuthorizationError> {
@@ -60,8 +68,7 @@ pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), Authorization
         .with_account_replacement_lock(workspace, || {
             let host = account::saved_host_at(&state)?;
             let bytes = state
-                .record(RecordKind::ChatgptRegistration)
-                .read()
+                .read_current(&CHATGPT_REGISTRATION)
                 .map_err(|_| AuthorizationError::Unavailable)?;
             match bytes {
                 Some(bytes) => {
@@ -99,8 +106,7 @@ impl Registration {
             .with_account_replacement_lock(workspace, || {
                 let saved_host = account::saved_host_at(state)?;
                 if let Some(bytes) = state
-                    .record(RecordKind::ChatgptRegistration)
-                    .read()
+                    .read_current(&CHATGPT_REGISTRATION)
                     .map_err(|_| AuthorizationError::Unavailable)?
                 {
                     let mut record = Record::decode(&bytes)?;
@@ -157,8 +163,7 @@ impl Registration {
 
 pub(super) fn verify_host_at(state: &StateRoot, host_id: Uuid) -> Result<(), AuthorizationError> {
     let Some(bytes) = state
-        .record(RecordKind::ChatgptRegistration)
-        .read()
+        .read_current(&CHATGPT_REGISTRATION)
         .map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
@@ -175,8 +180,7 @@ pub(super) fn complete_issued_client_at(
     host_id: Uuid,
 ) -> Result<(), AuthorizationError> {
     let Some(bytes) = state
-        .record(RecordKind::ChatgptRegistration)
-        .read()
+        .read_current(&CHATGPT_REGISTRATION)
         .map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
@@ -211,8 +215,7 @@ fn retain_at(
     state
         .with_account_replacement_lock(workspace, || {
             let bytes = state
-                .record(RecordKind::ChatgptRegistration)
-                .read()
+                .read_current(&CHATGPT_REGISTRATION)
                 .map_err(|_| AuthorizationError::Unavailable)?
                 .ok_or(AuthorizationError::InvalidIdentity)?;
             let mut record = Record::decode(&bytes)?;

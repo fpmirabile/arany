@@ -1,8 +1,8 @@
-use arany::RecordKind;
 use arany::{
     Effort, NativeApiCredentials, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,
 };
+use arany::{RecordFormat, RecordKind};
 #[cfg(all(test, not(target_os = "macos")))]
 use keyring::Entry;
 use serde::{Deserialize, Serialize};
@@ -83,6 +83,15 @@ struct StoredAccountFile {
     #[serde(deserialize_with = "Option::deserialize")]
     account: Option<SavedAccount>,
 }
+
+pub(crate) const SAVED_ACCOUNT: RecordFormat = RecordFormat {
+    kind: RecordKind::SavedAccount,
+    field: "schema",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| StoredAccountFile::parse(bytes).is_ok(),
+};
 
 impl StoredAccountFile {
     fn parse(record: &[u8]) -> Result<Self, CredentialError> {
@@ -389,8 +398,7 @@ async fn save_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .record(RecordKind::SavedAccount)
-                    .read()
+                    .read_current(&SAVED_ACCOUNT)
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -441,8 +449,7 @@ async fn save_file_at(
         state
             .with_account_replacement_lock(&workspace, || {
                 let existing = state
-                    .record(RecordKind::SavedAccount)
-                    .read()
+                    .read_current(&SAVED_ACCOUNT)
                     .map_err(|_| CredentialError::StateUnavailable)?;
                 if existing
                     .as_deref()
@@ -526,8 +533,7 @@ fn load_file_at(path: &Path) -> Result<Option<StoredAccountFile>, CredentialErro
         return Ok(None);
     };
     let Some(record) = state
-        .record(RecordKind::SavedAccount)
-        .read()
+        .read_current(&SAVED_ACCOUNT)
         .map_err(|_| CredentialError::StateUnavailable)?
     else {
         return Ok(None);

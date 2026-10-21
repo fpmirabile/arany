@@ -1,6 +1,5 @@
 use crate::provider::{Effort, valid_profile_name as valid_name};
-use crate::store::RecordKind;
-use crate::store::{StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use reqwest::Url;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -89,6 +88,15 @@ enum Privacy {
     UserAuthorized,
 }
 
+pub(crate) const PROVIDER_PROFILES: RecordFormat = RecordFormat {
+    kind: RecordKind::ProviderProfiles,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| CustomProfile::parse_document(bytes).is_ok(),
+};
+
 impl CustomProfile {
     async fn resolve_destination(&self) -> Result<PinnedDestination, CustomProfileError> {
         PinnedDestination::resolve(self).await
@@ -99,21 +107,27 @@ impl CustomProfile {
             return Err(CustomProfileError::InvalidConfiguration);
         }
         let bytes = state
-            .record(RecordKind::ProviderProfiles)
-            .read()
+            .read_current(&PROVIDER_PROFILES)
             .map_err(|error| match error {
                 StoreError::StateNotPrivate => CustomProfileError::UnsafeFile,
                 _ => CustomProfileError::Unavailable,
             })?
             .ok_or(CustomProfileError::Unavailable)?;
+        Self::parse_document(&bytes)?
+            .into_iter()
+            .find(|profile| profile.name == name)
+            .ok_or(CustomProfileError::NotFound)
+    }
+
+    fn parse_document(bytes: &[u8]) -> Result<Vec<Self>, CustomProfileError> {
         let document: ProfileDocument =
-            serde_json::from_slice(&bytes).map_err(|_| CustomProfileError::InvalidConfiguration)?;
+            serde_json::from_slice(bytes).map_err(|_| CustomProfileError::InvalidConfiguration)?;
         if document.version != 1 || document.profiles.len() > MAX_PROFILES {
             return Err(CustomProfileError::InvalidConfiguration);
         }
         let mut names = HashSet::new();
         let mut credentials = HashMap::new();
-        let mut selected = None;
+        let mut profiles = Vec::with_capacity(document.profiles.len());
         for entry in document.profiles {
             let profile = Self::validate(entry)?;
             if !names.insert(profile.name.clone()) {
@@ -129,11 +143,9 @@ impl CustomProfile {
             {
                 return Err(CustomProfileError::InvalidConfiguration);
             }
-            if profile.name == name {
-                selected = Some(profile);
-            }
+            profiles.push(profile);
         }
-        selected.ok_or(CustomProfileError::NotFound)
+        Ok(profiles)
     }
 
     fn validate(entry: ProfileEntry) -> Result<Self, CustomProfileError> {

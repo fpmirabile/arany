@@ -6,8 +6,8 @@ use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
-use arany::RecordKind;
 use arany::{Effort, StateRoot, validate_native_model_id};
+use arany::{RecordFormat, RecordKind};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -200,6 +200,15 @@ fn bounded_model_checks<'de, D: Deserializer<'de>>(
     )
 }
 
+pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
+    kind: RecordKind::ChatgptAccounts,
+    field: "schema",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
+};
+
 impl AccountIndex {
     fn account_position(&self, id: Uuid) -> Result<usize, AuthorizationError> {
         self.accounts
@@ -278,8 +287,7 @@ impl AccountIndex {
 
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .record(RecordKind::ChatgptAccounts)
-            .read()
+            .read_current(&CHATGPT_ACCOUNTS)
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());

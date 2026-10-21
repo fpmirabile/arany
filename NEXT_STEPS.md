@@ -28,7 +28,7 @@ The goal: one normal engineering day in this repository (explore, multi-file edi
 11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
 12. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
 13. **Terminal: live evidence.** Owner: run the [terminal checks](#terminal); remaining feature work is in [Terminal follow-ups](#terminal-follow-ups).
-14. **[Anthropic-compatible custom routes](./planning/anthropic-compatible-routes/README.md).** DeepSeek API, Kimi API and Kimi Code console keys with an honest User-Agent, and GLM Standard API keys; exclude GLM Coding Plan benefits. Depends on JSON record migration; resolve DeepSeek strict compaction before admission. Remaining (owner, live): `arany provider check custom:NAME` for each exact vendor/model profile, including both Kimi billing routes, using the owner's own keys outside the repo. No live compatibility is established.
+14. **[Anthropic-compatible custom routes](./planning/anthropic-compatible-routes/README.md).** DeepSeek API, Kimi API and Kimi Code console keys with an honest User-Agent, and GLM Standard API keys; exclude GLM Coding Plan benefits. Resolve DeepSeek strict compaction before admission. Remaining (owner, live): `arany provider check custom:NAME` for each exact vendor/model profile, including both Kimi billing routes, using the owner's own keys outside the repo. No live compatibility is established.
 
 Exit: a week of dogfooding with every fallback to another harness recorded here; done when a full day passes without one.
 

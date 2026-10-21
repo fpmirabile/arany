@@ -95,56 +95,92 @@ pub enum RecordKind {
 }
 
 impl RecordKind {
-    // Kinds without a pending file are read-only to the harness.
-    const fn spec(self) -> (&'static str, Option<&'static str>, usize) {
+    pub const ALL: [Self; 12] = [
+        Self::ToolsConfig,
+        Self::WorkspacePermissions,
+        Self::ProviderProfiles,
+        Self::ProviderRouting,
+        Self::ProviderRoster,
+        Self::Permissions,
+        Self::UnguardedCommands,
+        Self::SavedAccount,
+        Self::UiPreferences,
+        Self::ModelPreferences,
+        Self::ChatgptRegistration,
+        Self::ChatgptAccounts,
+    ];
+
+    // User-authored kinds are read-only to the harness; only a record migration replaces them.
+    const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
-            Self::ToolsConfig => ("tools.json", None, 64 * 1024),
+            Self::ToolsConfig => ("tools.json", "tools.pending", 64 * 1024, false),
             Self::WorkspacePermissions => (
                 "workspace-permissions.json",
-                Some("workspace-permissions.pending"),
+                "workspace-permissions.pending",
                 64 * 1024,
+                true,
             ),
-            Self::ProviderRoster => ("provider-roster.json", None, 64 * 1024),
-            Self::ProviderRouting => ("provider-routing.json", None, 16 * 1024),
-            Self::Permissions => ("permissions.json", None, 64 * 1024),
+            Self::ProviderRoster => (
+                "provider-roster.json",
+                "provider-roster.pending",
+                64 * 1024,
+                false,
+            ),
+            Self::ProviderRouting => (
+                "provider-routing.json",
+                "provider-routing.pending",
+                16 * 1024,
+                false,
+            ),
+            Self::Permissions => ("permissions.json", "permissions.pending", 64 * 1024, false),
             Self::UnguardedCommands => (
                 "unguarded-commands.json",
-                Some("unguarded-commands.pending"),
+                "unguarded-commands.pending",
                 64 * 1024,
+                true,
             ),
-            Self::ProviderProfiles => ("provider-profiles.json", None, 64 * 1024),
+            Self::ProviderProfiles => (
+                "provider-profiles.json",
+                "provider-profiles.pending",
+                64 * 1024,
+                false,
+            ),
             Self::SavedAccount => (
                 "account-credentials.json",
-                Some("account-credentials.pending"),
+                "account-credentials.pending",
                 1024,
+                true,
             ),
-            Self::UiPreferences => ("ui-preferences.json", Some("ui-preferences.pending"), 1024),
+            Self::UiPreferences => ("ui-preferences.json", "ui-preferences.pending", 1024, true),
             Self::ModelPreferences => (
                 "model-preferences.json",
-                Some("model-preferences.pending"),
+                "model-preferences.pending",
                 1024 * 1024,
+                true,
             ),
             Self::ChatgptRegistration => (
                 "chatgpt-registration.json",
-                Some("chatgpt-registration.pending"),
+                "chatgpt-registration.pending",
                 256,
+                true,
             ),
             Self::ChatgptAccounts => (
                 "chatgpt-accounts.json",
-                Some("chatgpt-accounts.pending"),
+                "chatgpt-accounts.pending",
                 384 * 1024,
+                true,
             ),
         }
     }
 
     #[cfg(test)]
-    const fn file(self) -> &'static str {
+    pub(super) const fn file(self) -> &'static str {
         self.spec().0
     }
 
     #[cfg(test)]
-    fn pending(self) -> &'static str {
-        self.spec().1.expect("writable record kind")
+    pub(super) const fn pending(self) -> &'static str {
+        self.spec().1
     }
 
     pub const fn limit(self) -> usize {
@@ -159,25 +195,34 @@ pub struct Record<'a> {
 
 impl Record<'_> {
     pub fn read(&self) -> Result<Option<Vec<u8>>, StoreError> {
-        let (name, _, limit) = self.kind.spec();
+        let (name, _, limit, _) = self.kind.spec();
         self.root.read_private_record(name, limit)
     }
 
     pub fn present(&self) -> Result<bool, StoreError> {
-        let (name, _, limit) = self.kind.spec();
+        let (name, _, limit, _) = self.kind.spec();
         Ok(self.root.open_private_record(name, limit)?.is_some())
     }
 
     pub fn replace(&self, record: &[u8]) -> Result<(), StoreError> {
-        let (name, pending, limit) = self.kind.spec();
-        let pending = pending.ok_or(StoreError::ReadOnly)?;
+        if !self.kind.spec().3 {
+            return Err(StoreError::ReadOnly);
+        }
+        self.replace_upgraded(record)
+    }
+
+    // Also replaces a user-authored record, so only a record migration calls it.
+    pub(super) fn replace_upgraded(&self, record: &[u8]) -> Result<(), StoreError> {
+        let (name, pending, limit, _) = self.kind.spec();
         self.root
             .replace_private_record(name, pending, record, limit)
     }
 
     pub fn remove(&self) -> Result<(), StoreError> {
-        let (name, pending, limit) = self.kind.spec();
-        let pending = pending.ok_or(StoreError::ReadOnly)?;
+        let (name, pending, limit, writable) = self.kind.spec();
+        if !writable {
+            return Err(StoreError::ReadOnly);
+        }
         self.root.remove_private_record(name, pending, limit)
     }
 }
@@ -468,11 +513,8 @@ impl StateRoot {
             file.set_len(0)?;
             file.write_all(record)?;
             file.sync_all()?;
-            self.dir.rename(pending, &self.dir, name)?;
-            self.dir
-                .open_with(".", OpenOptions::new().read(true))?
-                .sync_all()?;
-            Ok(())
+            rename(&self.dir, pending, &self.dir, name)?;
+            sync(&self.dir)
         }
         #[cfg(not(unix))]
         {

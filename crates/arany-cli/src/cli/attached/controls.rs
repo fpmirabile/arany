@@ -9,16 +9,46 @@ use crate::terminal::{
     InteractiveCommand, MouseMode, PointerSettings, Submission, TerminalInput, TerminalMode,
     transcript_agents,
 };
-use arany::RecordKind;
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, SessionId, SessionView, StateRoot, fork_session,
     rename_session, resume_session, validate_native_model_id,
 };
+use arany::{RecordFormat, RecordKind, RecordStep};
+use serde_json::Value;
 use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
 const UI_PREFERENCES_VERSION: u8 = 4;
+
+pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
+    kind: RecordKind::UiPreferences,
+    field: "version",
+    floor: 3,
+    current: UI_PREFERENCES_VERSION as u64,
+    steps: &[RecordStep {
+        from: 3,
+        transform: with_pointer_defaults,
+    }],
+    accepts: |bytes| decode_settings(bytes).is_ok(),
+};
+
+// Version 4 added Mouse and Copy on select; a version-3 record had no choice, so it gets the defaults.
+fn with_pointer_defaults(record: Value) -> Option<Value> {
+    let Value::Object(mut record) = record else {
+        return None;
+    };
+    let Some(Value::Object(preferences)) = record.get_mut("preferences") else {
+        return None;
+    };
+    if preferences.contains_key("mouse") || preferences.contains_key("copy_on_select") {
+        return None;
+    }
+    preferences.insert("mouse".into(), "wheel_and_clicks".into());
+    preferences.insert("copy_on_select".into(), true.into());
+    record.insert("version".into(), 4.into());
+    Some(Value::Object(record))
+}
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
@@ -337,8 +367,7 @@ async fn saved_settings(
 
 fn read_settings(root: &StateRoot) -> Result<Result<Preferences, &'static str>, String> {
     let Some(record) = root
-        .record(RecordKind::UiPreferences)
-        .read()
+        .read_current(&UI_PREFERENCES)
         .map_err(|_| "display settings unavailable or unsafe")?
     else {
         return Ok(Ok(Preferences::default()));
@@ -1750,6 +1779,7 @@ mod tests {
             br#"{"version":1,"completion":"tabs"}"#.as_slice(),
             br#"{"version":2,"completion":"tabs","view":"classic"}"#.as_slice(),
             br#"{"version":3,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
+            br#"{"version":5,"preferences":{"completion":"tabs","view":"classic"}}"#.as_slice(),
             br#"{"version":2,"preferences":{"completion":"tabs"}}"#.as_slice(),
             br#"{"version":2,"preferences":{"completion":"unknown","view":"classic"}}"#.as_slice(),
             br#"{"version":2,"preferences":{"completion":"tabs","view":"unknown"}}"#.as_slice(),
@@ -1786,27 +1816,21 @@ mod tests {
             original,
             br#"{"version":4,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true}}"#
         );
-        // A complete version-3 record is refused by version, without conversion or overwrite.
+        // A complete version-3 record upgrades in place, keeping its choices with the pointer defaults.
         let version_three = br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
         root.record(RecordKind::UiPreferences)
             .replace(version_three)
             .unwrap();
         assert_eq!(
-            restore_settings(&admission).await.unwrap_err(),
-            "unsupported settings; use /settings to replace them"
+            restore_settings(&admission).await.unwrap(),
+            combined_classic
         );
-        // /settings and new tasks keep working on defaults so the record can be replaced.
-        assert_eq!(
-            settings_or_defaults(&admission).await.unwrap(),
-            Preferences::default()
-        );
-        assert_eq!(
-            root.record(RecordKind::UiPreferences)
-                .read()
-                .unwrap()
-                .unwrap(),
-            version_three
-        );
+        let upgraded = root
+            .record(RecordKind::UiPreferences)
+            .read()
+            .unwrap()
+            .unwrap();
+        assert_eq!(decode_settings(&upgraded), Ok(combined_classic));
         root.record(RecordKind::UiPreferences)
             .replace(&original)
             .unwrap();
