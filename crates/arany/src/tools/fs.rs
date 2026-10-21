@@ -23,9 +23,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && offset.is_none_or(|n| n >= 1)
                 && limit.is_none_or(|n| (1..=MAX_READ_PAGE_LINES).contains(&n))
         }
-        ToolCall::Search { path, query } => {
-            valid_relative(path, true) && !query.is_empty() && query.len() <= 512
-        }
+        ToolCall::Search { path, .. } => valid_relative(path, true) && super::search::valid(call),
         ToolCall::Mkdir { path } => valid_relative(path, false),
         ToolCall::Write {
             path,
@@ -69,7 +67,33 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                 json!({"type":["integer", "null"], "description":format!("Number of lines, 1 through {MAX_READ_PAGE_LINES}; null reads up to {MAX_READ_PAGE_LINES} lines. Lines are numbered and cut after {MAX_READ_LINE_CHARS} characters; the rendered result budget may end the page earlier.")}),
             ),
         ],
-        "search" => vec![path, ("query", string())],
+        "search" => vec![
+            path,
+            (
+                "query",
+                json!({"type":"string", "description":"Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true."}),
+            ),
+            (
+                "regex",
+                json!({"type":["boolean", "null"], "description":"true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally."}),
+            ),
+            (
+                "include",
+                json!({"type":["string", "null"], "description":"File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file."}),
+            ),
+            (
+                "case_sensitive",
+                json!({"type":["boolean", "null"], "description":"false ignores case; null or true matches case exactly."}),
+            ),
+            (
+                "offset",
+                json!({"type":["integer", "null"], "description":"Number of matching lines to skip; null starts at 0. Continue using next_offset."}),
+            ),
+            (
+                "limit",
+                json!({"type":["integer", "null"], "description":format!("Matching lines to return, 1 through {MAX_SEARCH_ROWS}; null returns up to {MAX_SEARCH_ROWS}. The rendered result budget may end the page earlier.")}),
+            ),
+        ],
         "write" => vec![
             path,
             ("expected_digest", nullable()),
@@ -573,9 +597,9 @@ pub(super) fn snapshot_into(
     if let Some(target) = project {
         for path in &config.workspace_paths {
             if path == "." {
-                collect_root(workspace, "", &mut entries, &mut budget)?;
+                collect_root(workspace, "", &mut entries, &mut budget, &|_| true)?;
             } else {
-                collect(workspace, path, &mut entries, &mut budget)?;
+                collect(workspace, path, &mut entries, &mut budget, &|_| true)?;
             }
         }
         for entry in entries {
@@ -668,17 +692,21 @@ fn charge_runtime(total: &mut usize, count: usize) -> Result<(), ToolError> {
     Ok(())
 }
 
+// `keep` selects files before their content is read; directories are always traversed.
+type Keep<'a> = &'a dyn Fn(&str) -> bool;
+
 fn collect(
     root: &Dir,
     path: &str,
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
+    keep: Keep,
 ) -> Result<(), ToolError> {
     if !valid_relative(path, false) || path.split('/').count() > 16 {
         return Err(ToolError::Path);
     }
     let file = open_file(root, path)?;
-    collect_open(root, path, file, output, budget)
+    collect_open(root, path, file, output, budget, keep)
 }
 
 fn collect_open(
@@ -687,6 +715,7 @@ fn collect_open(
     file: File,
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
+    keep: Keep,
 ) -> Result<(), ToolError> {
     let metadata = file.metadata().map_err(|_| ToolError::Path)?;
     if metadata.is_dir() {
@@ -718,9 +747,9 @@ fn collect_open(
             });
         }
         for name in names {
-            collect(root, &format!("{path}/{name}"), output, budget)?;
+            collect(root, &format!("{path}/{name}"), output, budget, keep)?;
         }
-    } else {
+    } else if keep(path) {
         #[cfg(unix)]
         let executable = {
             use std::os::unix::fs::PermissionsExt;
@@ -754,6 +783,7 @@ fn collect_root(
     path: &str,
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
+    keep: Keep,
 ) -> Result<(), ToolError> {
     if !valid_relative(path, true) || path.split('/').count() > 16 {
         return Err(ToolError::Path);
@@ -763,7 +793,7 @@ fn collect_root(
     } else {
         let file = open_file(root, path)?;
         if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
-            return collect_open(root, path, file, output, budget);
+            return collect_open(root, path, file, output, budget, keep);
         }
         Dir::from_std_file(file)
     };
@@ -807,9 +837,9 @@ fn collect_root(
                 return Err(ToolError::Limit);
             }
             let _ = open_file(root, &selected)?;
-            collect_root(root, &selected, output, budget)?;
+            collect_root(root, &selected, output, budget, keep)?;
         } else {
-            collect(root, &selected, output, budget)?;
+            collect(root, &selected, output, budget, keep)?;
         }
     }
     Ok(())
@@ -992,7 +1022,7 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
             .file_name()
             .into_string()
             .map_err(|_| ToolError::Path)?;
-        collect(&root, &name, &mut entries, &mut budget)?;
+        collect(&root, &name, &mut entries, &mut budget, &|_| true)?;
     }
     for entry in entries {
         put_entry(&target, entry)?;
@@ -1122,6 +1152,7 @@ pub(super) fn inspect(
     call: &ToolCall,
     config: &Config,
     result_bytes: usize,
+    deadline: std::time::Instant,
 ) -> Result<String, ToolError> {
     match call {
         ToolCall::Read {
@@ -1146,9 +1177,9 @@ pub(super) fn inspect(
             }
             read_page(file, *offset, *limit, result_bytes)
         }
-        ToolCall::List { path } | ToolCall::Search { path, .. } => {
+        ToolCall::List { path } => {
             let path = if path == "." { "" } else { path.as_str() };
-            if config.workspace_paths == ["."] && matches!(call, ToolCall::List { .. }) {
+            if config.workspace_paths == ["."] {
                 let rows = entries(root, path, "")?;
                 let truncated = rows.len() >= 64;
                 return fit_rows(
@@ -1157,34 +1188,12 @@ pub(super) fn inspect(
                     result_bytes,
                 );
             }
-            let mut files = Vec::new();
-            let mut budget = ScanBudget::default();
-            for selected in &config.workspace_paths {
-                if selected == "." {
-                    collect_root(root, path, &mut files, &mut budget)?;
-                } else if path.is_empty() || Path::new(selected).starts_with(path) {
-                    collect(root, selected, &mut files, &mut budget)?;
-                } else if Path::new(path).starts_with(selected) {
-                    collect(root, path, &mut files, &mut budget)?;
-                }
-            }
             let mut rows = Vec::new();
-            for entry in files {
-                let name = entry.path;
-                let Some(content) = entry.content else {
-                    if matches!(call, ToolCall::List { .. }) {
-                        rows.push(json!({"path":name,"kind":"directory"}));
-                        if rows.len() >= 64 {
-                            break;
-                        }
-                    }
-                    continue;
-                };
-                if let ToolCall::Search { query, .. } = call {
-                    search_rows(&name, &content, query, &mut rows);
-                } else {
-                    rows.push(json!({"path":name,"bytes":content.len()}));
-                }
+            for entry in selected(root, path, config, &|_| true)? {
+                rows.push(match entry.content {
+                    None => json!({"path":entry.path,"kind":"directory"}),
+                    Some(content) => json!({"path":entry.path,"bytes":content.len()}),
+                });
                 if rows.len() >= 64 {
                     break;
                 }
@@ -1192,22 +1201,38 @@ pub(super) fn inspect(
             let truncated = rows.len() >= 64;
             fit_rows(rows, truncated, result_bytes)
         }
+        ToolCall::Search { path, .. } => {
+            let mut search = super::search::Search::new(call, deadline)?;
+            let path = if path == "." { "" } else { path.as_str() };
+            let mut files = selected(root, path, config, &|file| search.includes(file))?;
+            files.sort_by(|left, right| left.path.cmp(&right.path));
+            files.dedup_by(|left, right| left.path == right.path);
+            for entry in files {
+                if let Some(content) = entry.content
+                    && search.scan(&entry.path, &content)?
+                {
+                    break;
+                }
+            }
+            search.finish(result_bytes)
+        }
         _ => Err(ToolError::Operation),
     }
 }
 
-pub(super) fn search_rows(name: &str, content: &[u8], query: &str, rows: &mut Vec<Value>) {
-    let Ok(text) = std::str::from_utf8(content) else {
-        return;
-    };
-    for (index, line) in text.lines().enumerate() {
-        if line.contains(query) {
-            rows.push(json!({"path":name,"line":index+1,"text":line.chars().take(512).collect::<String>()}));
-        }
-        if rows.len() == 64 {
-            break;
+fn selected(root: &Dir, path: &str, config: &Config, keep: Keep) -> Result<Vec<Entry>, ToolError> {
+    let mut files = Vec::new();
+    let mut budget = ScanBudget::default();
+    for selected in &config.workspace_paths {
+        if selected == "." {
+            collect_root(root, path, &mut files, &mut budget, keep)?;
+        } else if path.is_empty() || Path::new(selected).starts_with(path) {
+            collect(root, selected, &mut files, &mut budget, keep)?;
+        } else if Path::new(path).starts_with(selected) {
+            collect(root, path, &mut files, &mut budget, keep)?;
         }
     }
+    Ok(files)
 }
 
 fn escaped_len(character: char) -> usize {

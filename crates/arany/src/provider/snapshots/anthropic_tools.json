@@ -114,20 +114,61 @@
       "name": "arany_read"
     },
     {
-      "description": "Search literal UTF-8 content in a Workspace file or directory. Use Read or an include for edit SHA-256.",
+      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "case_sensitive": {
+            "description": "false ignores case; null or true matches case exactly.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include": {
+            "description": "File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Matching lines to return, 1 through 100; null returns up to 100. The rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching lines to skip; null starts at 0. Continue using next_offset.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "path": {
             "type": "string"
           },
           "query": {
+            "description": "Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true.",
             "type": "string"
+          },
+          "regex": {
+            "description": "true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "path",
-          "query"
+          "query",
+          "regex",
+          "include",
+          "case_sensitive",
+          "offset",
+          "limit"
         ],
         "type": "object"
       },
@@ -905,20 +946,61 @@
       "name": "arany_read"
     },
     {
-      "description": "Search literal UTF-8 content in a Workspace file or directory. Use Read or an include for edit SHA-256.",
+      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "case_sensitive": {
+            "description": "false ignores case; null or true matches case exactly.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include": {
+            "description": "File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Matching lines to return, 1 through 100; null returns up to 100. The rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching lines to skip; null starts at 0. Continue using next_offset.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "path": {
             "type": "string"
           },
           "query": {
+            "description": "Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true.",
             "type": "string"
+          },
+          "regex": {
+            "description": "true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "path",
-          "query"
+          "query",
+          "regex",
+          "include",
+          "case_sensitive",
+          "offset",
+          "limit"
         ],
         "type": "object"
       },
@@ -1159,20 +1241,61 @@
       "name": "arany_read"
     },
     {
-      "description": "Search literal UTF-8 content in a Workspace file or directory. Use Read or an include for edit SHA-256.",
+      "description": "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
+          "case_sensitive": {
+            "description": "false ignores case; null or true matches case exactly.",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "include": {
+            "description": "File glob relative to a directory path, or a named file's basename: *, ?, whole-segment ** and {a,b}. *.rs matches only the directory's own files; use **/*.rs for any depth. null searches every file.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "limit": {
+            "description": "Matching lines to return, 1 through 100; null returns up to 100. The rendered result budget may end the page earlier.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "offset": {
+            "description": "Number of matching lines to skip; null starts at 0. Continue using next_offset.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "path": {
             "type": "string"
           },
           "query": {
+            "description": "Text to find within one line, 1 through 512 UTF-8 bytes; literal unless regex is true.",
             "type": "string"
+          },
+          "regex": {
+            "description": "true reads query as Rust regex syntax (no look-around or backreferences); null or false matches it literally.",
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
           "path",
-          "query"
+          "query",
+          "regex",
+          "include",
+          "case_sensitive",
+          "offset",
+          "limit"
         ],
         "type": "object"
       },

@@ -1137,7 +1137,7 @@ fn unsupported_journal_versions_reject_without_changing_existing_data() {
         .enable_all()
         .build()
         .unwrap();
-    for version in [0, 1, 2, 3, 5] {
+    for version in [0, 1, 2, 3, 4, 6] {
         let temp = tempfile::tempdir().expect("private test root");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
