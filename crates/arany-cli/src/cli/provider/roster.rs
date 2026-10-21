@@ -2,7 +2,7 @@ use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
     AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, Providers,
-    RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
+    RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
 };
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
@@ -76,8 +76,27 @@ fn bounded(bytes: &[u8]) -> bool {
     depth == 0 && !string
 }
 
+pub(crate) const PROVIDER_ROSTER: RecordFormat = RecordFormat {
+    kind: RecordKind::ProviderRoster,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| presets(bytes).is_ok(),
+};
+
 fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
-    if !bounded(bytes) || !valid_profile_name(selected) {
+    if !valid_profile_name(selected) {
+        return Err(INVALID.into());
+    }
+    presets(bytes)?
+        .into_iter()
+        .find(|preset| preset.name == selected)
+        .ok_or_else(|| "selected roster preset is unavailable".into())
+}
+
+fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
+    if !bounded(bytes) {
         return Err(INVALID.into());
     }
     let mut config: Config = serde_json::from_slice(bytes).map_err(|_| INVALID)?;
@@ -116,11 +135,11 @@ fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
             }
         }
     }
-    let mut presets = BTreeSet::new();
-    let mut result = None;
+    let mut preset_names = BTreeSet::new();
+    let mut result = Vec::with_capacity(config.presets.len());
     for preset in config.presets {
         if !valid_profile_name(&preset.name)
-            || !presets.insert(preset.name.clone())
+            || !preset_names.insert(preset.name.clone())
             || preset.child_profiles.is_empty()
             || preset.child_profiles.len() > 8
         {
@@ -154,26 +173,24 @@ fn parse(bytes: &[u8], selected: &str) -> Result<SelectedRoster, String> {
         if referenced.len() > 8 || !referenced.is_subset(&names) {
             return Err(INVALID.into());
         }
-        if preset.name == selected {
-            result = Some(SelectedRoster {
-                name: preset.name,
-                profiles: referenced
-                    .iter()
-                    .map(|name| {
-                        config
-                            .profiles
-                            .iter()
-                            .find(|profile| &profile.name == name)
-                            .expect("validated reference")
-                            .clone()
-                    })
-                    .collect(),
-                providers,
-                child_profiles: preset.child_profiles,
-            });
-        }
+        result.push(SelectedRoster {
+            name: preset.name,
+            profiles: referenced
+                .iter()
+                .map(|name| {
+                    config
+                        .profiles
+                        .iter()
+                        .find(|profile| &profile.name == name)
+                        .expect("validated reference")
+                        .clone()
+                })
+                .collect(),
+            providers,
+            child_profiles: preset.child_profiles,
+        });
     }
-    result.ok_or_else(|| "selected roster preset is unavailable".into())
+    Ok(result)
 }
 
 pub(crate) fn load(
@@ -202,8 +219,7 @@ pub(crate) fn load_without_workspace(
         );
     }
     let bytes = root
-        .record(RecordKind::ProviderRoster)
-        .read()
+        .read_current(&PROVIDER_ROSTER)
         .map_err(|_| "Provider roster unavailable or unsafe")?
         .ok_or("provider-roster.json is unavailable")?;
     parse(&bytes, name)

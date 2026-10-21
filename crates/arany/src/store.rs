@@ -16,6 +16,7 @@ mod migrate;
 mod replay;
 mod state;
 use journal::{HotSession, append, fork_session, open_connection};
+pub use migrate::{RECORD_FORMATS, RecordFormat, RecordStep};
 use replay::{
     latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
     session_for_run,

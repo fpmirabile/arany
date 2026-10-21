@@ -1,7 +1,7 @@
 use super::types::digest;
 use super::{ToolCall, ToolError, now_ms};
 use crate::session::WorkspaceIdentity;
-use crate::store::{RecordKind, StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -67,11 +67,19 @@ impl ExactCommandRule {
     }
 }
 
+pub(crate) const UNGUARDED_COMMANDS: RecordFormat = RecordFormat {
+    kind: RecordKind::UnguardedCommands,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| ExactCommandRules::parse(bytes).is_ok(),
+};
+
 impl ExactCommandRules {
     pub(crate) fn load(state: &StateRoot) -> Result<Option<Self>, ToolError> {
         state
-            .record(RecordKind::UnguardedCommands)
-            .read()
+            .read_current(&UNGUARDED_COMMANDS)
             .map_err(|_| ToolError::Configuration)?
             .map(|bytes| Self::parse(&bytes))
             .transpose()

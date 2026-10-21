@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::path::PathBuf;
 use uuid::{Uuid, Variant, Version};
 
-mod account;
+pub(crate) mod account;
 mod browser;
 mod callback;
 mod catalog;

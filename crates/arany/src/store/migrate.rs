@@ -16,8 +16,10 @@ use std::io::{self, Read};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod record;
 #[cfg(test)]
 mod tests;
+pub use record::{RECORD_FORMATS, RecordFormat, RecordStep};
 
 const DIR: &str = "migrations";
 const MARKER: &str = "phase.json";

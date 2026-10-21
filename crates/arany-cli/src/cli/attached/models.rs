@@ -5,11 +5,11 @@ use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, ShutdownSignal,
     TerminalInput,
 };
-use arany::RecordKind;
 use arany::{
     CustomProfile, Effort, ModelEntry, NativeApiCredentials, SessionId, SessionView, StateRoot,
     list_native_models_with_credentials, resolve_native_effort,
 };
+use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
@@ -69,10 +69,18 @@ fn bounded_models<'de, D: serde::Deserializer<'de>>(
     )
 }
 
+pub(crate) const MODEL_PREFERENCES: RecordFormat = RecordFormat {
+    kind: RecordKind::ModelPreferences,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| decode_preferences(bytes).is_ok(),
+};
+
 fn read_preferences(root: &StateRoot) -> Result<ModelPreferences, String> {
     let Some(record) = root
-        .record(RecordKind::ModelPreferences)
-        .read()
+        .read_current(&MODEL_PREFERENCES)
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(ModelPreferences {
@@ -99,8 +107,7 @@ pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
     };
     root.with_account_replacement_lock(workspace, || {
         let record = root
-            .record(RecordKind::ModelPreferences)
-            .read()
+            .read_current(&MODEL_PREFERENCES)
             .map_err(|_| "saved model preferences unavailable or unsafe")?;
         Ok(record.is_some_and(|bytes| decode_preferences(&bytes).is_err()))
     })
