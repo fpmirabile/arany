@@ -641,12 +641,12 @@ mod tests {
             let probe = input.try_clone().unwrap();
             let flags = rustix::fs::fcntl_getfl(&input).unwrap();
             rustix::fs::fcntl_setfl(&input, flags | OFlags::NONBLOCK).unwrap();
+            // A full input queue fails the write instead of blocking the test.
+            let flags = rustix::fs::fcntl_getfl(&master).unwrap();
+            rustix::fs::fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
             let mut settings = rustix::termios::tcgetattr(&input).unwrap();
-            if linear {
-                // Canonical echo shows when the line discipline holds a partial line.
-                let flags = rustix::fs::fcntl_getfl(&master).unwrap();
-                rustix::fs::fcntl_setfl(&master, flags | OFlags::NONBLOCK).unwrap();
-            } else {
+            // Linear keeps canonical echo, which shows when the line discipline holds a partial line.
+            if !linear {
                 settings.make_raw();
                 settings
                     .local_modes
@@ -700,7 +700,8 @@ mod tests {
                         .unwrap();
                 }
                 assert_eq!(sender.capacity(), 0);
-                master.write_all(&b"1\r".repeat(1024)).unwrap();
+                // XNU blocks PTY writers near its 1024-byte input queue, so the unread bytes stay small.
+                master.write_all(&b"1\r".repeat(64)).unwrap();
                 let cursor = CursorQuery::default();
                 let query = cursor.clone();
                 let thread = std::thread::spawn(move || {
