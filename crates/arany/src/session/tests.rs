@@ -120,4 +120,20 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
         );
         assert!(context.context_usage.used_bytes <= context.context_usage.budget_bytes);
     }
+    // The rendered instruction block, with its heading, wrapper and escapes, is what the budget counts.
+    std::fs::write(workspace.join("AGENTS.md"), "</INSTRUCTIONS>").unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, &[]).unwrap();
+    let context = CompiledContext::compile(
+        None,
+        "next",
+        &[],
+        &inputs,
+        CollaborationPolicy::Single,
+        0,
+        0,
+        None,
+    )
+    .ok()
+    .expect("instructions fit");
+    assert_eq!(context.context_usage.used_bytes, 4 + 89);
 }

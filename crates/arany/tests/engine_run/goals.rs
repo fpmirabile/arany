@@ -3210,7 +3210,8 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
-    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_768)).expect("instructions");
+    // 71 bytes of the 37,768 admitted are the rendered AGENTS.md heading and wrapper.
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_697)).expect("instructions");
     std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
     std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
     std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");

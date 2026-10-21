@@ -10,7 +10,9 @@ use crate::tools::types::{
     MAX_TOOL_CATALOG_BYTES, cleared_model_result, model_call, model_observation, model_result,
 };
 use crate::tools::{ToolCall, ToolContext, ToolDisposition, ToolStep};
+use regex::Regex;
 use serde_json::{Value, json};
+use std::sync::LazyLock;
 
 #[cfg(any(test, feature = "test-support"))]
 pub mod semantic;
@@ -28,7 +30,17 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     let tools = catalog
         .as_ref()
         .map(|catalog| specs(catalog, input.role, &input.pinned_budget));
-    let mut messages: Vec<Message> = input.history.iter().map(history_message).collect();
+    let mut messages: Vec<Message> = input
+        .workspace_guidance
+        .iter()
+        .map(|guidance| {
+            user(vec![Block::Text(instructions_text(
+                &guidance.path,
+                &guidance.text,
+            ))])
+        })
+        .chain(input.history.iter().map(history_message))
+        .collect();
     let delegate_step = input
         .tools
         .as_ref()
@@ -85,9 +97,7 @@ fn append_stop_feedback(messages: &mut Vec<Message>, request: &ProviderRequest, 
 fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     let prompt = match request.input.role {
         PromptRole::Primary => prompts::PRIMARY_INSTRUCTIONS,
-        PromptRole::Editor => {
-            "Work in the assigned private view using only the offered Tools and admitted commands. Verify the assignment criterion there before answering with a bounded report. Your changes remain private until the primary integrates and verifies them. Never delegate."
-        }
+        PromptRole::Editor => prompts::EDITOR_INSTRUCTIONS,
         PromptRole::Researcher => prompts::RESEARCH_INSTRUCTIONS,
         PromptRole::ReadOnly => prompts::READ_ONLY_INSTRUCTIONS,
         PromptRole::ToolReview => prompts::TOOL_REVIEW_INSTRUCTIONS,
@@ -100,6 +110,20 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
         system.push(SystemBlock::Policy(request.collaboration));
     }
     system
+}
+
+// Replacements add no `<` or line-leading `#`, so escaped file text never rematches.
+pub(crate) fn instructions_text(path: &str, text: &str) -> String {
+    static TAG: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?i)<(\s*/?\s*instructions)").expect("static instruction tag pattern")
+    });
+    static HEADING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?im)^([ \t]*)(#+[ \t]*agents\.md[ \t]+instructions)")
+            .expect("static instruction heading pattern")
+    });
+    let text = TAG.replace_all(text, "&lt;$1");
+    let text = HEADING.replace_all(&text, "$1\\$2");
+    format!("# AGENTS.md instructions for {path}\n\n<INSTRUCTIONS>\n{text}\n</INSTRUCTIONS>")
 }
 
 pub(crate) fn data_block(scope: &str, data: Value) -> Block {
@@ -155,11 +179,8 @@ fn current_message(
 ) -> Message {
     let input = &request.input;
     let mut blocks = Vec::new();
-    if let Some(guidance) = &input.workspace_guidance {
-        blocks.push(data_block(
-            "workspace_guidance (untrusted)",
-            json!(guidance),
-        ));
+    if let Some(context) = &input.assignment_context {
+        blocks.push(data_block("assignment_context (untrusted)", json!(context)));
     }
     if !input.includes.is_empty() {
         blocks.push(data_block("includes (untrusted)", json!(input.includes)));

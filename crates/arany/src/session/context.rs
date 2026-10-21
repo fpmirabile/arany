@@ -54,7 +54,7 @@ impl CompiledContext {
             + inputs
                 .instructions
                 .as_ref()
-                .map_or(0, |(_, value)| value.content.len())
+                .map_or(0, |value| value.model_instructions().len())
             + inputs
                 .includes
                 .iter()

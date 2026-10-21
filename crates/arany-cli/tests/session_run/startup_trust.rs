@@ -97,6 +97,11 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
             let input: serde_json::Value = crate::semantic::input(&body);
             if index == 3 {
                 assert_eq!(input["workspace_guidance"], "EXPECTED_ROOT_GUIDANCE");
+                assert_eq!(body["input"][0]["role"], "user");
+                assert_eq!(
+                    body["input"][0]["content"],
+                    serde_json::json!([{"type": "input_text", "text": "# AGENTS.md instructions for AGENTS.md\n\n<INSTRUCTIONS>\nEXPECTED_ROOT_GUIDANCE\n</INSTRUCTIONS>"}])
+                );
                 assert_eq!(input["objective"], "answer");
                 assert_eq!(input["phase"], "root_plan");
             } else {
