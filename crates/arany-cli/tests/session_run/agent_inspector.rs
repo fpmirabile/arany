@@ -1136,8 +1136,7 @@ struct Gates {
 
 const LIVE_SIZE: (usize, usize) = (80, 24);
 
-// One xterm PTY whose captured bytes are checked only at complete frames: Ratatui ends each
-// frame with a cursor hide or show, so a partial frame never satisfies or fails a step.
+// Decode at cursor markers; Classic resizing also emits them before the replacement frame.
 struct LivePty {
     input: std::process::ChildStdin,
     output: std::process::ChildStdout,
@@ -1413,7 +1412,15 @@ fn live_agent_chat_journey(
     );
     gates.release.send(()).expect("release the synthesis");
     // Escape returns to the primary without cancelling; its answer follows the Run's end.
-    pty.step(b"\x1b", &["team answer"], &["viewing child"]);
+    pty.step(
+        b"\x1b",
+        &[
+            "team answer",
+            "Ask Arany",
+            "> Ask a question, or type / for commands",
+        ],
+        &["viewing child", "agents · Esc primary"],
+    );
     exit_live(&mut attached, &mut pty);
     if classic {
         // Live records were appended once each, below the chat's read-only boundary.
@@ -1493,7 +1500,15 @@ fn live_agent_picker_journey(
     gates.release.send(()).expect("release the second child");
     pty.await_request(gates, "synthesis");
     gates.release.send(()).expect("release the synthesis");
-    pty.step(b"\x1b", &["team answer"], &["viewing child"]);
+    pty.step(
+        b"\x1b",
+        &[
+            "team answer",
+            "Ask Arany",
+            "> Ask a question, or type / for commands",
+        ],
+        &["viewing child", "agents · Esc primary"],
+    );
     exit_live(&mut attached, &mut pty);
 }
 
