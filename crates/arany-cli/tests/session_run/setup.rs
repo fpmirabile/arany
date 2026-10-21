@@ -1980,13 +1980,13 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         input
             .write_all(b"\x1b")
             .expect("cancel setup without consuming draft");
-        wait_for_after(
+        crate::session_picker::wait_for_screen(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            closed_at,
-            b"Setup closed",
+            (closed_at, columns.into(), 8),
+            "Setup closed",
         );
         let returned_at = transcript.len();
         input.write_all(b"?").expect("edit restored draft");
@@ -2039,13 +2039,13 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
         );
         let closed_at = transcript.len();
         input.write_all(b"\x1b").expect("close setup selector");
-        wait_for_after(
+        crate::session_picker::wait_for_screen(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            closed_at,
-            b"Setup closed",
+            (closed_at, columns.into(), 8),
+            "Setup closed",
         );
         wait_for_after(
             &mut output,
