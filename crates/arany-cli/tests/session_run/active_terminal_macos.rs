@@ -82,8 +82,8 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         let state = temp.path().join("state");
-        if fullscreen {
-            crate::seed_fullscreen(&state);
+        if !fullscreen {
+            crate::seed_classic(&state);
         }
         std::fs::create_dir(&workspace).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -280,7 +280,6 @@ fn native_resume_picker_renderer_failure_restores_surviving_terminal() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
-            crate::seed_fullscreen(&state);
             std::fs::create_dir(&workspace).unwrap();
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -601,66 +600,87 @@ fn read_until_consent(
 }
 
 #[test]
-fn native_saved_classic_chat_view_selects_the_primary_screen() {
-    let temp = tempfile::tempdir().unwrap();
-    let workspace = temp.path().join("project");
-    let state = temp.path().join("state");
-    std::fs::create_dir(&workspace).unwrap();
-    StateRoot::admit(&state)
-        .unwrap()
-        .record(RecordKind::UiPreferences)
-        .replace(&super::saved_ui_preferences("tabs", "classic"))
-        .unwrap();
-    let geometry = nix::pty::Winsize {
-        ws_row: 24,
-        ws_col: 80,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
-    let before = crate::process::terminal_settings(&input);
-    let master = input.try_clone().unwrap();
-    let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
-    command
-        .env_clear()
-        .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
-        .env("HOME", temp.path().join("fixture-home"))
-        .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
-        .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
-        .env("TERM", "xterm")
-        .current_dir(&workspace)
-        .args(["--no-color", "--state-dir"])
-        .arg(&state)
-        .arg("--workspace")
-        .arg(&workspace)
-        .stdin(Stdio::from(slave.try_clone().unwrap()))
-        .stdout(Stdio::piped())
-        .stderr(Stdio::from(slave));
-    own_terminal(&mut command);
-    // Close fixture PTYs before reaping a child on unwind.
-    let (mut child, mut input, mut master) =
-        (ChildGuard::new(command.spawn().unwrap()), input, master);
-    drop(command);
-    let mut transcript = Vec::new();
-    read_until_consent(&mut master, &mut transcript, &mut child, "saved classic");
-    assert!(
-        transcript.windows(4).any(|part| part == b"\x1b[6n"),
-        "saved classic observes the inline cursor"
-    );
-    assert!(
-        !transcript.windows(8).any(|part| part == b"\x1b[?1049h"),
-        "saved classic stays on the primary screen"
-    );
-    input.write_all(&[3]).unwrap();
-    let output = crate::process::capture_terminal(
-        child.child(),
-        master,
-        Duration::from_secs(10),
-        64 * 1024,
-        |_| {},
-    );
-    assert_eq!(output.status.code(), Some(0));
-    restored(&input, &before);
+fn native_startup_chat_view_honors_default_saved_and_flag() {
+    for (saved, classic) in [(None, false), (Some("classic"), false), (None, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("project");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&workspace).unwrap();
+        if let Some(view) = saved {
+            StateRoot::admit(&state)
+                .unwrap()
+                .record(RecordKind::UiPreferences)
+                .replace(&super::saved_ui_preferences("tabs", view))
+                .unwrap();
+        }
+        let fullscreen = saved.is_none() && !classic;
+        let geometry = nix::pty::Winsize {
+            ws_row: 24,
+            ws_col: 80,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
+        let (input, slave) = crate::process::cloexec_pty(Some(&geometry));
+        let before = crate::process::terminal_settings(&input);
+        let master = input.try_clone().unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_TEST_ACCOUNT_ROOT", temp.path().join("account"))
+            .env("HOME", temp.path().join("fixture-home"))
+            .env("XDG_STATE_HOME", temp.path().join("fixture-state"))
+            .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
+            .env("TERM", "xterm")
+            .current_dir(&workspace)
+            .args(["--no-color", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .stdin(Stdio::from(slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(slave));
+        if classic {
+            command.arg("--classic");
+        }
+        own_terminal(&mut command);
+        // Close fixture PTYs before reaping a child on unwind.
+        let (mut child, mut input, mut master) =
+            (ChildGuard::new(command.spawn().unwrap()), input, master);
+        drop(command);
+        let mut transcript = Vec::new();
+        read_until_consent(
+            &mut master,
+            &mut transcript,
+            &mut child,
+            "startup chat view",
+        );
+        assert_eq!(
+            transcript.windows(4).any(|part| part == b"\x1b[6n"),
+            !fullscreen,
+            "only Classic observes the inline cursor"
+        );
+        let text = String::from_utf8_lossy(&transcript);
+        for mode in [1049, 1000, 1002, 1006] {
+            assert_eq!(
+                text.contains(&format!("\x1b[?{mode}h")),
+                fullscreen,
+                "startup mode {mode}: saved {saved:?}, --classic {classic}"
+            );
+        }
+        for mode in [1003, 1007, 1015] {
+            assert!(!text.contains(&format!("\x1b[?{mode}h")));
+        }
+        input.write_all(&[3]).unwrap();
+        let output = crate::process::capture_terminal(
+            child.child(),
+            master,
+            Duration::from_secs(10),
+            64 * 1024,
+            |_| {},
+        );
+        assert_eq!(output.status.code(), Some(0));
+        restored(&input, &before);
+    }
 }
 
 #[test]
@@ -677,7 +697,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
-            crate::seed_fullscreen(&state);
+            StateRoot::admit(&state).unwrap();
             let entries = || {
                 let mut names = std::fs::read_dir(&state)
                     .unwrap()
@@ -745,7 +765,7 @@ fn native_folder_consent_restores_before_account_setup_or_session_work() {
                 assert_eq!(
                     transcript.windows(8).any(|part| part == b"\x1b[?1049h"),
                     !linear,
-                    "saved chat view is fullscreen: {linear} {case}"
+                    "default chat view is fullscreen: {linear} {case}"
                 );
                 let active = crate::process::terminal_settings(&input);
                 assert_eq!(
@@ -829,7 +849,6 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
             let temp = tempfile::tempdir().unwrap();
             let workspace = temp.path().join("project");
             let state = temp.path().join("state");
-            crate::seed_fullscreen(&state);
             std::fs::create_dir(&workspace).unwrap();
             let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
             write_profile(&state, listener.local_addr().unwrap().port());
@@ -1140,7 +1159,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
 mod steering;
 
 #[test]
-fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
+fn native_explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("project");
     let state = temp.path().join("state");
@@ -1165,7 +1184,7 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         .env("XDG_DATA_HOME", temp.path().join("fixture-data"))
         .env("TERM", "xterm")
         .current_dir(&workspace)
-        .args(["--no-color", "--state-dir"])
+        .args(["--classic", "--no-color", "--state-dir"])
         .arg(&state)
         .arg("--workspace")
         .arg(&workspace)
@@ -1318,7 +1337,6 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
     let workspace = temp.path().join("project");
     let state = temp.path().join("state");
     std::fs::create_dir(&workspace).unwrap();
-    crate::seed_fullscreen(&state);
     let id = crate::seed_transcript_session(&state, &workspace);
     let provider = super::loopback::held_stream_provider(&state, ANSWER);
     check_profile(&workspace, &state);
@@ -1436,7 +1454,12 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
                     back_from = from;
                     Some(b"q")
                 }
-                5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some() => Some(b"/exit\r"),
+                // An active Run drops an empty-draft Ctrl+D, so wait for the settled `ready`.
+                5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some()
+                    && super::screen_rows(bytes, 80, 24)[23].starts_with("ready") =>
+                {
+                    Some(b"\x04")
+                }
                 _ => None,
             };
             if let Some(keys) = next {

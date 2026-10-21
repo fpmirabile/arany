@@ -418,11 +418,11 @@ fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-fn seed_fullscreen(state: &std::path::Path) {
+fn seed_classic(state: &std::path::Path) {
     arany::StateRoot::admit(state)
         .unwrap()
         .record(arany::RecordKind::UiPreferences)
-        .replace(&saved_ui_preferences("tabs", "fullscreen"))
+        .replace(&saved_ui_preferences("tabs", "classic"))
         .unwrap();
 }
 
@@ -611,7 +611,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             let mode = if case == "fullscreen" || case == "fullscreen-panic" {
                 TerminalMode::Fullscreen
             } else {
-                TerminalMode::default()
+                TerminalMode::Classic
             };
             let mut terminal = AttachedTerminal::acquire_with_mode(
                 linear && case != "cursor-timeout",
