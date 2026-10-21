@@ -12,7 +12,8 @@ pub mod rewind;
 #[cfg(test)]
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
-    AgentInspectorModel, AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets,
+    AgentFocus, AgentInspectorModel, AgentQuery, AgentRow, AgentTarget, AgentTranscript, Appended,
+    MAX_AGENT_ROWS, MAX_AGENT_SEARCH, TranscriptPart, agent_targets, run_targets,
 };
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{

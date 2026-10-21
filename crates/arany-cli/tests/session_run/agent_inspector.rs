@@ -244,10 +244,12 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let patterns: [&[u8]; 7] = [
+        let patterns: [&[u8]; 8] = [
             b"Agent: primary; state: active",
             b"Agent choice: n next",
             b"Agent 2/2: primary; finished",
+            // The reprint rearms, so the next choice waits for its prompt.
+            b"Agent choice: n next",
             b"Notice: Run is active; Ctrl+C cancels",
             b"Agent choice: n next",
             b"z",
@@ -296,16 +298,17 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     stage(1);
     input.write_all(b"n\n").expect("select recent AgentRun");
     stage(2);
-    input.write_all(b"q\n").expect("close active inspector");
     stage(3);
+    input.write_all(b"q\n").expect("close active inspector");
+    stage(4);
     input
         .write_all(b"/agents\n")
         .expect("reopen active inspector");
-    stage(4);
-    input.write_all(b"z").expect("partial inspector choice");
     stage(5);
-    release_run.send(()).expect("release active response");
+    input.write_all(b"z").expect("partial inspector choice");
     stage(6);
+    release_run.send(()).expect("release active response");
+    stage(7);
     input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let result = wait_product(attached.take());
@@ -742,6 +745,45 @@ fn agent_chat_journey(
         &[primary]
     };
     step(b"\x1b", returned, &[child]);
+    // `/agents` searches locally; no match activates nothing, and Enter opens the focused child.
+    let picker = "Enter open · Esc close";
+    step(
+        b"/agents\r",
+        &[picker, "Type to search 3 agents", "› 1. Run 1: primary"],
+        &[child],
+    );
+    step(
+        b"zz",
+        &[
+            picker,
+            "Search: zz · no matching agents",
+            "No matching agents",
+        ],
+        &["› 1."],
+    );
+    step(
+        b"\r\x7f\x7f",
+        &[picker, "Type to search 3 agents"],
+        &[child],
+    );
+    step(
+        b"second",
+        &[
+            "Search: second · 1 of 3 agents",
+            "› 1. Run 1: child 2; finished · second child task",
+        ],
+        &[child],
+    );
+    step(
+        b"\r",
+        &[
+            "viewing child 2 (read-only)",
+            armed,
+            "result of second child task",
+        ],
+        &[picker, primary],
+    );
+    step(b"\x1b", returned, &[child]);
     let from = checkpoint_screen(
         &mut transcript,
         &mut answered,
@@ -830,7 +872,8 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
         let mut declined = false;
         let mut bytes = Vec::new();
         let prompt: &[u8] = b"Agent chat: number opens";
-        let stages: [&[u8]; 12] = [
+        let picker: &[u8] = b"Agent choice: n next";
+        let stages: [&[u8]; 24] = [
             b"Input:",
             b"second child task\r\nAgent chat: number opens",
             b"Viewing child 2 (read-only)",
@@ -843,6 +886,18 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
             prompt,
             b"Back to primary",
             // The primary prompt follows the return barrier, so later input reaches the composer.
+            b"Input:",
+            b"Type to search 3 agents",
+            picker,
+            b"Search: zz \xc2\xb7 no matching agents",
+            picker,
+            b"Notice: No agent focused; choose a number first",
+            picker,
+            b"1. Run 1: child 2; finished \xc2\xb7 second child task (focused)",
+            picker,
+            b"Viewing child 2 (read-only)",
+            prompt,
+            b"Back to primary",
             b"Input:",
         ];
         let mut next = 0;
@@ -896,6 +951,20 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
     input.write_all(b"q\n").expect("return to primary");
     stage(10);
     stage(11);
+    // Every picker choice waits for the prompt that follows its rearmed reprint.
+    for (keys, stages) in [
+        (b"/agents\n".as_slice(), [12, 13]),
+        (b"/zz\n".as_slice(), [14, 15]),
+        (b"o\n".as_slice(), [16, 17]),
+        (b"/second\n".as_slice(), [18, 19]),
+        (b"o\n".as_slice(), [20, 21]),
+    ] {
+        input.write_all(keys).expect("agent picker choice");
+        stages.into_iter().for_each(stage);
+    }
+    input.write_all(b"q\n").expect("return to primary again");
+    stage(22);
+    stage(23);
     input.write_all(b"/exit\n").expect("exit linear chat");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1003,7 +1072,7 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     );
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
-    let server = gated_team_server(listener, 3, requests, released);
+    let server = gated_team_server(listener, 5, requests, released);
     check_profile(&workspace, &state);
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
@@ -1029,12 +1098,15 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     for classic in [false, true] {
         live_agent_chat_journey(&workspace, &state, session_id, classic, &gates);
     }
+    for classic in [false, true] {
+        live_agent_picker_journey(&workspace, &state, session_id, classic, &gates);
+    }
     live_linear_agent_chat(&workspace, &state, session_id, &gates);
     server.join().expect("synthetic server completed");
 
     // Following a child only read committed facts: each team Run closed normally, with no note.
     let (_, view) = replayed(&state, session_id);
-    assert_eq!(view.runs.len(), 4);
+    assert_eq!(view.runs.len(), 6);
     for run in &view.runs[1..] {
         assert_eq!(run.status, RunStatus::Finished);
         assert_eq!(run.assistant_message.as_deref(), Some("team answer"));
@@ -1164,13 +1236,13 @@ impl LivePty {
     }
 }
 
-fn live_agent_chat_journey(
+// A Classic or Fullscreen attached process that resumes the Session and starts a team Run.
+fn live_pty(
     workspace: &std::path::Path,
     state: &std::path::Path,
     id: SessionId,
     classic: bool,
-    gates: &Gates,
-) {
+) -> (ChildGuard, LivePty) {
     let mode = if classic { "--classic " } else { "" };
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
@@ -1196,7 +1268,7 @@ fn live_agent_chat_journey(
     let output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut pty = LivePty {
+    let pty = LivePty {
         input,
         output,
         transcript: Vec::new(),
@@ -1205,6 +1277,60 @@ fn live_agent_chat_journey(
         capture_from: 0,
         context: if classic { "Classic" } else { "Fullscreen" },
     };
+    (attached, pty)
+}
+
+// Exits through `/exit` and checks that the terminal settings were restored.
+fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
+    let from = checkpoint_screen(
+        &mut pty.transcript,
+        &mut pty.answered,
+        &mut pty.history,
+        LIVE_SIZE,
+        pty.capture_from,
+    );
+    pty.input.write_all(b"/exit\r").expect("exit attached mode");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pty.pump();
+        if attached.child().try_wait().expect("chat status").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} live chat did not exit: {}",
+            pty.context,
+            tail(&pty.transcript[from..])
+        );
+        thread::yield_now();
+    }
+    let result = wait_product(attached.take());
+    pty.pump();
+    assert!(
+        result.status.success(),
+        "{} chat exited cleanly",
+        pty.context
+    );
+    pty.history.extend_from_slice(&pty.transcript[from..]);
+    let text = String::from_utf8_lossy(&pty.history);
+    let setting = |marker: &str| {
+        text.split_once(marker)
+            .and_then(|(_, rest)| rest.lines().next())
+            .map(|line| line.trim_end_matches('\r').to_owned())
+            .unwrap_or_else(|| panic!("{} {marker} missing", pty.context))
+    };
+    assert_eq!(setting("TTY_BEFORE:"), setting("TTY_AFTER:"));
+    assert!(!text.contains("test-key"));
+}
+
+fn live_agent_chat_journey(
+    workspace: &std::path::Path,
+    state: &std::path::Path,
+    id: SessionId,
+    classic: bool,
+    gates: &Gates,
+) {
+    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
     let armed = "agents · Esc primary";
     pty.await_request(gates, "first");
     // The shelf lists both children once their spawns are committed and reduced.
@@ -1274,45 +1400,7 @@ fn live_agent_chat_journey(
     gates.release.send(()).expect("release the synthesis");
     // Escape returns to the primary without cancelling; its answer follows the Run's end.
     pty.step(b"\x1b", &["team answer"], &["viewing child"]);
-    let from = checkpoint_screen(
-        &mut pty.transcript,
-        &mut pty.answered,
-        &mut pty.history,
-        LIVE_SIZE,
-        pty.capture_from,
-    );
-    pty.input.write_all(b"/exit\r").expect("exit attached mode");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        pty.pump();
-        if attached.child().try_wait().expect("chat status").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{} live chat did not exit: {}",
-            pty.context,
-            tail(&pty.transcript[from..])
-        );
-        thread::yield_now();
-    }
-    let result = wait_product(attached.take());
-    pty.pump();
-    assert!(
-        result.status.success(),
-        "{} chat exited cleanly",
-        pty.context
-    );
-    pty.history.extend_from_slice(&pty.transcript[from..]);
-    let text = String::from_utf8_lossy(&pty.history);
-    let setting = |marker: &str| {
-        text.split_once(marker)
-            .and_then(|(_, rest)| rest.lines().next())
-            .map(|line| line.trim_end_matches('\r').to_owned())
-            .unwrap_or_else(|| panic!("{} {marker} missing", pty.context))
-    };
-    assert_eq!(setting("TTY_BEFORE:"), setting("TTY_AFTER:"));
-    assert!(!text.contains("test-key"));
+    exit_live(&mut attached, &mut pty);
     if classic {
         // Live records were appended once each, below the chat's read-only boundary.
         let (scrollback, screen) = crate::terminal_grid(&pty.history, LIVE_SIZE.0, LIVE_SIZE.1);
@@ -1323,6 +1411,61 @@ fn live_agent_chat_journey(
         // The Fullscreen journey's Run, then this one after the return, each once.
         assert_eq!(count("team answer"), 2, "{rows:?}");
     }
+}
+
+// `/agents` during a team Run: committed changes while the user searches never retarget the focus.
+fn live_agent_picker_journey(
+    workspace: &std::path::Path,
+    state: &std::path::Path,
+    id: SessionId,
+    classic: bool,
+    gates: &Gates,
+) {
+    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let picker = "Enter open · Esc close";
+    let focused = |pty: &LivePty, end: usize| {
+        pty.screen(end)
+            .lines()
+            .find(|row| row.starts_with("› ") && row.contains(". Run "))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    pty.await_request(gates, "first");
+    let from = pty.capture_from;
+    pty.frame(from, &["child 2 ·", "Alt+Left/Right agents"], &[]);
+    pty.step(b"/agents\r", &[picker, "Current Run: 3 agents"], &[]);
+    pty.step(b"active", &["Search: active · 3 of"], &[]);
+    let end = pty.step(b"\x1b[B\x1b[B", &["› 3. Run "], &[]);
+    assert!(
+        focused(&pty, end).contains("child 2; active"),
+        "{}",
+        pty.screen(end)
+    );
+    // The first child finishes and leaves the matches; the focus stays on child 2, now second.
+    let from = pty.capture_from;
+    gates.release.send(()).expect("release the first child");
+    pty.await_request(gates, "second");
+    let end = pty.frame(from, &["Search: active · 2 of", "› 2. Run "], &[]);
+    assert!(
+        focused(&pty, end).contains("child 2; active"),
+        "{}",
+        pty.screen(end)
+    );
+    pty.step(
+        b"\r",
+        &[
+            "viewing child 2 (read-only)",
+            "agents · Esc primary",
+            "second child task",
+            "child 2 is working",
+        ],
+        &[picker],
+    );
+    gates.release.send(()).expect("release the second child");
+    pty.await_request(gates, "synthesis");
+    gates.release.send(()).expect("release the synthesis");
+    pty.step(b"\x1b", &["team answer"], &["viewing child"]);
+    exit_live(&mut attached, &mut pty);
 }
 
 fn live_linear_agent_chat(

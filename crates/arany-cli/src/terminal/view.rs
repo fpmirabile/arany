@@ -2157,12 +2157,16 @@ pub(super) fn agent_detail_lines(model: &AgentInspectorModel, width: u16) -> Vec
         .collect()
 }
 
+pub(super) const AGENT_PICKER_ROWS: u16 = 23;
+
+// The Session line, the search line, a window of rows, the focused row's details and the key hint.
 pub(super) fn draw_agent_inspector_frame(
     frame: &mut Frame,
     area: Rect,
     model: &AgentInspectorModel,
     scroll: usize,
     armed: bool,
+    notice: Option<&str>,
     palette: Palette,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -2173,22 +2177,28 @@ pub(super) fn draw_agent_inspector_frame(
         Paragraph::new(model.lines[0].as_str()).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(model.search.as_str()),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
     let choices = agent_choice_rows(area.height, model.choices.len());
-    let start = model.selected.saturating_sub(choices.saturating_sub(1));
+    let start = super::agents::window_start(model.selected, choices);
     for (index, choice) in model.choices.iter().enumerate().skip(start).take(choices) {
         frame.render_widget(
             Paragraph::new(numbered_line(
                 index,
                 choice,
-                armed.then_some(model.selected),
+                model.selected.filter(|_| armed),
                 area.width,
             )),
-            Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
+            Rect::new(area.x, area.y + 2 + (index - start) as u16, area.width, 1),
         );
     }
     let detail_y = area
         .y
-        .saturating_add(1 + u16::try_from(choices).unwrap_or(u16::MAX));
+        .saturating_add(2 + u16::try_from(choices).unwrap_or(u16::MAX));
     let detail_rows = agent_detail_rows(area.height, model.choices.len());
     for (index, line) in agent_detail_lines(model, area.width)
         .into_iter()
@@ -2201,14 +2211,18 @@ pub(super) fn draw_agent_inspector_frame(
             Rect::new(area.x, detail_y + index as u16, area.width, 1),
         );
     }
-    if armed && area.height > 1 {
-        let hint = if area.width < 20 {
-            "Esc Up/Dn Pg"
-        } else {
-            "Esc close · Up/Down agent · PgUp/PgDn"
+    if armed && area.height > 2 {
+        let hint = match area.width {
+            70.. => "Enter open · Esc close · Up/Down agent · type to search · PgUp/PgDn",
+            40.. => "Enter open · Esc close · type to search",
+            20.. => "Enter Esc Up/Dn Pg",
+            _ => "Esc Up/Dn Pg",
         };
         frame.render_widget(
-            Paragraph::new(safe_truncate(hint, usize::from(area.width))),
+            Paragraph::new(safe_truncate(
+                notice.unwrap_or(hint),
+                usize::from(area.width),
+            )),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
     }
@@ -2272,34 +2286,32 @@ pub(super) fn draw_agent_chat_frame(
 }
 
 pub(super) fn agent_choice_rows(height: u16, count: usize) -> usize {
-    usize::from(height / 3).min(4).min(count)
+    usize::from(height.saturating_sub(3) / 2)
+        .min(crate::presentation::MAX_AGENT_ROWS)
+        .min(count)
 }
 
 pub(super) fn agent_detail_rows(height: u16, count: usize) -> usize {
-    usize::from(height.saturating_sub(2)).saturating_sub(agent_choice_rows(height, count))
+    usize::from(height.saturating_sub(3)).saturating_sub(agent_choice_rows(height, count))
 }
 
 pub(super) fn agent_picker_index(
     area: Rect,
     column: u16,
     row: u16,
-    selected: usize,
+    selected: Option<usize>,
     count: usize,
 ) -> Option<usize> {
     let visible = agent_choice_rows(area.height, count);
-    if visible == 0
-        || column < area.left()
+    let first = area.top().saturating_add(2);
+    if column < area.left()
         || column >= area.right()
-        || row <= area.top()
-        || row
-            > area
-                .top()
-                .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX))
+        || row < first
+        || usize::from(row - first) >= visible
     {
         return None;
     }
-    let start = selected.saturating_sub(visible.saturating_sub(1));
-    let index = start.saturating_add(usize::from(row - area.top() - 1));
+    let index = super::agents::window_start(selected, visible) + usize::from(row - first);
     (index < count).then_some(index)
 }
 

@@ -4,8 +4,10 @@ use super::{
     AttachedTerminal, Composer, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
     dialog_area, draw_history_above,
 };
-use crate::presentation::{AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets};
-use arany::{RunId, SessionId, SessionView};
+use crate::presentation::{
+    AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets, run_targets,
+};
+use arany::{AgentRunId, RunId, SessionId, SessionView};
 use std::io;
 
 const MAX_CHOICE_BYTES: usize = 16;
@@ -260,6 +262,29 @@ impl AttachedTerminal {
             Some(number) => self.show_agent(view, run, targets, number - 1, false).await,
             None if linear => self.show_agent(view, run, targets, 0, true).await,
             None => self.show_agent(view, run, targets, 1, false).await,
+        }
+    }
+
+    // `/agents` Enter: a child opens its chat by identity; a primary row shows the primary chat.
+    pub(super) async fn open_agent(
+        &mut self,
+        view: &SessionView,
+        run: RunId,
+        agent: AgentRunId,
+    ) -> Result<Option<&'static str>, TerminalError> {
+        let targets = view
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run)
+            .map(run_targets)
+            .unwrap_or_default();
+        match targets.iter().position(|target| target.id == agent) {
+            Some(0) => self.end_agent_chat().map(|()| None),
+            Some(index) => match self.show_agent(view, run, targets, index, false).await? {
+                AgentChatInput::Notice(text) => Ok(Some(text)),
+                _ => Ok(None),
+            },
+            None => Ok(Some(MISSING_AGENT)),
         }
     }
 

@@ -718,11 +718,12 @@ pub(super) async fn submit_objective(
                 if terminal.agents_open()
                     && !matches!(input, TerminalInput::Interrupt | TerminalInput::Suspend | TerminalInput::Shutdown(_))
                 {
-                    if terminal.agent_input(view, input).is_err() {
-                        break "terminal rendering failed".to_owned();
-                    }
+                    let notice = match terminal.agent_input(view, input).await {
+                        Ok(notice) => notice.map(TerminalNotice::Transient),
+                        Err(_) => break "terminal rendering failed".to_owned(),
+                    };
                     if !terminal.agents_open()
-                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err()
+                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err()
                     {
                         break "terminal rendering failed".to_owned();
                     }
