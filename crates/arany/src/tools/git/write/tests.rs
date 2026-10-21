@@ -12,6 +12,7 @@ pub(super) enum Stage {
     Checked,
     Planned,
     Locked,
+    Recovering,
 }
 
 type Race = (PathBuf, Stage, Box<dyn FnOnce() + Send>);
@@ -193,6 +194,12 @@ fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
     );
     repo.git(&["fsck", "--connectivity-only", "--no-dangling"]);
 
+    let nested = repo.succeeded(branch("feature/nested", None));
+    assert_eq!(
+        repo.git(&["rev-parse", "feature/nested"]).trim(),
+        nested["oid"]
+    );
+    repo.git(&["branch", "-q", "-D", "feature/nested"]);
     let created = repo.succeeded(branch("older", Some("HEAD~1")));
     assert_eq!(created["oid"], parent);
     assert_eq!(repo.git(&["rev-parse", "older"]).trim(), parent);
@@ -239,7 +246,8 @@ fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
     assert_eq!(repo.succeeded(switch("main"))["switched"], false);
 
     // "." commits every change except protected paths, which stay modified and uncommitted.
-    repo.succeeded(commit(&["."], "everything"));
+    // "." beside another path still commits everything.
+    repo.succeeded(commit(&["notes.md", "."], "everything"));
     assert_eq!(
         repo.git(&["status", "--porcelain=v1", "--untracked-files=no"]),
         " M .env\n M .env.local\n M cfg/.Env\n"
@@ -324,7 +332,37 @@ fn hostile_repository_configuration_never_executes_during_writes() {
 #[test]
 fn refusals_leave_the_repository_and_workspace_unchanged() {
     type Setup = fn(&Repo);
-    let cases: [(&str, Setup, ToolCall, &str); 16] = [
+    let symbolic: Setup = |repo| {
+        let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+        git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
+        git(&[
+            "symbolic-ref",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/main",
+        ]);
+    };
+    let cases: [(&str, Setup, ToolCall, &str); 19] = [
+        (
+            "switch from a detached HEAD",
+            |repo| {
+                host_git(&repo.workspace, &repo.home, &["branch", "other"]);
+                host_git(&repo.workspace, &repo.home, &["checkout", "-q", "--detach"]);
+            },
+            switch("other"),
+            DETACHED_SWITCH,
+        ),
+        (
+            "a symbolic start point",
+            symbolic,
+            branch("topic", Some("origin/HEAD")),
+            SYMBOLIC_START,
+        ),
+        (
+            "a remote name resolving to its symbolic HEAD",
+            symbolic,
+            branch("topic", Some("origin")),
+            SYMBOLIC_START,
+        ),
         (
             "a branch differing from an existing one only by case",
             |_| {},
@@ -721,6 +759,7 @@ fn a_branch_start_ref_stays_locked_until_the_branch_publishes() {
 #[test]
 fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
     let mut repo = Repo::new();
+    host_git(&repo.workspace, &repo.home, &["branch", "older", "HEAD~1"]);
     let stash = repo.temp.path().join("stash");
     std::fs::create_dir(&stash).unwrap();
     let left = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -740,36 +779,38 @@ fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
             }
         }),
     ));
-    repo.succeeded(commit(&["src/a.txt"], "m"));
+    repo.succeeded(branch("topic", Some("older")));
     let git_dir = repo.workspace.join(".git");
+    let residue = |git_dir: &Path| {
+        tree(git_dir)
+            .into_iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .filter(|name| name.contains(".lock") || name.starts_with("arany-"))
+            .collect::<BTreeSet<_>>()
+    };
     assert!(
-        !tree(&git_dir)
-            .iter()
-            .any(|(path, _)| path.to_string_lossy().contains(".lock")
-                || path.to_string_lossy().starts_with("arany-locks-")),
-        "a finished write leaves no lock or ledger"
+        residue(&git_dir).is_empty(),
+        "a finished write leaves no lock or record"
     );
     let left = left.lock().unwrap().clone();
-    let names: BTreeSet<String> = left
-        .iter()
-        .map(|(path, _)| path.to_string_lossy().into_owned())
-        .collect();
+    let ledger = format!("arany-locks-{}.json", repo.intent);
     assert_eq!(
-        names,
+        left.iter()
+            .map(|(path, _)| path.to_string_lossy().into_owned())
+            .collect::<BTreeSet<_>>(),
         [
             "HEAD.lock".to_owned(),
-            format!("arany-locks-{}.json", repo.intent),
-            "index.lock".into(),
+            ledger.clone(),
             "packed-refs.lock".into(),
-            "refs/heads/main.lock".into(),
+            "refs/heads/older.lock".into(),
+            "refs/heads/topic.lock".into(),
         ]
         .into_iter()
         .collect()
     );
-    // Locks already renamed into place would not survive a crash, so only the others return.
+    // The renamed-into-place branch would not survive a crash as a lock; the rest return.
     for (path, link) in &left {
-        let name = path.to_string_lossy();
-        if name != "index.lock" && name != "refs/heads/main.lock" {
+        if path != Path::new("refs/heads/topic.lock") {
             std::fs::hard_link(link, git_dir.join(path)).unwrap();
             std::fs::remove_file(link).unwrap();
         }
@@ -781,17 +822,27 @@ fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
         git_dir.join("packed-refs.lock").exists(),
         "another intent recovers nothing"
     );
+    // A live Git replaces a recorded lock right before recovery moves it: it must survive.
+    let replaced = git_dir.join("refs/heads/older.lock");
+    let racer = replaced.clone();
+    RACES.lock().unwrap().push((
+        repo.workspace.clone(),
+        Stage::Recovering,
+        Box::new(move || {
+            std::fs::remove_file(&racer).unwrap();
+            std::fs::write(&racer, "").unwrap();
+        }),
+    ));
     recover_locks(&repo.workspace, repo.intent).unwrap();
-    assert!(!git_dir.join("packed-refs.lock").exists());
-    assert!(git_dir.join("HEAD.lock").exists(), "a changed lock stays");
-    assert!(
-        !git_dir
-            .join(format!("arany-locks-{}.json", repo.intent))
-            .exists()
+    assert_eq!(
+        residue(&git_dir),
+        ["HEAD.lock".to_owned(), "refs/heads/older.lock".into()]
+            .into_iter()
+            .collect(),
+        "only unchanged locks of this intent go, and nothing is left aside"
     );
     assert_eq!(
-        repo.git(&["log", "-1", "--format=%s"]),
-        "m\n",
-        "publication is not retried"
+        repo.git(&["rev-parse", "topic"]),
+        repo.git(&["rev-parse", "older"])
     );
 }

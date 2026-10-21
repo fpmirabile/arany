@@ -195,6 +195,18 @@ mod tests {
         // Metadata changes are refused even in the writable view.
         let allowed = std::fs::metadata(scratch.join("allowed")).unwrap();
         assert_ne!(allowed.mode() & 0o777, 0o777);
+        // Inode-flag and similar ioctls work through a read-only descriptor, so every ioctl fails.
+        let file = std::fs::File::open(workspace.join("kept.txt")).unwrap();
+        let confined = std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    restrict_thread(&[&scratch]).unwrap();
+                    rustix::fs::ioctl_getflags(&file)
+                })
+                .join()
+                .unwrap()
+        });
+        assert_eq!(confined.err(), Some(rustix::io::Errno::NOTTY));
         std::fs::write(workspace.join("guard.txt"), "guard").unwrap();
     }
 }

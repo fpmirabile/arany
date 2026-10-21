@@ -1554,7 +1554,10 @@ impl Engine {
                 })
                 .map(|t| t.intent.id)
                 .collect();
-            if !git_writes.is_empty() && submission.tools.is_some() {
+            if !git_writes.is_empty() {
+                if submission.tools.is_none() {
+                    return Err(EngineError::GoalUnavailable);
+                }
                 crate::tools::worker::recover_private(&git_writes).await?;
                 for id in git_writes {
                     crate::tools::recover_git_locks(&request.workspace, id)?;

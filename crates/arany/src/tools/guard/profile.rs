@@ -190,10 +190,11 @@ pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
 
 pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = Vec::new();
-    for program in programs()?
-        .into_iter()
-        .chain([non_spawning_program()?, metadata_program()?])
-    {
+    for program in programs()?.into_iter().chain([
+        non_spawning_program()?,
+        metadata_program()?,
+        ioctl_program()?,
+    ]) {
         bytes.extend_from_slice(&(program.len() as u32).to_le_bytes());
         for instruction in program {
             bytes.extend_from_slice(&instruction.code.to_le_bytes());
@@ -240,8 +241,6 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
         const FCHMODAT2: i64 = 452;
         const SETXATTRAT: i64 = 463;
         const REMOVEXATTRAT: i64 = 466;
-        // _IOW('f', 2, long), its 32-bit compat form, and _IOW('X', 32, struct fsxattr).
-        const INODE_FLAG_IOCTLS: [u64; 3] = [0x4008_6602, 0x4004_6602, 0x401c_5820];
         let mut rules = BTreeMap::new();
         for call in [
             libc::SYS_fchmod,
@@ -272,16 +271,6 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
         ] {
             rules.insert(call, Vec::new());
         }
-        let mut ioctls = Vec::new();
-        for request in INODE_FLAG_IOCTLS {
-            let condition =
-                SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, request)
-                    .map_err(|_| ToolError::ProtectionUnavailable)?;
-            ioctls.push(
-                SeccompRule::new(vec![condition]).map_err(|_| ToolError::ProtectionUnavailable)?,
-            );
-        }
-        rules.insert(libc::SYS_ioctl, ioctls);
         compile(rules, SeccompAction::Errno(libc::EPERM as u32))
     }
     #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -290,9 +279,21 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
     }
 }
 
-// Calling thread only: the Git child inherits it while the Guard thread keeps its access.
+// Every ioctl: requests such as inode-flag, fsxattr or filesystem-version setters change metadata
+// through a read-only descriptor. Git without a terminal needs none; ENOTTY keeps isatty honest.
+fn ioctl_program() -> Result<BpfProgram, ToolError> {
+    compile(
+        [(libc::SYS_ioctl, Vec::new())].into(),
+        SeccompAction::Errno(libc::ENOTTY as u32),
+    )
+}
+
+// Calling thread only: the Git child inherits them while the Guard thread keeps its access.
 pub(super) fn install_metadata_filter() -> Result<(), ToolError> {
-    seccompiler::apply_filter(&metadata_program()?).map_err(|_| ToolError::ProtectionUnavailable)
+    for program in [metadata_program()?, ioctl_program()?] {
+        seccompiler::apply_filter(&program).map_err(|_| ToolError::ProtectionUnavailable)?;
+    }
+    Ok(())
 }
 
 pub(super) fn install_non_spawning() -> Result<(), ToolError> {
