@@ -6,8 +6,8 @@ use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
-use arany::RecordKind;
 use arany::{Effort, StateRoot, validate_native_model_id};
+use arany::{RecordFormat, RecordKind};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -17,6 +17,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use uuid::{Uuid, Variant, Version};
+
+pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 1;
 
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
@@ -91,7 +93,7 @@ impl SelectedAccount {
 
 impl TokenRecord {
     fn valid_for(&self, storage: AccountStorage) -> bool {
-        self.schema == 1
+        self.schema == TOKEN_RECORD_SCHEMA
             && self.credentials.valid_saved()
             && self.consent.matches(&self.credentials, storage)
     }
@@ -167,7 +169,7 @@ impl AccountEntry {
             && match (&self.storage, &self.token) {
                 (AccountStorage::PrivateFile, Some(token)) => {
                     !self.disconnected
-                        && token.schema == 1
+                        && token.schema == TOKEN_RECORD_SCHEMA
                         && token.credentials.valid_saved()
                         && token.credentials.client_id == self.client_id
                         && token.credentials.host_id == self.host_id
@@ -199,6 +201,15 @@ fn bounded_model_checks<'de, D: Deserializer<'de>>(
         "too many model checks",
     )
 }
+
+pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
+    kind: RecordKind::ChatgptAccounts,
+    field: "schema",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
+};
 
 impl AccountIndex {
     fn account_position(&self, id: Uuid) -> Result<usize, AuthorizationError> {
@@ -278,8 +289,7 @@ impl AccountIndex {
 
     fn read(state: &StateRoot) -> Result<Self, AuthorizationError> {
         let Some(bytes) = state
-            .record(RecordKind::ChatgptAccounts)
-            .read()
+            .read_current(&CHATGPT_ACCOUNTS)
             .map_err(|_| AuthorizationError::Unavailable)?
         else {
             return Ok(Self::empty());
@@ -742,7 +752,7 @@ pub(super) fn save_private_file_at(
     expected_selected: Option<Uuid>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
         credentials,
         consent,
     };
@@ -840,7 +850,7 @@ fn save_keyring_at_with(
     write: impl FnOnce(&str, &str) -> Result<(), AuthorizationError>,
 ) -> Result<Uuid, AuthorizationError> {
     let token = TokenRecord {
-        schema: 1,
+        schema: TOKEN_RECORD_SCHEMA,
         credentials,
         consent,
     };
@@ -980,7 +990,7 @@ fn read_keyring_token(
     }
     let token: TokenRecord =
         serde_json::from_slice(&bytes).map_err(|_| AuthorizationError::InvalidIdentity)?;
-    if token.schema != 1
+    if token.schema != TOKEN_RECORD_SCHEMA
         || !token.credentials.valid_saved()
         || token.credentials.subject != subject
         || token.credentials.host_id != host_id
@@ -1348,7 +1358,7 @@ fn refresh_selected_with(
                 return Err(AuthorizationError::InvalidIdentity);
             }
             let updated = TokenRecord {
-                schema: 1,
+                schema: TOKEN_RECORD_SCHEMA,
                 credentials: replacement,
                 consent: token.consent,
             };

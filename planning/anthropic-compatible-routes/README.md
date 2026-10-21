@@ -41,14 +41,14 @@ citations refer to the planning baseline, not proposed implementation:
 | Native Messages already has streaming assembly, request/tool-use encoding, opaque thinking handling and usage decoding. Run outcomes use text or native functions; compaction still requests structured JSON via `output_config`. | [anthropic/wire.rs:20](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:420](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:551](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:594](../../crates/arany/src/provider/anthropic/wire.rs), [anthropic/wire.rs:614](../../crates/arany/src/provider/anthropic/wire.rs) |
 | Checks clear old evidence, run direct/delegate/compaction probes plus each declared effort, and only publish complete success; the aggregate deadline is 180 seconds. | [custom/check.rs:12](../../crates/arany/src/provider/custom/check.rs), [custom/check.rs:31](../../crates/arany/src/provider/custom/check.rs), [custom/check.rs:73](../../crates/arany/src/provider/custom/check.rs) |
 | Saved-account CLI access is native-only; custom routes cannot use a saved native account. | [cli/provider.rs:133](../../crates/arany-cli/src/cli/provider.rs), [cli/provider/select.rs:84](../../crates/arany-cli/src/cli/provider/select.rs) |
-| `store::migrate` has schema/Event registries, but no JSON-record registry. `ProviderProfiles` is a bounded 64 KiB read-only record (`pending: None`), and ordinary reads do not migrate it. | [store/migrate.rs:31](../../crates/arany/src/store/migrate.rs), [store/state.rs:115](../../crates/arany/src/store/state.rs), [store/state.rs:160](../../crates/arany/src/store/state.rs) |
+| `store::migrate` registers JSON record formats. `PROVIDER_PROFILES` declares version 1 as floor and current; `load_named` reads through the migration, which publishes an upgrade through `provider-profiles.pending` while ordinary writes to this 64 KiB user-authored record stay refused. | [store/migrate/record.rs](../../crates/arany/src/store/migrate/record.rs), [provider/custom.rs](../../crates/arany/src/provider/custom.rs), [store/state.rs](../../crates/arany/src/store/state.rs) |
 
 Editing/evidence rules: [security](../../agents/security.md#security-pass-triggers),
 [testing](../../agents/testing.md), [spec workflow](../../docs/specs/README.md),
 and [runtime architecture](../../docs/architecture/system-overview.md#2-runtime-architecture).
-The existing [automatic state migrations plan, slice 4](../state-migrations/README.md#vertical-slices)
-owns the missing JSON migration mechanism. This plan depends on that slice;
-it does not introduce a second migration framework.
+The [automatic state migrations plan, slice 4](../state-migrations/README.md#vertical-slices)
+owns the JSON record migration mechanism. This plan uses it and does not
+introduce a second migration framework.
 
 ## Contract and scenarios
 
@@ -181,8 +181,7 @@ and [streaming.rs:151](../../crates/arany/src/provider/streaming.rs):
   bump the profile document to version 2, ship the registered v1 → v2 transform
   and fixture via the JSON-record migration path in `store::migrate`, and keep
   only the v2 ordinary decoder. Preserve existing Responses semantics; do not
-  reset user settings or add a compatibility reader. The JSON slice must first
-  provide safe replacement for this currently read-only record kind.
+  reset user settings or add a compatibility reader.
 - Vendor “Anthropic compatible” does not establish strict compaction, effort,
   tool-use or usage fidelity → per-slice fixtures and exact live checks; omit
   unsupported effort choices and leave failing routes unadmitted. Do not repair

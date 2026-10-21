@@ -22,8 +22,8 @@ use std::{
 
 mod active;
 mod agents;
-mod controls;
-mod models;
+pub(crate) mod controls;
+pub(crate) mod models;
 mod permissions;
 mod picker;
 mod rewind;

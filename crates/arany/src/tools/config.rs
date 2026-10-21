@@ -2,8 +2,7 @@ use super::ToolError;
 use super::fs::{open_absolute, read_regular};
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
-use crate::store::RecordKind;
-use crate::store::StateRoot;
+use crate::store::{RecordFormat, RecordKind, StateRoot};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -62,15 +61,27 @@ pub(crate) struct Server {
     pub tools: Vec<String>,
 }
 
+pub(crate) const TOOLS_CONFIG: RecordFormat = RecordFormat {
+    kind: RecordKind::ToolsConfig,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| Config::parse(bytes).is_ok(),
+};
+
 impl Config {
     pub(crate) fn load(state: &StateRoot) -> Result<Self, ToolError> {
         let bytes = state
-            .record(RecordKind::ToolsConfig)
-            .read()
+            .read_current(&TOOLS_CONFIG)
             .map_err(|_| ToolError::Configuration)?
             .ok_or(ToolError::MissingConfiguration)?;
+        Self::parse(&bytes)
+    }
+
+    fn parse(bytes: &[u8]) -> Result<Self, ToolError> {
         let value =
-            super::skills::parse_json(&bytes, 64 * 1024).map_err(|_| ToolError::Configuration)?;
+            super::skills::parse_json(bytes, 64 * 1024).map_err(|_| ToolError::Configuration)?;
         let config: Self = serde_json::from_value(value).map_err(|_| ToolError::Configuration)?;
         config.validate()?;
         if !config.runtime_grants.is_empty() {

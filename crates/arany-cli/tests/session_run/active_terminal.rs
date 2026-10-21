@@ -372,7 +372,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             patterns.push(b"Notice: Error: Usage: /status\r\n");
             patterns.push(b"Notice: Error: Usage: /help\r\n");
             patterns.push(b"Notice: Error: Usage: /exit\r\n");
-            patterns.push(b"Notice: Model: model-1");
+            // The PTY may repeat CR before LF, so the whole line is matched here, not by `contains`.
+            patterns.push(
+                "Notice: Model: model-1 \u{b7} default; /model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
+                    .as_bytes(),
+            );
             patterns.push(b"Notice: Working \xc2\xb7 request ");
             patterns.push(b"\r\n");
         }
@@ -1030,11 +1034,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     assert_eq!(view.runs[0].agents.len(), 1);
     assert_eq!(view.runs[0].agents[0].provider_calls.len(), 1);
     if expect_typo {
-        assert!(
-            transcript.contains(
-                "/model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
-            )
-        );
         assert_eq!(
             view.defaults,
             arany::SessionDefaults {

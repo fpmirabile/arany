@@ -57,7 +57,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         provider_concurrency: 1,
         workspace_device: 1,
         workspace_inode: 2,
-        instruction_digest: None,
+        instruction_sources: Vec::new(),
+        launch_directory: String::new(),
         include_digests: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
@@ -1485,6 +1486,7 @@ pub(super) async fn native_command_changeset_corpus(
                             objective: "Exercise native changeset integration".into(),
                             images: Vec::new(),
                             workspace: workspace.clone(),
+                            launch_directory: None,
                             include_paths: Vec::new(),
                             policy: CollaborationPolicy::Single,
                             goal: arany::GoalRequest::default(),
@@ -1627,7 +1629,7 @@ pub(super) async fn native_command_changeset_corpus(
                 "Exercise native changeset integration"
             );
             assert!(
-                request.input.workspace_guidance.is_none()
+                request.input.workspace_guidance.is_empty()
                     && request.input.history.is_empty()
                     && request.input.includes.is_empty()
                     && request.input.context_summary.is_none()

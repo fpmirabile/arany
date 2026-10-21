@@ -9,6 +9,8 @@ pub(crate) mod attached;
 pub(crate) mod exec;
 pub(crate) mod generate_schema;
 pub(crate) mod provider;
+#[cfg(test)]
+mod record_formats;
 pub(crate) mod serve;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]

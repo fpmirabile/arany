@@ -1,7 +1,7 @@
 use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
     AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderRole, Providers,
-    RecordKind, StateRoot,
+    RecordFormat, RecordKind, StateRoot,
 };
 use serde::Deserialize;
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -94,6 +94,15 @@ impl Route {
     }
 }
 
+pub(crate) const PROVIDER_ROUTING: RecordFormat = RecordFormat {
+    kind: RecordKind::ProviderRouting,
+    field: "version",
+    floor: 1,
+    current: 1,
+    steps: &[],
+    accepts: |bytes| parse(bytes).is_ok(),
+};
+
 fn parse(bytes: &[u8]) -> Result<RoutingConfig, RoutingError> {
     let config: RoutingConfig =
         serde_json::from_slice(bytes).map_err(|_| RoutingError::InvalidConfiguration)?;
@@ -121,8 +130,7 @@ pub(crate) async fn configured_providers(
 ) -> Result<AdmittedProviders, RoutingError> {
     let root = StateRoot::admit(state_dir).map_err(|_| RoutingError::StateUnavailable)?;
     let Some(bytes) = root
-        .record(RecordKind::ProviderRouting)
-        .read()
+        .read_current(&PROVIDER_ROUTING)
         .map_err(|_| RoutingError::RoutingUnavailable)?
     else {
         return Ok(AdmittedProviders::single(primary));

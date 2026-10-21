@@ -16,8 +16,10 @@ use std::io::{self, Read};
 use std::str::FromStr;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod record;
 #[cfg(test)]
 mod tests;
+pub use record::{RECORD_FORMATS, RecordFormat, RecordStep};
 
 const DIR: &str = "migrations";
 const MARKER: &str = "phase.json";
@@ -113,6 +115,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         glob_step!("GoalPlanContractRecorded", 6),
         glob_step!("AgentSpawned", 11),
         glob_step!("RunStarted", 17),
+        EventStep {
+            kind: "RunStarted",
+            from: 18,
+            transform: crate::session::run_started_v18_to_v19,
+            canonical: crate::session::run_started_v18_payload,
+        },
         glob_step!("ProviderCallRecorded", 13),
     ],
 };

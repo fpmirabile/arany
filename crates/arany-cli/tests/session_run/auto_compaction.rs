@@ -131,7 +131,10 @@ fn synthetic_server(
             3 => {
                 assert_eq!(input["objective"].as_str().unwrap().len(), 8192);
                 assert_eq!(
-                    input["workspace_guidance"].as_str().unwrap().len(),
+                    input["workspace_guidance"][0]["text"]
+                        .as_str()
+                        .unwrap()
+                        .len(),
                     20 * 1024
                 );
                 assert_eq!(input["includes"].as_array().unwrap().len(), 2);

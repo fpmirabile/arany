@@ -6,8 +6,7 @@ use super::toolchains::{
 use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::session::WorkspaceIdentity;
-use crate::store::RecordKind;
-use crate::store::{StateRoot, StoreError};
+use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -151,9 +150,17 @@ fn state_error(error: StoreError) -> TrustRecordError {
     }
 }
 
+pub(crate) const WORKSPACE_PERMISSIONS: RecordFormat = RecordFormat {
+    kind: RecordKind::WorkspacePermissions,
+    field: "version",
+    floor: 2,
+    current: 2,
+    steps: &[],
+    accepts: |bytes| parse(bytes).is_ok(),
+};
+
 fn read_bytes(root: &StateRoot) -> Result<Option<Vec<u8>>, TrustRecordError> {
-    root.record(RecordKind::WorkspacePermissions)
-        .read()
+    root.read_current(&WORKSPACE_PERMISSIONS)
         .map_err(record_error)
 }
 

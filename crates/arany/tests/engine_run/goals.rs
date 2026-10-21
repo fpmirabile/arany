@@ -321,7 +321,7 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         );
         let goal = &input["pinned_goal"];
         assert_eq!(goal["objective"], objective);
-        assert_eq!(goal["project_instructions"], serde_json::Value::Null);
+        assert_eq!(goal["project_instructions"], serde_json::json!([]));
         assert_eq!(goal["includes"], serde_json::json!([]));
         assert_eq!(goal["plan_contract"], serde_json::Value::Null);
         assert_eq!(
@@ -1556,7 +1556,8 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                instruction_digest: None,
+                instruction_sources: Vec::new(),
+                launch_directory: String::new(),
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),
                 excluded_history_runs: 0,
@@ -5396,7 +5397,8 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                instruction_digest: None,
+                instruction_sources: Vec::new(),
+                launch_directory: String::new(),
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),
                 excluded_history_runs: 0,
