@@ -3484,6 +3484,7 @@ int main(int argc, char **argv) {
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,
+                    hidden: Default::default(),
                     intent: EffectIntent {
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),

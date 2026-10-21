@@ -357,7 +357,12 @@ fn invocations(call: &ToolCall, filtered: bool) -> Result<Vec<Vec<String>>, Tool
             ]);
             if filtered {
                 // Changed paths are the per-commit evidence; the requested count is kept after filtering.
-                argv.extend(owned(&["--name-only", "--diff-merges=first-parent"]));
+                // Rename detection reports only the destination, which would hide a visible source.
+                argv.extend(owned(&[
+                    "--name-only",
+                    "--no-renames",
+                    "--diff-merges=first-parent",
+                ]));
                 argv.push(format!("--max-count={MAX_FILTERED_LOG_COMMITS}"));
             } else {
                 argv.push(format!("--max-count={max_count}"));
@@ -822,8 +827,10 @@ fn log_output(
         commits.push((row, hidden.is_empty()));
     }
     let mut rows = Rows::new(budget);
+    // An exhausted scan may hide older visible history.
+    let mut truncated =
+        overflow || !hidden.is_empty() && commits.len() >= MAX_FILTERED_LOG_COMMITS as usize;
     let mut visible = commits.into_iter().filter(|(_, evidence)| *evidence);
-    let mut truncated = overflow;
     for (row, _) in visible.by_ref().take(max_count as usize) {
         if !rows.push(row) {
             truncated = true;
@@ -1965,6 +1972,14 @@ mod tests {
             subjects(log_output(log.as_bytes(), false, 4096, 1, &hidden).unwrap()),
             (vec!["visible".to_owned()], true)
         );
+        let exhausted: String = (0..MAX_FILTERED_LOG_COMMITS)
+            .map(|_| commit(1, "covered", "private/s\n"))
+            .collect();
+        assert_eq!(
+            subjects(log_output(exhausted.as_bytes(), false, 1 << 30, 5, &hidden).unwrap()),
+            (Vec::new(), true),
+            "an exhausted scan is incomplete, not empty history"
+        );
         assert_eq!(
             failure("m", b"fatal: private/s\n", 4096, &hidden),
             json!({"failed": "m"}).to_string()
@@ -1982,6 +1997,7 @@ mod tests {
         git(&["init", "-q", "-b", "main"]);
         std::fs::write(workspace.join("private/c"), "base\n").unwrap();
         std::fs::write(workspace.join("a"), "base\n").unwrap();
+        std::fs::write(workspace.join("moved"), "base\n").unwrap();
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "base"]);
         git(&["checkout", "-q", "-b", "side"]);
@@ -1991,6 +2007,9 @@ mod tests {
         std::fs::write(workspace.join("private/c"), "main DENY_CANARY\n").unwrap();
         std::fs::write(workspace.join("a"), "main\n").unwrap();
         git(&["commit", "-q", "-am", "main"]);
+        // A rename into a covered directory still deletes a visible path, so the commit stays visible.
+        git(&["mv", "moved", "private/moved"]);
+        git(&["commit", "-q", "-m", "move into private"]);
         // The merge conflicts in private/c, so `git diff` reports it as a combined section.
         host_git_output(&workspace, &home, &["merge", "-q", "side"]);
         std::fs::write(workspace.join("a"), "edited\n").unwrap();
@@ -2042,5 +2061,18 @@ mod tests {
         let filtered: Value = serde_json::from_str(&filtered).unwrap();
         assert_eq!(filtered["commits"][0]["subject"], "base", "{filtered}");
         assert_eq!(filtered["truncated"], false);
+        let (_, filtered) = run(
+            3,
+            ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("main".into()),
+                max_count: 1,
+            },
+        );
+        let filtered: Value = serde_json::from_str(&filtered).unwrap();
+        assert_eq!(
+            filtered["commits"][0]["subject"], "move into private",
+            "{filtered}"
+        );
     }
 }

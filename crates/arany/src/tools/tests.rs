@@ -3593,3 +3593,40 @@ fn read_restrictions_cover_workspace_skill_files_and_catalog_previews() {
     );
     assert!(!catalog.contains("\"y\""), "{catalog}");
 }
+
+#[test]
+fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
+    use super::permissions::PermissionConfig;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    runtime.config.skills.push(super::config::Skill {
+        disable_model_invocation: false,
+        name: "root".into(),
+        description: "root skill".into(),
+        directory: workspace.to_str().unwrap().to_owned(),
+        files: std::collections::BTreeMap::from([("SKILL.md".into(), "0".repeat(64))]),
+    });
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(PermissionConfig::parse(b"{}").unwrap()),
+        digest: digest(b"{}"),
+    });
+    let call = ToolCall::Skill {
+        name: "root".into(),
+        resource: None,
+    };
+    assert_eq!(
+        runtime.skill_workspace_path(&call).as_deref(),
+        Some("SKILL.md")
+    );
+    let config = runtime.permissions().unwrap();
+    assert_eq!(
+        config.evaluate_skill_file(&call, runtime.skill_workspace_path(&call).as_deref()),
+        config.evaluate(&call)
+    );
+    assert!(runtime.context().unwrap().catalog.contains("root skill"));
+}

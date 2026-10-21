@@ -780,11 +780,12 @@ impl ToolRuntime {
 
     fn skill_file_path(&self, name: &str, file: &str) -> Option<String> {
         let skill = self.config.skills.iter().find(|skill| skill.name == name)?;
-        let directory = Path::new(&skill.directory)
+        Path::new(&skill.directory)
             .strip_prefix(&self.workspace)
             .ok()?
-            .to_str()?;
-        Some(format!("{directory}/{file}"))
+            .join(file)
+            .to_str()
+            .map(str::to_owned)
     }
 
     pub(crate) fn permissions(&self) -> Option<&permissions::PermissionConfig> {
