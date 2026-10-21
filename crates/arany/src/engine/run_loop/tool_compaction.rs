@@ -547,8 +547,8 @@ impl RunLoop<'_> {
             None => failed(CompactionFailure::Cancelled),
             Some(CompactionOutcome {
                 response: Ok(response),
-                ..
-            }) => classify_response(response),
+                provider,
+            }) => classify_response(response, provider.identity().limits.output_token_bound),
             Some(CompactionOutcome {
                 response: Err(crate::provider::ProviderError::CallTimedOut),
                 ..

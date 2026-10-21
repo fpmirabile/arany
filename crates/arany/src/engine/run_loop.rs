@@ -1114,6 +1114,7 @@ pub(super) async fn invoke_bounded_with_preview(
     }
     let timeout = provider.identity().limits.deadline.min(remaining);
     let output_cap = request.max_output_tokens;
+    let output_bound = provider.identity().limits.output_token_bound;
     let invocation = async {
         match preview {
             Some(preview) => provider.invoke_with_preview(request, preview).await,
@@ -1144,10 +1145,7 @@ pub(super) async fn invoke_bounded_with_preview(
             )))
         }
         Ok(Ok(response))
-            if response
-                .usage
-                .output_tokens
-                .is_some_and(|count| count > output_cap) =>
+            if !output_bound.admits_reported_output(response.usage.output_tokens, output_cap) =>
         {
             CallResult::Failed(CallFailure::OutputLimit)
         }
@@ -1804,6 +1802,128 @@ mod decision_tests {
                 expected,
                 "row {index}: {site:?} {facts:?}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod call_bound_tests {
+    use super::*;
+    use crate::provider::{
+        AgentPhase, Answer, ChatGptAdmission, ChatGptProvenance, ChatGptProvider,
+        CompactionRequest, CompactionResponse, Effort, OutputTokenBound, PromptRole, Provider,
+        ProviderError, ProviderIdentity, ProviderRequest, ProviderTurn, RunInput, Usage,
+    };
+    use crate::session::{AgentRunId, CollaborationPolicy, RunId, SessionId};
+
+    struct Slow {
+        identity: ProviderIdentity,
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Slow {
+        fn identity(&self) -> &ProviderIdentity {
+            &self.identity
+        }
+
+        async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
+            tokio::time::sleep(self.delay).await;
+            Ok(ProviderResponse {
+                outcome: ProviderOutcome::Answer(Answer {
+                    text: "Synthetic answer".into(),
+                }),
+                turn: ProviderTurn::scripted(),
+                response_id: None,
+                // A reasoning-heavy total: well above the cap, which the route checks on visible output.
+                usage: Usage {
+                    input_tokens: Some(20),
+                    output_tokens: Some(9_000),
+                    ..Usage::default()
+                },
+                wire_provenance: None,
+            })
+        }
+
+        async fn compact(&self, _: CompactionRequest) -> Result<CompactionResponse, ProviderError> {
+            Err(ProviderError::Rejected)
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_declared_call_ceiling_ends_a_slow_call_and_only_local_bounds_admit_large_totals() {
+        let chatgpt = ChatGptProvider::from_checked_account(
+            "model-a".into(),
+            Effort::High,
+            "synthetic-subscription-token".into(),
+            ChatGptProvenance {
+                account_id: uuid::Uuid::now_v7(),
+                evidence_fingerprint: [7; 32],
+                admission: ChatGptAdmission::AccountConsent,
+            },
+        )
+        .expect("synthetic account")
+        .identity()
+        .clone();
+        let native = ProviderIdentity::new("scripted", "model-a", crate::Provenance::native());
+        assert_eq!(
+            native.limits.output_token_bound,
+            OutputTokenBound::ProviderEnforced
+        );
+        let ceiling = chatgpt.limits.deadline;
+        for (label, identity, delay, accepted) in [
+            (
+                "ChatGPT within the ceiling",
+                &chatgpt,
+                ceiling - Duration::from_secs(1),
+                true,
+            ),
+            (
+                "ChatGPT past the ceiling",
+                &chatgpt,
+                ceiling + Duration::from_secs(1),
+                false,
+            ),
+            ("provider-enforced cap", &native, Duration::ZERO, false),
+        ] {
+            let provider = Slow {
+                identity: identity.clone(),
+                delay,
+            };
+            let request = ProviderRequest {
+                session_id: SessionId::new(),
+                run_id: RunId::new(),
+                agent_run_id: AgentRunId::new(),
+                phase: AgentPhase::RootPlan,
+                collaboration: CollaborationPolicy::Single,
+                model: "model-a".into(),
+                max_output_tokens: identity.limits.max_output_tokens,
+                input: RunInput::new(PromptRole::ReadOnly, "Synthetic objective".into()),
+            };
+            let started = Instant::now();
+            let (result, transient) = invoke_bounded_with_preview(
+                &provider,
+                request,
+                started + Duration::from_secs(1200),
+                RunCancellation::new(),
+                None,
+            )
+            .await;
+            assert!(transient.is_none(), "{label}");
+            match result {
+                CallResult::Response(response) => {
+                    assert!(accepted, "{label}");
+                    assert_eq!(response.usage.output_tokens, Some(9_000), "{label}");
+                }
+                CallResult::Failed(CallFailure::Timeout) => {
+                    assert!(!accepted && delay > ceiling, "{label}");
+                    assert_eq!(started.elapsed(), ceiling, "{label}");
+                }
+                CallResult::Failed(CallFailure::OutputLimit) => {
+                    assert!(!accepted && delay.is_zero(), "{label}");
+                }
+                _ => panic!("{label}: unexpected call result"),
+            }
         }
     }
 }

@@ -797,13 +797,13 @@ impl RunView {
             .find(|(_, fallback)| fallback.role == crate::provider::ProviderRole::Compaction)
             .map(|(_, fallback)| &fallback.to)
             .unwrap_or(initial);
-        record.output_tokens.is_none_or(|tokens| {
-            tokens
-                <= identity
-                    .limits
-                    .max_output_tokens
-                    .min(super::MAX_COMPACTION_OUTPUT_TOKENS)
-        }) && identity.profile == record.provider
+        identity.limits.output_token_bound.admits_reported_output(
+            record.output_tokens,
+            identity
+                .limits
+                .max_output_tokens
+                .min(super::MAX_COMPACTION_OUTPUT_TOKENS),
+        ) && identity.profile == record.provider
             && identity.model == record.model
             && identity.chatgpt_provenance() == record.chatgpt_provenance.as_ref()
             && identity.limits.output_token_bound == record.output_token_bound

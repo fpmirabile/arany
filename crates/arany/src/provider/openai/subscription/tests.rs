@@ -39,7 +39,7 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
     assert_eq!(provider.identity().chatgpt_provenance(), Some(&provenance));
     assert_eq!(
         provider.identity().limits.deadline,
-        std::time::Duration::from_secs(120)
+        std::time::Duration::from_secs(600)
     );
     assert_eq!(
         provider.identity().limits.output_token_bound,
@@ -877,6 +877,167 @@ async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     }
 }
 
+fn with_output_details(stream: Vec<u8>, details: &Value) -> Vec<u8> {
+    String::from_utf8(stream)
+        .unwrap()
+        .split_inclusive('\n')
+        .map(|line| match line.strip_prefix("data: ") {
+            Some(data) if data.contains("response.completed") => {
+                let mut event: Value = serde_json::from_str(data.trim_end()).unwrap();
+                event["response"]["usage"]["output_tokens_details"] = details.clone();
+                format!("data: {event}\r\n")
+            }
+            _ => line.to_owned(),
+        })
+        .collect::<String>()
+        .into_bytes()
+}
+
+#[tokio::test]
+async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
+    use crate::ProviderFailureReason::{LocalOutputLimit, ResponseContract};
+    // Both requests cap visible output at 64 tokens.
+    for (label, total, details, expected) in [
+        (
+            "reasoning-heavy",
+            4_000,
+            json!({"reasoning_tokens": 3_990}),
+            None,
+        ),
+        (
+            "visible output over the cap",
+            4_000,
+            json!({"reasoning_tokens": 3_900}),
+            Some(LocalOutputLimit),
+        ),
+        (
+            "absent details count all output",
+            65,
+            Value::Null,
+            Some(LocalOutputLimit),
+        ),
+        (
+            "reasoning above the total",
+            12,
+            json!({"reasoning_tokens": 13}),
+            Some(ResponseContract),
+        ),
+        (
+            "details without a count",
+            12,
+            json!({}),
+            Some(ResponseContract),
+        ),
+        (
+            "total above the reporting ceiling",
+            MAX_REPORTED_OUTPUT_TOKENS + 1,
+            json!({"reasoning_tokens": MAX_REPORTED_OUTPUT_TOKENS}),
+            Some(ResponseContract),
+        ),
+    ] {
+        for compaction in [false, true] {
+            let text = if compaction {
+                r#"{"summary":"Condensed"}"#
+            } else {
+                "done"
+            };
+            let stream = with_output_details(completed_with_text(Some(total), text), &details);
+            let (endpoint, server) = serve(event_reply(stream)).await;
+            let result = if compaction {
+                compact_at(
+                    &client(),
+                    endpoint,
+                    TOKEN,
+                    &compaction_request(),
+                    Effort::Medium,
+                )
+                .await
+                .map(|response| response.usage)
+            } else {
+                invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
+                    .await
+                    .map(|response| response.usage)
+            };
+            match expected {
+                None => assert_eq!(
+                    result.expect(label).output_tokens,
+                    Some(total),
+                    "{label}, compaction {compaction}"
+                ),
+                Some(reason) => {
+                    let error = result.expect_err(label);
+                    assert_eq!(
+                        error.failure_reason(),
+                        Some(reason),
+                        "{label}, compaction {compaction}"
+                    );
+                    assert_eq!(error.retry_cause(), None, "{label}");
+                }
+            }
+            server.await.expect("server");
+        }
+    }
+}
+
+struct ScriptedChunks(std::collections::VecDeque<(Duration, Vec<u8>)>);
+
+impl ChunkSource for ScriptedChunks {
+    async fn next_chunk(&mut self) -> Result<Option<Vec<u8>>, Stage> {
+        let Some((gap, chunk)) = self.0.pop_front() else {
+            return Ok(None);
+        };
+        tokio::time::sleep(gap).await;
+        Ok(Some(chunk))
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn only_received_events_restart_the_stream_idle_window() {
+    let stream = completed(Some(12));
+    let split = stream.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+    let (created, terminal) = (stream[..split].to_vec(), stream[split..].to_vec());
+    let progress =
+        b"event: response.in_progress\r\ndata: {\"type\":\"response.in_progress\"}\r\n\r\n"
+            .to_vec();
+    let secs = Duration::from_secs;
+    let steady = [
+        (secs(0), created.clone()),
+        (secs(100), progress.clone()),
+        (secs(299), progress),
+        (secs(150), terminal.clone()),
+    ];
+    let stalled = [(secs(0), created.clone()), (secs(301), terminal.clone())];
+    // A comment and a partial frame are bytes, not events, so the window keeps running.
+    let trickled = [
+        (secs(0), created.clone()),
+        (secs(200), b": keep-alive\r\n\r\n".to_vec()),
+        (secs(50), terminal[..8].to_vec()),
+        (secs(100), terminal[8..].to_vec()),
+    ];
+    for (label, script, elapsed, completes) in [
+        ("slow but steady", &steady[..], secs(549), true),
+        ("idle gap", &stalled[..], secs(300), false),
+        ("bytes without an event", &trickled[..], secs(300), false),
+    ] {
+        let started = Instant::now();
+        let mut decoder = StreamDecoder::new(TOKEN);
+        let mut source = ScriptedChunks(script.iter().cloned().collect());
+        let result = read_events(&mut decoder, &mut source).await;
+        assert_eq!(started.elapsed(), elapsed, "{label}");
+        if completes {
+            assert!(result.is_ok(), "{label}");
+            continue;
+        }
+        let error = result.expect_err(label);
+        assert!(matches!(error, ProviderError::PartialTransport), "{label}");
+        assert_eq!(
+            error.retry_cause().map(|(cause, _)| cause),
+            Some(crate::provider::RetryCause::StreamCut),
+            "{label}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn compaction_stream_requires_complete_bounded_summary() {
     let stream = completed_with_text(Some(12), r#"{"summary":"Condensed"}"#);
@@ -1292,7 +1453,7 @@ fn subscription_accept_rejects_cached_tokens_above_input() {
         cache_read_input_tokens: Some(13),
         cache_creation_input_tokens: None,
     };
-    assert!(accept_result(false, usage, 4096, StreamCounts::default()).is_err());
+    assert!(accept_result(false, usage, 0, 4096, StreamCounts::default()).is_err());
 }
 
 #[test]
