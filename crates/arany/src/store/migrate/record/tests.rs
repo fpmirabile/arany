@@ -143,31 +143,38 @@ fn a_behind_record_upgrades_in_its_pending_replacement_and_any_other_stays_uncha
 
 #[test]
 fn an_interrupted_upgrade_keeps_the_original_and_finishes_on_the_next_read() {
-    let temp = tempfile::tempdir().unwrap();
-    let (state, path) = root(temp.path());
-    let kind = FORMAT.kind;
-    let original = br#"{"version":1,"name":"Session"}"#.to_vec();
-    let upgraded = br#"{"title":"Session","version":2}"#.to_vec();
+    let profiles = crate::provider::PROVIDER_PROFILES;
+    let original_profiles = br#"{"version":1,"profiles":[{"name":"local","protocol":"openai-responses","endpoint":"https://example.com/responses","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY","outcome_encoding":"json_schema","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]}]}"#;
+    for (format, original) in [
+        (&FORMAT, br#"{"version":1,"name":"Session"}"#.as_slice()),
+        (&profiles, original_profiles.as_slice()),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let (state, path) = root(temp.path());
+        let kind = format.kind;
+        let original = original.to_vec();
+        let upgraded = format.upgrade(&original).unwrap();
 
-    plant(&path, kind, &original);
-    FAIL_AT.with(|fail| fail.set(Some(0)));
-    assert!(state.read_current(&FORMAT).is_err());
-    FAIL_AT.with(|fail| fail.set(None));
-    assert_eq!(on_disk(&path, kind), (original.clone(), true));
-    assert_eq!(
-        std::fs::read(path.join(kind.pending())).unwrap(),
-        upgraded,
-        "the crash leaves only the pending replacement behind"
-    );
-    assert_eq!(state.read_current(&FORMAT).unwrap(), Some(upgraded.clone()));
-    assert_eq!(on_disk(&path, kind), (upgraded.clone(), false));
+        plant(&path, kind, &original);
+        FAIL_AT.with(|fail| fail.set(Some(0)));
+        assert!(state.read_current(format).is_err());
+        FAIL_AT.with(|fail| fail.set(None));
+        assert_eq!(on_disk(&path, kind), (original.clone(), true));
+        assert_eq!(
+            std::fs::read(path.join(kind.pending())).unwrap(),
+            upgraded,
+            "the crash leaves only the pending replacement behind"
+        );
+        assert_eq!(state.read_current(format).unwrap(), Some(upgraded.clone()));
+        assert_eq!(on_disk(&path, kind), (upgraded.clone(), false));
 
-    plant(&path, kind, &original);
-    FAIL_AT.with(|fail| fail.set(Some(1)));
-    assert!(state.read_current(&FORMAT).is_err());
-    FAIL_AT.with(|fail| fail.set(None));
-    assert_eq!(on_disk(&path, kind), (upgraded.clone(), false));
-    assert_eq!(state.read_current(&FORMAT).unwrap(), Some(upgraded));
+        plant(&path, kind, &original);
+        FAIL_AT.with(|fail| fail.set(Some(1)));
+        assert!(state.read_current(format).is_err());
+        FAIL_AT.with(|fail| fail.set(None));
+        assert_eq!(on_disk(&path, kind), (upgraded.clone(), false));
+        assert_eq!(state.read_current(format).unwrap(), Some(upgraded));
+    }
 }
 
 #[test]

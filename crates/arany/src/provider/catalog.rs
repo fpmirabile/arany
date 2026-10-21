@@ -3,7 +3,10 @@ use super::{
 };
 #[cfg(test)]
 use reqwest::redirect::Policy;
-use reqwest::{Client, Url, header};
+use reqwest::{
+    Client, Url,
+    header::{self, HeaderValue},
+};
 use serde::{Deserialize, Deserializer, de};
 use std::{collections::HashSet, fmt, time::Duration};
 
@@ -151,9 +154,13 @@ async fn list_at(
             .header(header::ACCEPT_ENCODING, "identity");
         let request = match profile {
             "openai" => request.bearer_auth(key),
-            "anthropic" => request
-                .header("x-api-key", key)
-                .header("anthropic-version", "2023-06-01"),
+            "anthropic" => {
+                let mut key = HeaderValue::from_str(key).map_err(|_| ProviderError::Rejected)?;
+                key.set_sensitive(true);
+                request
+                    .header("x-api-key", key)
+                    .header("anthropic-version", "2023-06-01")
+            }
             _ => return Err(ProviderError::Rejected),
         };
         let request = match credentials.anthropic_workspace_id() {
