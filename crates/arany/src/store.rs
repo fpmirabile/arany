@@ -12,6 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 
 mod evidence;
 mod journal;
+mod migrate;
 mod replay;
 mod state;
 use journal::{HotSession, append, fork_session, open_connection};
@@ -108,6 +109,8 @@ pub enum StoreError {
     InvalidHistory,
     #[error("an interrupted history archive no longer matches its files")]
     ArchiveConflict,
+    #[error("an interrupted history migration no longer matches its files")]
+    MigrationConflict,
     #[error("invalid compaction snapshot")]
     InvalidSnapshot,
     #[error("store thread closed unexpectedly")]
@@ -127,6 +130,7 @@ pub enum HistoryRecovery {
     InvalidStateDirectory,
     Inaccessible,
     ArchiveConflict,
+    MigrationConflict,
     Busy,
     Changed,
     StorageFull,
@@ -157,6 +161,7 @@ impl StoreError {
             Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
             Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
             Self::ArchiveConflict => HistoryRecovery::ArchiveConflict,
+            Self::MigrationConflict => HistoryRecovery::MigrationConflict,
             Self::HistoryBusy => HistoryRecovery::Busy,
             Self::HistoryChanged => HistoryRecovery::Changed,
             Self::StorageFull => HistoryRecovery::StorageFull,
@@ -304,7 +309,7 @@ impl Store {
         let thread = std::thread::Builder::new()
             .name("arany-sqlite".into())
             .spawn(move || {
-                let _history = match root.lock_history(false) {
+                let _history = match migrate::lease_after_recovery(&root, !read_only) {
                     Ok(lock) => lock,
                     Err(error) => {
                         let _ = ready_sender.send(Err(error));
