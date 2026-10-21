@@ -25,7 +25,7 @@ This table is a summary only; the sections below and the linked contracts own ea
 | Anthropic | Claude subscription | — | Not admitted without Anthropic's prior approval |
 | Any OpenAI-Responses-compatible service | API key | `custom:NAME`, protocol `openai-responses` | Supported after `provider check` |
 | DeepSeek | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned: [Anthropic-compatible routes](../../planning/anthropic-compatible-routes/README.md) |
-| DeepSeek | Subscription | — | Not applicable: no DeepSeek subscription route was found or is in scope (checked 2026-10-21) |
+| DeepSeek | Subscription | — | Not applicable: no DeepSeek subscription route is in scope |
 | Kimi (Moonshot) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
 | Kimi (Moonshot) | Kimi Code subscription | `custom:NAME` with the plan's console key and an honest Arany User-Agent | Planned. Reusing kimi-cli's OAuth client would impersonate it and is excluded |
 | GLM (Z.ai) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
