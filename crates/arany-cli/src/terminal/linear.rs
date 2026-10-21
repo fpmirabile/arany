@@ -849,6 +849,14 @@ mod tests {
         state
             .write_agent_chat(&mut output, &["Back to primary".into()], None, false)
             .unwrap();
+        state
+            .write_agent_chat(
+                &mut output,
+                &[],
+                Some("Copy unavailable: \u{1b}]52;c;eA==\u{7}\u{1b}[2J\u{9b}31m"),
+                false,
+            )
+            .unwrap();
         let prompt = "Agent chat: number opens, n next, p previous, q returns to primary:";
         assert_eq!(
             String::from_utf8(output).unwrap(),
@@ -875,7 +883,8 @@ mod tests {
                  Notice: Invalid agent choice; type a number, n, p or q\n\
                  {prompt}\n\
                  \n\
-                 Back to primary\n"
+                 Back to primary\n\
+                 Notice: Copy unavailable: \\u{{001b}}]52;c;eA==\\u{{0007}}\\u{{001b}}[2J\\u{{009b}}31m\n"
             )
         );
     }
