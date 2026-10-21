@@ -183,9 +183,6 @@ fn run_picker_case(
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    if fullscreen {
-        crate::seed_fullscreen(&state);
-    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");

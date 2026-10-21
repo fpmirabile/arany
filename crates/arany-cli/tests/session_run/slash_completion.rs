@@ -250,7 +250,6 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
     std::fs::create_dir(&other_workspace).expect("other Workspace");
     std::fs::write(workspace.join("skills-lock.json"), b"unparsed lock data").unwrap();
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let shell = "printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --screen-reader --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --resume \"$ARANY_TEST_SESSION\"; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\"";
     let mut command =
@@ -876,7 +875,6 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    crate::seed_fullscreen(&state);
     let saved_id = saved_conversation(&state, &workspace, SessionDefaults::default());
     let skill = workspace.join(".agents/skills/review");
     std::fs::create_dir_all(&skill).unwrap();

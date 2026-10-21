@@ -40,7 +40,6 @@ fn run_case(case: &'static str) {
     std::fs::create_dir(&workspace).unwrap();
     let state = root.join("state");
     StateRoot::admit(&state).unwrap();
-    crate::seed_fullscreen(&state);
     crate::private_file(&state.join("permissions.json"), br#"{"permissions":{}}"#);
     crate::private_file(&state.join("tools.json"), &serde_json::to_vec(&json!({
         "version":1,"workspace_paths":["."],"write":true,

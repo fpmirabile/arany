@@ -1184,7 +1184,7 @@ mod clipboard_copy;
 mod tmux;
 
 #[test]
-fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
+fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
     use super::session_picker::{PtyResponses, pump, tail};
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     let temp = tempfile::tempdir().unwrap();
@@ -1193,7 +1193,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     let state = temp.path().join("state");
     let id = crate::seed_transcript_session(&state, &workspace);
     assert!(!state.join("ui-preferences.json").exists());
-    let shell = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$result\"";
+    let shell = "stty rows 24 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$result\"";
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command
         .env_clear()

@@ -71,8 +71,8 @@ pub fn report_error(message: impl std::fmt::Display) {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TerminalMode {
-    #[default]
     Classic,
+    #[default]
     Fullscreen,
 }
 

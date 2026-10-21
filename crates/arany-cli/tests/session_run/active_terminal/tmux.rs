@@ -1841,9 +1841,6 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
-    if view.alternate_screen() {
-        crate::seed_fullscreen(&state);
-    }
     let exit_path = temp.path().join("exit");
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
     write_profile(

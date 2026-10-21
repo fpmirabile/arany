@@ -1678,7 +1678,7 @@ mod tests {
             restore_settings(&admission).await.unwrap(),
             Preferences {
                 completion: CompletionLayout::Tabs,
-                view: TerminalMode::Classic,
+                view: TerminalMode::Fullscreen,
                 ..Preferences::default()
             }
         );
