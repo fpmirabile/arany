@@ -206,6 +206,7 @@ pub(crate) async fn run(mut args: ExecArgs, telemetry: Telemetry) -> Result<Comm
         };
         let state = StateRoot::open_existing(&state_dir)
             .map_err(|_| "state directory unavailable or unsafe")?;
+        super::admit_headless_history(&state)?;
         arany::enable_development_diagnostics(&state);
         let engine = Engine::open(
             state,
@@ -249,6 +250,7 @@ async fn run_with_provider(
     }
     let state = StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
     let providers = super::provider::routing::configured_providers(
         &admission.state_dir,

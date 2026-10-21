@@ -124,6 +124,7 @@ impl ChatGptSetupAccount {
 pub(super) enum HistoryAdmission {
     Ready,
     Reset,
+    Archived(arany::ArchivedHistory),
     Exit,
 }
 
@@ -150,10 +151,14 @@ pub(super) async fn admit_history(
             }
             Err(error) => Err(error),
         };
-        let error = match root.and_then(Store::open) {
-            Ok(store) => {
+        let opened = root.and_then(|root| {
+            let archived = root.archive_incompatible_history()?;
+            Store::open(root).map(|store| (store, archived))
+        });
+        let error = match opened {
+            Ok((store, archived)) => {
                 store.close().await.map_err(|_| "store shutdown failed")?;
-                return Ok(ready(reset_attempted));
+                return Ok(archived.map_or(ready(reset_attempted), HistoryAdmission::Archived));
             }
             Err(error) => error,
         };
@@ -170,6 +175,9 @@ pub(super) async fn admit_history(
             match reset.as_ref().err().unwrap_or(&error).history_recovery() {
                 HistoryRecovery::InvalidHistory => "Saved history is incompatible or damaged.",
                 HistoryRecovery::Damaged => "Saved history is damaged.",
+                HistoryRecovery::ArchiveConflict => {
+                    "An interrupted history archive no longer matches its files; inspect the archive folder in the state directory."
+                }
                 HistoryRecovery::Busy => "History is in use; close the other Arany and retry.",
                 HistoryRecovery::Changed => "History changed during recovery; retry.",
                 HistoryRecovery::StorageFull => "Storage is full; free space and retry.",

@@ -163,6 +163,7 @@ pub(crate) async fn run(
         #[cfg(test)]
         authenticated: None,
     };
+    super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
     let mut signals =
         super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;

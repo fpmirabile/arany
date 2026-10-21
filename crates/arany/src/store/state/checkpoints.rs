@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const FILE: &str = "checkpoints.sqlite";
-const FILES: [&str; 4] = [
+pub(super) const FILES: [&str; 4] = [
     FILE,
     "checkpoints.sqlite-journal",
     "checkpoints.sqlite-wal",
@@ -89,7 +89,7 @@ pub(crate) struct Capture {
     pub(crate) files: Vec<(String, Vec<u8>)>,
 }
 
-struct Lock {
+pub(super) struct Lock {
     file: File,
     deadline: Instant,
 }
@@ -159,7 +159,7 @@ fn private_file(
     Ok(Some(file))
 }
 
-fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
+pub(super) fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
     root.readmit()?;
     let file = private_file(root, "checkpoints.lock", true, 0)?
         .ok_or(StoreError::InvalidStateDirectory)?;
@@ -185,7 +185,7 @@ fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
     Ok(guard)
 }
 
-fn records(root: &StateRoot) -> Result<Vec<Option<Metadata>>, StoreError> {
+pub(super) fn records(root: &StateRoot) -> Result<Vec<Option<Metadata>>, StoreError> {
     FILES
         .iter()
         .map(|name| {

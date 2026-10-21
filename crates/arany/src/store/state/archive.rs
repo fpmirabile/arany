@@ -1,0 +1,530 @@
+use super::{
+    HISTORY_FILES, StateRoot, StoreError, check_private_record_file, checkpoints, nonblocking,
+    prepare_database_file,
+};
+use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
+use cap_std::fs::{Dir, DirBuilder, MetadataExt, OpenOptions};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const ARCHIVE_DIR: &str = "archive";
+// The plan is durable before any move and stays until the notice is acknowledged.
+const PLAN: &str = "pending.json";
+const PLAN_TEMP: &str = "pending.tmp";
+const MANIFEST: &str = "manifest.json";
+const MAX_PLAN_BYTES: usize = 4096;
+
+type Identity = (u64, u64, u64);
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Plan {
+    name: String,
+    files: Vec<(String, Option<Identity>)>,
+}
+
+#[derive(Debug)]
+#[must_use = "acknowledge after the notice is delivered"]
+pub struct ArchivedHistory {
+    archive: Dir,
+    name: String,
+    path: PathBuf,
+}
+
+impl ArchivedHistory {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn acknowledge(self) -> Result<(), StoreError> {
+        let target = self.archive.open_dir_nofollow(&self.name)?;
+        match rename(&self.archive, PLAN, &target, MANIFEST) {
+            Err(StoreError::Io(error)) if error.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
+        sync(&target)?;
+        sync(&self.archive)
+    }
+}
+
+impl StateRoot {
+    pub fn archive_incompatible_history(&self) -> Result<Option<ArchivedHistory>, StoreError> {
+        if self.archive_plan()?.is_none() {
+            let _shared = self.lock_history(false)?;
+            match check_history(self) {
+                Err(StoreError::InvalidHistory) => {}
+                result => return result.map(|()| None),
+            }
+        }
+        let _exclusive = self.lock_history(true)?;
+        // An interrupted archive may have moved the database; readmission needs one.
+        prepare_database_file(&self.dir, true)?;
+        self.readmit()?;
+        let _checkpoints = checkpoints::lock(self)?;
+        checkpoints::records(self)?;
+        let plan = match self.archive_plan()? {
+            Some(plan) => plan,
+            None => {
+                match check_history(self) {
+                    Err(StoreError::InvalidHistory) => {}
+                    result => return result.map(|()| None),
+                }
+                self.write_archive_plan()?
+            }
+        };
+        let archive = private_subdirectory(&self.dir, ARCHIVE_DIR)?;
+        let target = private_subdirectory(&archive, &plan.name)?;
+        sync(&archive)?;
+        for (name, identity) in &plan.files {
+            let archived = identity_of(&target, name)?;
+            match (identity, archived) {
+                (None, None) => {}
+                (Some(expected), Some(archived)) if *expected == archived => {}
+                (Some(expected), None) if identity_of(&self.dir, name)? == Some(*expected) => {
+                    rename(&self.dir, name, &target, name)?;
+                    sync(&target)?;
+                    sync(&self.dir)?;
+                }
+                _ => return Err(StoreError::ArchiveConflict),
+            }
+        }
+        prepare_database_file(&self.dir, true)?;
+        check_history(self)?;
+        sync(&self.dir)?;
+        Ok(Some(ArchivedHistory {
+            path: self.path.join(ARCHIVE_DIR).join(&plan.name),
+            archive,
+            name: plan.name,
+        }))
+    }
+
+    fn archive_plan(&self) -> Result<Option<Plan>, StoreError> {
+        let archive = match self.dir.open_dir_nofollow(ARCHIVE_DIR) {
+            Ok(archive) => archive,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        let mut options = OpenOptions::new();
+        options.read(true).follow(FollowSymlinks::No);
+        nonblocking(&mut options);
+        let file = match archive.open_with(PLAN, &options) {
+            Ok(file) => file,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+        check_private_record_file(&file, MAX_PLAN_BYTES)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_PLAN_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        let plan: Plan = serde_json::from_slice(&bytes).map_err(|_| StoreError::ArchiveConflict)?;
+        let known = HISTORY_FILES.iter().chain(checkpoints::FILES.iter().rev());
+        if !valid_archive_name(&plan.name)
+            || !plan
+                .files
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .eq(known.copied())
+        {
+            return Err(StoreError::ArchiveConflict);
+        }
+        Ok(Some(plan))
+    }
+
+    fn write_archive_plan(&self) -> Result<Plan, StoreError> {
+        // Sidecars move before their database so a fresh database never inherits a stale hot journal.
+        let mut files = Vec::new();
+        for name in HISTORY_FILES.iter().chain(checkpoints::FILES.iter().rev()) {
+            files.push(((*name).to_owned(), identity_of(&self.dir, name)?));
+        }
+        let plan = Plan {
+            name: archive_name(SystemTime::now()),
+            files,
+        };
+        let archive = private_subdirectory(&self.dir, ARCHIVE_DIR)?;
+        sync(&self.dir)?;
+        if identity_of(&archive, &plan.name)?.is_some() {
+            return Err(StoreError::HistoryChanged);
+        }
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .follow(FollowSymlinks::No);
+        #[cfg(unix)]
+        cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        nonblocking(&mut options);
+        let mut file = archive.open_with(PLAN_TEMP, &options)?;
+        check_private_record_file(&file, usize::MAX)?;
+        file.write_all(&serde_json::to_vec(&plan).map_err(|_| StoreError::ArchiveConflict)?)?;
+        step()?;
+        file.sync_all()?;
+        rename(&archive, PLAN_TEMP, &archive, PLAN)?;
+        sync(&archive)?;
+        Ok(plan)
+    }
+}
+
+fn check_history(root: &StateRoot) -> Result<(), StoreError> {
+    let connection = super::super::journal::open_connection(root, false)?;
+    super::super::replay::validate_history(&connection)
+}
+
+fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match parent.create_dir_with(name, &builder) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    let dir = parent.open_dir_nofollow(name)?;
+    crate::private_fs::check_directory(&dir, true)?;
+    Ok(dir)
+}
+
+fn identity_of(dir: &Dir, name: &str) -> Result<Option<Identity>, StoreError> {
+    match dir.symlink_metadata(name) {
+        Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino(), metadata.len()))),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn rename(from_dir: &Dir, from: &str, to_dir: &Dir, to: &str) -> Result<(), StoreError> {
+    step()?;
+    Ok(from_dir.rename(from, to_dir, to)?)
+}
+
+fn sync(dir: &Dir) -> Result<(), StoreError> {
+    step()?;
+    dir.open_with(".", OpenOptions::new().read(true))?
+        .sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(test))]
+fn step() -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn step() -> io::Result<()> {
+    FAIL_AT.with(|fail| match fail.get() {
+        Some(0) => Err(io::Error::other("injected durability failure")),
+        remaining => {
+            fail.set(remaining.map(|steps| steps - 1));
+            Ok(())
+        }
+    })
+}
+
+fn valid_archive_name(name: &str) -> bool {
+    name.len() == 28
+        && name.starts_with("history-")
+        && name.ends_with('Z')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-.".contains(&byte))
+}
+
+fn archive_name(now: SystemTime) -> String {
+    let millis = now
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis());
+    let seconds = millis / 1000;
+    let (days, of_day) = (seconds / 86_400, seconds % 86_400);
+    // Civil date from days since 1970-01-01 (Howard Hinnant's algorithm, proleptic Gregorian).
+    let shifted = days + 719_468;
+    let era = shifted / 146_097;
+    let day_of_era = shifted % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = year_of_era + era * 400 + u128::from(month <= 2);
+    format!(
+        "history-{year:04}{month:02}{day:02}T{:02}{:02}{:02}.{:03}Z",
+        of_day / 3600,
+        of_day / 60 % 60,
+        of_day % 60,
+        millis % 1000
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{DATABASE_FILE, RecordKind, StateRoot};
+    use crate::{Store, StoreError};
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    use std::path::Path;
+
+    async fn seeded(path: &Path, workspace: &Path) -> Vec<u8> {
+        let state = StateRoot::admit(path).unwrap();
+        state
+            .record(RecordKind::UiPreferences)
+            .replace(b"ui")
+            .unwrap();
+        state
+            .record(RecordKind::ModelPreferences)
+            .replace(b"models")
+            .unwrap();
+        crate::create_session(state, workspace.to_path_buf(), None)
+            .await
+            .unwrap();
+        let checkpoints = path.join("checkpoints.sqlite");
+        std::fs::write(&checkpoints, b"synthetic-checkpoints").unwrap();
+        std::fs::set_permissions(&checkpoints, std::fs::Permissions::from_mode(0o600)).unwrap();
+        rusqlite::Connection::open(path.join(DATABASE_FILE))
+            .unwrap()
+            .execute_batch(
+                "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
+            )
+            .unwrap();
+        std::fs::read(path.join(DATABASE_FILE)).unwrap()
+    }
+
+    fn fail_after(steps: Option<usize>) {
+        super::FAIL_AT.with(|fail| fail.set(steps));
+    }
+
+    fn archive_entries(path: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(path.join("archive"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+
+    #[tokio::test]
+    async fn incompatible_history_is_archived_intact_and_replaced_by_a_fresh_store() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let history = seeded(&path, &workspace).await;
+        let state = StateRoot::open_existing(&path).unwrap();
+
+        let open = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
+        assert!(matches!(
+            state.archive_incompatible_history(),
+            Err(StoreError::HistoryBusy)
+        ));
+        open.close().await.unwrap();
+        assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), history);
+        assert!(
+            !path.join("archive").exists(),
+            "busy history stays in place"
+        );
+
+        let archived = state.archive_incompatible_history().unwrap().unwrap();
+        let archive = archived.path().to_path_buf();
+        assert_eq!(archive.parent().unwrap(), path.join("archive"));
+        let name = archive.file_name().unwrap().to_str().unwrap();
+        assert!(
+            name.starts_with("history-") && name.ends_with('Z'),
+            "{name}"
+        );
+        assert_eq!(std::fs::read(archive.join(DATABASE_FILE)).unwrap(), history);
+        assert_eq!(
+            std::fs::read(archive.join("checkpoints.sqlite")).unwrap(),
+            b"synthetic-checkpoints"
+        );
+        for dir in [path.join("archive"), archive.clone()] {
+            assert_eq!(
+                std::fs::metadata(dir).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+        }
+        assert!(!path.join("checkpoints.sqlite").exists());
+        assert_eq!(
+            state.record(RecordKind::UiPreferences).read().unwrap(),
+            Some(b"ui".to_vec())
+        );
+        assert_eq!(
+            state.record(RecordKind::ModelPreferences).read().unwrap(),
+            Some(b"models".to_vec())
+        );
+        assert!(
+            crate::list_sessions(StateRoot::open_existing(&path).unwrap(), workspace.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        let repeated = state.archive_incompatible_history().unwrap().unwrap();
+        assert_eq!(repeated.path(), archive, "an unacknowledged notice repeats");
+        drop(repeated);
+        archived.acknowledge().unwrap();
+        assert!(archive.join("manifest.json").exists());
+        assert!(state.archive_incompatible_history().unwrap().is_none());
+        assert_eq!(archive_entries(&path), [name]);
+    }
+
+    #[tokio::test]
+    async fn every_interrupted_step_resumes_to_one_intact_archive() {
+        let mut interrupted = 0;
+        loop {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("state");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let history = seeded(&path, &workspace).await;
+            let state = StateRoot::open_existing(&path).unwrap();
+            fail_after(Some(interrupted));
+            let first = state.archive_incompatible_history();
+            fail_after(None);
+            let archived = match first {
+                Ok(archived) => {
+                    archived.unwrap().acknowledge().unwrap();
+                    break;
+                }
+                Err(StoreError::Io(_)) => state.archive_incompatible_history().unwrap().unwrap(),
+                Err(error) => panic!("step {interrupted}: {error}"),
+            };
+            let archive = archived.path().to_path_buf();
+            assert_eq!(std::fs::read(archive.join(DATABASE_FILE)).unwrap(), history);
+            assert_eq!(
+                std::fs::read(archive.join("checkpoints.sqlite")).unwrap(),
+                b"synthetic-checkpoints",
+                "step {interrupted}"
+            );
+            fail_after(Some(0));
+            assert!(archived.acknowledge().is_err());
+            fail_after(None);
+            let archived = state.archive_incompatible_history().unwrap().unwrap();
+            assert_eq!(archived.path(), archive, "step {interrupted}");
+            archived.acknowledge().unwrap();
+            assert!(state.archive_incompatible_history().unwrap().is_none());
+            assert_eq!(archive_entries(&path).len(), 1, "step {interrupted}");
+            assert_eq!(
+                state.record(RecordKind::UiPreferences).read().unwrap(),
+                Some(b"ui".to_vec())
+            );
+            interrupted += 1;
+        }
+        assert!(interrupted >= 9, "every durability step was interrupted");
+    }
+
+    #[tokio::test]
+    async fn resumed_archive_never_takes_newer_history() {
+        for newer_checkpoints in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("state");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).unwrap();
+            let history = seeded(&path, &workspace).await;
+            fail_after(Some(8));
+            let interrupted = StateRoot::open_existing(&path)
+                .unwrap()
+                .archive_incompatible_history();
+            fail_after(None);
+            assert!(matches!(interrupted, Err(StoreError::Io(_))));
+            assert!(!path.join(DATABASE_FILE).exists() && path.join("checkpoints.sqlite").exists());
+            let fresh =
+                crate::create_session(StateRoot::admit(&path).unwrap(), workspace.clone(), None)
+                    .await
+                    .unwrap();
+            let sidecar = path.join("checkpoints.sqlite-journal");
+            std::fs::write(&sidecar, b"newer-sidecar").unwrap();
+            std::fs::set_permissions(&sidecar, std::fs::Permissions::from_mode(0o600)).unwrap();
+            if newer_checkpoints {
+                let checkpoints = path.join("checkpoints.sqlite");
+                std::fs::remove_file(&checkpoints).unwrap();
+                std::fs::write(&checkpoints, b"newer-checkpoints").unwrap();
+                std::fs::set_permissions(&checkpoints, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+
+            let resumed = StateRoot::open_existing(&path)
+                .unwrap()
+                .archive_incompatible_history();
+            let archive = path.join("archive").join(
+                archive_entries(&path)
+                    .into_iter()
+                    .find(|name| name.starts_with("history-"))
+                    .unwrap(),
+            );
+            assert_eq!(std::fs::read(archive.join(DATABASE_FILE)).unwrap(), history);
+            assert_eq!(std::fs::read(&sidecar).unwrap(), b"newer-sidecar");
+            if newer_checkpoints {
+                assert!(matches!(resumed, Err(StoreError::ArchiveConflict)));
+                assert_eq!(
+                    std::fs::read(path.join("checkpoints.sqlite")).unwrap(),
+                    b"newer-checkpoints"
+                );
+                assert!(!archive.join("checkpoints.sqlite").exists());
+                assert!(
+                    path.join("archive/pending.json").exists(),
+                    "conflict keeps its plan"
+                );
+            } else {
+                resumed.unwrap().unwrap().acknowledge().unwrap();
+                assert_eq!(
+                    std::fs::read(archive.join("checkpoints.sqlite")).unwrap(),
+                    b"synthetic-checkpoints"
+                );
+            }
+            let sessions =
+                crate::list_sessions(StateRoot::open_existing(&path).unwrap(), workspace.clone())
+                    .await
+                    .unwrap();
+            assert_eq!(sessions.len(), 1);
+            assert_eq!(sessions[0].id, fresh);
+        }
+    }
+
+    #[tokio::test]
+    async fn damaged_and_unsafe_history_is_never_archived() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+
+        let damaged = temp.path().join("damaged");
+        StateRoot::admit(&damaged).unwrap();
+        std::fs::write(damaged.join(DATABASE_FILE), b"synthetic-broken-history").unwrap();
+        let error = StateRoot::open_existing(&damaged)
+            .unwrap()
+            .archive_incompatible_history()
+            .unwrap_err();
+        assert_eq!(error.history_recovery(), crate::HistoryRecovery::Damaged);
+        assert_eq!(
+            std::fs::read(damaged.join(DATABASE_FILE)).unwrap(),
+            b"synthetic-broken-history"
+        );
+        assert!(!damaged.join("archive").exists());
+
+        let unsafe_state = temp.path().join("unsafe");
+        let history = seeded(&unsafe_state, &workspace).await;
+        let outside = temp.path().join("outside");
+        std::fs::write(&outside, b"outside-stays").unwrap();
+        symlink(&outside, unsafe_state.join("events.sqlite3-journal")).unwrap();
+        let error = StateRoot::open_existing(&unsafe_state)
+            .unwrap()
+            .archive_incompatible_history()
+            .unwrap_err();
+        assert_eq!(
+            error.history_recovery(),
+            crate::HistoryRecovery::Inaccessible
+        );
+        assert_eq!(
+            std::fs::read(unsafe_state.join(DATABASE_FILE)).unwrap(),
+            history
+        );
+        assert_eq!(std::fs::read(outside).unwrap(), b"outside-stays");
+        assert!(!unsafe_state.join("archive").exists());
+    }
+}

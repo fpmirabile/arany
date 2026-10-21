@@ -357,7 +357,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
     }
     let mut composer = Composer::default();
     let mut setup_notice = None;
-    if admit_startup(
+    let ControlFlow::Continue(mut archived_history) = admit_startup(
         &mut terminal,
         &mut admission,
         &mut composer,
@@ -365,10 +365,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         selected,
     )
     .await?
-    .is_break()
-    {
+    else {
         return Ok(());
-    }
+    };
     if !native_protection_supported() {
         append_notice(&mut setup_notice, permissions::UNAVAILABLE_NOTICE);
     }
@@ -601,7 +600,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         skills_supported,
     );
     seed_setup_catalog(&mut composer, &view.defaults, setup_catalog.as_deref());
-    let mut notice = if setup_notice.is_some() {
+    let notice = if setup_notice.is_some() {
         setup_notice
     } else if admission.setup_requested
         && admission.defaults.provider.as_deref() == Some("chatgpt")
@@ -616,8 +615,11 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 format!("Session {session_id} · /help for commands")
             }
         })
-    }
-    .map(Feedback::History);
+    };
+    let archive_notice = archived_history
+        .as_ref()
+        .map(|archived| super::archived_history_notice(archived.path()));
+    let mut notice = final_startup_notice(notice, archive_notice.as_deref());
     let mut empty_interrupt = None::<Instant>;
     let mut idle_escape = None::<Instant>;
     if let Some(prompt) = startup_objective {
@@ -702,7 +704,13 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
-        notice = None;
+        let archive_drawn = archive_notice_drawn(notice.as_ref(), archive_notice.as_deref());
+        notice = archived_history
+            .take_if(|_| archive_drawn)
+            .and_then(|archived| archived.acknowledge().err())
+            .map(|error| {
+                Feedback::History(format!("Error: {error}; the archive notice may show again"))
+            });
         let input = loop {
             let input = terminal
                 .next_input()
@@ -1870,7 +1878,7 @@ async fn admit_startup(
     composer: &mut Composer,
     setup_notice: &mut Option<String>,
     selected: Option<super::provider::roster::SelectedRoster>,
-) -> Result<ControlFlow<()>, String> {
+) -> Result<ControlFlow<(), Option<arany::ArchivedHistory>>, String> {
     match permissions::admit(terminal, &admission.workspace, composer, admission.tools).await {
         Ok(permissions::PermissionChoice::Selected(access)) => {
             for notice in access.stale_runtime_notices() {
@@ -1902,25 +1910,26 @@ async fn admit_startup(
             result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
         }
     }
-    match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
-        Ok(setup::HistoryAdmission::Ready) => {}
-        Ok(setup::HistoryAdmission::Reset) => {
-            admission.entry = EntryMode::New;
-            if admission.prompt.take().is_some() {
-                append_notice(
-                    setup_notice,
-                    "Initial task was not submitted; enter it again.",
-                );
-            }
-            append_notice(
-                setup_notice,
-                "Starting a new conversation; saved accounts and folder trust kept.",
-            );
-        }
-        Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
-        Err(error) => return Err(error.into()),
+    let archived =
+        match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
+            Ok(setup::HistoryAdmission::Ready) => return Ok(ControlFlow::Continue(None)),
+            Ok(setup::HistoryAdmission::Reset) => None,
+            Ok(setup::HistoryAdmission::Archived(path)) => Some(path),
+            Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
+            Err(error) => return Err(error.into()),
+        };
+    admission.entry = EntryMode::New;
+    if admission.prompt.take().is_some() {
+        append_notice(
+            setup_notice,
+            "Initial task was not submitted; enter it again.",
+        );
     }
-    Ok(ControlFlow::Continue(()))
+    append_notice(
+        setup_notice,
+        "Starting a new conversation; saved accounts and folder trust kept.",
+    );
+    Ok(ControlFlow::Continue(archived))
 }
 
 async fn authorize_or_notice<N: From<String> + std::fmt::Display>(
@@ -2002,6 +2011,20 @@ async fn preflight_prompt(
         },
     )
     .await
+}
+
+// Appended after every setup branch so none can replace the archive path before it is drawn.
+fn final_startup_notice(mut notice: Option<String>, archive: Option<&str>) -> Option<Feedback> {
+    if let Some(archive) = archive {
+        append_notice(&mut notice, archive);
+    }
+    notice.map(Feedback::History)
+}
+
+fn archive_notice_drawn(notice: Option<&Feedback>, archive: Option<&str>) -> bool {
+    archive.is_some_and(
+        |archive| matches!(notice, Some(Feedback::History(text)) if text.contains(archive)),
+    )
 }
 
 fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {
@@ -2426,6 +2449,39 @@ fn print_run_answer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_notice_survives_every_setup_outcome_and_gates_acknowledgement() {
+        let archive = "History from an incompatible version archived intact to /state/archive/history-20261021T000000.000Z";
+        for setup in [
+            None,
+            Some("Setup could not be completed: synthetic; use /setup to try again"),
+            Some("openai ready: gpt-5.4 · low. Use /model to change."),
+            Some("Error: synthetic; selection kept for this conversation only"),
+        ] {
+            let notice = super::final_startup_notice(setup.map(str::to_owned), Some(archive));
+            let Some(super::Feedback::History(text)) = &notice else {
+                panic!("archive notice missing after {setup:?}");
+            };
+            assert!(text.starts_with(archive), "{setup:?}: {text}");
+            assert!(setup.is_none_or(|setup| text.contains(setup)), "{text}");
+            assert!(super::archive_notice_drawn(notice.as_ref(), Some(archive)));
+        }
+        for drawn in [
+            None,
+            Some(super::Feedback::History(
+                "New conversation · /help for commands".into(),
+            )),
+            Some(super::Feedback::Transient(archive.into())),
+        ] {
+            assert!(!super::archive_notice_drawn(drawn.as_ref(), Some(archive)));
+        }
+        assert!(!super::archive_notice_drawn(
+            Some(&super::Feedback::History(archive.into())),
+            None
+        ));
+        assert!(super::final_startup_notice(None, None).is_none());
+    }
+
     #[test]
     fn draft_returns_only_when_no_sequence_was_committed() {
         assert!(super::committed_nothing(Some(7), 7));

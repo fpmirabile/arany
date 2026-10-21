@@ -19,13 +19,13 @@ use replay::{
     latest_session_id, list_session_page, load_session, resolve_open_view, resolve_view,
     session_for_run,
 };
-pub use state::HistoryReset;
 #[cfg(test)]
 pub(crate) use state::capture_archive;
 pub use state::checkpoints::CheckpointReset;
 pub(crate) use state::checkpoints::{
     Capture as CheckpointCapture, CaptureOwner as CheckpointOwner,
 };
+pub use state::{ArchivedHistory, HistoryReset};
 pub(crate) use state::{
     BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
     WorkspaceRunLock, archive_size_with_limit,
@@ -102,6 +102,8 @@ pub enum StoreError {
     StaleCursor,
     #[error("corrupt or unsupported Event history")]
     InvalidHistory,
+    #[error("an interrupted history archive no longer matches its files")]
+    ArchiveConflict,
     #[error("invalid compaction snapshot")]
     InvalidSnapshot,
     #[error("store thread closed unexpectedly")]
@@ -120,6 +122,7 @@ pub enum HistoryRecovery {
     Damaged,
     InvalidStateDirectory,
     Inaccessible,
+    ArchiveConflict,
     Busy,
     Changed,
     StorageFull,
@@ -149,6 +152,7 @@ impl StoreError {
             }
             Self::InvalidStateDirectory => HistoryRecovery::InvalidStateDirectory,
             Self::StateNotPrivate | Self::Io(_) => HistoryRecovery::Inaccessible,
+            Self::ArchiveConflict => HistoryRecovery::ArchiveConflict,
             Self::HistoryBusy => HistoryRecovery::Busy,
             Self::HistoryChanged => HistoryRecovery::Changed,
             Self::StorageFull => HistoryRecovery::StorageFull,

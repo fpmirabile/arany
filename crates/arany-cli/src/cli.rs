@@ -59,6 +59,50 @@ fn admit_workspace(
     Ok((workspace, state))
 }
 
+pub(crate) fn archived_history_notice(path: &std::path::Path) -> String {
+    crate::presentation::escape_terminal(&format!(
+        "History from an incompatible version archived intact to {}",
+        path.display()
+    ))
+}
+
+pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
+    use arany::HistoryRecovery;
+    let error = match state.archive_incompatible_history() {
+        Ok(None) => return Ok(()),
+        Ok(Some(archived)) => {
+            use std::io::Write;
+            std::io::stderr()
+                .write_all(
+                    format!(
+                        "warning: {}; started a new history\n",
+                        archived_history_notice(archived.path())
+                    )
+                    .as_bytes(),
+                )
+                .map_err(|_| "history notice output failed".to_owned())?;
+            return archived.acknowledge().map_err(|error| error.to_string());
+        }
+        Err(error) => error,
+    };
+    Err(match error.history_recovery() {
+        HistoryRecovery::InvalidHistory | HistoryRecovery::Damaged => {
+            "saved history is incompatible or damaged; run `arany` to reset history"
+        }
+        HistoryRecovery::ArchiveConflict => {
+            "an interrupted history archive no longer matches its files; inspect the archive folder in the state directory"
+        }
+        HistoryRecovery::Busy => "history is in use; close the other Arany and retry",
+        HistoryRecovery::Changed => "history changed during recovery; retry",
+        HistoryRecovery::StorageFull => "state storage is full; free space and retry",
+        HistoryRecovery::Inaccessible | HistoryRecovery::InvalidStateDirectory => {
+            "history files are unsafe or inaccessible; check permissions and retry"
+        }
+        HistoryRecovery::Unavailable => "history cannot be opened; check storage access and retry",
+    }
+    .to_owned())
+}
+
 pub(crate) fn open_optional_state(
     path: &std::path::Path,
 ) -> Result<Option<StateRoot>, arany::StoreError> {

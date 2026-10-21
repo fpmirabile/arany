@@ -77,8 +77,8 @@ pub use session::{
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
 pub use store::{
-    CheckpointReset, HistoryRecovery, HistoryReset, Record, RecordKind, StateRoot, Store,
-    StoreError,
+    ArchivedHistory, CheckpointReset, HistoryRecovery, HistoryReset, Record, RecordKind, StateRoot,
+    Store, StoreError,
 };
 pub use telemetry::{Telemetry, TelemetryConfigError};
 pub use tools::{

@@ -3326,6 +3326,99 @@ fn serve_rejects_unsupported_transport_and_terminal_input_before_state_admission
 }
 
 #[test]
+fn headless_startup_archives_incompatible_history_and_fails_closed_on_unsafe_history() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for surface in [
+        &["serve", "--stdio"][..],
+        &["acp", "--provider", "openai", "--model", "gpt-5.4"],
+    ] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = root.path().join("state");
+        runtime.block_on(async {
+            create_session(StateRoot::admit(&state).unwrap(), workspace.clone(), None)
+                .await
+                .unwrap()
+        });
+        StateRoot::open_existing(&state)
+            .unwrap()
+            .record(arany::RecordKind::UiPreferences)
+            .replace(b"synthetic-preferences")
+            .unwrap();
+        rusqlite::Connection::open(state.join("events.sqlite3"))
+            .unwrap()
+            .execute_batch(
+                "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
+            )
+            .unwrap();
+        let history = std::fs::read(state.join("events.sqlite3")).unwrap();
+        let run = || {
+            process::file_output(
+                Command::new(env!("CARGO_BIN_EXE_arany"))
+                    .env_clear()
+                    .current_dir(&workspace)
+                    .args(surface)
+                    .arg("--state-dir")
+                    .arg(&state),
+                Some(b""),
+            )
+        };
+
+        let output = run();
+        assert_eq!(output.status.code(), Some(0), "{surface:?}: {output:?}");
+        let archived = std::fs::read_dir(state.join("archive"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect::<Vec<_>>();
+        assert_eq!(archived.len(), 1, "{surface:?}");
+        assert_eq!(
+            String::from_utf8(output.stderr).unwrap(),
+            format!(
+                "warning: History from an incompatible version archived intact to {}; started a new history\n",
+                archived[0].display()
+            )
+        );
+        assert_eq!(
+            std::fs::read(archived[0].join("events.sqlite3")).unwrap(),
+            history
+        );
+        assert_eq!(
+            StateRoot::open_existing(&state)
+                .unwrap()
+                .record(arany::RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .as_deref(),
+            Some(&b"synthetic-preferences"[..])
+        );
+        assert!(runtime.block_on(async {
+            list_sessions(StateRoot::open_existing(&state).unwrap(), workspace.clone())
+                .await
+                .unwrap()
+                .is_empty()
+        }));
+
+        let outside = root.path().join("outside");
+        std::fs::write(&outside, b"outside-stays").unwrap();
+        std::os::unix::fs::symlink(&outside, state.join("events.sqlite3-journal")).unwrap();
+        let fresh = std::fs::read(state.join("events.sqlite3")).unwrap();
+        let output = run();
+        assert_eq!(output.status.code(), Some(1), "{surface:?}: {output:?}");
+        assert_eq!(
+            output.stderr,
+            b"error: history files are unsafe or inaccessible; check permissions and retry\n"
+        );
+        assert_eq!(std::fs::read(state.join("events.sqlite3")).unwrap(), fresh);
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside-stays");
+        assert_eq!(std::fs::read_dir(state.join("archive")).unwrap().count(), 1);
+    }
+}
+
+#[test]
 fn acp_stdio_negotiates_reports_auth_required_and_exits_cleanly() {
     let root = tempfile::tempdir().unwrap();
     let workspace = root.path().join("workspace");

@@ -324,15 +324,18 @@ mod tests {
             InitialSetupFailure,
             InvalidHistory,
             InvalidHistorySameRoot,
-            InvalidHistoryCancel,
+            InvalidHistorySetup,
+            InvalidHistorySetupQuit,
             CorruptHistory,
+            CorruptHistoryCancel,
+            StaleEventHistory,
             UnsafeHistory,
             ResumeLocked,
             ContinueMissing,
             Cancel,
         }
         impl Case {
-            const ALL: [Self; 25] = [
+            const ALL: [Self; 28] = [
                 Self::ChatGpt,
                 Self::Locked,
                 Self::Missing,
@@ -352,8 +355,11 @@ mod tests {
                 Self::InitialSetupFailure,
                 Self::InvalidHistory,
                 Self::InvalidHistorySameRoot,
-                Self::InvalidHistoryCancel,
+                Self::InvalidHistorySetup,
+                Self::InvalidHistorySetupQuit,
                 Self::CorruptHistory,
+                Self::CorruptHistoryCancel,
+                Self::StaleEventHistory,
                 Self::UnsafeHistory,
                 Self::ResumeLocked,
                 Self::ContinueMissing,
@@ -381,13 +387,27 @@ mod tests {
                     Self::InitialSetupFailure => "initial_setup_failure",
                     Self::InvalidHistory => "invalid_history",
                     Self::InvalidHistorySameRoot => "invalid_history_same_root",
-                    Self::InvalidHistoryCancel => "invalid_history_cancel",
                     Self::CorruptHistory => "corrupt_history",
+                    Self::CorruptHistoryCancel => "corrupt_history_cancel",
+                    Self::StaleEventHistory => "stale_event_history",
+                    Self::InvalidHistorySetup => "invalid_history_setup",
+                    Self::InvalidHistorySetupQuit => "invalid_history_setup_quit",
                     Self::UnsafeHistory => "unsafe_history",
                     Self::ResumeLocked => "resume_locked",
                     Self::ContinueMissing => "continue_missing",
                     Self::Cancel => "cancel",
                 }
+            }
+
+            fn archives_history(self) -> bool {
+                matches!(
+                    self,
+                    Self::InvalidHistory
+                        | Self::InvalidHistorySameRoot
+                        | Self::InvalidHistorySetup
+                        | Self::InvalidHistorySetupQuit
+                        | Self::StaleEventHistory
+                )
             }
 
             fn parse(name: &str) -> Self {
@@ -442,15 +462,16 @@ mod tests {
                         Interrupt,
                         Reply("/exit\n"),
                     ],
-                    Case::InitialSetupFailure => &[Reply("ChatGPT plan\n"), Reply("/exit\n")],
-                    Case::InvalidHistory | Case::InvalidHistorySameRoot | Case::CorruptHistory => {
-                        &[
-                            Reply("Reset history\n"),
-                            Reply("Accept\n"),
-                            Reply("/exit\n"),
-                        ]
+                    Case::InitialSetupFailure | Case::InvalidHistorySetup => {
+                        &[Reply("ChatGPT plan\n"), Reply("/exit\n")]
                     }
-                    Case::InvalidHistoryCancel => {
+                    Case::InvalidHistorySetupQuit => &[Interrupt],
+                    Case::CorruptHistory => &[
+                        Reply("Reset history\n"),
+                        Reply("Accept\n"),
+                        Reply("/exit\n"),
+                    ],
+                    Case::CorruptHistoryCancel => {
                         &[Reply("Reset history\n"), Reply("\n"), Reply("Exit\n")]
                     }
                     Case::UnsafeHistory => &[Reply("Exit\n")],
@@ -597,7 +618,37 @@ mod tests {
                     "credential escaped to presentation"
                 );
                 let marker = temp.path().join("helper-access");
-                if case.name().contains("history") {
+                if case.archives_history() {
+                    assert!(
+                        !transcript.contains("Setup: History recovery"),
+                        "incompatible history must not need a manual reset: {case}"
+                    );
+                    // Setup replaces earlier startup notices; the archive notice must survive it.
+                    assert_eq!(
+                        transcript
+                            .lines()
+                            .filter(|line| line.starts_with("Notice: ")
+                                && line.contains(
+                                    "History from an incompatible version archived intact to "
+                                ))
+                            .count(),
+                        usize::from(case != Case::InvalidHistorySetupQuit),
+                        "archive notice for {case}: {}",
+                        crate::presentation::escape_terminal(&transcript)
+                    );
+                    if case == Case::InvalidHistorySameRoot {
+                        assert!(transcript.contains("Initial task was not submitted"));
+                    }
+                    if case == Case::InvalidHistorySetup {
+                        assert!(transcript.contains("Setup could not be completed"));
+                    }
+                    let calls = std::fs::read_to_string(marker).unwrap_or_default();
+                    assert_eq!(
+                        calls.lines().count(),
+                        usize::from(!case.name().contains("_setup")),
+                        "archived history keeps access"
+                    );
+                } else if case.name().contains("history") {
                     assert!(
                         transcript.contains("Setup: History recovery"),
                         "history case {case}: {}",
@@ -796,10 +847,13 @@ mod tests {
                 Case::InvalidRegistration
                 | Case::InvalidHistorySameRoot
                 | Case::InvalidHistory
-                | Case::InvalidHistoryCancel
                 | Case::CorruptHistory
+                | Case::CorruptHistoryCancel
+                | Case::StaleEventHistory
                 | Case::UnsafeHistory => "exit 0",
                 Case::InitialSetupFailure
+                | Case::InvalidHistorySetup
+                | Case::InvalidHistorySetupQuit
                 | Case::InvalidChatgpt
                 | Case::InvalidChatgptReset
                 | Case::InvalidPreferences
@@ -861,7 +915,7 @@ mod tests {
                 .replace(b"unsupported-registration")
                 .unwrap();
         }
-        if case == Case::InitialSetupFailure {
+        if matches!(case, Case::InitialSetupFailure | Case::InvalidHistorySetup) {
             nix::unistd::mkfifo(
                 &state.path().join("chatgpt-registration.json"),
                 nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
@@ -869,7 +923,7 @@ mod tests {
             .unwrap();
         }
         let recovery = case.name().starts_with("invalid_")
-            || case.name().ends_with("_history")
+            || case.name().contains("_history")
             || case == Case::InitialSetupFailure;
         let before_accounts = if recovery {
             Some((
@@ -919,7 +973,7 @@ mod tests {
             screen_reader: true,
             ..Default::default()
         };
-        args.setup = case == Case::InitialSetupFailure;
+        args.setup = case == Case::InitialSetupFailure || case.name().contains("_setup");
         if case == Case::InvalidHistorySameRoot {
             args.prompt = Some("synthetic task must remain unsubmitted".into());
             args.continue_session = true;
@@ -945,7 +999,16 @@ mod tests {
                 rusqlite::Connection::open(session_path.join("events.sqlite3")).unwrap();
             connection.execute_batch("PRAGMA user_version=3").unwrap();
         }
-        if case == Case::CorruptHistory {
+        if case == Case::StaleEventHistory {
+            let connection =
+                rusqlite::Connection::open(session_path.join("events.sqlite3")).unwrap();
+            connection
+                .execute_batch(
+                    "UPDATE events SET event_version = event_version - 1 WHERE kind = 'SessionStarted'",
+                )
+                .unwrap();
+        }
+        if case.name().starts_with("corrupt_history") {
             std::fs::write(
                 session_path.join("events.sqlite3"),
                 b"synthetic-broken-history",
@@ -1049,10 +1112,42 @@ mod tests {
                         .unwrap()
                         .is_empty()
                     );
+                    let archive = session_path.join("archive");
+                    if case.archives_history() {
+                        let archived = std::fs::read_dir(&archive)
+                            .unwrap()
+                            .map(|entry| entry.unwrap().path())
+                            .filter(|path| {
+                                path.file_name()
+                                    .unwrap()
+                                    .to_str()
+                                    .unwrap()
+                                    .starts_with("history-")
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(archived.len(), 1, "one archive for {case}");
+                        assert!(
+                            std::fs::read(archived[0].join("events.sqlite3")).unwrap() == database,
+                            "archived history stays intact"
+                        );
+                        // Only a drawn archive notice is acknowledged into the manifest.
+                        let drawn = case != Case::InvalidHistorySetupQuit;
+                        assert_eq!(archived[0].join("manifest.json").exists(), drawn, "{case}");
+                        assert_eq!(archive.join("pending.json").exists(), !drawn, "{case}");
+                    } else {
+                        assert!(!archive.exists(), "manual reset never archives");
+                    }
                 }
                 assert!(
                     state.record(RecordKind::ChatgptAccounts).read().unwrap()
                         == before_accounts.unwrap().1
+                );
+                // Startup re-remembers the selection, so only presence is stable here.
+                assert!(
+                    state
+                        .record(RecordKind::ModelPreferences)
+                        .present()
+                        .unwrap()
                 );
                 assert!(trust_path.exists());
                 return;
