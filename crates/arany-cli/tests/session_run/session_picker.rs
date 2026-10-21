@@ -227,7 +227,7 @@ fn run_picker_case(
         }
     }
     if fullscreen {
-        // Rows only respond once the picker has enabled its transient capture.
+        // Rows respond to the pointer once Fullscreen has enabled its global capture.
         let deadline = Instant::now() + Duration::from_secs(10);
         while count(&transcript, b"\x1b[?1000h") == 0 {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -262,8 +262,8 @@ fn run_picker_case(
             .expect("composer returned");
         assert_eq!(
             count(&selected[..returned], b"\x1b[?1000l"),
-            1,
-            "capture released before selection returns in {name}: {}",
+            0,
+            "Fullscreen keeps its global capture when selection returns in {name}: {}",
             tail(selected)
         );
     }

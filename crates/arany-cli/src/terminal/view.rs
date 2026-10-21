@@ -1092,6 +1092,20 @@ pub(super) fn draw_history_rows(
             Paragraph::new(Line::from(spans)),
             Rect::new(area.x, area.y + row as u16, area.width, 1),
         );
+        // Inverse video marks a selection without relying on color.
+        if let Some((from, to)) = line.selected {
+            let from = u16::try_from(from).unwrap_or(u16::MAX).min(area.width);
+            let to = u16::try_from(to).unwrap_or(u16::MAX).min(area.width);
+            frame.buffer_mut().set_style(
+                Rect::new(
+                    area.x + from,
+                    area.y + row as u16,
+                    to.saturating_sub(from),
+                    1,
+                ),
+                Style::default().add_modifier(Modifier::REVERSED),
+            );
+        }
     }
 }
 
@@ -1103,10 +1117,10 @@ pub(super) fn draw_frame_with_history(
     palette: Palette,
     history_rows: &[HistoryRow],
     history_status: Option<&str>,
-) {
+) -> Rect {
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
-        return;
+        return Rect::default();
     }
     let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
     let composer_height = (draft_rows.lines.len().min(MAX_VISIBLE_DRAFT_ROWS) as u16)
@@ -1122,12 +1136,8 @@ pub(super) fn draw_frame_with_history(
     let padding = history_top_padding(available_history);
     let history_top = area.y + padding;
     let history_height = available_history - padding;
-    draw_history_rows(
-        frame,
-        Rect::new(area.x, history_top, area.width, history_height),
-        history_rows,
-        palette,
-    );
+    let history_area = Rect::new(area.x, history_top, area.width, history_height);
+    draw_history_rows(frame, history_area, history_rows, palette);
     if history_rows.is_empty()
         && history_status.is_none()
         && model.empty_chat
@@ -1344,6 +1354,7 @@ pub(super) fn draw_frame_with_history(
             Rect::new(area.x, status_y, area.width, 1),
         );
     }
+    history_area
 }
 
 pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Line<'static> {

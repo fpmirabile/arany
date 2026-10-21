@@ -18,6 +18,7 @@ fn numbered_tool_approval_dispatches_only_after_review_and_an_explicit_choice() 
     for case in [
         "yes",
         "escape",
+        "mouse-digits",
         "early-digit",
         "typeahead",
         "linear-yes",
@@ -339,6 +340,10 @@ impl Driver {
             }
             let answer: &[u8] = match case {
                 "escape" | "typeahead" => b"\x1b",
+                // Mouse records, malformed ones carrying digits and Ctrl+C, answer nothing; Escape then denies.
+                "mouse-digits" => {
+                    b"\x1b[<0;1;x1M\x1b[<0;2;1;1M\x1b[<0;1;1~2M\x1b[<0;1;1\x031m\x1b[<0;5;20M\x1b[<0;5;20m\x1b[<64;5;5M\x1b"
+                }
                 "early-digit" | "yes" => b"1",
                 "linear-yes" => b"1\r",
                 "linear-no" => b"no\r",
@@ -411,7 +416,12 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
         let run = &view.runs[0];
         let denied = matches!(
             case,
-            "escape" | "typeahead" | "linear-no" | "unguarded-page-up" | "unguarded-pages"
+            "escape"
+                | "mouse-digits"
+                | "typeahead"
+                | "linear-no"
+                | "unguarded-page-up"
+                | "unguarded-pages"
         );
         assert_eq!(
             run.status,

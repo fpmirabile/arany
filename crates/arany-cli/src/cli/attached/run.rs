@@ -1238,9 +1238,12 @@ mod tests {
         let trust_record = account.path().join("workspace-permissions.json");
         std::fs::write(&trust_record, &remembered).unwrap();
         std::fs::set_permissions(&trust_record, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let mut terminal =
-            AttachedTerminal::acquire_with_mode(true, crate::terminal::TerminalMode::default())
-                .unwrap();
+        let mut terminal = AttachedTerminal::acquire_with_mode(
+            true,
+            crate::terminal::TerminalMode::default(),
+            Default::default(),
+        )
+        .unwrap();
         let mut composer = Composer::default();
         composer.apply(crate::terminal::TerminalInput::Character('x'));
         composer.set_approval_mode(Some(ApprovalMode::AutoEdits));

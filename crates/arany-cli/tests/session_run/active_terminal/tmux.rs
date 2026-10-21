@@ -2008,17 +2008,29 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
     });
     // Positive controls while the pane is alive: the expected screen, the cursor and mouse reporting
     // are observable here, so the post-exit values below prove restoration rather than an unset flag.
-    // Ordinary chat leaves mouse reporting to the terminal; only pickers capture transiently.
+    // Fullscreen captures button, drag and SGR reporting; Classic leaves the mouse to the terminal.
     let alternate = view.alternate_screen();
     assert_eq!(
         pane_flag(&server, "#{alternate_on}"),
         if alternate { "1" } else { "0" },
         "{view:?} chat view owns the expected screen"
     );
+    for flag in [
+        "#{mouse_any_flag}",
+        "#{mouse_standard_flag}",
+        "#{mouse_button_flag}",
+        "#{mouse_sgr_flag}",
+    ] {
+        assert_eq!(
+            pane_flag(&server, flag),
+            if alternate { "1" } else { "0" },
+            "{view:?} chat view {flag} while idle"
+        );
+    }
     assert_eq!(
-        pane_flag(&server, "#{mouse_any_flag}"),
+        pane_flag(&server, "#{mouse_all_flag}"),
         "0",
-        "{view:?} chat view mouse reporting while idle"
+        "{view:?} chat view never reports any motion"
     );
     assert_eq!(
         pane_flag(&server, "#{cursor_flag}"),
@@ -2156,6 +2168,9 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
         text.contains("interrupted") && text.contains("Use/goalresumetocontinue")
     });
     wait_screen(&server, "idle prompt after /goal", idle_composer);
+    if alternate {
+        wheel_scrolls_fullscreen_history(&server, &workspace);
+    }
     assert!(
         server
             .run(&["send-keys", "-l", "-t", "arany-test:0.0", "/exit"])
@@ -2238,6 +2253,101 @@ fn steering_note_and_pause_in_tmux(view: ChatView) {
 }
 
 // The bottom non-empty row is the status row; its state leads.
+// With `mouse on`, tmux forwards wheel reports from its client to a pane that captures the mouse.
+fn wheel_scrolls_fullscreen_history(server: &TmuxServer, workspace: &Path) {
+    assert!(
+        server
+            .run(&["set-option", "-g", "mouse", "on"])
+            .status
+            .success(),
+        "tmux mouse on"
+    );
+    // A 12-row client shrinks the pane to 11 rows so the History is taller than its area.
+    let command = "stty rows 12 cols 80; exec \"$ARANY_TEST_TMUX\" -S \"$ARANY_TEST_SOCKET\" attach-session -t arany-test";
+    let mut client = Command::new("/usr/bin/script");
+    client
+        .env_clear()
+        .env("TERM", "xterm")
+        .env("SHELL", "/bin/sh")
+        .env("PATH", "/usr/bin:/bin")
+        .env("ARANY_TEST_TMUX", "/usr/bin/tmux")
+        .env("ARANY_TEST_SOCKET", &server.socket)
+        .current_dir(workspace)
+        .args(["-q", "-e", "-c", command, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut client = ChildGuard::new(client.spawn().expect("tmux mouse client"));
+    let mut input = client.child().stdin.take().expect("tmux client input");
+    let mut output = client.child().stdout.take().expect("tmux client output");
+    let flags = fcntl_getfl(&output).expect("tmux client output flags");
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking tmux client output");
+    let mut transcript = Vec::new();
+    let mut answered = 0;
+    // The client parses SGR wheel reports only after enabling them on its own terminal.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+        if transcript
+            .windows(b"\x1b[?1006h".len())
+            .any(|part| part == b"\x1b[?1006h")
+            && pane_flag(server, "#{pane_height}") == "11"
+            && capture_pane(server).is_some_and(|screen| {
+                idle_composer(&screen) && !status_row(&screen).contains("History")
+            })
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "tmux mouse client not ready: {}",
+            redacted_tail(&transcript)
+        );
+        thread::yield_now();
+    }
+    for (report, scrolled) in [(&b"\x1b[<64;10;3M"[..], true), (b"\x1b[<65;10;3M", false)] {
+        input.write_all(report).expect("tmux client wheel report");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+            if capture_pane(server).is_some_and(|screen| {
+                idle_composer(&screen) && status_row(&screen).contains("History") == scrolled
+            }) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "wheel did not scroll History (scrolled {scrolled}): {}",
+                redacted_tail(&capture_pane(server).unwrap_or_default())
+            );
+            thread::yield_now();
+        }
+    }
+    assert!(
+        server
+            .run(&["detach-client", "-s", "arany-test"])
+            .status
+            .success(),
+        "detach the mouse client"
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while client
+        .child()
+        .try_wait()
+        .expect("tmux client status")
+        .is_none()
+    {
+        pump_pty(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "tmux mouse client did not detach"
+        );
+        thread::yield_now();
+    }
+    let result = wait_product(client.take());
+    assert!(result.status.success(), "tmux mouse client exited cleanly");
+}
+
 fn status_row(screen: &[u8]) -> String {
     String::from_utf8_lossy(screen)
         .lines()

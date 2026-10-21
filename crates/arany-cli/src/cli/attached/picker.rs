@@ -157,7 +157,7 @@ async fn pick_session_inline(
                     selected = index;
                 }
             }
-            TerminalInput::PointerClick { column, row } => {
+            TerminalInput::PointerClick { column, row, .. } => {
                 if let Some(index) =
                     terminal.session_picker_target(column, row, selected, items.len())
                 {

@@ -1959,9 +1959,10 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .record(arany::RecordKind::UiPreferences)
             .replace(
-                &serde_json::to_vec(&json!({"version":3,"preferences":{
+                &serde_json::to_vec(&json!({"version":4,"preferences":{
                     "completion":"tabs","view":"classic","goal_budget":budget,
-                    "resources":arany::ToolResourceSettings::default()
+                    "resources":arany::ToolResourceSettings::default(),
+                    "mouse":"wheel_and_clicks","copy_on_select":true
                 }}))
                 .unwrap(),
             )

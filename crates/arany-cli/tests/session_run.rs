@@ -412,7 +412,7 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
     format!(
-        r#"{{"version":3,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}}}}"#
+        r#"{{"version":4,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}},"mouse":"wheel_and_clicks","copy_on_select":true}}}}"#
     )
     .into_bytes()
 }
@@ -613,9 +613,12 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
             } else {
                 TerminalMode::default()
             };
-            let mut terminal =
-                AttachedTerminal::acquire_with_mode(linear && case != "cursor-timeout", mode)
-                    .unwrap();
+            let mut terminal = AttachedTerminal::acquire_with_mode(
+                linear && case != "cursor-timeout",
+                mode,
+                Default::default(),
+            )
+            .unwrap();
             assert_eq!(terminal.is_linear(), linear);
             for cycle in 0..2 {
                 assert_eq!(
@@ -727,7 +730,9 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .set_mode(TerminalMode::Fullscreen, draft.text().len())
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
-                    terminal.handle_history_input(TerminalInput::PageUp, &view);
+                    terminal
+                        .handle_history_input(TerminalInput::PageUp, &view, &draft, false)
+                        .await;
                     terminal
                         .set_mode(TerminalMode::Classic, draft.text().len())
                         .unwrap();

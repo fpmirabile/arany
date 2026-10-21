@@ -364,7 +364,7 @@ fn narrow_classic_history_cue_keeps_export_action_visible() {
                 Palette { color: false },
                 &[],
                 Some(status),
-            )
+            );
         })
         .expect("narrow history status");
     assert!(buffer_row(terminal.backend().buffer(), 7).contains(status));
@@ -846,6 +846,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                         speaker: MessageKind::User,
                         heading: true,
                         matched: false,
+                        selected: None,
                     }],
                     None,
                 );
@@ -1166,18 +1167,21 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             speaker: MessageKind::User,
             heading: true,
             matched: false,
+            selected: None,
         },
         HistoryRow {
             text: "  committed objective".into(),
             speaker: MessageKind::User,
             heading: false,
             matched: false,
+            selected: None,
         },
         HistoryRow {
             text: "Arany:".into(),
             speaker: MessageKind::Assistant,
             heading: true,
             matched: false,
+            selected: None,
         },
     ];
     terminal
@@ -1229,12 +1233,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             speaker: MessageKind::Error,
             heading: true,
             matched: false,
+            selected: None,
         });
         feedback_rows.push(HistoryRow {
             text: "  Retry /setup; your draft is retained".into(),
             speaker: MessageKind::Error,
             heading: false,
             matched: false,
+            selected: None,
         });
         wide.draw(|frame| {
             draw_frame_with_history(
@@ -1347,12 +1353,14 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             speaker: MessageKind::User,
             heading: false,
             matched: true,
+            selected: None,
         },
         HistoryRow {
             text: String::new(),
             speaker: MessageKind::User,
             heading: false,
             matched: false,
+            selected: None,
         },
         rows[2].clone(),
         HistoryRow {
@@ -1360,6 +1368,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             speaker: MessageKind::Assistant,
             heading: false,
             matched: false,
+            selected: None,
         },
     ]);
     for width in [16, 40, 80] {
@@ -3458,7 +3467,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                         Palette { color },
                         &rows,
                         None,
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -3535,7 +3544,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         Palette { color },
                         &rows,
                         None,
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -3570,7 +3579,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         Palette { color },
                         &rows,
                         None,
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -3599,7 +3608,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         Palette { color },
                         &rows,
                         None,
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -3632,7 +3641,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         Palette { color },
                         &rows,
                         None,
-                    )
+                    );
                 })
                 .unwrap();
             let buffer = terminal.backend().buffer();
@@ -3654,5 +3663,52 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
 fn classic_floor_is_the_larger_of_24_rows_and_sixty_percent_within_the_screen() {
     for (screen, floor) in [(8, 8), (12, 12), (24, 24), (40, 24), (60, 36), (100, 60)] {
         assert_eq!(classic_floor(screen), floor, "{screen} rows");
+    }
+}
+
+#[test]
+fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
+    let rows = [
+        HistoryRow {
+            text: "  selected text".into(),
+            speaker: MessageKind::Assistant,
+            heading: false,
+            matched: false,
+            selected: Some((2, 10)),
+        },
+        HistoryRow {
+            text: "  body".into(),
+            speaker: MessageKind::User,
+            heading: false,
+            matched: false,
+            selected: Some((2, 6)),
+        },
+        HistoryRow {
+            text: "Arany:".into(),
+            speaker: MessageKind::Assistant,
+            heading: true,
+            matched: false,
+            selected: None,
+        },
+    ];
+    let mut terminal = Terminal::new(TestBackend::new(20, 3)).expect("selection terminal");
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            draw_history_rows(frame, area, &rows, Palette { color: false });
+        })
+        .expect("selection frame");
+    let buffer = terminal.backend().buffer();
+    assert_eq!(buffer_row(buffer, 1), "│ body              ");
+    for (y, selected) in [(0, 2..10), (1, 2..6), (2, 0..0)] {
+        for x in 0..20 {
+            let cell = &buffer[(x, y)];
+            assert_eq!(
+                cell.modifier.contains(Modifier::REVERSED),
+                selected.contains(&x),
+                "row {y} column {x}"
+            );
+            assert_eq!((cell.fg, cell.bg), (Color::Reset, Color::Reset));
+        }
     }
 }

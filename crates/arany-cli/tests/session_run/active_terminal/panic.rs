@@ -41,9 +41,12 @@ fn panic_child() {
         .build()
         .expect("terminal helper runtime");
     runtime.block_on(async {
-        let terminal =
-            AttachedTerminal::acquire_with_mode(false, arany_cli::terminal::TerminalMode::Classic)
-                .expect("inline terminal owner");
+        let terminal = AttachedTerminal::acquire_with_mode(
+            false,
+            arany_cli::terminal::TerminalMode::Classic,
+            Default::default(),
+        )
+        .expect("inline terminal owner");
         assert!(!terminal.is_linear(), "raw-mode owner acquired");
         let mut gate = UnixStream::connect(gate).expect("panic gate connection");
         let mut release = [0];
