@@ -566,8 +566,7 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     chat.assert_active(&CAPTURE, "resumed pager");
     chat.step("pager closed", b"q", &[EMPTY_COMPOSER], &CAPTURE);
 
-    // An active Run drops an empty-draft Ctrl+D, so wait for the settled Run's `ready` status.
-    // /exit stays refused until the Engine returns the Run; the settled Ctrl+D is held until then.
+    // An active Run drops an empty-draft Ctrl+D, so wait for the settled `ready`.
     chat.wait(
         0,
         |bytes| screen_rows(bytes, 80, 24)[23].starts_with("ready"),

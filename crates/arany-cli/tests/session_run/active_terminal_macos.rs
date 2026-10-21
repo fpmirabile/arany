@@ -1446,8 +1446,7 @@ fn native_fullscreen_pager_dumps_bounded_transcript_while_a_run_streams() {
                     back_from = from;
                     Some(b"q")
                 }
-                // An active Run drops an empty-draft Ctrl+D, so it waits for the settled `ready`
-                // status; /exit stays refused until the Engine returns the Run, Ctrl+D is held.
+                // An active Run drops an empty-draft Ctrl+D, so wait for the settled `ready`.
                 5 if find(tail, b"\x1b[?25h\x1b[22;3H").is_some()
                     && super::screen_rows(bytes, 80, 24)[23].starts_with("ready") =>
                 {
