@@ -1112,7 +1112,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                         Some(Feedback::History("Permissions unchanged".into()));
                                     continue;
                                 }
-                                Some(false) => {
+                                Some(permissions::PermissionArea::TypedGitRules) => {
                                     let summary = permissions::manage_rules(
                                         &mut terminal,
                                         &admission.state_dir,
@@ -1125,7 +1125,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     notice = Some(Feedback::History(summary));
                                     continue;
                                 }
-                                Some(true) => {}
+                                Some(permissions::PermissionArea::FolderTrust) => {}
                             }
                             let permissions = match permissions::open_or_recover(
                                 &mut terminal,

@@ -99,9 +99,14 @@ const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
 const HOST_NOTE: &str = "unavailable; human approval required";
 
+pub(super) enum PermissionArea {
+    FolderTrust,
+    TypedGitRules,
+}
+
 pub(super) async fn choose_area(
     terminal: &mut AttachedTerminal,
-) -> Result<Option<bool>, SetupError> {
+) -> Result<Option<PermissionArea>, SetupError> {
     Ok(
         match super::setup::choose_focused(
             terminal,
@@ -117,8 +122,8 @@ pub(super) async fn choose_area(
         )
         .await?
         {
-            Some(b'1') => Some(true),
-            Some(b'2') => Some(false),
+            Some(b'1') => Some(PermissionArea::FolderTrust),
+            Some(b'2') => Some(PermissionArea::TypedGitRules),
             _ => None,
         },
     )
@@ -157,7 +162,10 @@ async fn pick<T: Copy>(
     let mut rows = options
         .iter()
         .enumerate()
-        .map(|(index, (_, label))| (ENTRY_BASE + index as u8, label.as_str()))
+        .map(|(index, (_, label))| {
+            let index = u8::try_from(index).expect("pick lists are a few fixed options");
+            (ENTRY_BASE + index, label.as_str())
+        })
         .collect::<Vec<_>>();
     rows.push((BACK, "Back"));
     Ok(
@@ -176,21 +184,23 @@ pub(super) async fn manage_rules(
 ) -> Result<String, SetupError> {
     let mut notice = None::<String>;
     let mut saved = false;
+    let mut uncertain = false;
     loop {
-        let loaded = StateRoot::open_existing(state_dir)
-            .map_err(|_| SettingsError::Invalid)
-            .and_then(|state| {
-                PermissionSettings::load(&state, workspace).map(|settings| (state, settings))
-            });
-        let (state, settings) = match loaded {
-            Ok(loaded) => loaded,
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(
+                "Error: state directory unavailable or unsafe; permissions unchanged".into(),
+            );
+        };
+        let settings = match PermissionSettings::load(&state, workspace) {
+            Ok(settings) => settings,
             Err(error) => return Ok(format!("Error: {error}; permissions unchanged")),
         };
         let entries = settings.typed_prefixes();
         let mut rows = vec![(ADD, "Add a rule".to_owned())];
         rows.extend(entries.iter().enumerate().map(|(index, entry)| {
+            let index = u8::try_from(index).expect("typed rules are capped at 128");
             (
-                ENTRY_BASE + index as u8,
+                ENTRY_BASE + index,
                 format!(
                     "{} {} · {}",
                     decision_label(entry.decision),
@@ -229,7 +239,9 @@ pub(super) async fn manage_rules(
                 entry_edit(terminal, usize::from(value - ENTRY_BASE)).await?
             }
             _ => {
-                return Ok(if saved {
+                return Ok(if uncertain {
+                    "Typed Git rules may have changed; reopen /permissions to verify".into()
+                } else if saved {
                     SAVED.into()
                 } else {
                     "Typed Git rules unchanged".into()
@@ -242,7 +254,17 @@ pub(super) async fn manage_rules(
                 saved = true;
                 notice = Some("Saved.".into());
             }
-            Err(error) => notice = Some(format!("Error: {error}.")),
+            Err(error) => {
+                uncertain |= match error {
+                    SettingsError::NotConfirmed => true,
+                    SettingsError::Invalid
+                    | SettingsError::Conflict
+                    | SettingsError::Busy
+                    | SettingsError::Missing
+                    | SettingsError::Folder => false,
+                };
+                notice = Some(format!("Error: {error}."));
+            }
         }
     }
 }
