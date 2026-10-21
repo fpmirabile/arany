@@ -79,6 +79,13 @@ impl Grant<'_> {
     }
 }
 
+#[must_use]
+enum ToolReviewDecision {
+    Approve,
+    Deny,
+}
+
+#[must_use]
 enum Verdict {
     Dispatch {
         intent: EffectIntent,
@@ -1656,9 +1663,11 @@ impl RunLoop<'_> {
                         }
                     };
                     match review {
-                        Ok(review_approved) => {
-                            resolution.approved =
-                                review_approved && self.terminal_mode() == initial_mode;
+                        Ok(decision) => {
+                            resolution.approved = match decision {
+                                ToolReviewDecision::Approve => self.terminal_mode() == initial_mode,
+                                ToolReviewDecision::Deny => false,
+                            };
                             resolution.source = if resolution.approved {
                                 PermissionSource::AiReview
                             } else {
@@ -1756,7 +1765,7 @@ impl RunLoop<'_> {
         objective: &str,
         intent: &EffectIntent,
         delegation_deadline: Option<Instant>,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<ToolReviewDecision, EngineError> {
         let mut model = String::new();
         let mut max_output_tokens = 256;
         self.routing.bind(
@@ -1849,11 +1858,17 @@ impl RunLoop<'_> {
             self.ledger().active_time_exhausted()
         };
         if exhausted {
-            return Ok(false);
+            return Ok(ToolReviewDecision::Deny);
         }
-        Ok(
-            matches!(&result, CallResult::Response(ProviderResponse { outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve), .. }) if valid),
-        )
+        Ok(match &result {
+            CallResult::Response(ProviderResponse {
+                outcome: ProviderOutcome::Review(crate::ReviewVerdict::Approve),
+                ..
+            }) if valid => ToolReviewDecision::Approve,
+            CallResult::Response(_) | CallResult::Failed(_) | CallResult::Cancelled => {
+                ToolReviewDecision::Deny
+            }
+        })
     }
 }
 
@@ -1953,6 +1968,7 @@ pub(super) enum DispatchSite {
     Researcher,
 }
 
+#[must_use]
 pub(super) enum AdmissionRefusal {
     RemainingCalls,
     StoreCapacity,
@@ -1984,6 +2000,7 @@ pub(super) enum UnguardedRefusal {
     ProtectedPath,
 }
 
+#[must_use]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum NotDispatched {
     TimeoutLimit { requested: u32, maximum: u32 },
@@ -2077,6 +2094,7 @@ enum Dispatch {
     QueuePause,
 }
 
+#[must_use]
 #[derive(Debug, Eq, PartialEq)]
 struct DispatchDecision<'a> {
     outcome: Result<Dispatch, Refusal<'a>>,
@@ -2501,6 +2519,7 @@ fn unguarded_gate(
     })
 }
 
+#[must_use]
 #[derive(Debug, Eq, PartialEq)]
 pub(super) enum SkillInitialization {
     Ready,
@@ -2508,6 +2527,7 @@ pub(super) enum SkillInitialization {
     Failed(crate::session::RunFailure),
 }
 
+#[must_use]
 #[derive(Debug, Eq, PartialEq)]
 enum SkillReadPlan {
     Skip,
@@ -2609,22 +2629,28 @@ impl RunLoop<'_> {
     }
 }
 
+#[must_use]
+pub(super) enum DefinitionInitialization {
+    Ready,
+    Stopped,
+}
+
 impl RunLoop<'_> {
     pub(super) async fn initialize_definitions(
         &self,
         request: &mut ProviderRequest,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<DefinitionInitialization, EngineError> {
         let Some(runtime) = self.controls.tools else {
-            return Ok(true);
+            return Ok(DefinitionInitialization::Ready);
         };
         let Some(pin) = runtime.definitions.pin() else {
-            return Ok(true);
+            return Ok(DefinitionInitialization::Ready);
         };
         let mut outputs = Vec::with_capacity(pin.files.len());
         let mut normalized_bytes = 0;
         for (index, file) in pin.files.iter().enumerate() {
             if self.pause_at_boundary() || self.controls.cancellation.is_cancelled() {
-                return Ok(false);
+                return Ok(DefinitionInitialization::Stopped);
             }
             let call = ToolCall::ParseAgentDefinition {
                 index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
@@ -2633,7 +2659,7 @@ impl RunLoop<'_> {
             let Some(mut intent) = self.primary_intent(runtime, call)? else {
                 self.active_time_floor
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(false);
+                return Ok(DefinitionInitialization::Stopped);
             };
             intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
             let grant = Grant::Primary {
@@ -2646,16 +2672,16 @@ impl RunLoop<'_> {
                 .await
                 .and_then(intent_observation)?
             else {
-                return Ok(false);
+                return Ok(DefinitionInitialization::Stopped);
             };
             if observation.disposition != ToolDisposition::Succeeded
                 || observation.attestation.is_none()
             {
-                return Ok(false);
+                return Ok(DefinitionInitialization::Stopped);
             }
             normalized_bytes += observation.output.len();
             if normalized_bytes > 1024 * 1024 {
-                return Ok(false);
+                return Ok(DefinitionInitialization::Stopped);
             }
             outputs.push(observation.output);
         }
@@ -2665,7 +2691,7 @@ impl RunLoop<'_> {
             outputs.iter().map(String::as_str),
             child_model,
         ) else {
-            return Ok(false);
+            return Ok(DefinitionInitialization::Stopped);
         };
         let registry = registry.definitions;
         let tools = request
@@ -2709,12 +2735,12 @@ impl RunLoop<'_> {
             || tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
-            return Ok(false);
+            return Ok(DefinitionInitialization::Stopped);
         }
         self.definitions
             .set(registry)
             .map_err(|_| EngineError::CoordinatorFailed)?;
-        Ok(true)
+        Ok(DefinitionInitialization::Ready)
     }
 }
 

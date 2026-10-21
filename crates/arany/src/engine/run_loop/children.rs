@@ -102,6 +102,7 @@ struct ActiveChild {
 }
 
 // A boundary stop lets in-flight work settle on its own terms; an abort tears the wave down.
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum WaveStop {
     Boundary(StopCause),
@@ -229,6 +230,7 @@ pub(super) enum ChildDecision {
     End(ChildEnd),
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum ChildEnd {
     // An editor ends before handover capture; the cause applies when no stronger fact does.
@@ -242,6 +244,7 @@ pub(super) enum ChildEnd {
     },
 }
 
+#[must_use]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum StopHookRun {
     Passed,
