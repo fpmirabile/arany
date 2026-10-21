@@ -2717,9 +2717,15 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
 
     let large = r"\w{1000}";
     for (call, cause) in [
-        (regex(search("src", "(")), "regex syntax is invalid"),
-        (regex(search("src", "(?=foo)")), "regex syntax is invalid"),
-        (regex(search("src", r"(f)\1")), "regex syntax is invalid"),
+        (regex(search("src", "(")), "invalid or unsupported regex"),
+        (
+            regex(search("src", "(?=foo)")),
+            "invalid or unsupported regex",
+        ),
+        (
+            regex(search("src", r"(f)\1")),
+            "invalid or unsupported regex",
+        ),
         (regex(search("src", large)), "regex exceeds the 128 KiB"),
         (
             include(search("src", "foo"), "[ab].rs"),
@@ -2755,7 +2761,14 @@ async fn search_matches_regex_include_and_case_in_byte_order_without_protected_f
         ),
     ] {
         assert!(call.valid(), "{call:?}");
-        let observation = run_in_process(&runtime, call.clone()).await;
+        // Refusals fit the smallest admitted result budget.
+        let mut intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            call.clone(),
+        );
+        intent.limits.result_bytes = 128;
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
         assert_eq!(observation.disposition, ToolDisposition::Failed, "{call:?}");
         assert!(
             observation.output.starts_with("Search pattern refused: ")

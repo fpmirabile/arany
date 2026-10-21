@@ -1527,6 +1527,15 @@ fn updated_input_accepts_only_provable_narrowing() {
         offset: 0,
         limit: 100,
     };
+    let filtered = |path: &str, include: &str| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: Some(include.into()),
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
+    };
     let status = |path: &str| ToolCall::GitStatus { path: path.into() };
     let diff = |path: &str, staged| ToolCall::GitDiff {
         path: path.into(),
@@ -1644,6 +1653,18 @@ fn updated_input_accepts_only_provable_narrowing() {
             matching(false, None, true),
             false,
         ),
+        // `*.rs` under `src` excludes `src/nested/a.rs`; rebased under `src/nested` it would match.
+        (
+            filtered("src", "*.rs"),
+            filtered("src/nested", "*.rs"),
+            false,
+        ),
+        (
+            filtered("src", "**/*.rs"),
+            filtered("src/nested", "**/*.rs"),
+            false,
+        ),
+        (filtered("src", "*.rs"), filtered("src", "*.rs"), true),
         (status("a"), status("a/b"), true),
         (status("a/b"), status("a"), false),
         (status("a"), status("a/../b"), false),

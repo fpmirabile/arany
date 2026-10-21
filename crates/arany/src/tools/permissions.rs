@@ -369,7 +369,12 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
                         && u64::from(*new_offset) + u64::from(*new_limit)
                             <= u64::from(*offset) + u64::from(*limit)
                 } else {
-                    within(path, new_path) && *offset == 0 && *new_offset == 0 && new_limit <= limit
+                    // An include matches paths relative to the searched path, so a new path rebases it.
+                    include.is_none()
+                        && within(path, new_path)
+                        && *offset == 0
+                        && *new_offset == 0
+                        && new_limit <= limit
                 }
         }
         (

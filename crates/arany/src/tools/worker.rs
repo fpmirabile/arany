@@ -1732,9 +1732,23 @@ mod tests {
                 json!([])
             );
         }
-        let refused = search("(", None, true, 0);
+        let mut refused = intent(
+            &runtime,
+            &view,
+            ToolCall::Search {
+                path: "owned".into(),
+                query: "(".into(),
+                regex: true,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+        );
+        refused.limits.result_bytes = 128;
+        let refused = view.read(refused);
         assert_eq!(refused.disposition, ToolDisposition::Failed);
-        assert!(refused.output.contains("regex syntax is invalid"));
+        assert!(refused.valid() && refused.output.contains("invalid or unsupported regex"));
         let handover = view.handover().unwrap();
         assert!(decode_data(&handover, WorkerDataPurpose::Handover).is_ok());
         let final_changes: WorkerChangeset = serde_json::from_slice(&handover).unwrap();

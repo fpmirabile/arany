@@ -9,8 +9,9 @@ const MAX_GLOB_EXPRESSION_BYTES: usize = 8 * 1024;
 const MAX_GLOB_ALTERNATIVES: usize = 16;
 const PREVIEW_CHARS: usize = 512;
 
+// Every refusal fits the 128-byte minimum result budget after its fixed prefix and suffix.
 const INVALID_REGEX: &str =
-    "regex syntax is invalid or unsupported (Rust regex syntax; no look-around or backreferences)";
+    "invalid or unsupported regex (Rust syntax, no look-around or backreferences)";
 const LARGE_REGEX: &str = "regex exceeds the 128 KiB compiled size limit";
 const INVALID_GLOB: &str = "include glob is invalid or unsupported";
 const LARGE_GLOB: &str =
