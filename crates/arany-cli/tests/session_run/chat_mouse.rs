@@ -211,8 +211,12 @@ impl Chat {
         self.answered = PtyResponses::default();
     }
 
-    fn exit(mut self) -> Modes {
-        self.send(b"/exit\r");
+    fn exit(self) -> Modes {
+        self.exit_with(b"/exit\r")
+    }
+
+    fn exit_with(mut self, keys: &[u8]) -> Modes {
+        self.send(keys);
         let deadline = Instant::now() + Duration::from_secs(10);
         while self.child.child().try_wait().expect("status").is_none() {
             self.pump();
@@ -562,7 +566,9 @@ fn fullscreen_pager_dumps_bounded_transcript_to_scrollback_while_a_run_streams()
     chat.assert_active(&CAPTURE, "resumed pager");
     chat.step("pager closed", b"q", &[EMPTY_COMPOSER], &CAPTURE);
 
-    let modes = chat.exit();
+    // The pager shows the committed answer before the Engine returns the Run, and /exit is
+    // refused until it does; an empty-draft Ctrl+D exits once the Run has returned.
+    let modes = chat.exit_with(b"\x04");
     assert_eq!(modes.active, Vec::<u32>::new(), "modes restored on exit");
     let mut enabled = modes.enabled;
     enabled.sort_unstable();
