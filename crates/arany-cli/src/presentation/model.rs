@@ -21,6 +21,8 @@ pub(crate) struct PresentationModel {
     pub(crate) setup_required: bool,
     pub(crate) draft_action: DraftAction,
     pub(crate) empty_chat: bool,
+    // The current or last Run has children, so an empty composer can switch agent chats.
+    pub(crate) agent_switch: bool,
 }
 
 impl PresentationModel {
@@ -167,6 +169,12 @@ impl PresentationModel {
             activity_lines,
             setup_required,
             empty_chat: view.runs.is_empty(),
+            agent_switch: !preparing
+                && view.runs.last().is_some_and(|run| {
+                    run.agents
+                        .iter()
+                        .any(|agent| agent.role == AgentRole::Child)
+                }),
             draft_action: if preparing {
                 DraftAction::Retain
             } else if run.is_some_and(|run| run.status == RunStatus::Active) {

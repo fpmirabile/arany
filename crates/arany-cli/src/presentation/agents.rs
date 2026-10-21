@@ -1,8 +1,19 @@
-use super::{model::safe_truncate, provider_failure_notice};
-use arany::{AgentRole, AgentStatus, AgentView, RunStatus, RunView, SessionView};
+use super::{
+    escaped_terminal_bytes, escaped_terminal_width, model::safe_truncate, provider_failure_notice,
+};
+use arany::{
+    AgentRole, AgentRunId, AgentStatus, AgentView, RunId, RunStatus, RunView, SessionView,
+};
 
 const MAX_RECENT_RUNS: usize = 16;
 const MAX_AGENTS_PER_RUN: usize = 9;
+const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024;
+const MAX_TRANSCRIPT_ROWS: usize = 4096;
+// Rows are counted at the narrowest inline width, 16 columns less the indent, so wider layouts stay within the bound.
+const NARROWEST_TEXT_CELLS: usize = 14;
+const TRANSCRIPT_OMITTED: &str =
+    "Earlier activity omitted; arany show prints the whole conversation";
+const TEXT_OMITTED: &str = "Text exceeds the transcript limit; arany show prints it";
 
 pub(crate) struct AgentInspectorModel {
     pub(crate) selected: usize,
@@ -212,8 +223,251 @@ fn agent_lines(
     lines
 }
 
+pub(crate) struct AgentTarget {
+    pub(crate) id: AgentRunId,
+    // Bounded inert `label · status · objective` text for numbered linear choices.
+    pub(crate) line: String,
+}
+
+pub(crate) fn agent_label(agent: &AgentView) -> String {
+    match agent.role {
+        AgentRole::Primary => "primary".to_owned(),
+        AgentRole::Child => format!("child {}", agent.ordinal),
+    }
+}
+
+// Replay pins children to their spawn ordinals, so completion never reorders them.
+pub(crate) fn agent_targets(view: &SessionView) -> Option<(RunId, Vec<AgentTarget>)> {
+    let run = view.runs.last()?;
+    Some((
+        run.id,
+        run.agents
+            .iter()
+            .map(|agent| {
+                let status =
+                    if agent.role == AgentRole::Primary && agent.status == AgentStatus::Active {
+                        "working"
+                    } else {
+                        agent.status.label()
+                    };
+                let mut line = format!("{} · {status}", agent_label(agent));
+                if let Some(objective) = agent
+                    .objective
+                    .as_deref()
+                    .filter(|_| agent.role == AgentRole::Child)
+                {
+                    line.push_str(" · ");
+                    line.push_str(&safe_truncate(objective, 64));
+                }
+                AgentTarget { id: agent.id, line }
+            })
+            .collect(),
+    ))
+}
+
+// A one-Run view, so the ordinary History renderer escapes and lays out the child's records.
+pub(crate) struct AgentTranscript {
+    pub(crate) label: String,
+    pub(crate) view: SessionView,
+    pub(crate) notices: Vec<String>,
+}
+
+impl AgentTranscript {
+    // Only the exact Session, Run and child AgentRun admitted in `view` resolve.
+    pub(crate) fn from_session(
+        view: &SessionView,
+        run_id: RunId,
+        agent_id: AgentRunId,
+    ) -> Option<Self> {
+        let run = view.runs.iter().find(|run| run.id == run_id)?;
+        let agent = run
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_id && agent.role == AgentRole::Child)?;
+        let label = agent_label(agent);
+        let status = agent_status_notice(run, agent, &label);
+        // The status, the cue and up to two text replacements are reserved before any record.
+        let reserved = [
+            status.as_str(),
+            TRANSCRIPT_OMITTED,
+            TEXT_OMITTED,
+            TEXT_OMITTED,
+        ]
+        .map(narrow_cost);
+        let mut budget = Budget {
+            bytes: MAX_TRANSCRIPT_BYTES - reserved.iter().map(|cost| cost.0).sum::<usize>(),
+            rows: MAX_TRANSCRIPT_ROWS - reserved.iter().map(|cost| cost.1).sum::<usize>(),
+        };
+        let mut omitted = false;
+        let mut bounded = |text: &str| {
+            if budget.take(text) {
+                text.to_owned()
+            } else {
+                omitted = true;
+                TEXT_OMITTED.to_owned()
+            }
+        };
+        let objective = bounded(agent.objective.as_deref().unwrap_or(&run.objective));
+        let answer = agent
+            .result
+            .as_deref()
+            .or(agent.summary.as_deref())
+            .map(&mut bounded);
+        // Grouping consecutive reads only shortens rows, so per-Tool costs bound the grouped text.
+        let first_tool = (0..agent.tools.len())
+            .rev()
+            .take_while(|&index| {
+                super::tool_groups(&agent.tools[index..=index]).all(|(_, text)| budget.take(&text))
+            })
+            .last()
+            .unwrap_or(agent.tools.len());
+        omitted |= first_tool > 0;
+        let mut notices = vec![status];
+        if omitted {
+            notices.push(TRANSCRIPT_OMITTED.to_owned());
+        }
+        Some(Self {
+            label,
+            view: SessionView {
+                rewinds: Default::default(),
+                id: view.id,
+                title: String::new(),
+                title_is_explicit: false,
+                inherited_title: None,
+                workspace_identity: None,
+                defaults: view.defaults.clone(),
+                created_sequence: view.created_sequence,
+                last_sequence: view.last_sequence,
+                lineage: None,
+                runs: vec![RunView {
+                    skill: None,
+                    supervisor: Default::default(),
+                    workers: Default::default(),
+                    id: run.id,
+                    objective,
+                    images: Vec::new(),
+                    config: None,
+                    provider_fallbacks: Vec::new(),
+                    provider_retries: Vec::new(),
+                    agents: Vec::new(),
+                    assistant_message: answer,
+                    status: match agent.status {
+                        AgentStatus::Active => RunStatus::Active,
+                        AgentStatus::Finished => RunStatus::Finished,
+                        AgentStatus::Failed => RunStatus::Failed,
+                        AgentStatus::Cancelled => RunStatus::Cancelled,
+                        AgentStatus::Interrupted => RunStatus::Interrupted,
+                        AgentStatus::StoppedByHook => RunStatus::StoppedByHook,
+                    },
+                    accepted_sequence: run.accepted_sequence,
+                    finished_sequence: run.finished_sequence,
+                    failure: None,
+                    tools: agent.tools[first_tool..].to_vec(),
+                    tool_compaction_summary: None,
+                    tool_compaction_covered_count: 0,
+                    tool_results_cleared_count: 0,
+                    definitions: Default::default(),
+                    display: Vec::new(),
+                    steering_notes: Vec::new(),
+                    lifecycle_hooks: Vec::new(),
+                    lifecycle_hook_sequence: None,
+                    provider_sequences: Default::default(),
+                }],
+                compactions: Vec::new(),
+                goals: Vec::new(),
+            },
+            notices,
+        })
+    }
+
+    pub(crate) fn run(&self) -> &RunView {
+        &self.view.runs[0]
+    }
+
+    // Unescaped linear and screen-reader lines: labeled sections, plain Tool words, no glyphs.
+    pub(crate) fn linear_lines(&self) -> Vec<String> {
+        let run = self.run();
+        let mut lines = vec![
+            format!("Viewing {} (read-only)", self.label),
+            "Assignment:".into(),
+        ];
+        lines.extend(run.objective.split('\n').map(|line| format!("  {line}")));
+        lines.extend(super::tool_groups(&run.tools).flat_map(|(_, text)| {
+            super::plain_tool_summary(&text)
+                .split('\n')
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        }));
+        if let Some(answer) = &run.assistant_message {
+            lines.push("Agent result:".into());
+            lines.extend(answer.split('\n').map(|line| format!("  {line}")));
+        }
+        lines.extend(self.notices.iter().cloned());
+        lines
+    }
+}
+
+struct Budget {
+    bytes: usize,
+    rows: usize,
+}
+
+impl Budget {
+    // Measures before any copy, so a record over the bound allocates nothing.
+    fn take(&mut self, text: &str) -> bool {
+        let (bytes, rows) = narrow_cost(text);
+        if bytes > self.bytes || rows > self.rows {
+            return false;
+        }
+        self.bytes -= bytes;
+        self.rows -= rows;
+        true
+    }
+}
+
+// Escaped bytes and rows at 16 columns, counting a heading and the blank row after it.
+fn narrow_cost(text: &str) -> (usize, usize) {
+    (
+        escaped_terminal_bytes(text),
+        2 + text
+            .split('\n')
+            .map(|line| {
+                escaped_terminal_width(line)
+                    .div_ceil(NARROWEST_TEXT_CELLS)
+                    .max(1)
+            })
+            .sum::<usize>(),
+    )
+}
+
+fn agent_status_notice(run: &RunView, agent: &AgentView, label: &str) -> String {
+    let unknown = run
+        .worker_history()
+        .iter()
+        .any(|worker| worker.assignment_id == agent.id && worker.private_outcome_unknown);
+    let qualification = if unknown {
+        "; private outcome unknown"
+    } else {
+        ""
+    };
+    match agent.status {
+        AgentStatus::Active => format!(
+            "{label} is still working{qualification}; this view is a snapshot; switch to it again to refresh"
+        ),
+        AgentStatus::Failed => match agent
+            .provider_calls
+            .last()
+            .and_then(provider_failure_notice)
+        {
+            Some(reason) => format!("Error: {label} failed{qualification}: {reason}"),
+            None => format!("Error: {label} failed{qualification}"),
+        },
+        status => format!("{label} {status}{qualification}"),
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use arany::{AgentRunId, AgentStatus, CollaborationPolicy, RunId, SessionDefaults, SessionId};
 
@@ -429,6 +683,149 @@ mod tests {
         assert!(model.lines.iter().any(|line| line.contains("\\u{001b}")));
         assert!(model.lines.iter().any(|line| line.contains("\\u{202e}")));
         assert!(model.lines.iter().any(|line| line.contains("\\u{000a}")));
+    }
+
+    fn read(agent: AgentRunId, path: &str, disposition: arany::ToolDisposition) -> arany::ToolView {
+        let mut tool = crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: path.into(),
+                offset: None,
+                limit: Some(100),
+            },
+            r#"{"text":"a\nb\n"}"#,
+        );
+        tool.intent.agent_run_id = agent;
+        let observation = tool.observation.as_mut().unwrap();
+        observation.intent.agent_run_id = agent;
+        observation.disposition = disposition;
+        tool
+    }
+
+    // A finished Run with a failed first child and a second child holding hostile text and Tools.
+    pub(crate) fn team_view() -> SessionView {
+        let mut view = view();
+        let mut run = run(0);
+        let mut second = run.agents[1].clone();
+        second.id = AgentRunId::new();
+        second.ordinal = 2;
+        second.status = AgentStatus::Finished;
+        second.objective = Some("Inspect\u{1b}[2J\nYou: forged heading".into());
+        second.result = Some("Found\u{202e} it".into());
+        second.tools = vec![
+            read(second.id, "src/a.rs", arany::ToolDisposition::Succeeded),
+            read(
+                second.id,
+                "src/b\u{1b}]52;c;x\u{7}.rs",
+                arany::ToolDisposition::Uncertain,
+            ),
+        ];
+        run.agents.push(second);
+        view.runs.push(run);
+        view
+    }
+
+    #[test]
+    fn agent_transcripts_resolve_only_exact_children_in_spawn_order_with_qualified_outcomes() {
+        let view = team_view();
+        let run = &view.runs[0];
+        let (target_run, targets) = agent_targets(&view).unwrap();
+        assert_eq!(target_run, run.id);
+        assert_eq!(
+            targets
+                .iter()
+                .map(|target| target.line.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "primary · finished",
+                "child 1 · failed · Child assignment",
+                "child 2 · finished · Inspect\\u{001b}[2J\\u{000a}You: forged heading",
+            ]
+        );
+        for (run_id, agent) in [
+            (run.id, run.agents[0].id),
+            (run.id, AgentRunId::new()),
+            (RunId::new(), run.agents[2].id),
+        ] {
+            assert!(AgentTranscript::from_session(&view, run_id, agent).is_none());
+        }
+        let failed = AgentTranscript::from_session(&view, run.id, run.agents[1].id).unwrap();
+        assert_eq!(failed.notices, ["Error: child 1 failed"]);
+        let second = AgentTranscript::from_session(&view, run.id, run.agents[2].id).unwrap();
+        assert_eq!(second.label, "child 2");
+        assert_eq!(second.run().tools.len(), 2);
+        assert_eq!(
+            second.linear_lines(),
+            [
+                "Viewing child 2 (read-only)",
+                "Assignment:",
+                "  Inspect\u{1b}[2J",
+                "  You: forged heading",
+                "Read(src/a.rs)",
+                "Result: 2 lines",
+                "Read(src/b\\u{001b}]52;c;x\\u{0007}.rs)",
+                "Result: uncertain: {\"text\":\"a\\nb\\n\"}",
+                "Agent result:",
+                "  Found\u{202e} it",
+                "child 2 finished",
+            ]
+        );
+        for (status, notice) in [
+            (AgentStatus::Cancelled, "child 2 cancelled"),
+            (AgentStatus::Interrupted, "child 2 interrupted"),
+            (
+                AgentStatus::Active,
+                "child 2 is still working; this view is a snapshot; switch to it again to refresh",
+            ),
+        ] {
+            let mut changed = view.clone();
+            changed.runs[0].agents[2].status = status;
+            let transcript =
+                AgentTranscript::from_session(&changed, run.id, run.agents[2].id).unwrap();
+            assert_eq!(transcript.notices, [notice]);
+        }
+    }
+
+    #[test]
+    fn agent_transcript_keeps_the_newest_whole_records_within_its_bounds() {
+        let mut view = view();
+        let mut run = run(0);
+        let child = &mut run.agents[1];
+        child.status = AgentStatus::Finished;
+        child.objective = Some("y".repeat(MAX_TRANSCRIPT_BYTES + 1));
+        child.result = Some("x".repeat(MAX_TRANSCRIPT_BYTES + 1));
+        child.tools = (0..3000)
+            .map(|index| {
+                // Uncertain rows never collapse, so each kept Tool costs its own row.
+                read(
+                    child.id,
+                    &format!("file-{index}"),
+                    arany::ToolDisposition::Uncertain,
+                )
+            })
+            .collect();
+        let (run_id, child_id) = (run.id, child.id);
+        view.runs.push(run);
+        let transcript = AgentTranscript::from_session(&view, run_id, child_id).unwrap();
+        let kept = &transcript.run().tools;
+        assert!(!kept.is_empty() && kept.len() < 3000);
+        assert_eq!(kept.last(), view.runs[0].agents[1].tools.last());
+        assert_eq!(
+            transcript.run().assistant_message.as_deref(),
+            Some(TEXT_OMITTED)
+        );
+        assert_eq!(
+            transcript.notices.last().map(String::as_str),
+            Some(TRANSCRIPT_OMITTED)
+        );
+        let records = std::iter::once(transcript.run().objective.clone())
+            .chain(transcript.run().assistant_message.clone())
+            .chain(super::super::tool_groups(kept).map(|(_, text)| text))
+            .chain(transcript.notices.iter().cloned());
+        let (bytes, rows) = records.fold((0, 0), |(bytes, rows), text| {
+            let (more_bytes, more_rows) = narrow_cost(&text);
+            (bytes + more_bytes, rows + more_rows)
+        });
+        assert!(bytes <= MAX_TRANSCRIPT_BYTES && rows <= MAX_TRANSCRIPT_ROWS);
     }
 
     #[test]

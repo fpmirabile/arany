@@ -85,6 +85,8 @@ pub enum TerminalInput {
     HistoryFind,
     HistoryLive,
     Transcript,
+    AgentPrevious,
+    AgentNext,
     Submit,
     Escape,
     Interrupt,
@@ -739,6 +741,18 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             _ => None,
         };
     }
+    if key.modifiers == KeyModifiers::ALT {
+        return match key.code {
+            KeyCode::Left => Some(TerminalInput::AgentPrevious),
+            KeyCode::Right => Some(TerminalInput::AgentNext),
+            // Option+Left/Right arrive as `ESC b`/`ESC f` without enhanced key reporting, as in Codex.
+            #[cfg(target_os = "macos")]
+            KeyCode::Char('b') => Some(TerminalInput::AgentPrevious),
+            #[cfg(target_os = "macos")]
+            KeyCode::Char('f') => Some(TerminalInput::AgentNext),
+            _ => None,
+        };
+    }
     if key.modifiers.intersects(
         KeyModifiers::CONTROL
             | KeyModifiers::ALT
@@ -1237,6 +1251,29 @@ mod tests {
                         TerminalInput::WordLeft,
                         TerminalInput::WordRight,
                     ],
+                ),
+                // Alt+Left/Right switch agent chats; plain and other modified arrows keep their owners.
+                (
+                    b"\x1b[1;3D\x1b[1;3C\x1b[D\x1b[C\x1b[1;3A\x1b[1;7D\x1b[1;4C".as_slice(),
+                    vec![
+                        TerminalInput::AgentPrevious,
+                        TerminalInput::AgentNext,
+                        TerminalInput::Left,
+                        TerminalInput::Right,
+                    ],
+                ),
+                // Option+Left/Right as `ESC b`/`ESC f` navigate only on macOS; other Alt letters stay inert.
+                (
+                    b"\x1bb\x1bf\x1bx\x1b[98;3u".as_slice(),
+                    if cfg!(target_os = "macos") {
+                        vec![
+                            TerminalInput::AgentPrevious,
+                            TerminalInput::AgentNext,
+                            TerminalInput::AgentPrevious,
+                        ]
+                    } else {
+                        vec![]
+                    },
                 ),
                 (
                     b"\x1b[H\x1bOF\x1b[3~\x1b[5~\x1b[6~".as_slice(),
