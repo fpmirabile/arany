@@ -1012,15 +1012,23 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
             Stage::OutcomeToolPath,
         ),
         (
-            json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(4096),"new":"x".repeat(4097)}),
+            json!({"operation":"edit","path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(32 * 1024),"new":"x".repeat(32 * 1024 + 1)}),
             Stage::OutcomeToolTextSize,
+        ),
+        (
+            json!({"operation":"write","path":"README.md","expected_digest":null,"content":"x".repeat(64 * 1024 + 1)}),
+            Stage::OutcomeToolTextSize,
+        ),
+        (
+            json!({"operation":"command","program":"date","args":vec!["x".repeat(300); 64],"cwd":""}),
+            Stage::OutcomeToolArgumentSize,
         ),
         (
             json!({"operation":"command","program":"/usr/bin/date","args":[],"cwd":""}),
             Stage::OutcomeToolProgram,
         ),
         (
-            json!({"operation":"write","path":"README.md","expected_digest":"0".repeat(64),"content":"x".repeat(16385)}),
+            json!({"operation":"write","path":"README.md","expected_digest":"0".repeat(64),"content":"x".repeat(400 * 1024 + 1)}),
             Stage::OutcomeToolArgumentSize,
         ),
     ] {
@@ -1071,6 +1079,38 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
     assert!(
         matches!(decode(&read_only_request(MODEL), &fixture).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "Pending read result")
     );
+}
+
+#[test]
+fn native_write_and_edit_decode_at_the_content_ceiling() {
+    let request = primary_request(MODEL);
+    let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
+    for (name, arguments) in [
+        (
+            "arany_write",
+            json!({"path":"README.md","expected_digest":null,"content":"é".repeat(ceiling / 2)}),
+        ),
+        (
+            "arany_edit",
+            json!({"path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(ceiling / 2),"new":"é".repeat(ceiling / 4)}),
+        ),
+    ] {
+        let fixture = response("completed", json!([function_call(name, &arguments)]));
+        assert!(
+            matches!(
+                decode(&request, &fixture).unwrap().outcome,
+                ProviderOutcome::Tools(_)
+            ),
+            "{name}"
+        );
+        assert!(
+            matches!(
+                decode_streamed(&request, &fixture).unwrap().outcome,
+                ProviderOutcome::Tools(_)
+            ),
+            "{name}"
+        );
+    }
 }
 
 #[test]

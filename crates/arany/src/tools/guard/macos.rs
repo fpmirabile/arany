@@ -74,6 +74,7 @@ pub(super) fn unit_main() -> std::process::ExitCode {
 
 const CPU_LIMIT: Duration = Duration::from_secs(15);
 const SYSTEM_PROGRAMS_CAP: usize = 2048;
+const SYSTEM_PROGRAMS_BYTES_CAP: usize = 96 * 1024;
 const PROFILE_BYTES_CAP: usize = 96 * 1024;
 pub(super) const SUPERVISION_INTERVAL: Duration = Duration::from_millis(10);
 pub(super) const PREPARATION_DEADLINE: Duration = Duration::from_secs(30);
@@ -265,6 +266,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&MAX_PROCESSES_OR_THREADS.to_le_bytes());
     bytes.extend_from_slice(&storage::STORAGE_BYTES_CAP.to_le_bytes());
     bytes.extend_from_slice(&(SYSTEM_PROGRAMS_CAP as u64).to_le_bytes());
+    bytes.extend_from_slice(&(SYSTEM_PROGRAMS_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(PROFILE_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(TASK_BYTES_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(crate::tools::types::MAX_CHANGESET_FILES as u64).to_le_bytes());
@@ -715,7 +717,7 @@ pub(crate) fn macos_enforcement_digest(
     }
     let mut bytes = policy.to_vec();
     bytes.extend_from_slice(&serde_json::to_vec(programs).map_err(|_| ToolError::Configuration)?);
-    if bytes.len() > TASK_BYTES_CAP {
+    if bytes.len() > SYSTEM_PROGRAMS_BYTES_CAP {
         return Err(ToolError::Limit);
     }
     Ok(digest(&bytes))

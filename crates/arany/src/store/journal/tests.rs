@@ -279,6 +279,41 @@ fn every_event_slot_admits_a_current_tool_observation() {
         event_payload_limit("ToolFinished", finished - 1),
         crate::store::MAX_EVENT_BYTES
     );
+    let started = payload_version("ToolStarted").expect("payload version");
+    assert_eq!(
+        event_payload_limit("ToolStarted", started - 1),
+        crate::store::MAX_EVENT_BYTES
+    );
+    // The largest typed Write: a six-byte escape per content byte and a long escaped path.
+    let intent = crate::tools::EffectIntent {
+        target: crate::session::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::session::RunId::new(),
+        agent_run_id: crate::session::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: u64::MAX,
+        workspace_inode: u64::MAX,
+        call: crate::tools::ToolCall::Write {
+            path: "\"".repeat(512),
+            expected_digest: Some("0".repeat(64)),
+            content: "\u{1}".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES),
+        },
+        limits: crate::tools::ToolLimits::default(),
+        expires_at_ms: u64::MAX,
+        use_count: 1,
+    };
+    assert!(intent.valid());
+    let payload = Event::ToolStarted {
+        run_id: intent.run_id,
+        agent_run_id: intent.agent_run_id,
+        intent,
+        active_ceiling_ms: u64::MAX,
+    }
+    .payload()
+    .unwrap();
+    assert!(payload.len() > crate::store::MAX_EVENT_BYTES);
+    assert!(payload.len() <= event_payload_limit("ToolStarted", started));
     let verdict = payload_version("ToolPermissionDecided").expect("payload version");
     assert_eq!(
         event_payload_limit("ToolPermissionDecided", verdict),

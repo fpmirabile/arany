@@ -446,17 +446,45 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
         .is_err(),
         "a Tool that was not offered does not exist"
     );
-    let large = json!({"path": "a", "expected_digest": null, "content": "x".repeat(20_000)});
-    assert!(
-        decode(
+    let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
+    for (name, input, accepted) in [
+        (
+            "arany_write",
+            json!({"path": "a", "expected_digest": null, "content": "é".repeat(ceiling / 2)}),
+            true,
+        ),
+        (
+            "arany_edit",
+            json!({"path": "a", "expected_digest": "0".repeat(64), "old": "x".repeat(ceiling / 2), "new": "é".repeat(ceiling / 4)}),
+            true,
+        ),
+        (
+            "arany_write",
+            json!({"path": "a", "expected_digest": null, "content": "x".repeat(ceiling + 1)}),
+            false,
+        ),
+        (
+            "arany_edit",
+            json!({"path": "a", "expected_digest": "0".repeat(64), "old": "x".repeat(ceiling / 2), "new": "x".repeat(ceiling / 2 + 1)}),
+            false,
+        ),
+    ] {
+        let decoded = decode(
             &request,
-            &response(
-                "tool_use",
-                json!([tool_use("toolu_1", "arany_write", large)])
-            )
-        )
-        .is_err()
-    );
+            &response("tool_use", json!([tool_use("toolu_1", name, input)])),
+        );
+        assert_eq!(
+            matches!(
+                decoded,
+                Ok(ProviderResponse {
+                    outcome: ProviderOutcome::Tools(_),
+                    ..
+                })
+            ),
+            accepted,
+            "{name} accepted={accepted}"
+        );
+    }
 }
 
 #[test]
@@ -1117,6 +1145,42 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
     );
 }
 
+#[test]
+fn streamed_write_at_the_content_ceiling_assembles_and_decodes() {
+    let content = "x".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES);
+    let arguments =
+        json!({"path": "src/new.rs", "expected_digest": null, "content": content}).to_string();
+    let mut events = vec![
+        message_start(),
+        json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"arany_write","input":{}}}),
+    ];
+    events.extend(arguments.as_bytes().chunks(4096).map(|fragment| {
+        json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":std::str::from_utf8(fragment).unwrap()}})
+    }));
+    events.extend([
+        json!({"type":"content_block_stop","index":0}),
+        json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
+        json!({"type":"message_stop"}),
+    ]);
+    let (publisher, _) = crate::provider::ResponsePreview::new();
+    let assembled = run_stream(&sse(&events), publisher).unwrap().unwrap();
+    let request = primary_request("model-1");
+    let conversation = render::conversation(&request).unwrap();
+    let scope = RunScope {
+        model: "model-1",
+        output_cap: request.max_output_tokens,
+        secret: KEY,
+        offered: conversation.tools.as_deref().unwrap(),
+        review: false,
+    };
+    let ProviderOutcome::Tools(requests) = decode_run(&assembled, &scope).unwrap().outcome else {
+        panic!("one Tool request");
+    };
+    assert!(
+        matches!(&requests[0].call, crate::tools::ToolCall::Write { content: decoded, .. } if *decoded == content)
+    );
+}
+
 const SCHEMA_BOUND_KEYWORDS: [&str; 6] = [
     "minLength",
     "maxLength",
@@ -1148,7 +1212,7 @@ fn assert_no_schema_bounds(value: &Value, at: &str) {
 #[test]
 fn streamed_delegate_accepts_the_bounded_assignment_envelope_beyond_tool_argument_bytes() {
     let arguments = json!({"agent":null, "children":vec![json!({"objective":"x".repeat(2048),"profile":null});8]}).to_string();
-    assert!(arguments.len() > MAX_TOOL_ARGUMENT_BYTES);
+    assert!(arguments.len() > crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES);
     let wire = sse(&[
         message_start(),
         json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"delegate_1","name":"arany_delegate","input":{}}}),

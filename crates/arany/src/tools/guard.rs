@@ -14,7 +14,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
-pub(super) const TASK_BYTES_CAP: usize = 96 * 1024;
+pub(super) const TASK_BYTES_CAP: usize = 1024 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.
 const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
 pub(super) const RUNTIME_ROOT: &str = "/usr";
@@ -2135,7 +2135,7 @@ mod tests {
         };
         let commands: Vec<_> = (0..200)
             .map(|index| {
-                serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(200)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
+                serde_json::json!({"name": format!("program{index}"), "executable": format!("/usr/bin/{}", "x".repeat(4900)), "sha256": "0".repeat(64), "interpreter": false, "inputs": []})
             })
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
@@ -2164,6 +2164,42 @@ mod tests {
             read_task(&mut std::io::BufReader::new(oversized.as_slice())),
             Err(ToolError::Limit)
         ));
+    }
+
+    #[test]
+    fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
+        let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+        let task = Task {
+            config,
+            intent: intent(ToolCall::Write {
+                path: "\"".repeat(512),
+                expected_digest: Some("0".repeat(64)),
+                content: "\u{1}".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES),
+            }),
+            cache: None,
+            hook_stdin: None,
+            definition: None,
+            worker: None,
+            handover: None,
+            #[cfg(target_os = "linux")]
+            parent_namespaces: profile::Namespaces::read().unwrap(),
+            #[cfg(target_os = "macos")]
+            workspace: "/private/fixture/workspace".into(),
+            #[cfg(target_os = "macos")]
+            guard_executable: "/private/fixture/arany".into(),
+            #[cfg(target_os = "macos")]
+            system_programs: None,
+        };
+        let mut frame = encode_task(&task).unwrap();
+        assert!(frame.len() <= TASK_BYTES_CAP + 1);
+        let read = |bytes: &[u8]| read_task(&mut std::io::BufReader::new(bytes));
+        assert!(read(&frame).is_ok());
+        frame.pop();
+        frame.resize(TASK_BYTES_CAP, b' ');
+        frame.push(b'\n');
+        assert!(read(&frame).is_ok(), "the exact ceiling is admissible");
+        frame.insert(0, b' ');
+        assert!(matches!(read(&frame), Err(ToolError::Limit)));
     }
 
     #[test]

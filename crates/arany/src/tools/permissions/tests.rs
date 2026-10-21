@@ -1321,7 +1321,7 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     let call = ToolCall::Write {
         path: "notes/a.txt".into(),
         expected_digest: None,
-        content: "x".repeat(super::super::types::MAX_TOOL_ARGUMENT_BYTES / 2),
+        content: "x".repeat(MAX_HOOK_INPUT_BYTES / 2),
     };
     let id = uuid::Uuid::now_v7();
     let input =
@@ -1349,6 +1349,28 @@ fn hook_stdin_is_closed_bounded_and_host_path_free() {
     assert_eq!(value["tool_use_id"], id.to_string());
     assert!(input.len() <= MAX_HOOK_INPUT_BYTES);
     assert!(!input.contains("permissions.json"));
+    // A valid call that cannot fit is refused whole: tool_input is never cut, even with an empty response.
+    let large = ToolCall::Write {
+        path: "notes/a.txt".into(),
+        expected_digest: None,
+        content: "x".repeat(super::super::types::MAX_EDIT_CONTENT_BYTES),
+    };
+    assert!(large.valid());
+    assert!(matches!(
+        pre_tool_use_input("session", PermissionMode::AcceptEdits, &large, id),
+        Err(ConfigError::Limit(_))
+    ));
+    assert!(matches!(
+        super::hooks::post_tool_use_input(
+            "session",
+            PermissionMode::AcceptEdits,
+            &large,
+            id,
+            json!(""),
+            0
+        ),
+        Err(ConfigError::Limit(_))
+    ));
 }
 
 #[test]

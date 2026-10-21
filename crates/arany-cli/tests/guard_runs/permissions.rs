@@ -2866,6 +2866,103 @@ async fn hook_post_tool_use_sets_that_cannot_run_deny_the_tool_before_dispatch()
     }
 }
 
+#[tokio::test]
+async fn a_64_kib_write_and_edit_publish_unhooked_and_a_hook_that_cannot_receive_them_denies() {
+    let ceiling = 64 * 1024;
+    let path = "notes/large.txt";
+    let written = format!("{}{}", "a".repeat(ceiling / 2), "b".repeat(ceiling / 2));
+    let write = arany::ToolCall::Write {
+        path: path.into(),
+        expected_digest: None,
+        content: written.clone(),
+    };
+    let edit = arany::ToolCall::Edit {
+        path: path.into(),
+        expected_digest: hash(written.as_bytes()),
+        old: "b".repeat(ceiling / 2),
+        new: "c".repeat(ceiling / 2),
+    };
+    let over = arany::ToolCall::Write {
+        path: path.into(),
+        expected_digest: None,
+        content: "x".repeat(ceiling + 1),
+    };
+    for event in [None, Some("PreToolUse"), Some("PostToolUse")] {
+        let mut settings = json!({"permissions": {"defaultMode": "acceptEdits"}});
+        let outcomes = match event {
+            None => vec![
+                tool_outcome(over.clone()),
+                tool_outcome(write.clone()),
+                tool_outcome(edit.clone()),
+                finish("answer"),
+            ],
+            Some(event) => {
+                settings["hooks"] =
+                    json!({(event): [{"matcher": "Write", "hooks": [shell_hook("exit 0")]}]});
+                vec![tool_outcome(write.clone()), finish("answer")]
+            }
+        };
+        let fixture = Fixture::new(Some(&settings), true);
+        let (result, _, humans) = fixture.run(outcomes, None, false).await;
+        assert_eq!(humans, 0, "{event:?}");
+        let published = std::fs::read(fixture.workspace.join(path)).ok();
+        let (events, view) = fixture.reopen(result.session_id).await;
+        let started: Vec<_> = events
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                Event::ToolStarted { intent, .. } => Some(intent.call.clone()),
+                _ => None,
+            })
+            .collect();
+        let tools = &view.runs[0].tools;
+        if event.is_none() {
+            let refused = events.iter().any(|envelope| {
+                matches!(&envelope.event, Event::ProviderCallRecorded { record, .. }
+                    if record.refusal.as_ref().is_some_and(|refusal| refusal.operation == "arany_write"
+                        && refusal.cause == arany::ProposalRefusalCause::InvalidArguments))
+            });
+            assert!(refused, "64 KiB + 1 is refused before any intent");
+            assert_eq!(
+                started,
+                [write.clone(), edit.clone()],
+                "complete intents persist"
+            );
+            assert!(tools.iter().all(|tool| {
+                tool.observation
+                    .as_ref()
+                    .is_some_and(|o| o.disposition == arany::ToolDisposition::Succeeded)
+            }));
+            let expected = format!("{}{}", "a".repeat(ceiling / 2), "c".repeat(ceiling / 2));
+            assert_eq!(published.as_deref(), Some(expected.as_bytes()));
+            for output in [Output::Text, Output::Jsonl] {
+                assert!(render_session(&view, &events, output).contains(&written));
+            }
+            continue;
+        }
+        // Denied whole before any handler or effect: no truncation, bypass or unhooked retry.
+        assert_eq!(started, std::slice::from_ref(&write), "{event:?}");
+        assert!(
+            !events
+                .iter()
+                .any(|envelope| matches!(envelope.event, Event::HookStarted { .. })),
+            "{event:?}"
+        );
+        assert_eq!(published, None, "{event:?}");
+        let verdict = tools[0].permission_verdict.as_ref().unwrap();
+        assert_eq!(
+            (verdict.hooks, verdict.hook_restriction),
+            (0, Some(Decision::Deny))
+        );
+        let observation = tools[0].observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+        assert!(
+            observation.output.contains("hook input exceeds its limit"),
+            "{event:?}: {}",
+            observation.output
+        );
+    }
+}
+
 #[cfg(target_os = "linux")]
 #[tokio::test]
 async fn hook_researcher_uncertain_outcome_stops_the_run_as_uncertain() {

@@ -1,5 +1,5 @@
 use super::{ChildAssignment, Delegate, ProviderError, ProviderOutcome, ToolUseId};
-use crate::tools::types::MAX_TOOL_ARGUMENT_BYTES;
+use crate::tools::types::{MAX_ORDINARY_TOOL_ARGUMENT_BYTES, MAX_TOOL_ARGUMENT_BYTES};
 use crate::tools::{ToolCall, ToolRequest};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -66,7 +66,9 @@ pub(crate) fn tool_function(
         return function_outcome(operation, fields);
     }
     if operation == "plan" {
-        if !serde_json::to_vec(&input).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_ARGUMENT_BYTES) {
+        if !serde_json::to_vec(&input)
+            .is_ok_and(|bytes| bytes.len() <= MAX_ORDINARY_TOOL_ARGUMENT_BYTES)
+        {
             return Err(ProviderError::InvalidOutcome);
         }
         let contract = serde_json::from_value(input).map_err(|_| ProviderError::InvalidOutcome)?;
