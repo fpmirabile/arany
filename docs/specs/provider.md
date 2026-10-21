@@ -28,7 +28,7 @@ This table is a summary only; the sections below and the linked contracts own ea
 | DeepSeek | Subscription | — | Not applicable: no DeepSeek subscription route is in scope |
 | Kimi (Moonshot) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
 | Kimi (Moonshot) | Kimi Code subscription | `custom:NAME` with the plan's console key and an honest Arany User-Agent | Planned. Reusing kimi-cli's OAuth client would impersonate it and is excluded |
-| GLM (Z.ai) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
+| GLM (Z.ai) | Standard API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
 | GLM (Z.ai) | GLM Coding Plan | — | Excluded: its terms allow only listed tools, and Arany is not listed. Revisit if Z.ai approves Arany |
 | OpenRouter | API key | Broker profile | Deferred behind its route and privacy gate |
 
