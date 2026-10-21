@@ -40,7 +40,7 @@ pub fn input(wire: &Value) -> Value {
         .join("\n\n");
     let instructions = wire["instructions"].as_str().unwrap_or(&system);
     let mut semantic = json!({
-        "objective": null, "history": [], "includes": [], "workspace_guidance": null,
+        "objective": null, "history": [], "includes": [], "workspace_guidance": [],
         "derived_context_summary": null, "child_results": [],
     });
     let mut notes = Vec::new();
@@ -51,10 +51,10 @@ pub fn input(wire: &Value) -> Value {
             .and_then(|(path, body)| Some((path, body.strip_suffix("\n</INSTRUCTIONS>")?)))
         {
             let guidance = json!({"path": path, "text": text});
-            match semantic["workspace_guidance"].as_array_mut() {
-                Some(files) => files.push(guidance),
-                None => semantic["workspace_guidance"] = json!([guidance]),
-            }
+            semantic["workspace_guidance"]
+                .as_array_mut()
+                .unwrap()
+                .push(guidance);
         } else if let Some((scope, data)) = scoped(&part) {
             match scope.split(" (").next().unwrap_or_default() {
                 "previous_run" => semantic["history"].as_array_mut().unwrap().push(data),
@@ -161,7 +161,16 @@ mod tests {
 
     #[test]
     fn semantic_inverts_render() {
-        let request = test_support::read_only_request("gpt-5.4");
+        for without_guidance in [false, true] {
+            assert_inverts(without_guidance);
+        }
+    }
+
+    fn assert_inverts(without_guidance: bool) {
+        let mut request = test_support::read_only_request("gpt-5.4");
+        if without_guidance {
+            request.input.workspace_guidance.clear();
+        }
         let conversation = render::conversation(&request).unwrap();
         let responses =
             openai::wire::run_body_with_effort(&request, &conversation, Effort::High).unwrap();
