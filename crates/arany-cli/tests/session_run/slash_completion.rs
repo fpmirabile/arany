@@ -2075,33 +2075,19 @@ fn session_picker_close_case(quick: bool) {
     } else {
         input.write_all(b"/resume\r").expect("Session command");
     }
-    wait_for_after(
+    // The picker header is decoded from the armed frame, not matched in raw bytes.
+    wait_for_frame(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        before_picker,
-        b"1 in this Workspace",
-    );
-    let picker_header = before_picker
-        + transcript[before_picker..]
-            .windows(b"1 in this Workspace".len())
-            .position(|part| part == b"1 in this Workspace")
-            .expect("Session picker header");
-    wait_for_after(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        picker_header,
-        b"\x1b[?25l",
-    );
-    wait_armed(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        before_picker,
+        (before_picker, 40, 24),
+        |screen| {
+            screen
+                .iter()
+                .any(|row| row.contains("Resume · 1 in this Workspace"))
+                && screen.iter().any(|row| row.starts_with("› 1. "))
+        },
     );
     let before_close = transcript.len();
     input.write_all(b"\x1b").expect("close picker");

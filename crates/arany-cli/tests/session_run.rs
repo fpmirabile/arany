@@ -144,8 +144,8 @@ fn terminal_grid(transcript: &[u8], columns: usize, rows: usize) -> (Vec<String>
     (lines(scrollback), lines(grid))
 }
 
-// Native history ends directly above the Classic composer: at most the message separator
-// row lies between them, never rows of an oversized viewport.
+// Native history ends directly above the Classic composer: at most the two blank rows that
+// end every native message lie between them, never rows of an oversized viewport.
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn assert_history_above(screen: &[String], composer_top: usize, context: &str) {
     let above = &screen[..composer_top];
@@ -155,7 +155,7 @@ fn assert_history_above(screen: &[String], composer_top: usize, context: &str) {
         .take_while(|row| row.trim().is_empty())
         .count();
     assert!(
-        gap <= 1 && gap < above.len(),
+        gap <= 2 && gap < above.len(),
         "{context}: {gap} blank rows between history and the composer: {screen:?}"
     );
 }

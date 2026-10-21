@@ -2056,13 +2056,25 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             b"\x1b[?25h",
         );
         input.write_all(b"/exit\r").expect("exit Session");
+        // Viewport height changes query the cursor, so keep answering until the product exits.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.child().try_wait().expect("product status").is_none() {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "{columns}: exit: {}",
+                tail(&transcript)
+            );
+            thread::yield_now();
+        }
         let result = wait_product(child.take());
         output
             .read_to_end(&mut transcript)
             .expect("final PTY output");
         assert!(
             result.status.success(),
-            "inline setup journey failed at {columns}"
+            "inline setup journey failed at {columns}: {}",
+            tail(&transcript)
         );
         assert!(
             (1..=128).contains(&answered.cursor_queries),
@@ -3613,9 +3625,11 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             },
         );
         if !linear {
+            // The decoded status row is the visible state; a recreated viewport re-emits rows.
+            let screen = crate::screen_rows(&transcript, 40, 12);
             assert!(
-                !String::from_utf8_lossy(&transcript[edited_start..]).contains("ready"),
-                "editing must not restore ready during admission"
+                !screen[11].trim_start().starts_with("ready"),
+                "editing must not restore ready during admission: {screen:?}"
             );
         }
         let interrupted_start = transcript.len();

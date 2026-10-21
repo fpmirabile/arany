@@ -451,14 +451,23 @@ fn inline_inspector(
     );
     let checkpoint = transcript.len();
     input.write_all(b"\x1b").expect("close inspector");
-    wait_for_pty(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        checkpoint,
-        b"Agent ins",
-    );
+    // The restored composer's status is decoded, since a recreated viewport splits its words.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !transcript[checkpoint..]
+        .windows(6)
+        .any(|part| part == b"\x1b[?25h")
+        || !crate::screen_rows(&transcript, width.into(), 24)
+            .iter()
+            .any(|row| row.contains("Agent insp"))
+    {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "inspector close notice missing: {}",
+            tail(&transcript[checkpoint..])
+        );
+        thread::yield_now();
+    }
     input.write_all(b"/exit\r").expect("exit attached mode");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
