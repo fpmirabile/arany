@@ -496,7 +496,8 @@ async fn completed_at_with_preview(
     Ok(CompletedStream {
         body,
         counts: decoder.counts(),
-        reasoning_tokens: decoder.reasoning_tokens,
+        reasoning_tokens: reasoning_tokens(decoder.output_tokens_details.as_ref())
+            .map_err(|error| failure(Stage::UsageContract, error, decoder.counts()))?,
     })
 }
 
@@ -675,7 +676,8 @@ struct StreamDecoder<'a> {
     response_shape: ResponseShape,
     response_id: Option<String>,
     done_items: Vec<(wire::WireItem, Value)>,
-    reasoning_tokens: u32,
+    // Kept raw: only the ChatGPT completion path interprets it, so shared streams stay unchanged.
+    output_tokens_details: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -704,7 +706,7 @@ impl<'a> StreamDecoder<'a> {
             response_shape: ResponseShape::default(),
             response_id: None,
             done_items: Vec::new(),
-            reasoning_tokens: 0,
+            output_tokens_details: None,
         }
     }
 
@@ -771,9 +773,9 @@ impl<'a> StreamDecoder<'a> {
                 if value.get("response").is_none() {
                     return Err(ProviderError::InvalidResponseContract);
                 }
-                self.reasoning_tokens = reasoning_tokens(&value).inspect_err(|_| {
-                    self.stage = Stage::UsageContract;
-                })?;
+                self.output_tokens_details = value
+                    .pointer("/response/usage/output_tokens_details")
+                    .cloned();
                 if cfg!(debug_assertions)
                     && let Some(output) =
                         value.pointer("/response/output").and_then(Value::as_array)
@@ -890,8 +892,8 @@ impl<'a> StreamDecoder<'a> {
 }
 
 // Absent details count every output token as visible; present details must carry the count.
-fn reasoning_tokens(completed: &Value) -> Result<u32, ProviderError> {
-    match completed.pointer("/response/usage/output_tokens_details") {
+fn reasoning_tokens(details: Option<&Value>) -> Result<u32, ProviderError> {
+    match details {
         None | Some(Value::Null) => Ok(0),
         Some(details) => details
             .get("reasoning_tokens")

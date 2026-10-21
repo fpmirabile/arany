@@ -1115,6 +1115,7 @@ pub(super) async fn invoke_bounded_with_preview(
     let timeout = provider.identity().limits.deadline.min(remaining);
     let output_cap = request.max_output_tokens;
     let output_bound = provider.identity().limits.output_token_bound;
+    let chatgpt = provider.identity().chatgpt_provenance().is_some();
     let invocation = async {
         match preview {
             Some(preview) => provider.invoke_with_preview(request, preview).await,
@@ -1130,6 +1131,11 @@ pub(super) async fn invoke_bounded_with_preview(
         Ok(Err(error)) => error
             .retry_cause()
             .map(|(cause, retry_after)| super::routing::Transient { cause, retry_after }),
+        // The ChatGPT stream had no decoded outcome at its ceiling; the router keeps the bounds.
+        Err(_) if chatgpt => Some(super::routing::Transient {
+            cause: crate::provider::RetryCause::StreamCut,
+            retry_after: None,
+        }),
         _ => None,
     };
     let result = match result {
@@ -1851,7 +1857,8 @@ mod call_bound_tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn the_declared_call_ceiling_ends_a_slow_call_and_only_local_bounds_admit_large_totals() {
+    async fn the_chatgpt_ceiling_cuts_a_slow_call_retryably_and_only_local_bounds_admit_large_totals()
+     {
         let chatgpt = ChatGptProvider::from_checked_account(
             "model-a".into(),
             Effort::High,
@@ -1909,7 +1916,12 @@ mod call_bound_tests {
                 None,
             )
             .await;
-            assert!(transient.is_none(), "{label}");
+            // A ChatGPT ceiling cut is a stream cut; the router decides whether a retry still fits.
+            assert_eq!(
+                transient.map(|transient| transient.cause),
+                (delay > ceiling).then_some(crate::provider::RetryCause::StreamCut),
+                "{label}"
+            );
             match result {
                 CallResult::Response(response) => {
                     assert!(accepted, "{label}");
