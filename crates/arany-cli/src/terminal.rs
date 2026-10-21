@@ -34,7 +34,7 @@ mod rewind;
 pub use rewind::RewindPanelError;
 mod view;
 use agent_chat::AgentChat;
-pub use agent_chat::AgentChatInput;
+pub use agent_chat::{AgentChatFollow, AgentChatInput};
 use agents::{AgentPanel, PanelUpdate};
 use backend::TerminalBackend;
 use clipboard::{ClipboardContent, ClipboardRead};

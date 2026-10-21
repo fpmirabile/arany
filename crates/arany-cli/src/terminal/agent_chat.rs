@@ -4,7 +4,7 @@ use super::{
     AttachedTerminal, Composer, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
     dialog_area, draw_history_above,
 };
-use crate::presentation::{AgentTarget, AgentTranscript, agent_targets, tool_groups};
+use crate::presentation::{AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets};
 use arany::{RunId, SessionId, SessionView};
 use std::io;
 
@@ -26,7 +26,17 @@ pub enum AgentChatInput {
     Notice(&'static str),
 }
 
-// One selected read-only snapshot; the primary keeps its own History, draft and anchors.
+#[derive(Debug, Eq, PartialEq)]
+pub enum AgentChatFollow {
+    // The shown chat is as it was: committed Events changed no displayed fact.
+    Unchanged,
+    Redraw,
+    // The selected child no longer resolves; the primary is shown with this notice.
+    Closed(&'static str),
+}
+
+// One selected read-only transcript that follows committed Events; the primary keeps its own
+// History, draft and anchors.
 pub(super) struct AgentChat {
     session: SessionId,
     run: RunId,
@@ -34,6 +44,8 @@ pub(super) struct AgentChat {
     targets: Vec<AgentTarget>,
     selected: usize,
     transcript: Option<AgentTranscript>,
+    // What Classic scrollback or linear output already holds, and which notices Fullscreen recorded.
+    appended: Appended,
     history: History,
     listing: bool,
     shown: bool,
@@ -83,9 +95,33 @@ impl AgentChat {
             .map_or("primary", |transcript| transcript.label.as_str())
     }
 
-    fn linear_lines(&self) -> Vec<String> {
+    // Rebuilds the selected child from `view` by identity; `None` when it no longer resolves.
+    fn refresh(&mut self, view: &SessionView) -> Option<bool> {
+        let Some(shown) = &self.transcript else {
+            return Some(false);
+        };
+        if shown.view.last_sequence == view.last_sequence {
+            return Some(false);
+        }
+        let id = self.targets.get(self.selected)?.id;
+        let fresh = AgentTranscript::from_session(view, self.run, id)?;
+        let changed = !fresh.same_display(shown);
+        self.transcript = Some(fresh);
+        Some(changed)
+    }
+
+    fn unappended(&mut self) -> Vec<TranscriptPart<'_>> {
+        self.transcript
+            .as_ref()
+            .map_or_else(Vec::new, |transcript| {
+                transcript.unappended(&mut self.appended)
+            })
+    }
+
+    // Lines for the first linear print of this view.
+    fn linear_lines(&mut self) -> Vec<String> {
         if let Some(transcript) = &self.transcript {
-            return transcript.linear_lines();
+            return transcript.linear_lines(&mut self.appended);
         }
         if !self.listing {
             return vec![PRIMARY_LINE.into()];
@@ -105,6 +141,29 @@ impl AttachedTerminal {
     #[must_use]
     pub fn agent_chat_open(&self) -> bool {
         self.agent_chat.is_some()
+    }
+
+    // After a burst of committed Events: whether the shown chat needs a frame. Siblings, the
+    // primary and a reload with the same facts leave a child view untouched.
+    pub async fn follow_agent_chat(
+        &mut self,
+        view: &SessionView,
+    ) -> Result<AgentChatFollow, TerminalError> {
+        let Some(chat) = self
+            .agent_chat
+            .as_mut()
+            .filter(|chat| chat.session == view.id)
+        else {
+            return Ok(AgentChatFollow::Redraw);
+        };
+        match chat.refresh(view) {
+            Some(true) => Ok(AgentChatFollow::Redraw),
+            Some(false) => Ok(AgentChatFollow::Unchanged),
+            None => {
+                self.leave_agent_chat().await?;
+                Ok(AgentChatFollow::Closed(MISSING_AGENT))
+            }
+        }
     }
 
     // Alt+Left/Right from an empty composer, and every input while a child transcript is shown.
@@ -253,6 +312,7 @@ impl AttachedTerminal {
             targets,
             selected,
             transcript,
+            appended: Appended::default(),
             history: History::agent(),
             listing,
             shown: false,
@@ -396,14 +456,19 @@ impl AttachedTerminal {
             Some(TerminalNotice::Transient(text)) => (None, Some(text)),
             None => (None, None),
         };
+        // A missing child keeps its last validated transcript; following reports it.
+        self.agent_chat
+            .as_mut()
+            .expect("open agent chat")
+            .refresh(view);
         if let Some(linear) = &mut self.linear {
             let chat = self.agent_chat.as_mut().expect("open agent chat");
-            if !chat.shown || history_notice.is_some() {
-                let lines = if chat.shown {
-                    Vec::new()
-                } else {
-                    chat.linear_lines()
-                };
+            let lines = if let Some(transcript) = chat.transcript.as_ref().filter(|_| chat.shown) {
+                transcript.linear_update(&mut chat.appended)
+            } else {
+                chat.linear_lines()
+            };
+            if !chat.shown || !lines.is_empty() || history_notice.is_some() {
                 linear.write_agent_chat(&mut io::stderr(), &lines, history_notice, true)?;
                 chat.shown = true;
             }
@@ -417,9 +482,7 @@ impl AttachedTerminal {
             screen.height
         })?;
         if classic {
-            if !self.agent_chat.as_ref().expect("open agent chat").shown {
-                self.write_native_agent_chat()?;
-            }
+            self.write_native_agent_chat()?;
             if let Some(text) = history_notice
                 && self
                     .native
@@ -440,17 +503,17 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.dialog_armed;
         let chat = self.agent_chat.as_mut().expect("open agent chat");
-        if !classic
-            && !chat.shown
-            && let Some(transcript) = &chat.transcript
-        {
+        if !classic && let Some(transcript) = &chat.transcript {
+            // Notices follow the rows they describe, so History takes the new records first.
             chat.history.sync(
                 &transcript.view,
                 usize::from(screen.width),
                 usize::from(screen.height.saturating_sub(AGENT_CHAT_ROWS)),
             );
-            for text in &transcript.notices {
-                chat.history.record_notice(TerminalNotice::History(text));
+            for part in transcript.unappended(&mut chat.appended) {
+                if let TranscriptPart::Notice(text) = part {
+                    chat.history.record_notice(TerminalNotice::History(text));
+                }
             }
         }
         chat.shown = true;
@@ -470,32 +533,30 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    // Classic appends the snapshot once below an unmistakable read-only boundary.
+    // Classic appends whole new records below an unmistakable read-only boundary, never
+    // repainting rows already in scrollback.
     fn write_native_agent_chat(&mut self) -> Result<(), TerminalError> {
-        let chat = self.agent_chat.as_ref().expect("open agent chat");
-        let Some(transcript) = &chat.transcript else {
+        let chat = self.agent_chat.as_mut().expect("open agent chat");
+        let Some(label) = chat.transcript.as_ref().map(|t| t.label.clone()) else {
             return Ok(());
         };
-        let run = transcript.run();
-        let mut parts = vec![
-            (
+        let mut records = Vec::new();
+        if !chat.shown {
+            records.push((
                 MessageKind::Notice,
-                format!(
-                    "Viewing {} (read-only); Esc returns to primary",
-                    transcript.label
-                ),
-            ),
-            (MessageKind::Assignment, run.objective.clone()),
-        ];
-        parts.extend(tool_groups(&run.tools).map(|(_, text)| (MessageKind::Tool, text)));
-        if let Some(answer) = &run.assistant_message {
-            parts.push((MessageKind::AgentResult, answer.clone()));
+                format!("Viewing {label} (read-only); Esc returns to primary"),
+            ));
         }
-        parts.extend(transcript.notices.iter().map(|text| {
-            let (kind, body) = notice_kind(text);
-            (kind, body.to_owned())
+        records.extend(chat.unappended().into_iter().map(|part| match part {
+            TranscriptPart::Assignment(text) => (MessageKind::Assignment, text.to_owned()),
+            TranscriptPart::Tool(text) => (MessageKind::Tool, text),
+            TranscriptPart::Result(text) => (MessageKind::AgentResult, text.to_owned()),
+            TranscriptPart::Notice(text) => {
+                let (kind, body) = notice_kind(text);
+                (kind, body.to_owned())
+            }
         }));
-        for (kind, text) in parts {
+        for (kind, text) in records {
             self.insert_native(kind, &text)?;
         }
         Ok(())
