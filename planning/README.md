@@ -44,6 +44,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Switch between agent chats](./agent-chat-switching/README.md) | Three slices: read-only child transcript switching, committed live updates, searchable `/agents` switch picker |
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Write and Edit content up to 64 KiB](./large-file-edits/README.md) | One slice: larger typed edits through bounded decoding, journal admission, hooks and Guard publication |
