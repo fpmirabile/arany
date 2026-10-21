@@ -405,7 +405,10 @@ fn save(
             state
                 .record(RecordKind::Permissions)
                 .replace(&updated)
-                .map_err(|_| SettingsError::NotConfirmed)?;
+                .map_err(|error| match error {
+                    StoreError::ReplaceUnconfirmed => SettingsError::NotConfirmed,
+                    _ => SettingsError::Invalid,
+                })?;
             Ok(parsed)
         })
         .map_err(|error| match error {

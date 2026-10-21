@@ -118,6 +118,8 @@ pub enum StoreError {
     Closed,
     #[error("store is read-only")]
     ReadOnly,
+    #[error("record replacement may have taken effect; its directory sync failed")]
+    ReplaceUnconfirmed,
     #[error("state filesystem operation failed")]
     Io(#[source] io::Error),
     #[error("SQLite operation failed")]

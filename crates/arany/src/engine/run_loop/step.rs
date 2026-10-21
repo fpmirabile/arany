@@ -1260,7 +1260,8 @@ impl RunLoop<'_> {
                 },
                 Some(prefix),
             ) => {
-                if runtime.record_typed_prefix_rule(prefix).is_ok() {
+                let saved = runtime.record_typed_prefix_rule(prefix);
+                if saved.is_ok() {
                     Verdict::Dispatch {
                         intent,
                         queue_pause,
@@ -1269,7 +1270,13 @@ impl RunLoop<'_> {
                     if let Some(pause) = queue_pause {
                         self.settle_active_pause(pause, None)?;
                     }
-                    self.refused(site, intent, refuse(NotDispatched::UnsavedRule, None))
+                    // The rule may already be installed, so the outcome is unknown and the Run stops.
+                    let refusal = if matches!(saved, Err(crate::tools::ToolError::Uncertain)) {
+                        refuse(NotDispatched::SaveUnconfirmed, Some(StopCause::Uncertain))
+                    } else {
+                        refuse(NotDispatched::UnsavedRule, None)
+                    };
+                    self.refused(site, intent, refusal)
                 }
             }
             (verdict, _) => verdict,
@@ -2122,6 +2129,7 @@ pub(super) enum NotDispatched {
     Paused,
     TokenBudget,
     UnsavedRule,
+    SaveUnconfirmed,
     UnguardedNeedsHuman,
     ApprovalRefused,
 }
@@ -2145,6 +2153,7 @@ impl NotDispatched {
             | Self::Paused
             | Self::TokenBudget
             | Self::UnsavedRule
+            | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
             Self::TimeoutLimit { .. }
@@ -2173,6 +2182,7 @@ impl NotDispatched {
             | Self::Paused
             | Self::TokenBudget
             | Self::UnsavedRule
+            | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
             | Self::ApprovalRefused => true,
             Self::TimeoutLimit { .. }
@@ -2359,6 +2369,7 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             | NotDispatched::Paused
             | NotDispatched::TokenBudget
             | NotDispatched::UnsavedRule
+            | NotDispatched::SaveUnconfirmed
             | NotDispatched::UnguardedNeedsHuman
             | NotDispatched::ApprovalRefused => {
                 (facts.permission.decision, facts.unresolved_source())
@@ -2473,6 +2484,7 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         | NotDispatched::Paused
         | NotDispatched::TokenBudget
         | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed
         | NotDispatched::UnguardedNeedsHuman
         | NotDispatched::ApprovalRefused => None,
     };
@@ -2488,6 +2500,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             "Goal token budget exhausted; no operation was dispatched".into(),
         ),
         NotDispatched::HookDenied(denial) => hook_denial(&intent, denial),
+        NotDispatched::SaveUnconfirmed => (
+            ToolDisposition::Uncertain,
+            "rule save not confirmed; no operation was dispatched".into(),
+        ),
         NotDispatched::DenyRule => (
             ToolDisposition::Denied,
             "Permission deny rule blocked this Tool".into(),

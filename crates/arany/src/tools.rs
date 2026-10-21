@@ -856,6 +856,7 @@ impl ToolRuntime {
         )
         .map_err(|error| match error {
             permissions::SettingsError::Busy => ToolError::AccountBusy,
+            permissions::SettingsError::NotConfirmed => ToolError::Uncertain,
             _ => ToolError::Configuration,
         })
     }

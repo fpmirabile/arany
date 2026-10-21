@@ -619,6 +619,56 @@ async fn a_failed_rule_save_after_the_verdict_dispatches_nothing_and_replays() {
 }
 
 #[tokio::test]
+async fn an_unconfirmed_rule_save_is_uncertain_stops_the_run_and_never_dispatches_or_resaves() {
+    use arany::permissions::PermissionSource;
+    let repo = Repo::new();
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    arany::FaultPlan::fail_record_sync(repo.state.clone(), "permissions.json");
+    let (outcome, asked, provider_calls, engine) = repo
+        .run_replying(vec![tool_outcome(commit("third")), answer()], false, |_| {
+            arany::ApprovalReply::AllowPrefixInFolder
+        })
+        .await;
+    let status = outcome.map(|outcome| outcome.run.status);
+    assert_eq!(
+        (asked, provider_calls),
+        (1, 1),
+        "no continuation: {status:?}"
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head, "nothing dispatched");
+    let session = list_sessions(
+        StateRoot::open_existing(&repo.state).unwrap(),
+        repo.workspace.clone(),
+    )
+    .await
+    .unwrap()[0]
+        .id;
+    let saved = std::fs::read(repo.state.join("permissions.json")).unwrap();
+    let (events, view) = repo.reopen(engine, session).await;
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.source, verdict.approved),
+        (PermissionSource::Human, true)
+    );
+    let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert!(observation.output.contains("rule save not confirmed"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(repo.state.join("permissions.json")).unwrap(),
+        saved,
+        "replay never saves again"
+    );
+}
+
+#[tokio::test]
 async fn typed_prefix_rules_cannot_expand_git_authority() {
     let repo = Repo::new();
     let allow = |workspace: Value| {

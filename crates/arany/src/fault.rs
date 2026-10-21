@@ -12,6 +12,7 @@ enum Fault {
     CheckpointStall(SessionId),
     SupervisorOff(SessionId),
     GuardReceipt(uuid::Uuid),
+    RecordSync(std::path::PathBuf, &'static str),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
         SessionId,
@@ -165,6 +166,16 @@ impl FaultPlan {
             .iter()
             .any(|fault| matches!(fault, Fault::RetryBackoff(id, None) if *id == session))
             .then_some(RetryBackoff::Immediate)
+    }
+
+    // The named record's next replacement in that state directory fails its directory sync after the rename.
+    pub fn fail_record_sync(state: std::path::PathBuf, record: &'static str) {
+        plan().push(Fault::RecordSync(state, record));
+    }
+
+    pub(crate) fn record_sync_fails(state: &std::path::Path, record: &str) -> bool {
+        take(|fault| matches!(fault, Fault::RecordSync(path, name) if path == state && *name == record))
+            .is_some()
     }
 
     pub fn lose_guard_receipt(intent: uuid::Uuid) {

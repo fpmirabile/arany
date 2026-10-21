@@ -512,7 +512,11 @@ impl StateRoot {
             file.write_all(record)?;
             file.sync_all()?;
             rename(&self.dir, pending, &self.dir, name)?;
-            sync(&self.dir)
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
+                return Err(StoreError::ReplaceUnconfirmed);
+            }
+            sync(&self.dir).map_err(|_| StoreError::ReplaceUnconfirmed)
         }
         #[cfg(not(unix))]
         {
