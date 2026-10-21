@@ -1046,7 +1046,11 @@ fn gated_team_server(
             let wire: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
             let input = crate::semantic::input(&wire);
-            let text = input.to_string();
+            let text = {
+                let mut current = input.clone();
+                current["history"] = serde_json::Value::Null;
+                current.to_string()
+            };
             let targeted = messaging
                 && input["phase"] == "child_work"
                 && input["objective"] == "second child task";
@@ -1187,14 +1191,19 @@ fn selected_child_messaging_journey() {
     let gates = Gates { requested, release };
     for classic in [false, true] {
         let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
+        let total = if classic { 7 } else { 4 };
         pty.await_request(&gates, "first");
         pty.frame(0, &["Alt+Left/Right agents", "child 2"], &[]);
         pty.step(
             b"/agents\r",
-            &["Type to search 3 agents", "Enter open"],
+            &[&format!("Type to search {total} agents"), "Enter open"],
             &[],
         );
-        pty.step(b"second", &["1 of 3 agents", "child 2"], &[]);
+        pty.step(
+            b"second",
+            &["Search: second", &format!("of {total} agents"), "child 2"],
+            &[],
+        );
         pty.step(
             b"\rqueued note\r",
             &["viewing child 2 (message)", "agents · Esc primary"],
