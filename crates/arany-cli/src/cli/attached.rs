@@ -616,14 +616,10 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             }
         })
     };
-    // Appended last so no setup branch can replace the archive path before it is drawn.
     let archive_notice = archived_history
         .as_ref()
         .map(|archived| super::archived_history_notice(archived.path()));
-    if let Some(archive_notice) = &archive_notice {
-        append_notice(&mut notice, archive_notice);
-    }
-    let mut notice = notice.map(Feedback::History);
+    let mut notice = final_startup_notice(notice, archive_notice.as_deref());
     let mut empty_interrupt = None::<Instant>;
     let mut idle_escape = None::<Instant>;
     if let Some(prompt) = startup_objective {
@@ -708,9 +704,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
-        let archive_drawn = archive_notice.as_deref().is_some_and(
-            |archive| matches!(&notice, Some(Feedback::History(text)) if text.contains(archive)),
-        );
+        let archive_drawn = archive_notice_drawn(notice.as_ref(), archive_notice.as_deref());
         notice = archived_history
             .take_if(|_| archive_drawn)
             .and_then(|archived| archived.acknowledge().err())
@@ -2019,6 +2013,20 @@ async fn preflight_prompt(
     .await
 }
 
+// Appended after every setup branch so none can replace the archive path before it is drawn.
+fn final_startup_notice(mut notice: Option<String>, archive: Option<&str>) -> Option<Feedback> {
+    if let Some(archive) = archive {
+        append_notice(&mut notice, archive);
+    }
+    notice.map(Feedback::History)
+}
+
+fn archive_notice_drawn(notice: Option<&Feedback>, archive: Option<&str>) -> bool {
+    archive.is_some_and(
+        |archive| matches!(notice, Some(Feedback::History(text)) if text.contains(archive)),
+    )
+}
+
 fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {
     *notice = Some(
         match notice.take() {
@@ -2441,6 +2449,39 @@ fn print_run_answer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn archive_notice_survives_every_setup_outcome_and_gates_acknowledgement() {
+        let archive = "History from an incompatible version archived intact to /state/archive/history-20261021T000000.000Z";
+        for setup in [
+            None,
+            Some("Setup could not be completed: synthetic; use /setup to try again"),
+            Some("openai ready: gpt-5.4 · low. Use /model to change."),
+            Some("Error: synthetic; selection kept for this conversation only"),
+        ] {
+            let notice = super::final_startup_notice(setup.map(str::to_owned), Some(archive));
+            let Some(super::Feedback::History(text)) = &notice else {
+                panic!("archive notice missing after {setup:?}");
+            };
+            assert!(text.starts_with(archive), "{setup:?}: {text}");
+            assert!(setup.is_none_or(|setup| text.contains(setup)), "{text}");
+            assert!(super::archive_notice_drawn(notice.as_ref(), Some(archive)));
+        }
+        for drawn in [
+            None,
+            Some(super::Feedback::History(
+                "New conversation · /help for commands".into(),
+            )),
+            Some(super::Feedback::Transient(archive.into())),
+        ] {
+            assert!(!super::archive_notice_drawn(drawn.as_ref(), Some(archive)));
+        }
+        assert!(!super::archive_notice_drawn(
+            Some(&super::Feedback::History(archive.into())),
+            None
+        ));
+        assert!(super::final_startup_notice(None, None).is_none());
+    }
+
     #[test]
     fn draft_returns_only_when_no_sequence_was_committed() {
         assert!(super::committed_nothing(Some(7), 7));
