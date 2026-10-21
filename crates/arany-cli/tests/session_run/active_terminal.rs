@@ -1393,6 +1393,25 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         }
         pump(&mut output, &mut input, transcript, answered);
     };
+    // The idle composer caret, found by the composer border wherever the viewport sits.
+    let wait_caret = |mut output: &mut dyn Read,
+                      mut input: &mut dyn Write,
+                      transcript: &mut Vec<u8>,
+                      answered: &mut PtyResponses,
+                      from: usize| {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !super::composer_caret(transcript, from, 80, 24)
+            .is_some_and(|(column, _)| column == 3)
+        {
+            pump(&mut output, &mut input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "Classic composer caret: {}",
+                tail(&transcript[from..])
+            );
+            thread::yield_now();
+        }
+    };
     wait(
         &mut output,
         &mut input,
@@ -1404,14 +1423,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     let text = String::from_utf8_lossy(&transcript);
     let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
     let _product = ProductGuard::new(pid, state.clone());
-    wait(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        0,
-        b"\x1b[?25h\x1b[22;3H",
-    );
+    wait_caret(&mut output, &mut input, &mut transcript, &mut answered, 0);
     let first_query = transcript
         .windows(4)
         .position(|part| part == b"\x1b[6n")
@@ -1420,8 +1432,13 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         transcript[..first_query].ends_with(b"\x1b[24;1H"),
         "Classic reserves rows below any existing shell output"
     );
-    // Idle Classic takes only its content, so the composer border (row 21) sits under history.
-    super::assert_history_above(&crate::screen_rows(&transcript, 80, 24), 20, "idle Classic");
+    // Idle Classic takes only its content, so the composer border sits under history.
+    let (_, screen) = super::composer_caret(&transcript, 0, 80, 24).expect("idle composer");
+    let border = screen
+        .iter()
+        .rposition(|row| row.starts_with("─ Ask Arany"))
+        .expect("composer border");
+    super::assert_history_above(&screen, border, "idle Classic");
     // The following transcript gesture is a reader-order barrier for both ignored page keys.
     let from = transcript.len();
     input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
@@ -1433,13 +1450,12 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         from,
         b"reached;",
     );
-    wait(
+    wait_caret(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         from,
-        b"\x1b[?25h\x1b[22;3H",
     );
     let dump = &transcript[from..];
     let heading = dump
@@ -1465,13 +1481,12 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             from,
             b"reached;",
         );
-        wait(
+        wait_caret(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             from,
-            b"\x1b[?25h\x1b[22;3H",
         );
         if gesture == b"\x0f" {
             let dump = &transcript[from..];
@@ -1515,13 +1530,12 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         }
         let close_from = transcript.len();
         input.write_all(b"\x1b").unwrap();
-        wait(
+        wait_caret(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             close_from,
-            b"\x1b[?25h\x1b[22;3H",
         );
         // The floored viewport keeps its height, so the frame diff repaints it without a clear.
         assert!(

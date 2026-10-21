@@ -3333,6 +3333,29 @@ fn credential_helper_command(operation: &str, slot: &str, directory: &Path) -> C
 }
 
 #[cfg(target_os = "linux")]
+// Waits for the Classic composer caret in `column`, located by the composer border on the
+// decoded 40x12 screen instead of a fixed row, since the content-sized viewport moves.
+fn wait_composer_column(
+    output: &mut std::process::ChildStdout,
+    input: &mut std::process::ChildStdin,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    from: usize,
+    column: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !crate::composer_caret(transcript, from, 40, 12).is_some_and(|(caret, _)| caret == column)
+    {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "composer caret at column {column}: {:?}",
+            crate::screen_rows(transcript, 40, 12)
+        );
+        thread::yield_now();
+    }
+}
+
 #[test]
 fn stalled_credential_bus_does_not_strand_unconfigured_start() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -3547,13 +3570,13 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
             },
         );
         if !linear {
-            wait_for_after(
+            wait_composer_column(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
                 startup_end,
-                b"\x1b[10;3H",
+                3,
             );
         }
         if replaced {
@@ -3707,31 +3730,38 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 b"Input:\r\n",
             );
         } else {
-            wait_for_after(
+            wait_composer_column(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
                 interrupted_start,
-                b"\x1b[10;11H",
+                11,
             );
         }
         let continuation_start = transcript.len();
         input
             .write_all(if linear { b"-suffix\x04" } else { b"-suffix" })
             .expect("continue recovered draft");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            continuation_start,
-            if linear {
-                b"Notice: Draft: 15 characters; Enter submits\r\n"
-            } else {
-                b"\x1b[10;18H"
-            },
-        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                continuation_start,
+                b"Notice: Draft: 15 characters; Enter submits\r\n",
+            );
+        } else {
+            wait_composer_column(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                continuation_start,
+                18,
+            );
+        }
         if linear {
             wait_for_after(
                 &mut output,
@@ -3744,14 +3774,25 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
         }
         let cleared_start = transcript.len();
         kill_process(product_pid, Signal::INT).expect("clear retained draft while idle");
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            cleared_start,
-            if linear { b"Input:\r\n" } else { b"\x1b[10;3H" },
-        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                cleared_start,
+                b"Input:\r\n",
+            );
+        } else {
+            wait_composer_column(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                cleared_start,
+                3,
+            );
+        }
         input
             .write_all(b"/exit\r")
             .expect("explicit quit after cancellation");

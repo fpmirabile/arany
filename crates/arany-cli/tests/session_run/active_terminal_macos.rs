@@ -1171,31 +1171,41 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             assert!(count <= 128);
             super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
             crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
+            // The idle composer caret is found by its border wherever the viewport sits.
+            let idle_caret = |from: usize| {
+                super::composer_caret(bytes, from, 80, 24).filter(|(column, _)| *column == 3)
+            };
             if stage == 0
-                && bytes
-                    .windows(b"\x1b[?25h\x1b[22;3H".len())
-                    .any(|part| part == b"\x1b[?25h\x1b[22;3H")
+                && let Some((_, screen)) = idle_caret(0)
             {
                 // Idle Classic takes only its content, so the composer border sits under history.
-                super::assert_history_above(&super::screen_rows(bytes, 80, 24), 20, "idle Classic");
+                let border = screen
+                    .iter()
+                    .rposition(|row| row.starts_with("─ Ask Arany"))
+                    .expect("composer border");
+                super::assert_history_above(&screen, border, "idle Classic");
                 from = bytes.len();
                 input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
                 stage = 1;
             } else if (4..=9).contains(&stage) {
-                let cursor = b"\x1b[?25h\x1b[22;3H";
                 let tail = &bytes[from..];
                 let (needle, send): (&[u8], &[u8]) = match stage {
                     4 => (b"Resume \xc2\xb7", b"\x1b"),
-                    5 => (cursor, b"/agents\r"),
+                    5 => (b"", b"/agents\r"),
                     6 => (b"Last", b"\x1b"),
-                    7 => (cursor, b"/help\r"),
+                    7 => (b"", b"/help\r"),
                     8 => (b"local controls", b"\x1b"),
-                    _ => (cursor, b"/exit\r"),
+                    _ => (b"", b"/exit\r"),
                 };
-                // A selector takes keys only once its armed frame is drawn.
-                if tail.windows(needle.len()).any(|part| part == needle)
-                    && (!matches!(stage, 4 | 6 | 8)
-                        || super::armed_selector(bytes, from, 80, 24).is_some())
+                // A selector takes keys only once its armed frame is drawn; a closed one
+                // returns to the composer, found by its border.
+                let frame_ready = if matches!(stage, 4 | 6 | 8) {
+                    super::armed_selector(bytes, from, 80, 24).is_some()
+                } else {
+                    idle_caret(from).is_some()
+                };
+                if (needle.is_empty() || tail.windows(needle.len()).any(|part| part == needle))
+                    && frame_ready
                 {
                     if matches!(stage, 5 | 7 | 9) {
                         assert!(
@@ -1211,11 +1221,7 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                 && bytes[from..]
                     .windows(b"reached;".len())
                     .position(|part| part == b"reached;")
-                    .is_some_and(|end| {
-                        bytes[from + end + b"reached;".len()..]
-                            .windows(b"\x1b[?25h\x1b[22;3H".len())
-                            .any(|part| part == b"\x1b[?25h\x1b[22;3H")
-                    })
+                    .is_some_and(|end| idle_caret(from + end + b"reached;".len()).is_some())
             {
                 let dump = &bytes[from..];
                 let heading = dump
@@ -1330,10 +1336,9 @@ fn native_copy_round_trips_non_ascii_answer_through_pbcopy() {
             assert!(bytes.windows(4).filter(|part| *part == b"\x1b[6n").count() <= 128);
             super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
             crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
-            let tail = &bytes[from..];
-            let caret = tail
-                .windows(b"\x1b[?25h\x1b[22;3H".len())
-                .any(|part| part == b"\x1b[?25h\x1b[22;3H");
+            // The idle composer caret is found by its border wherever the viewport sits.
+            let caret =
+                super::composer_caret(bytes, from, 80, 24).is_some_and(|(column, _)| column == 3);
             if stage < 2 && caret {
                 from = bytes.len();
                 input
