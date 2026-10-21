@@ -519,13 +519,14 @@ async fn switch(
 
 // A blob to read: its object name, whether it is executable and the index of its file.
 type Blob<'a> = (&'a str, bool, usize);
+type ChangedFiles<'a> = (Vec<FileChange>, Vec<Blob<'a>>);
 
 // The switch's file changes with verified preimages and the blobs to read, or the refusal.
 fn changed_files<'a>(
     git: &Git<'_>,
     fields: &[&'a [u8]],
     dirty: &BTreeSet<&[u8]>,
-) -> Result<Result<(Vec<FileChange>, Vec<Blob<'a>>), String>, ToolError> {
+) -> Result<Result<ChangedFiles<'a>, String>, ToolError> {
     let root = super::super::fs::open_directory(git.workspace)?;
     let mut files = Vec::with_capacity(fields.len() / 2);
     let mut blobs = Vec::new();

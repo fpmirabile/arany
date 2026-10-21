@@ -458,7 +458,14 @@ fn a_failure_after_the_first_published_effect_is_uncertain() {
 #[test]
 fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
     type Setup = fn(&Repo);
-    let cases: [(&str, Setup, Stage, &[&[&str]], ToolCall); 6] = [
+    type Case = (
+        &'static str,
+        Setup,
+        Stage,
+        &'static [&'static [&'static str]],
+        ToolCall,
+    );
+    let cases: [Case; 6] = [
         (
             "branch advanced after the snapshot",
             |_| {},

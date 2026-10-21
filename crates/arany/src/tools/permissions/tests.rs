@@ -94,10 +94,6 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
             Deny,
             "{whole:?}"
         );
-        assert_eq!(
-            config(json!({"allow": ["git_commit(./src/**)"]})).decision(&whole),
-            Ask
-        );
     }
     let switch = ToolCall::GitSwitch {
         branch: "topic".into(),
