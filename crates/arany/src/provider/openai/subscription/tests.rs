@@ -278,6 +278,13 @@ fn subscription_compaction_body_keeps_only_bounded_history_data() {
     assert!(input.contains("Unanswered objective"));
     assert!(!input.contains("workspace_guidance"));
     assert_eq!(value["text"]["format"]["name"], "arany_compaction");
+    // With no remote cap, the request states the summary bound instead.
+    assert!(
+        value["instructions"]
+            .as_str()
+            .expect("instructions")
+            .ends_with("Keep the summary under 6144 characters.")
+    );
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
     }
@@ -896,51 +903,54 @@ fn with_output_details(stream: Vec<u8>, details: &Value) -> Vec<u8> {
 #[tokio::test]
 async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
     use crate::ProviderFailureReason::{LocalOutputLimit, ResponseContract};
-    // Both requests cap visible output at 64 tokens.
-    for (label, total, details, expected) in [
+    type Usage = fn(u32) -> (u32, Value);
+    // A turn caps visible output at its request's 64 tokens. Compaction takes the route's turn cap,
+    // above its request's cap, because the route sends no cap and the summary bytes bound it.
+    let rows: [(&str, Usage, Option<_>); 6] = [
         (
-            "reasoning-heavy",
-            4_000,
-            json!({"reasoning_tokens": 3_990}),
+            "reasoning-heavy, visible output at the cap",
+            |cap| (cap + 3_990, json!({"reasoning_tokens": 3_990})),
             None,
         ),
         (
             "visible output over the cap",
-            4_000,
-            json!({"reasoning_tokens": 3_900}),
+            |cap| (cap + 3_901, json!({"reasoning_tokens": 3_900})),
             Some(LocalOutputLimit),
         ),
         (
             "absent details count all output",
-            65,
-            Value::Null,
+            |cap| (cap + 1, Value::Null),
             Some(LocalOutputLimit),
         ),
         (
             "reasoning above the total",
-            12,
-            json!({"reasoning_tokens": 13}),
+            |_| (12, json!({"reasoning_tokens": 13})),
             Some(ResponseContract),
         ),
         (
             "details without a count",
-            12,
-            json!({}),
+            |_| (12, json!({})),
             Some(ResponseContract),
         ),
         (
             "total above the reporting ceiling",
-            MAX_REPORTED_OUTPUT_TOKENS + 1,
-            json!({"reasoning_tokens": MAX_REPORTED_OUTPUT_TOKENS}),
+            |_| {
+                (
+                    MAX_REPORTED_OUTPUT_TOKENS + 1,
+                    json!({"reasoning_tokens": MAX_REPORTED_OUTPUT_TOKENS}),
+                )
+            },
             Some(ResponseContract),
         ),
-    ] {
+    ];
+    for (label, usage, expected) in rows {
         for compaction in [false, true] {
-            let text = if compaction {
-                r#"{"summary":"Condensed"}"#
+            let (text, cap) = if compaction {
+                (r#"{"summary":"Condensed"}"#, COMPACTION_VISIBLE_CAP)
             } else {
-                "done"
+                ("done", request().max_output_tokens)
             };
+            let (total, details) = usage(cap);
             let stream = with_output_details(completed_with_text(Some(total), text), &details);
             let (endpoint, server) = serve(event_reply(stream)).await;
             let result = if compaction {
@@ -1067,10 +1077,6 @@ async fn compaction_stream_requires_complete_bounded_summary() {
     assert!(document.get("max_output_tokens").is_none());
 
     for (label, stream) in [
-        (
-            "local token cap",
-            completed_with_text(Some(65), r#"{"summary":"Condensed"}"#),
-        ),
         (
             "missing usage",
             completed_with_text(None, r#"{"summary":"Condensed"}"#),
