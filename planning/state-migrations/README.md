@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-21
 
@@ -44,7 +44,7 @@ The hybrid: archive as the safety net, plus a copy-transform migration framework
 
 - Runtime keeps one current format. Decoders and the reducer never see old shapes, so strict replay and "one current internal format at runtime" hold.
 - Migration steps are JSON-level `Value -> Value` transforms keyed by (kind, from-version). They run only in a `store::migrate` module, on open, under the existing exclusive lease.
-- Floor = the current versions when slice 2 lands. Anything older is archived (slice 1), so none of today's ~19 historical bumps need transforms.
+- Floor = the current versions when slice 2 lands. Anything older is archived (slice 1), so none of today's ~19 historical bumps need transforms. The owner accepted archiving pre-floor history during pre-beta (2026-10-21).
 - A guard test iterates `payload_version()`, the schema versions and the record versions, and fails when a version is above the floor without a registered step and a fixture.
 - OS impact: none beyond existing atomic rename and private-directory rules on Linux and macOS.
 
@@ -63,16 +63,12 @@ The hybrid: archive as the safety net, plus a copy-transform migration framework
 
 ## Vertical slices
 
-1. **Automatic archive at startup.** An incompatible or damaged history at attached startup (and in `exec`/`serve`/`acp`) is archived intact under `archive/history-<ts>/`, a fresh store opens, and a notice names the archive. Accounts and settings are kept. This replaces the manual "Reset history" path for incompatible history (damaged or busy keep their current handling), updates terminal.md and the AGENTS.md rule 5 text, and adds tests that an old-version journal opens fresh with the archive present and an unsafe dir still fails closed. Depends on the startup history recovery fix (`fix/startup-history-recovery`).
+1. **Automatic archive at startup.** An incompatible or damaged history at attached startup (and in `exec`/`serve`/`acp`) is archived intact under `archive/history-<ts>/`, a fresh store opens, and a notice names the archive. Accounts and settings are kept. This replaces the manual "Reset history" path for incompatible history (damaged or busy keep their current handling), updates terminal.md and the AGENTS.md rule 5 text, and adds tests that an old-version journal opens fresh with the archive present and an unsafe dir still fails closed. Implemented on `fix/startup-history-recovery`.
 2. **Journal migration framework and guard.** Adds the `store::migrate` registry, the copy → transform → recompute digests → strict replay → atomic swap with backup, a `MigrationRecorded` fact, the floor at current versions, and the guard test. It also adds one real example step with a fixture, the next Event bump, to prove the path end to end. Updates execution.md and session.md.
 3. **Checkpoint store migration.** `checkpoints.sqlite` schema steps through the same framework, keeping blob references valid. Its tests are an old schema upgraded with rewind still working.
 4. **JSON record migration.** The registry covers the `RecordKind` records through their atomic pending replacement, starting with ui-preferences v3 → v4 (fixture already in `controls.rs`) and the native account schema. Updates terminal.md, credentials.md and goals.md.
 
 Each slice is one PR and usable on its own: after slice 1 nobody is blocked by an old store; after slice 2 Session history survives every future Event bump.
-
-## Open questions
-
-- Owner: accept that history older than the floor (all history written before slice 2 lands) is archived, not upgraded? The research shows several past bumps cannot be reconstructed honestly.
 
 ## Exit criteria
 
