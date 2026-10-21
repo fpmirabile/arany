@@ -36,6 +36,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
+        git_identity: None,
     };
     let runtime = ToolRuntime {
         worker: None,
@@ -244,6 +245,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
+        git_identity: None,
     };
     for (case, drift) in [("fresh", false), ("changed-input", true)] {
         let target = temp.path().join(case);
@@ -1950,7 +1952,7 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
     ];
     for call in &valid {
         assert!(call.valid(), "{call:?}");
-        assert!(call.is_goal_plan_prelude() && call.is_git_read() && !call.mutates());
+        assert!(call.is_goal_plan_prelude() && call.is_git() && !call.mutates());
         assert!(!call.is_process() && !call.is_child_research());
     }
     assert_eq!(valid[0].label(), "git_status");
@@ -2189,8 +2191,20 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         serde_json::from_value(json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]})).unwrap(),
     );
     assert_eq!(
-        catalog(config)["git"]["operations"],
+        catalog(config.clone())["git"]["operations"],
         json!(["git_status", "git_diff", "git_log"])
+    );
+    config.write = true;
+    assert_eq!(
+        catalog(config)["git"]["operations"],
+        json!([
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_commit",
+            "git_branch",
+            "git_switch"
+        ])
     );
 }
 

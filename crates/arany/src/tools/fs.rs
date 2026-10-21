@@ -1456,7 +1456,7 @@ pub(super) fn apply_worker_changeset(
     apply_files(&root, &changeset.files)
 }
 
-fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
+pub(super) fn apply_files(root: &Dir, files: &[FileChange]) -> Result<String, ToolError> {
     check_change_directory(root, root)?;
     let mut parents = Vec::new();
     let mut directories = BTreeMap::<String, std::sync::Arc<Dir>>::new();

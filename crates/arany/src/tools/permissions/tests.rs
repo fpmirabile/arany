@@ -44,21 +44,48 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
     let reads = read("src/lib.rs");
     let edits = write("src/lib.rs");
     let process = command("git", &["diff"]);
+    // A Git write is a process mutation, not a typed edit: edit modes still ask for it.
+    let git_write = ToolCall::GitCommit {
+        message: "m".into(),
+        paths: vec!["src/lib.rs".into()],
+        staged: false,
+    };
+    use Decision::{Allow, Ask, Deny};
     for (mode, decisions) in [
-        ("default", [Decision::Allow, Decision::Ask, Decision::Ask]),
-        (
-            "acceptEdits",
-            [Decision::Allow, Decision::Allow, Decision::Ask],
-        ),
-        ("auto", [Decision::Allow, Decision::Ask, Decision::Ask]),
-        ("plan", [Decision::Allow, Decision::Deny, Decision::Deny]),
-        ("dontAsk", [Decision::Allow, Decision::Deny, Decision::Deny]),
+        ("default", [Allow, Ask, Ask, Ask]),
+        ("acceptEdits", [Allow, Allow, Ask, Ask]),
+        ("auto", [Allow, Ask, Ask, Ask]),
+        ("plan", [Allow, Deny, Deny, Deny]),
+        ("dontAsk", [Allow, Deny, Deny, Deny]),
     ] {
         let parsed = config(json!({"defaultMode": mode}));
-        for (call, expected) in [&reads, &edits, &process].into_iter().zip(decisions) {
+        for (call, expected) in [&reads, &edits, &process, &git_write]
+            .into_iter()
+            .zip(decisions)
+        {
             assert_eq!(parsed.decision(call), expected, "{mode} {call:?}");
         }
     }
+    assert!(ApprovalMode::AutoEdits.asks(&git_write) && !ApprovalMode::AutoEdits.asks(&edits));
+    assert_eq!(
+        config(json!({"allow": ["git_commit"]})).decision(&git_write),
+        Allow
+    );
+    assert_eq!(
+        config(json!({"defaultMode": "acceptEdits", "allow": ["git_commit"]})).decision(&git_write),
+        Ask
+    );
+    assert_eq!(
+        config(json!({"deny": ["Read(./src/**)"]})).decision(&git_write),
+        Deny
+    );
+    let switch = ToolCall::GitSwitch {
+        branch: "topic".into(),
+    };
+    assert_eq!(
+        config(json!({"allow": ["git_switch"], "ask": ["Edit(./src/**)"]})).decision(&switch),
+        Ask
+    );
     let plan = config(json!({"defaultMode": "plan", "allow": ["Bash", "Edit"]}));
     assert_eq!(plan.decision(&process), Decision::Deny);
     assert_eq!(plan.decision(&edits), Decision::Deny);

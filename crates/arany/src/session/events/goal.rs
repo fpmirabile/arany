@@ -342,7 +342,7 @@ fn file_observation_digest(
             .iter()
             .find(|change| change.path == path)
             .and_then(|change| change.after.as_ref().map(|version| version.sha256.clone())),
-        ToolCall::McpCall { .. } => return Some(None),
+        ToolCall::McpCall { .. } | ToolCall::GitSwitch { .. } => return Some(None),
         _ => return None,
     };
     Some(digest.filter(|_| {
@@ -411,6 +411,10 @@ impl GoalPlanContract {
                         == resource.as_deref().unwrap_or("SKILL.md")
             }),
             ToolCall::McpList { .. } => true,
+            // Commits, branches and switches act on the whole repository.
+            ToolCall::GitCommit { .. }
+            | ToolCall::GitBranch { .. }
+            | ToolCall::GitSwitch { .. } => self.allows_path("."),
         }
     }
 

@@ -269,7 +269,9 @@ impl PermissionConfig {
                 || matches!(facts.family, Family::Mcp | Family::Git));
         let allow_skips_approval = !call.is_unguarded()
             && !auto_review
-            && !(self.mode == PermissionMode::AcceptEdits && facts.asks_approval && !facts.mutates);
+            && !(self.mode == PermissionMode::AcceptEdits
+                && facts.asks_approval
+                && !facts.typed_edit());
         let matched = self.rules.iter().find_map(|(decision, rule)| {
             if *decision == Decision::Allow && !allow_skips_approval {
                 None
@@ -282,7 +284,7 @@ impl PermissionConfig {
             if auto_review {
                 Decision::Ask
             } else if !facts.asks_approval
-                || (self.mode == PermissionMode::AcceptEdits && facts.mutates)
+                || (self.mode == PermissionMode::AcceptEdits && facts.typed_edit())
             {
                 Decision::Allow
             } else {
@@ -590,7 +592,10 @@ impl Rule {
                 facts.family == Family::File && (!facts.mutates || decision == Decision::Deny)
                     || facts.family == Family::Git && decision != Decision::Allow
             }
-            Tool::Edit => facts.family == Family::File && facts.mutates,
+            Tool::Edit => {
+                facts.typed_edit()
+                    || decision != Decision::Allow && matches!(call, ToolCall::GitSwitch { .. })
+            }
             Tool::Write => matches!(call, ToolCall::Write { .. }),
             Tool::Glob => matches!(call, ToolCall::List { .. }),
             Tool::Grep => matches!(call, ToolCall::Search { .. }),
@@ -653,6 +658,19 @@ impl Rule {
                             .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
+            ToolCall::GitCommit { paths, .. } if !paths.is_empty() => {
+                if decision == Decision::Allow {
+                    paths
+                        .iter()
+                        .all(|path| path_matches(pattern, path, decision))
+                } else {
+                    paths
+                        .iter()
+                        .any(|path| path_matches(pattern, path, decision))
+                }
+            }
+            // A staged commit or a switch publishes paths unknown before dispatch.
+            ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
                 source:
                     crate::session::worker::ChangesetSource::WorkerHandover { .. }

@@ -41,7 +41,7 @@ pub(super) fn failed(call: &ToolCall, output: &str) -> bool {
             value().map_or(true, |value| value["exit_code"] != 0)
         }
         ToolCall::McpCall { .. } => value().map_or(true, |value| value["is_error"] == true),
-        _ if call.is_git_read() => value().map_or(true, |value| value.get("failed").is_some()),
+        _ if call.is_git() => value().map_or(true, |value| value.get("failed").is_some()),
         _ => false,
     }
 }

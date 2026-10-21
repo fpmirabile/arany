@@ -285,6 +285,20 @@ pub enum ToolCall {
         revision: Option<String>,
         max_count: u32,
     },
+    GitCommit {
+        message: String,
+        paths: Vec<String>,
+        staged: bool,
+    },
+    GitBranch {
+        #[serde(deserialize_with = "required_nullable")]
+        name: Option<String>,
+        #[serde(deserialize_with = "required_nullable")]
+        start_point: Option<String>,
+    },
+    GitSwitch {
+        branch: String,
+    },
 }
 
 fn required_nullable<'de, D: serde::Deserializer<'de>>(
@@ -360,7 +374,7 @@ impl ToolCall {
         )
     }
 
-    pub(crate) fn is_git_read(&self) -> bool {
+    pub(crate) fn is_git(&self) -> bool {
         self.facts().family == Family::Git
     }
 
@@ -562,9 +576,7 @@ pub struct EffectIntent {
 impl EffectIntent {
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
-            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
-                GIT_TIMEOUT_MS
-            }
+            _ if self.call.is_git() => GIT_TIMEOUT_MS,
             ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
             _ => self.limits.runtime_ms,
         };

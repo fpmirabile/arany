@@ -585,6 +585,12 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         crate::tools::ToolCall::GitStatus { path } => format!("Git status {path}"),
         crate::tools::ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
         crate::tools::ToolCall::GitLog { path, .. } => format!("Git log {path}"),
+        crate::tools::ToolCall::GitCommit { .. } => "Git commit".into(),
+        crate::tools::ToolCall::GitBranch { name: None, .. } => "Git branch list".into(),
+        crate::tools::ToolCall::GitBranch {
+            name: Some(name), ..
+        } => format!("Git branch {name}"),
+        crate::tools::ToolCall::GitSwitch { branch } => format!("Git switch {branch}"),
     }
 }
 

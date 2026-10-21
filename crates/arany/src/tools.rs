@@ -833,7 +833,7 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
-                serde_json::json!({"operations":catalog::git_operations(),"scope":catalog::GIT_SCOPE})
+                serde_json::json!({"operations":catalog::git_operations(self.config.write),"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },

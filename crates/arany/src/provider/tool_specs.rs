@@ -117,6 +117,9 @@ mod tests {
                 "arany_command",
                 "arany_mcp_call",
                 "arany_command_unguarded",
+                "arany_git_commit",
+                "arany_git_branch",
+                "arany_git_switch",
                 "arany_plan"
             ]
         );

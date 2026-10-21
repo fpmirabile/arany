@@ -155,6 +155,21 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitStatus { path } => format!("Git status({path})"),
         ToolCall::GitDiff { path, .. } => format!("Git diff({path})"),
         ToolCall::GitLog { path, .. } => format!("Git log({path})"),
+        ToolCall::GitCommit {
+            paths,
+            staged: true,
+            ..
+        } if paths.is_empty() => "Git commit(staged)".into(),
+        ToolCall::GitCommit { paths, .. } => format!("Git commit({})", paths.join(", ")),
+        ToolCall::GitBranch { name: None, .. } => "Git branches()".into(),
+        ToolCall::GitBranch {
+            name: Some(name),
+            start_point,
+        } => match start_point {
+            Some(start) => format!("Git branch({name} from {start})"),
+            None => format!("Git branch({name})"),
+        },
+        ToolCall::GitSwitch { branch } => format!("Git switch({branch})"),
     };
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
@@ -169,6 +184,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                     command_result_summary(observation)
                         .unwrap_or_else(|| read_result_summary(std::slice::from_ref(tool)))
                 }
+                ToolCall::GitCommit { .. }
+                | ToolCall::GitBranch { name: Some(_), .. }
+                | ToolCall::GitSwitch { .. } => git_write_summary(observation),
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -284,6 +302,30 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
     }
 }
 
+// The committed receipt, not a later read, is the evidence of what was published.
+fn git_write_summary(observation: &arany::ToolObservation) -> String {
+    let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap_or_default();
+    let text = |key: &str| result[key].as_str().unwrap_or("?").to_owned();
+    let short = |key: &str| text(key).chars().take(12).collect::<String>();
+    match &observation.intent.call {
+        arany::ToolCall::GitCommit { .. } => {
+            format!("committed {} on {}", short("commit"), text("branch"))
+        }
+        arany::ToolCall::GitSwitch { .. } if result["switched"] == false => {
+            format!("already on {}", text("branch"))
+        }
+        arany::ToolCall::GitSwitch { .. } => {
+            let files = result["files"].as_u64().unwrap_or_default();
+            format!(
+                "switched to {} · {files} {}",
+                text("branch"),
+                if files == 1 { "file" } else { "files" }
+            )
+        }
+        _ => format!("created {} at {}", text("branch"), short("oid")),
+    }
+}
+
 fn command_result_summary(observation: &arany::ToolObservation) -> Option<String> {
     let result: serde_json::Value = serde_json::from_str(&observation.output).ok()?;
     let exit = result.get("exit_code")?.as_i64()?;
@@ -379,6 +421,7 @@ fn read_operation(tool: &arany::ToolView) -> bool {
             | ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }
             | ToolCall::GitLog { .. }
+            | ToolCall::GitBranch { name: None, .. }
             | ToolCall::Skill { .. }
             | ToolCall::McpList { .. }
     )
@@ -430,7 +473,10 @@ fn group_label(tools: &[arany::ToolView]) -> String {
             |c| {
                 matches!(
                     c,
-                    ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+                    ToolCall::GitStatus { .. }
+                        | ToolCall::GitDiff { .. }
+                        | ToolCall::GitLog { .. }
+                        | ToolCall::GitBranch { name: None, .. }
                 )
             },
             "inspected",
@@ -848,6 +894,44 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
                 escape_terminal(tool)
             ));
             lines.push(format!("Arguments: {}", escape_terminal(arguments)));
+        }
+        ToolCall::GitCommit {
+            message,
+            paths,
+            staged,
+        } => {
+            lines.push(if *staged {
+                "Commit the staged changes to the current branch".into()
+            } else {
+                "Commit the working-tree contents of these paths to the current branch:".into()
+            });
+            lines.extend(
+                paths
+                    .iter()
+                    .map(|path| format!("  {}", escape_terminal(path))),
+            );
+            lines.push("Message:".into());
+            lines.extend(
+                message
+                    .split('\n')
+                    .map(|line| format!("  {}", escape_terminal(line))),
+            );
+            lines.push("Repository hooks and configuration do not run".into());
+        }
+        ToolCall::GitBranch {
+            name: Some(name),
+            start_point,
+        } => lines.push(format!(
+            "Create branch {} at {} without switching",
+            escape_terminal(name),
+            escape_terminal(start_point.as_deref().unwrap_or("HEAD"))
+        )),
+        ToolCall::GitSwitch { branch } => {
+            lines.push(format!("Switch to branch {}", escape_terminal(branch)));
+            lines.push(
+                "Changed Workspace files are replaced; local changes they would overwrite refuse"
+                    .into(),
+            );
         }
         _ => lines.push(escape_terminal(
             &serde_json::to_string(&intent.call).expect("typed action"),
@@ -2119,6 +2203,90 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
+        let oid = "a".repeat(40);
+        for (call, output, expected) in [
+            (
+                ToolCall::GitCommit {
+                    message: "Fix\nbody".into(),
+                    paths: vec!["src/a.rs".into(), "README.md".into()],
+                    staged: false,
+                },
+                serde_json::json!({"commit": oid, "branch": "main"}),
+                "⏺ Git commit(src/a.rs, README.md)\n  ⎿ committed aaaaaaaaaaaa on main",
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "Fix".into(),
+                    paths: Vec::new(),
+                    staged: true,
+                },
+                serde_json::json!({"commit": oid, "branch": "main"}),
+                "⏺ Git commit(staged)\n  ⎿ committed aaaaaaaaaaaa on main",
+            ),
+            (
+                ToolCall::GitBranch {
+                    name: Some("topic".into()),
+                    start_point: Some("HEAD~1".into()),
+                },
+                serde_json::json!({"branch": "topic", "oid": oid}),
+                "⏺ Git branch(topic from HEAD~1)\n  ⎿ created topic at aaaaaaaaaaaa",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                serde_json::json!({"branch": "topic", "switched": true, "files": 1}),
+                "⏺ Git switch(topic)\n  ⎿ switched to topic · 1 file",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                serde_json::json!({"branch": "topic", "switched": false}),
+                "⏺ Git switch(topic)\n  ⎿ already on topic",
+            ),
+        ] {
+            assert_eq!(
+                tool_summary(&tool_fixture(call, &output.to_string())),
+                expected
+            );
+        }
+        let mut failed = tool_fixture(
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
+            },
+            r#"{"failed":"Switching would overwrite local changes"}"#,
+        );
+        failed.observation.as_mut().unwrap().disposition = ToolDisposition::Failed;
+        assert_eq!(
+            tool_summary(&failed),
+            "⏺ Git switch(topic)\n  ⎿ Error: {\"failed\":\"Switching would overwrite local changes\"}"
+        );
+        let approval = tool_fixture(
+            ToolCall::GitCommit {
+                message: "Fix\n\u{1b}[2J".into(),
+                paths: vec!["src/a.rs".into()],
+                staged: false,
+            },
+            "",
+        );
+        let lines = tool_approval_lines(&approval.intent);
+        assert_eq!(
+            lines[..6],
+            [
+                "Proposed action",
+                "Commit the working-tree contents of these paths to the current branch:",
+                "  src/a.rs",
+                "Message:",
+                "  Fix",
+                &format!("  {}", escape_terminal("\u{1b}[2J")),
+            ]
+        );
+        assert!(lines.contains(&"Repository hooks and configuration do not run".to_owned()));
+    }
+
+    #[test]
     fn timeout_rows_use_operation_caps_and_only_offer_settings_for_commands() {
         for (call, operation, cap, guidance) in [
             (
@@ -2145,6 +2313,14 @@ mod peer_row_tests {
                     max_count: 10,
                 },
                 "Git log(.)",
+                20_000,
+                "",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                "Git switch(topic)",
                 20_000,
                 "",
             ),

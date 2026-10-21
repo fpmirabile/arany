@@ -83,8 +83,16 @@ const fn write_row(name: &'static str, order: u8, description: &'static str) -> 
     }
 }
 
+const fn git_write_row(name: &'static str, order: u8, description: &'static str) -> OperationFacts {
+    OperationFacts {
+        mutates: true,
+        asks_approval: true,
+        ..facts_row(name, Family::Git, order, description)
+    }
+}
+
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 17] = [
+pub(crate) static ALL: [OperationFacts; 20] = [
     read_row(
         "list",
         Family::File,
@@ -197,7 +205,29 @@ pub(crate) static ALL: [OperationFacts; 17] = [
         ..facts_row("parse_agent_definition", Family::Preparation, 15, "")
     },
     facts_row("prepare_worker", Family::Preparation, 16, ""),
+    git_write_row(
+        "git_commit",
+        17,
+        "Commit to the current branch: exactly one of nonempty literal paths (their working-tree contents, including new and deleted files; \".\" is everything) or staged: true (the staged index). Other staged entries stay staged. Repository hooks and configuration never run; asks approval.",
+    ),
+    git_write_row(
+        "git_branch",
+        18,
+        "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
+    ),
+    git_write_row(
+        "git_switch",
+        19,
+        "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
+    ),
 ];
+
+static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
+    mutates: false,
+    asks_approval: false,
+    prelude: true,
+    ..git_write_row("git_branch", 18, "")
+};
 
 static WORKER_BASE: OperationFacts = OperationFacts {
     site: Site::InProcess,
@@ -236,6 +266,10 @@ impl ToolCall {
             Self::GitStatus { .. } => &ALL[11],
             Self::GitDiff { .. } => &ALL[12],
             Self::GitLog { .. } => &ALL[13],
+            Self::GitCommit { .. } => &ALL[17],
+            Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
+            Self::GitBranch { .. } => &ALL[18],
+            Self::GitSwitch { .. } => &ALL[19],
         }
     }
 }
@@ -248,9 +282,9 @@ pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
     by_name(call["properties"]["operation"]["enum"][0].as_str()?)
 }
 
-pub(crate) fn git_operations() -> Vec<&'static str> {
+pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
     ALL.iter()
-        .filter(|facts| facts.family == Family::Git)
+        .filter(|facts| facts.family == Family::Git && (write || !facts.mutates))
         .map(|facts| facts.name)
         .collect()
 }
@@ -267,9 +301,14 @@ pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
     "2025-11-25 stdio; catalog listing with mcp_list only";
-pub(crate) const GIT_SCOPE: &str = "Read-only status, diff and log of the Workspace-root repository under Git defaults; paths are Workspace-relative and \".\" is the whole repository.";
+pub(crate) const GIT_SCOPE: &str = "Status, diff, log, branches, commits and switches of the Workspace-root repository under Git defaults, never its configuration or hooks; paths are Workspace-relative and \".\" is the whole repository.";
 
 impl OperationFacts {
+    // Approval modes may pre-approve typed file edits; process and Git writes keep asking.
+    pub(crate) fn typed_edit(&self) -> bool {
+        self.mutates && self.family == Family::File
+    }
+
     fn schema(&self) -> Option<Vec<(&'static str, Value)>> {
         match self.family {
             Family::File => fs::schema(self.name),
@@ -329,7 +368,9 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
             Family::Process => ("commands", "program", 8),
             Family::Skill => ("skills", "name", MAX_SKILLS),
             Family::Mcp => ("mcp_servers", "server", 4),
-            Family::Git => return catalog["git"].is_object(),
+            Family::Git => {
+                return catalog["git"].is_object() && (!facts.mutates || catalog["write"] == true);
+            }
             Family::Preparation => return false,
         };
         let names: Vec<_> = catalog[key]
@@ -547,6 +588,18 @@ mod tests {
                     max_bytes: 1,
                     max_chunks: 1,
                 },
+            },
+            ToolCall::GitCommit {
+                message: "m".into(),
+                paths: vec![path()],
+                staged: false,
+            },
+            ToolCall::GitBranch {
+                name: Some("topic".into()),
+                start_point: None,
+            },
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
             },
         ]
     }

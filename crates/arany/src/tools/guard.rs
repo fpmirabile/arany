@@ -1826,6 +1826,7 @@ fn parser_config(config: &Config) -> Config {
         skills: Vec::new(),
         mcp: Vec::new(),
         git: None,
+        git_identity: None,
         runtime_grants: Vec::new(),
         ..config.clone()
     }
@@ -2755,6 +2756,7 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants,
             git: None,
+            git_identity: None,
         }
     }
 

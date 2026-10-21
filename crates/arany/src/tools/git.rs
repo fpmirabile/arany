@@ -1,5 +1,7 @@
+mod write;
+
 use super::ToolError;
-use super::config::Program;
+use super::config::{GitIdentity, Program};
 use super::executable::{EXECUTABLES, git_root, has_magic};
 use super::guard::GuardContext;
 use super::types::{
@@ -39,8 +41,53 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && revision.as_deref().is_none_or(valid_revision)
                 && (1..=MAX_GIT_LOG_COMMITS).contains(max_count)
         }
+        ToolCall::GitCommit {
+            message,
+            paths,
+            staged,
+        } => {
+            valid_message(message)
+                && if *staged {
+                    paths.is_empty()
+                } else {
+                    (1..=MAX_COMMIT_PATHS).contains(&paths.len())
+                        && paths
+                            .iter()
+                            .all(|path| path == "." || valid_relative(path, false))
+                        && paths
+                            .iter()
+                            .collect::<std::collections::BTreeSet<_>>()
+                            .len()
+                            == paths.len()
+                }
+        }
+        ToolCall::GitBranch {
+            name: None,
+            start_point,
+        } => start_point.is_none(),
+        ToolCall::GitBranch {
+            name: Some(name),
+            start_point,
+        } => valid_branch(name) && start_point.as_deref().is_none_or(valid_revision),
+        ToolCall::GitSwitch { branch } => valid_branch(branch),
         _ => false,
     }
+}
+
+const MAX_COMMIT_PATHS: usize = 128;
+const MAX_MESSAGE_BYTES: usize = 8 * 1024;
+
+fn valid_message(message: &str) -> bool {
+    message.len() <= MAX_MESSAGE_BYTES
+        && !message.trim().is_empty()
+        && !message
+            .chars()
+            .any(|character| character.is_control() && !matches!(character, '\n' | '\t'))
+}
+
+// A local branch name: the revision name grammar without ancestry steps, never HEAD itself.
+pub(super) fn valid_branch(name: &str) -> bool {
+    valid_revision(name) && !name.contains(['~', '^']) && name != "HEAD"
 }
 
 pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
@@ -68,6 +115,31 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
                 json!({"type":"integer", "description":"Number of commits: integer 1 through 50 inclusive."}),
             ),
         ],
+        "git_commit" => vec![
+            (
+                "message",
+                json!({"type":"string", "description":"Commit message: non-blank UTF-8, at most 8192 bytes; newlines and tabs allowed, no other control characters."}),
+            ),
+            (
+                "paths",
+                json!({"type":"array", "items":{"type":"string"}, "description":"Up to 128 distinct Workspace-relative literal paths (\".\" for every change) whose working-tree contents to commit; empty when staged is true."}),
+            ),
+            (
+                "staged",
+                json!({"type":"boolean", "description":"true commits exactly the staged index and requires empty paths."}),
+            ),
+        ],
+        "git_branch" => vec![
+            (
+                "name",
+                json!({"type":["string","null"], "description":"null lists local branches; otherwise the new branch name: letters, digits, '.', '_', '-' and '/' separators, at most 128 bytes."}),
+            ),
+            ("start_point", revision),
+        ],
+        "git_switch" => vec![(
+            "branch",
+            json!({"type":"string", "description":"Existing local branch name."}),
+        )],
         _ => return None,
     })
 }
@@ -151,18 +223,102 @@ pub(super) fn discover() -> Option<Program> {
     })
 }
 
+const USER_CONFIG_BYTES: u64 = 64 * 1024;
+
+// The user's global user.name/user.email as data, the way peers' Git picks its identity. Includes,
+// conditional includes and every other key are ignored; missing or invalid data yields None.
+pub(super) fn user_identity() -> Option<GitIdentity> {
+    let home = directories::BaseDirs::new()?.home_dir().to_owned();
+    let xdg = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".config"));
+    // Git reads the XDG file first, so ~/.gitconfig wins for each key.
+    let (mut name, mut email) = (None, None);
+    for path in [xdg.join("git/config"), home.join(".gitconfig")] {
+        let Some(bytes) = std::fs::File::open(&path)
+            .ok()
+            .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
+            .and_then(|file| {
+                let mut bytes = Vec::new();
+                file.take(USER_CONFIG_BYTES + 1)
+                    .read_to_end(&mut bytes)
+                    .ok()
+                    .filter(|_| bytes.len() as u64 <= USER_CONFIG_BYTES)
+                    .map(|_| bytes)
+            })
+        else {
+            continue;
+        };
+        let (found_name, found_email) = user_section(&String::from_utf8_lossy(&bytes));
+        name = found_name.or(name);
+        email = found_email.or(email);
+    }
+    let identity = GitIdentity {
+        name: name?,
+        email: email?,
+    };
+    identity.valid().then_some(identity)
+}
+
+fn user_section(text: &str) -> (Option<String>, Option<String>) {
+    let (mut name, mut email) = (None, None);
+    let mut in_user = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(header) = line.strip_prefix('[') {
+            in_user = header
+                .split_once(']')
+                .is_some_and(|(section, _)| section.trim().eq_ignore_ascii_case("user"));
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=').filter(|_| in_user) else {
+            continue;
+        };
+        let value = value.trim();
+        let value = match value.strip_prefix('"') {
+            Some(quoted) => quoted.strip_suffix('"'),
+            None => Some(
+                value
+                    .split(['#', ';'])
+                    .next()
+                    .unwrap_or_default()
+                    .trim_end(),
+            ),
+        };
+        // Escapes would need Git's full value grammar; such a value is ignored.
+        let Some(value) = value.filter(|value| !value.contains(['\\', '"'])) else {
+            continue;
+        };
+        match key.trim().to_ascii_lowercase().as_str() {
+            "name" => name = Some(value.to_owned()),
+            "email" => email = Some(value.to_owned()),
+            _ => {}
+        }
+    }
+    (name, email)
+}
+
 enum Prepared {
     Ready,
     Unsupported(&'static str),
 }
 
-fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
+struct Repository {
+    git_dir: Dir,
+    identity: (u64, u64),
+    head: Vec<u8>,
+    index: Option<(Vec<u8>, std::time::SystemTime)>,
+    links: Vec<&'static str>,
+}
+
+fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
     let root = super::fs::open_directory(workspace)?;
     match root.symlink_metadata(".git") {
         Ok(metadata) if metadata.is_dir() => {}
-        Ok(_) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
+        Ok(_) => return Ok(Err(UNSUPPORTED_LAYOUT)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(Prepared::Unsupported(NO_REPOSITORY));
+            return Ok(Err(NO_REPOSITORY));
         }
         Err(_) => return Err(ToolError::Path),
     }
@@ -173,20 +329,20 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
     let head = match read_optional(&git_dir, "HEAD", HEAD_BYTES) {
         Ok(Some(head)) => head,
         Ok(None) | Err(ToolError::Limit | ToolError::Path) => {
-            return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT));
+            return Ok(Err(UNSUPPORTED_LAYOUT));
         }
         Err(error) => return Err(error),
     };
     if !valid_head(&head) {
-        return Ok(Prepared::Unsupported(UNSUPPORTED_FORMAT));
+        return Ok(Err(UNSUPPORTED_FORMAT));
     }
     match read_optional(&git_dir, "config", CONFIG_BYTES) {
         Ok(Some(config)) if uses_extensions(&config) => {
-            return Ok(Prepared::Unsupported(UNSUPPORTED_FORMAT));
+            return Ok(Err(UNSUPPORTED_FORMAT));
         }
         Ok(_) => {}
         Err(ToolError::Limit | ToolError::Path) => {
-            return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT));
+            return Ok(Err(UNSUPPORTED_LAYOUT));
         }
         Err(error) => return Err(error),
     }
@@ -199,7 +355,7 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
                 links.push(name);
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => {}
-            _ => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
+            _ => return Ok(Err(UNSUPPORTED_LAYOUT)),
         }
     }
     let index = match open_optional(&git_dir, "index").and_then(|file| {
@@ -213,22 +369,42 @@ fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
         .transpose()
     }) {
         Ok(index) => index,
-        Err(ToolError::Path) => return Ok(Prepared::Unsupported(UNSUPPORTED_LAYOUT)),
+        Err(ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
         Err(error) => return Err(error),
     };
+    Ok(Ok(Repository {
+        identity: super::fs::identity(&git_dir)?,
+        git_dir,
+        head,
+        index,
+        links,
+    }))
+}
+
+// The fixed config, HEAD and index copies every view starts from.
+fn write_view_base(repository: &Repository, view: &Path, config: &[u8]) -> Result<(), ToolError> {
     std::fs::create_dir(view).map_err(|_| ToolError::Operation)?;
-    std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
-    std::fs::write(view.join("HEAD"), &head).map_err(|_| ToolError::Operation)?;
-    if let Some((index, modified)) = index {
+    std::fs::write(view.join("config"), config).map_err(|_| ToolError::Operation)?;
+    std::fs::write(view.join("HEAD"), &repository.head).map_err(|_| ToolError::Operation)?;
+    if let Some((index, modified)) = &repository.index {
         // Git's racy-stat check compares entry times with the index mtime; a fresh mtime hides same-size edits.
         std::fs::File::create_new(view.join("index"))
             .and_then(|mut file| {
-                std::io::Write::write_all(&mut file, &index)?;
-                file.set_modified(modified)
+                std::io::Write::write_all(&mut file, index)?;
+                file.set_modified(*modified)
             })
             .map_err(|_| ToolError::Operation)?;
     }
-    for name in links {
+    Ok(())
+}
+
+fn prepare_view(workspace: &Path, view: &Path) -> Result<Prepared, ToolError> {
+    let repository = match inspect(workspace)? {
+        Ok(repository) => repository,
+        Err(message) => return Ok(Prepared::Unsupported(message)),
+    };
+    write_view_base(&repository, view, VIEW_CONFIG)?;
+    for name in &repository.links {
         std::os::unix::fs::symlink(workspace.join(".git").join(name), view.join(name))
             .map_err(|_| ToolError::Operation)?;
     }
@@ -277,10 +453,15 @@ fn uses_extensions(config: &[u8]) -> bool {
 }
 
 fn pathspecs(path: &str) -> Vec<String> {
-    let mut specs = Vec::with_capacity(1 + 2 * (FORBIDDEN_NAMES.len() + 1));
-    if !path.is_empty() && path != "." {
-        specs.push(format!(":(literal){path}"));
-    }
+    pathspecs_of([path])
+}
+
+fn pathspecs_of<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut specs: Vec<String> = paths
+        .into_iter()
+        .filter(|path| !path.is_empty() && *path != ".")
+        .map(|path| format!(":(literal){path}"))
+        .collect();
     for name in FORBIDDEN_NAMES.into_iter().chain([".env.*"]) {
         specs.push(format!(":(icase,exclude,glob)**/{name}"));
         specs.push(format!(":(icase,exclude,glob)**/{name}/**"));
@@ -361,6 +542,12 @@ fn invocations(call: &ToolCall) -> Result<Vec<Vec<String>>, ToolError> {
             argv.extend(pathspecs(path));
             runs.push(argv);
         }
+        ToolCall::GitBranch { name: None, .. } => runs.push(owned(&[
+            "--no-pager",
+            "for-each-ref",
+            "--format=%(refname)%00%(objectname)%00%(HEAD)",
+            "refs/heads/",
+        ])),
         _ => return Err(ToolError::Configuration),
     }
     Ok(runs)
@@ -418,24 +605,51 @@ async fn spawn_git(
     workspace: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<Captured, ToolError> {
+    spawn_git_with(git, argv, env, workspace, deadline, None, CAPTURE_BYTES).await
+}
+
+async fn spawn_git_with(
+    git: &Path,
+    argv: &[String],
+    env: &[(&'static str, OsString)],
+    workspace: &Path,
+    deadline: tokio::time::Instant,
+    stdin: Option<&[u8]>,
+    stdout_bytes: usize,
+) -> Result<Captured, ToolError> {
     let mut child = super::guard::spawn_before(
         tokio::process::Command::new(git)
             .args(argv)
             .env_clear()
             .envs(env.iter().map(|(key, value)| (key, value)))
             .current_dir(workspace)
-            .stdin(Stdio::null())
+            .stdin(if stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true),
         deadline,
     )?;
+    let input = child.stdin.take();
     let stdout = child.stdout.take().ok_or(ToolError::Operation)?;
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
     let result = tokio::time::timeout_at(deadline, async {
-        let ((stdout, overflow), (stderr, _)) = tokio::try_join!(
-            read_prefix(stdout, CAPTURE_BYTES, false),
-            read_prefix(stderr, STDERR_BYTES, true)
+        // Feed stdin while draining stdout, or a full pipe deadlocks both sides.
+        let feed = async {
+            if let (Some(mut input), Some(bytes)) = (input, stdin) {
+                tokio::io::AsyncWriteExt::write_all(&mut input, bytes)
+                    .await
+                    .map_err(|_| ToolError::Operation)?;
+            }
+            Ok::<_, ToolError>(())
+        };
+        let ((stdout, overflow), (stderr, _), ()) = tokio::try_join!(
+            read_prefix(stdout, stdout_bytes, false),
+            read_prefix(stderr, STDERR_BYTES, true),
+            feed
         )?;
         let status = super::guard::reap_owned_child(&mut child)
             .await
@@ -468,15 +682,29 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let scratch = Path::new("/scratch");
     #[cfg(not(target_os = "linux"))]
     let scratch = site.root;
-    let output = execute(
-        site.workspace,
-        scratch,
-        git,
-        &site.intent.call,
-        site.intent.limits.result_bytes as usize,
-        site.remaining_runtime(),
-    )
-    .await;
+    let max_bytes = site.intent.limits.result_bytes as usize;
+    let output = if site.intent.call.mutates() {
+        write::execute(
+            site.workspace,
+            scratch,
+            git,
+            &site.config.git_identity.clone().unwrap_or_default(),
+            &site.intent.call,
+            max_bytes,
+            site.remaining_runtime(),
+        )
+        .await
+    } else {
+        execute(
+            site.workspace,
+            scratch,
+            git,
+            &site.intent.call,
+            max_bytes,
+            site.remaining_runtime(),
+        )
+        .await
+    };
     #[cfg(target_os = "linux")]
     site.stop_descendants().await?;
     output
@@ -519,6 +747,7 @@ pub(super) async fn execute(
         }
         (ToolCall::GitDiff { .. }, [numstat, patch]) => diff_output(numstat, patch, budget)?,
         (ToolCall::GitLog { .. }, [log]) => log_output(&log.stdout, log.overflow, budget)?,
+        (ToolCall::GitBranch { .. }, [list]) => branch_output(&list.stdout, list.overflow, budget)?,
         _ => return Err(ToolError::Configuration),
     };
     let text = value.to_string();
@@ -765,14 +994,40 @@ fn log_output(raw: &[u8], overflow: bool, budget: usize) -> Result<Value, ToolEr
     Ok(json!({"commits": rows.rows, "truncated": truncated}))
 }
 
+fn branch_output(raw: &[u8], overflow: bool, budget: usize) -> Result<Value, ToolError> {
+    let mut rows = Rows::new(budget);
+    let mut truncated = overflow;
+    for record in records(raw, b'\n', overflow)? {
+        let fields: Vec<&[u8]> = record.split(|byte| *byte == 0).collect();
+        let [name, oid, head] = fields.as_slice() else {
+            return Err(ToolError::Operation);
+        };
+        let name = String::from_utf8_lossy(name);
+        let row = json!({
+            "name": clipped(name.strip_prefix("refs/heads/").ok_or(ToolError::Operation)?, 200),
+            "oid": object_id(oid)?,
+            "current": *head == b"*",
+        });
+        if !rows.push(row) {
+            truncated = true;
+            break;
+        }
+    }
+    Ok(json!({"branches": rows.rows, "truncated": truncated}))
+}
+
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::test_support::process::BoundedOutput;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
 
-    fn host_git_output(repository: &Path, home: &Path, args: &[&str]) -> std::process::Output {
+    pub(super) fn host_git_output(
+        repository: &Path,
+        home: &Path,
+        args: &[&str],
+    ) -> std::process::Output {
         std::process::Command::new(discover().expect("pinned git").executable)
             // `git commit` otherwise detaches `maintenance run --auto`, which can write `.git` after the fixture returns.
             .args(["-c", "maintenance.auto=false", "-c", "gc.auto=0"])
@@ -793,7 +1048,7 @@ mod tests {
             .expect("pinned git")
     }
 
-    fn host_git(repository: &Path, home: &Path, args: &[&str]) {
+    pub(super) fn host_git(repository: &Path, home: &Path, args: &[&str]) {
         let output = host_git_output(repository, home, args);
         assert!(
             output.status.success(),
@@ -802,7 +1057,7 @@ mod tests {
         );
     }
 
-    fn fixture(temp: &Path) -> PathBuf {
+    pub(super) fn fixture(temp: &Path) -> PathBuf {
         let workspace = temp.join("workspace");
         let home = temp.join("home");
         std::fs::create_dir_all(workspace.join("src")).unwrap();
@@ -832,7 +1087,7 @@ mod tests {
         workspace
     }
 
-    fn arm_hostile(temp: &Path, workspace: &Path) -> PathBuf {
+    pub(super) fn arm_hostile(temp: &Path, workspace: &Path) -> PathBuf {
         let markers = temp.join("markers");
         let scripts = temp.join("scripts");
         let hooks = temp.join("hooks");
@@ -908,7 +1163,7 @@ mod tests {
         markers
     }
 
-    fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    pub(super) fn tree(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
         fn walk(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
             let mut entries: Vec<PathBuf> = std::fs::read_dir(path)
                 .unwrap()
@@ -934,7 +1189,7 @@ mod tests {
         out
     }
 
-    fn assert_unchanged(root: &Path, before: &[(PathBuf, Vec<u8>)]) {
+    pub(super) fn assert_unchanged(root: &Path, before: &[(PathBuf, Vec<u8>)]) {
         let after = tree(root);
         if after == before {
             return;
@@ -963,13 +1218,13 @@ mod tests {
         panic!("repository .git changed: {diff:#?}");
     }
 
-    fn scratch(temp: &Path, index: usize) -> PathBuf {
+    pub(super) fn scratch(temp: &Path, index: usize) -> PathBuf {
         let path = temp.join(format!("scratch-{index}"));
         std::fs::create_dir_all(&path).unwrap();
         path
     }
 
-    fn run_call(workspace: &Path, scratch: &Path, call: &ToolCall) -> Value {
+    pub(super) fn run_call(workspace: &Path, scratch: &Path, call: &ToolCall) -> Value {
         let git = discover().expect("pinned system git");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -988,7 +1243,7 @@ mod tests {
         serde_json::from_str(&output).unwrap()
     }
 
-    struct RestoreMode(PathBuf);
+    pub(super) struct RestoreMode(pub(super) PathBuf);
 
     impl Drop for RestoreMode {
         fn drop(&mut self) {

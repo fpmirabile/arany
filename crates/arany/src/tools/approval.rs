@@ -30,7 +30,7 @@ impl ApprovalMode {
 
     pub(crate) fn asks(self, call: &ToolCall) -> bool {
         let facts = call.facts();
-        facts.asks_approval && (self != Self::AutoEdits || !facts.mutates)
+        facts.asks_approval && (self != Self::AutoEdits || !facts.typed_edit())
     }
 }
 

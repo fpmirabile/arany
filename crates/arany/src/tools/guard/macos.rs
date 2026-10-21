@@ -422,7 +422,7 @@ pub(super) fn install(
     if task.intent.call.is_process() {
         return install_command(task, stage);
     }
-    if task.intent.call.is_git_read() {
+    if task.intent.call.is_git() {
         return install_git(task, stage);
     }
     configure_file_cpu()?;
@@ -636,6 +636,10 @@ fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf
         git_path,
     )?;
     profile.grant("allow file-read*", "subpath", &task.workspace)?;
+    // A Git write publishes its validated result into the Workspace and its `.git` itself.
+    if task.intent.call.mutates() {
+        profile.rule("allow file-write*", "subpath", &task.workspace)?;
+    }
     let view = root.join(crate::tools::git::VIEW);
     profile.grant("allow file-read* file-write*", "subpath", &view)?;
     profile.rule(
@@ -1106,7 +1110,7 @@ async fn execute_worker(
         .arg("--internal-tool-guard")
         .env_clear()
         .current_dir(
-            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git_read() {
+            if runtime.worker.is_some() || intent.call.is_process() || intent.call.is_git() {
                 root
             } else {
                 Path::new("/")
