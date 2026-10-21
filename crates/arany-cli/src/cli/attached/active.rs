@@ -519,6 +519,7 @@ pub(super) async fn submit_objective(
             .unzip();
         tokio::select! {
             approval = inbox.next(), if pending.is_none() => {
+                terminal.settle_child_notes(view, &steering, true);
                 pending = approval;
                 approval_page = 0;
                 approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
@@ -542,6 +543,13 @@ pub(super) async fn submit_objective(
                     }
                     RunStep::Completed(result) => result,
                 };
+                let caught_up = !terminal.child_notes_pending()
+                    || catch_up(&admission.state_dir, view).await.is_ok();
+                terminal.settle_child_notes(view, &steering, true);
+                let child_follow = if !caught_up { false } else { match terminal.follow_agent_chat(view).await {
+                    Ok(follow) => follow != AgentChatFollow::Unchanged,
+                    Err(_) => break "terminal input cleanup failed".into(),
+                }};
                 terminal.set_waiting_tool(None);
                 terminal.set_preview(None);
                 composer.set_file_candidates(None, Vec::new());
@@ -565,9 +573,9 @@ pub(super) async fn submit_objective(
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
-                if let Some(notice) = run_end_notice(sent, withdrawn, restored)
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice)))
-                        .is_err()
+                let notice = run_end_notice(sent, withdrawn, restored);
+                if (child_follow || notice.is_some())
+                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice.map(TerminalNotice::History)).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
                 }
@@ -625,6 +633,10 @@ pub(super) async fn submit_objective(
                 } else {
                     retry.as_deref().map(TerminalNotice::Transient)
                 };
+                let child_changed = terminal.settle_child_notes(view, &steering, stop != ActiveStop::Running);
+                if child_changed && terminal.restore_selected_draft_input(composer.text().len()).is_err() {
+                    break "terminal input failed".to_owned();
+                }
                 let follow = match terminal.follow_agent_chat(view).await {
                     Ok(follow) => follow,
                     Err(_) => break "terminal rendering failed".to_owned(),
@@ -634,7 +646,7 @@ pub(super) async fn submit_objective(
                     AgentChatFollow::Unchanged | AgentChatFollow::Redraw => notice,
                 };
                 if pending.is_none()
-                    && (follow != AgentChatFollow::Unchanged || notice.is_some())
+                    && (child_changed || follow != AgentChatFollow::Unchanged || notice.is_some())
                     && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err()
                 {
                     break "terminal rendering failed".to_owned();
@@ -743,6 +755,24 @@ pub(super) async fn submit_objective(
                 }
                 // A child view takes Escape before Run cancellation; Ctrl+C passes through.
                 let agent_notice = match terminal.agent_chat_input(view, input, composer).await {
+                    Ok(AgentChatInput::ChildMessage { target, text }) => {
+                        let agent = view.runs.iter().find(|run| run.id == target.run_id)
+                            .and_then(|run| run.agents.iter().find(|agent| agent.id == target.agent_run_id));
+                        let ordinal = agent.map_or(0, |agent| agent.ordinal);
+                        let count = agent.map_or(0, |agent| agent.steering_notes.len());
+                        let (notice, offer) = if stop == ActiveStop::Running {
+                            match steering.offer_child_note(target, text.clone()) {
+                                Ok(()) => (format!("Note waiting for child {ordinal}'s next step"), Some((text, count))),
+                                Err(refused) => (steering_refusal(refused, autonomous), None),
+                            }
+                        } else { ("Child note unavailable while stopping; draft retained".into(), None) };
+                        terminal.child_note_feedback(target, notice, offer);
+                        Some(None)
+                    }
+                    Ok(AgentChatInput::ChildEdited(target)) => {
+                        terminal.withdraw_child_offer(target, &steering);
+                        Some(None)
+                    }
                     Ok(AgentChatInput::Pass) => None,
                     Ok(AgentChatInput::Handled) => continue,
                     Ok(AgentChatInput::Returned) => Some(None),
@@ -905,6 +935,7 @@ pub(super) async fn submit_objective(
                                     ActiveStop::Running => {
                                         steering.pause();
                                         stop = ActiveStop::Pausing;
+                                        terminal.settle_child_notes(view, &steering, true);
                                         "Pausing at the next step; Ctrl+C cancels now"
                                     }
                                     ActiveStop::Pausing => "Already pausing at the next step",
@@ -962,6 +993,7 @@ pub(super) async fn submit_objective(
                             break "forced shutdown after second Ctrl+C".to_owned();
                         }
                         stop = ActiveStop::Cancelling;
+                        terminal.settle_child_notes(view, &steering, true);
                         cancellation.cancel();
                         None
                     }
@@ -1011,6 +1043,7 @@ pub(super) async fn submit_objective(
             }
         }
     };
+    terminal.settle_child_notes(view, &steering, true);
     cancellation.cancel();
     let linear = terminal.is_linear();
     let mode = (!linear).then_some(terminal.mode());

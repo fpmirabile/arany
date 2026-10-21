@@ -215,6 +215,7 @@ pub struct AgentView {
     pub result: Option<String>,
     pub provider_calls: Vec<ProviderCallRecord>,
     pub grant: Option<crate::session::ChildGrant>,
+    pub steering_notes: Vec<String>,
     /// Read-only research Tools of a child; the primary's Tools stay in `RunView::tools`.
     pub tools: Vec<ToolView>,
     pub status: AgentStatus,
@@ -739,6 +740,19 @@ pub struct CompactionView {
 }
 
 impl RunView {
+    pub(crate) fn steering_bytes(&self) -> usize {
+        self.steering_notes
+            .iter()
+            .map(|note| note.len() + super::MAX_STEERING_LABEL_BYTES)
+            .sum::<usize>()
+            + self
+                .agents
+                .iter()
+                .flat_map(|agent| &agent.steering_notes)
+                .map(|note| note.len() + super::MAX_CHILD_STEERING_LABEL_BYTES)
+                .sum::<usize>()
+    }
+
     pub(crate) fn history_user_text(&self) -> String {
         let mut text = self.objective.clone();
         if !self.steering_notes.is_empty() {
@@ -746,6 +760,25 @@ impl RunView {
             for (index, note) in self.steering_notes.iter().enumerate() {
                 use std::fmt::Write;
                 write!(&mut text, "\n[{}] {note}", index + 1).expect("String formatting");
+            }
+        }
+        if self
+            .agents
+            .iter()
+            .any(|agent| !agent.steering_notes.is_empty())
+        {
+            use std::fmt::Write;
+            text.push_str("\n\nSteering notes the user sent to children during this Run:");
+            for agent in &self.agents {
+                for (index, note) in agent.steering_notes.iter().enumerate() {
+                    write!(
+                        &mut text,
+                        "\n[child {} / {}] {note}",
+                        agent.ordinal,
+                        index + 1
+                    )
+                    .expect("String formatting");
+                }
             }
         }
         text
@@ -1094,7 +1127,8 @@ impl SessionView {
             | Event::GoalContextCompacted { .. }
             | Event::ToolResultsCleared { .. }
             | Event::GoalFinished { .. }
-            | Event::GoalSteeringNoteRecorded { .. } => {
+            | Event::GoalSteeringNoteRecorded { .. }
+            | Event::AgentSteeringNoteRecorded { .. } => {
                 goal::apply(current, &envelope.event, prior)?
             }
             Event::MessageAccepted { .. }

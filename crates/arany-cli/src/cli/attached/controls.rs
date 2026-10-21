@@ -1366,6 +1366,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: AgentStatus::Active,

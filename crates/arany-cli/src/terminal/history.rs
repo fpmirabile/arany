@@ -35,9 +35,10 @@ pub(super) struct ClassicProjection {
 pub(super) enum MessageKind {
     User,
     Assistant,
-    // A child's assignment and result in a read-only agent transcript.
+    // A child's assignment and result in its agent transcript.
     Assignment,
     AgentResult,
+    SteeringNote,
     Notice,
     Error,
     Preview,
@@ -54,6 +55,7 @@ enum MessageSource {
     Assistant(usize),
     Notice(u64),
     Tool(usize, usize),
+    Steering(usize, usize),
     Commentary(usize, u32, u8),
     Supervisor(usize, usize),
 }
@@ -200,6 +202,7 @@ impl History {
                     MessageSource::User(run)
                     | MessageSource::Assistant(run)
                     | MessageSource::Supervisor(run, _)
+                    | MessageSource::Steering(run, _)
                     | MessageSource::Tool(run, _)
                     | MessageSource::Commentary(run, _, _) => run >= first,
                     MessageSource::Notice(_) => false,
@@ -259,6 +262,16 @@ impl History {
                     for tool_index in range {
                         self.push_notices_after(
                             Some(MessageSource::Tool(index, tool_index)),
+                            width,
+                        );
+                    }
+                }
+                if self.agent {
+                    for (note, text) in run.steering_notes.iter().enumerate() {
+                        self.push_owned(
+                            MessageSource::Steering(index, note),
+                            MessageKind::SteeringNote,
+                            text.clone(),
                             width,
                         );
                     }
@@ -1308,6 +1321,7 @@ fn message_text<'a>(
         return Cow::Borrowed(text);
     }
     match message.source {
+        MessageSource::Steering(run, note) => Cow::Borrowed(&view.runs[run].steering_notes[note]),
         MessageSource::Supervisor(run, verdict) => Cow::Owned(
             crate::presentation::supervisor_line(&view.runs[run].supervisor.verdicts()[verdict].1),
         ),
@@ -1606,6 +1620,7 @@ fn message_heading(kind: MessageKind) -> &'static str {
         MessageKind::Assistant => "Arany:",
         MessageKind::Assignment => "Assignment:",
         MessageKind::AgentResult => "Agent result:",
+        MessageKind::SteeringNote => "Steering note:",
         MessageKind::Notice => "Arany · notice:",
         MessageKind::Error => "Arany · error:",
         MessageKind::Preview => "Arany · provisional:",

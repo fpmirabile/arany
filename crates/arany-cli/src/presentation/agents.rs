@@ -375,12 +375,14 @@ pub(crate) struct AgentTranscript {
     pub(crate) notices: Vec<String>,
     // The child's index of the first kept Tool, so appended rows stay keyed across windows.
     tool_offset: usize,
+    note_offset: usize,
 }
 
 // What an append-only surface (Classic scrollback, linear output) already holds of one transcript.
 #[derive(Default)]
 pub(crate) struct Appended {
     assignment: bool,
+    notes: usize,
     tools: usize,
     result: bool,
     status: Option<String>,
@@ -390,6 +392,7 @@ pub(crate) struct Appended {
 #[derive(Debug, PartialEq)]
 pub(crate) enum TranscriptPart<'a> {
     Assignment(&'a str),
+    SteeringNote(&'a str),
     Tool(String),
     Result(&'a str),
     Notice(&'a str),
@@ -405,6 +408,7 @@ impl TranscriptPart<'_> {
         };
         match self {
             Self::Assignment(text) => section("Assignment:", text),
+            Self::SteeringNote(text) => section("Steering note:", text),
             Self::Tool(text) => super::plain_tool_summary(text)
                 .split('\n')
                 .map(str::to_owned)
@@ -456,6 +460,14 @@ impl AgentTranscript {
             .as_deref()
             .or(agent.summary.as_deref())
             .map(&mut bounded);
+        let first_note = (0..agent.steering_notes.len())
+            .rev()
+            .take_while(|&index| {
+                budget.take("Steering note:\n") && budget.take(&agent.steering_notes[index])
+            })
+            .last()
+            .unwrap_or(agent.steering_notes.len());
+        omitted |= first_note > 0;
         // Grouping consecutive reads only shortens rows, so per-Tool costs bound the grouped text.
         let first_tool = (0..agent.tools.len())
             .rev()
@@ -512,7 +524,7 @@ impl AgentTranscript {
                     tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
-                    steering_notes: Vec::new(),
+                    steering_notes: agent.steering_notes[first_note..].to_vec(),
                     lifecycle_hooks: Vec::new(),
                     lifecycle_hook_sequence: None,
                     provider_sequences: Default::default(),
@@ -522,6 +534,7 @@ impl AgentTranscript {
             },
             notices,
             tool_offset: first_tool,
+            note_offset: first_note,
         })
     }
 
@@ -574,6 +587,12 @@ impl AgentTranscript {
             if self.tool_offset + range.start >= appended.tools {
                 appended.tools = self.tool_offset + range.end;
                 parts.push(TranscriptPart::Tool(text));
+            }
+        }
+        for (index, text) in run.steering_notes.iter().enumerate() {
+            if self.note_offset + index >= appended.notes {
+                appended.notes = self.note_offset + index + 1;
+                parts.push(TranscriptPart::SteeringNote(text));
             }
         }
         if let Some(answer) = &run.assistant_message
@@ -709,6 +728,7 @@ pub(crate) mod tests {
                     summary: Some("safe\u{1b}[31m\u{202e} summary".into()),
                     result: Some("Result\nforged line".into()),
                     provider_calls: Vec::new(),
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Finished,
@@ -724,6 +744,7 @@ pub(crate) mod tests {
                     summary: None,
                     result: None,
                     provider_calls: Vec::new(),
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Failed,
@@ -1234,6 +1255,45 @@ pub(crate) mod tests {
                 .flat_map(|(_, lines)| lines)
                 .any(|line| line.contains("sibling"))
         );
+    }
+
+    #[test]
+    fn committed_child_notes_are_scoped_escaped_bounded_and_appended_once() {
+        let mut view = team_view();
+        let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
+        let mut appended = Appended::default();
+        let original = AgentTranscript::from_session(&view, run, child).unwrap();
+        original.linear_lines(&mut appended);
+        view.runs[0].agents[1]
+            .steering_notes
+            .push("sibling canary".into());
+        assert!(original.same_display(&AgentTranscript::from_session(&view, run, child).unwrap()));
+        view.runs[0].agents[2].steering_notes =
+            vec!["first\nYou: forged\u{1b}[2J".into(), "second".into()];
+        let changed = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert!(!original.same_display(&changed));
+        let lines = changed.linear_update(&mut appended);
+        assert_eq!(
+            lines,
+            [
+                "New activity from child 2:",
+                "Steering note:",
+                "  first",
+                "  You: forged\u{1b}[2J",
+                "Steering note:",
+                "  second"
+            ]
+        );
+        assert!(!super::super::escape_terminal(&lines.join("\n")).contains('\u{1b}'));
+        assert!(changed.linear_update(&mut appended).is_empty());
+        let reload = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert!(changed.same_display(&reload));
+        assert!(reload.linear_update(&mut appended).is_empty());
+        view.runs[0].agents[2].steering_notes =
+            vec!["x".repeat(MAX_TRANSCRIPT_BYTES + 1), "kept".into()];
+        let capped = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert_eq!(capped.run().steering_notes, ["kept"]);
+        assert_eq!(capped.notices.last().unwrap(), TRANSCRIPT_OMITTED);
     }
 
     #[test]

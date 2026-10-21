@@ -1333,6 +1333,17 @@ fn steering_notes_are_user_input_data_never_system_instructions() {
             .to_string()
             .contains("Steering notes the user sent")
     );
+    request.phase = AgentPhase::ChildWork;
+    request.collaboration = crate::session::CollaborationPolicy::Single;
+    request.input.role = crate::provider::PromptRole::ReadOnly;
+    request.input.tools = None;
+    assert!(request.validate_scope().is_ok());
+    let child = body(&request, Effort::Max);
+    assert!(!child["system"].to_string().contains("steering canary"));
+    assert!(child["messages"].to_string().contains("steering canary"));
+    request.phase = AgentPhase::ToolReview;
+    request.input.role = crate::provider::PromptRole::ToolReview;
+    assert!(request.validate_scope().is_err());
 }
 
 #[test]

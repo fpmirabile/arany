@@ -123,6 +123,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             summary: Some("A concise result".into()),
             result: Some("Done".into()),
             provider_calls: Vec::new(),
+            steering_notes: Vec::new(),
             grant: None,
             tools: Vec::new(),
             status: AgentStatus::Finished,

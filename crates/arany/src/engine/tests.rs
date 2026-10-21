@@ -391,7 +391,7 @@ mod run_steering_tests {
             steering.offer_note("y".into()),
             Err(SteeringRefused::RunFull)
         );
-        steering.begin_run();
+        steering.begin_run(SessionId::new(), RunId::new());
         steering
             .offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("a new Run has its own byte quota");
@@ -424,6 +424,100 @@ mod run_steering_tests {
             Err(SteeringRefused::RunFull),
             "the next one-byte note exceeds the bound with its label"
         );
+    }
+
+    #[test]
+    fn child_steering_is_targeted_and_shares_the_run_quota() {
+        let steering = RunSteering::new();
+        let (session_id, run_id) = (SessionId::new(), RunId::new());
+        let a = ChildSteeringTarget {
+            session_id,
+            run_id,
+            agent_run_id: AgentRunId::new(),
+        };
+        let b = ChildSteeringTarget {
+            agent_run_id: AgentRunId::new(),
+            ..a
+        };
+        assert_eq!(
+            steering.offer_child_note(a, "x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        steering.begin_run(session_id, run_id);
+        for target in [a, b] {
+            steering.register_child(target);
+        }
+        steering.offer_child_note(a, "one".into()).unwrap();
+        steering.offer_child_note(a, "two".into()).unwrap();
+        steering.offer_child_note(b, "sibling".into()).unwrap();
+        steering.offer_note("primary".into()).unwrap();
+        assert_eq!(steering.take_child_note(a).as_deref(), Some("one\n\ntwo"));
+        assert_eq!(steering.delivered_notes(), 0);
+        let spent = "one\n\ntwo".len() + MAX_CHILD_STEERING_LABEL_BYTES;
+        let pending = "sibling".len()
+            + MAX_CHILD_STEERING_LABEL_BYTES
+            + "primary".len()
+            + MAX_STEERING_LABEL_BYTES;
+        let remaining = MAX_STEERING_NOTE_BYTES - spent - pending;
+        steering
+            .offer_child_note(a, "x".repeat(remaining - MAX_CHILD_STEERING_LABEL_BYTES))
+            .unwrap();
+        assert_eq!(
+            steering.offer_note("y".into()),
+            Err(SteeringRefused::RunFull)
+        );
+        assert!(steering.take_child_note(a).is_some());
+        assert_eq!(steering.take_note().as_deref(), Some("primary"));
+        steering.close_child(b);
+        assert!(steering.take_child_note(b).is_none());
+        assert_eq!(steering.withdraw_child_note(b).as_deref(), Some("sibling"));
+        steering.begin_run(session_id, RunId::new());
+        assert_eq!(
+            steering.offer_child_note(a, "stale".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(steering.take_child_note(a).is_none());
+        let targets: Vec<_> = (0..8)
+            .map(|_| ChildSteeringTarget {
+                run_id: steering.lock().unwrap().run.unwrap().1,
+                agent_run_id: AgentRunId::new(),
+                ..a
+            })
+            .collect();
+        for target in &targets {
+            steering.register_child(*target);
+            steering
+                .offer_child_note(*target, "pending".into())
+                .unwrap();
+        }
+        for target in &targets {
+            steering.close_child(*target);
+        }
+        let ninth = ChildSteeringTarget {
+            agent_run_id: AgentRunId::new(),
+            ..targets[0]
+        };
+        steering.register_child(ninth);
+        assert_eq!(
+            steering.offer_child_note(ninth, "new".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert_eq!(
+            steering.withdraw_child_note(targets[0]).as_deref(),
+            Some("pending")
+        );
+        steering.offer_child_note(ninth, "new".into()).unwrap();
+        let poisoned = steering.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.state.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        assert_eq!(
+            steering.offer_child_note(a, "x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(steering.withdraw_child_note(a).is_none());
     }
 
     #[test]

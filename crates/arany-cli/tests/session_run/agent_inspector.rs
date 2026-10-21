@@ -686,8 +686,15 @@ fn agent_chat_journey(
             let screen =
                 frame_end.map(|end| screen_rows(&transcript[..end], size.0, size.1).join("\n"));
             if let Some(screen) = screen.as_ref().filter(|screen| {
-                needles.iter().all(|needle| screen.contains(needle))
-                    && !absent.iter().any(|text| screen.contains(text))
+                needles.iter().all(|needle| {
+                    crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
+                        .next()
+                        .is_some()
+                }) && !absent.iter().any(|text| {
+                    crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes())
+                        .next()
+                        .is_some()
+                })
             }) {
                 break screen.clone();
             }
@@ -1018,6 +1025,7 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
 fn gated_team_server(
     listener: TcpListener,
     journeys: usize,
+    messaging: bool,
     requested: mpsc::Sender<&'static str>,
     release: mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
@@ -1038,6 +1046,17 @@ fn gated_team_server(
             let wire: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
             let input = crate::semantic::input(&wire);
+            let text = input.to_string();
+            let targeted = messaging
+                && input["phase"] == "child_work"
+                && input["objective"] == "second child task";
+            assert_eq!(
+                text.contains("/literal guidance"),
+                targeted,
+                "only the selected child's request receives its note"
+            );
+            assert!(!text.contains("late note") && !text.contains("queued note"));
+
             let gate = |name| {
                 requested.send(name).expect("request observer");
                 release
@@ -1086,7 +1105,7 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     );
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
-    let server = gated_team_server(listener, 5, requests, released);
+    let server = gated_team_server(listener, 5, false, requests, released);
     check_profile(&workspace, &state);
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
@@ -1115,7 +1134,7 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     for classic in [false, true] {
         live_agent_picker_journey(&workspace, &state, session_id, classic, &gates);
     }
-    live_linear_agent_chat(&workspace, &state, session_id, &gates);
+    live_linear_agent_chat(&workspace, &state, session_id, &gates, false);
     server.join().expect("synthetic server completed");
 
     // Following a child only read committed facts: each team Run closed normally, with no note.
@@ -1126,6 +1145,128 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
         assert_eq!(run.assistant_message.as_deref(), Some("team answer"));
         assert_eq!(run.agents.len(), 3);
         assert!(run.steering_notes.is_empty());
+    }
+}
+
+#[test]
+fn selected_child_messaging_journey() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    write_profile(&state, listener.local_addr().unwrap().port());
+    let (requests, requested) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = gated_team_server(listener, 3, true, requests, released);
+    check_profile(&workspace, &state);
+    let prior = wait_product(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace)
+            .args(["exec", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .args(["--provider", "custom:local", "--model", "model-1", "prior"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(prior.status.success());
+    let id = String::from_utf8(prior.stderr)
+        .unwrap()
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Session: ")
+                .and_then(|id| id.parse::<SessionId>().ok())
+        })
+        .unwrap();
+    let gates = Gates { requested, release };
+    for classic in [false, true] {
+        let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
+        pty.await_request(&gates, "first");
+        pty.frame(0, &["Alt+Left/Right agents", "child 2"], &[]);
+        pty.step(
+            b"/agents\r",
+            &["Type to search 3 agents", "Enter open"],
+            &[],
+        );
+        pty.step(b"second", &["1 of 3 agents", "child 2"], &[]);
+        pty.step(
+            b"\rqueued note\r",
+            &["viewing child 2 (message)", "agents · Esc primary"],
+            &["queued note"],
+        );
+        pty.step(b"/literal guidance", &["> /literal guidance"], &[]);
+        pty.step(b"\r", &["Note waiting for child 2's next step"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"\x1b[1;3C",
+            &["viewing child 1 (message)", "agents · Esc primary"],
+            &[],
+        );
+        pty.step(b"late note", &["> late note"], &[]);
+        pty.step(b"\r", &["Note waiting for child 1's next step"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"/transcript agents 3\r",
+            &["viewing child 2 (message)", "/literal guidance"],
+            &[],
+        );
+        let from = pty.capture_from;
+        gates.release.send(()).unwrap();
+        pty.await_request(&gates, "second");
+        pty.frame(
+            from,
+            &[
+                "Steering note recorded for child 2",
+                "viewing child 2 (message)",
+            ],
+            &[],
+        );
+        pty.step(b"draft", &["> draft"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"/transcript agents 2\r",
+            &["viewing child 1 (read-only)", "> late note"],
+            &[],
+        );
+        pty.step(b"\r", &["This child is read-only; draft retained"], &[]);
+        pty.step(b"\x7f", &["Read-only"], &["> late note"]);
+        pty.step(b"\x1b[1;3C", &["viewing child 2 (message)", "> draft"], &[]);
+        gates.release.send(()).unwrap();
+        pty.await_request(&gates, "synthesis");
+        pty.frame(
+            pty.capture_from,
+            &["viewing child 2 (read-only)", "> draft"],
+            &[],
+        );
+        gates.release.send(()).unwrap();
+        pty.step(b"\x1b", &["team answer", "Ask Arany"], &["viewing child"]);
+        exit_live(&mut attached, &mut pty);
+    }
+    live_linear_agent_chat(&workspace, &state, id, &gates, true);
+    server.join().unwrap();
+    let (events, view) = replayed(&state, id);
+    assert_eq!(view.runs.len(), 4);
+    assert_eq!(view.goals.len(), 4);
+    let notes: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, arany::Event::AgentSteeringNoteRecorded { .. }))
+        .collect();
+    assert_eq!(notes.len(), 3);
+    for run in &view.runs[1..] {
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.agents.len(), 3);
+        assert!(run.steering_notes.is_empty());
+        assert!(run.agents[1].steering_notes.is_empty());
+        assert_eq!(run.agents[2].steering_notes, ["/literal guidance"]);
+        assert_eq!(run.agents[2].grant, Some(arany::ChildGrant::NoTools));
+        assert!(!events.iter().any(|event| event.run_id == Some(run.id)
+            && matches!(event.event, arany::Event::ToolPermissionDecided { .. })));
     }
 }
 
@@ -1178,9 +1319,15 @@ impl LivePty {
             let end = self.frame_ends(from).last().copied();
             if let Some(end) = end {
                 let screen = self.screen(end);
-                if needles.iter().all(|needle| screen.contains(needle))
-                    && !absent.iter().any(|text| screen.contains(text))
-                {
+                if needles.iter().all(|needle| {
+                    crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
+                        .next()
+                        .is_some()
+                }) && !absent.iter().any(|text| {
+                    crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes())
+                        .next()
+                        .is_some()
+                }) {
                     return end;
                 }
             }
@@ -1352,7 +1499,7 @@ fn live_agent_chat_journey(
     pty.step(
         b"\x1b[1;3C",
         &[
-            "viewing child 1 (read-only)",
+            "viewing child 1 (message)",
             armed,
             "first child task",
             "child 1 is working",
@@ -1360,7 +1507,7 @@ fn live_agent_chat_journey(
         &[],
     );
     let second: &[&str] = &[
-        "viewing child 2 (read-only)",
+        "viewing child 2 (message)",
         armed,
         "second child task",
         "child 2 is working",
@@ -1370,7 +1517,7 @@ fn live_agent_chat_journey(
     gates.release.send(()).expect("release the first child");
     pty.await_request(gates, "second");
     for screen in pty.frames_since(shown) {
-        assert!(screen.contains("viewing child 2 (read-only)"), "{screen}");
+        assert!(screen.contains("viewing child 2 (message)"), "{screen}");
         assert!(!screen.contains("result of first child task"), "{screen}");
     }
     // The sibling's committed result is there once its own chat is opened.
@@ -1407,7 +1554,7 @@ fn live_agent_chat_journey(
     assert!(
         frames
             .iter()
-            .all(|screen| screen.contains("viewing child 2 (read-only)")),
+            .all(|screen| screen.contains("viewing child 2 (")),
         "{frames:?}"
     );
     gates.release.send(()).expect("release the synthesis");
@@ -1428,7 +1575,7 @@ fn live_agent_chat_journey(
         let rows = scrollback.iter().chain(&screen).collect::<Vec<_>>();
         let count = |needle: &str| rows.iter().filter(|row| row.contains(needle)).count();
         assert_eq!(count("result of second child task"), 1, "{rows:?}");
-        assert_eq!(count("Viewing child 2 (read-only)"), 2, "{rows:?}");
+        assert_eq!(count("Viewing child 2 (message)"), 2, "{rows:?}");
         // The Fullscreen journey's Run, then this one after the return, each once.
         assert_eq!(count("team answer"), 2, "{rows:?}");
     }
@@ -1490,7 +1637,7 @@ fn live_agent_picker_journey(
     pty.step(
         b"\r",
         &[
-            "viewing child 2 (read-only)",
+            "viewing child 2 (message)",
             "agents · Esc primary",
             "second child task",
             "child 2 is working",
@@ -1517,6 +1664,7 @@ fn live_linear_agent_chat(
     state: &std::path::Path,
     id: SessionId,
     gates: &Gates,
+    messaging: bool,
 ) {
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -1546,15 +1694,15 @@ fn live_linear_agent_chat(
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let prompt: &[u8] = b"Agent chat: number opens";
-    let stages: [&[u8]; 14] = [
+    let mut stages: Vec<&[u8]> = vec![
         b"Agent: child 2;",
-        b"Viewing child 2 (read-only)",
+        b"Viewing child 2 (message)",
         b"child 2 is working; its committed activity appears here",
         prompt,
         b"Viewing child 1 (read-only)",
         b"result of first child task",
         prompt,
-        b"Viewing child 2 (read-only)",
+        b"Viewing child 2 (message)",
         prompt,
         b"New activity from child 2:\r\nAgent result:\r\n  result of second child task\r\nchild 2 finished",
         prompt,
@@ -1562,6 +1710,13 @@ fn live_linear_agent_chat(
         b"team answer",
         b"Input:",
     ];
+    if messaging {
+        stages[9] = b"New activity from child 2:";
+        stages.insert(4, b"Notice: Note waiting for child 2's next step");
+        stages.insert(5, prompt);
+        stages.insert(6, b"Steering note recorded for child 2");
+        stages.insert(7, prompt);
+    }
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
@@ -1577,13 +1732,12 @@ fn live_linear_agent_chat(
             bytes.extend_from_slice(&chunk[..count]);
             crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             while let Some(stage) = stages.get(offsets.len()) {
-                let Some(offset) = bytes[search_from..]
-                    .windows(stage.len())
-                    .position(|part| part == *stage)
+                let Some(matched) =
+                    crate::process::pty_text_matches(&bytes[search_from..], stage).next()
                 else {
                     break;
                 };
-                search_from += offset + stage.len();
+                search_from += matched.end;
                 offsets.push(search_from);
                 sender.send(offsets.len() - 1).expect("stage receiver");
             }
@@ -1613,18 +1767,28 @@ fn live_linear_agent_chat(
         .write_all(b"/transcript agents 3\n")
         .expect("open the second child");
     (1..=3).for_each(stage);
+    if messaging {
+        input
+            .write_all(b"/message /literal guidance\n")
+            .expect("offer child note");
+        (4..=5).for_each(stage);
+    }
     gates.release.send(()).expect("release the first child");
     request("second");
+    if messaging {
+        (6..=7).for_each(stage);
+    }
+    let shift = usize::from(messaging) * 4;
     input.write_all(b"p\n").expect("previous agent");
-    (4..=6).for_each(stage);
+    (4 + shift..=6 + shift).for_each(stage);
     input.write_all(b"n\n").expect("next agent");
-    (7..=8).for_each(stage);
+    (7 + shift..=8 + shift).for_each(stage);
     gates.release.send(()).expect("release the second child");
-    (9..=10).for_each(stage);
+    (9 + shift..=10 + shift).for_each(stage);
     request("synthesis");
     gates.release.send(()).expect("release the synthesis");
     input.write_all(b"q\n").expect("return to primary");
-    (11..=13).for_each(stage);
+    (11 + shift..=13 + shift).for_each(stage);
     input.write_all(b"/exit\n").expect("exit linear chat");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1642,7 +1806,8 @@ fn live_linear_agent_chat(
     let (bytes, offsets) = reader.join().expect("linear output reader");
     let text = String::from_utf8_lossy(&bytes);
     // While child 2 was shown, its sibling's committed result printed nothing.
-    let second_shown = String::from_utf8_lossy(&bytes[offsets[1]..offsets[4]]);
+    let second_shown =
+        String::from_utf8_lossy(&bytes[offsets[1]..offsets[4 + usize::from(messaging) * 4]]);
     assert!(!second_shown.contains("result of first"), "{second_shown}");
     assert_eq!(
         text.matches("result of second child task").count(),

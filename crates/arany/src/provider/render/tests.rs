@@ -1018,3 +1018,51 @@ fn clearing_keeps_the_pinned_prefix_plan_skill_facts_and_uncertainty() {
     let next = conversation(&input).unwrap();
     assert_eq!(stable.messages, next.messages[..stable.messages.len()]);
 }
+
+#[test]
+fn child_notes_preserve_the_shared_renderer_prefix_and_remain_user_data() {
+    for role in [PromptRole::Researcher, PromptRole::Editor] {
+        let mut request = request(Vec::new());
+        request.phase = AgentPhase::ChildWork;
+        request.input.role = role;
+        request.collaboration = CollaborationPolicy::Single;
+        request.input.goal_context_facts = None;
+        let earlier = conversation(&request).unwrap();
+        request
+            .input
+            .tools
+            .as_mut()
+            .unwrap()
+            .steps
+            .push(step("first", "src/lib.rs"));
+        request
+            .input
+            .tools
+            .as_mut()
+            .unwrap()
+            .steps
+            .last_mut()
+            .unwrap()
+            .steering_notes
+            .push("child canary".into());
+        let noted = conversation(&request).unwrap();
+        assert_eq!(earlier.system, noted.system);
+        assert_eq!(earlier.messages, noted.messages[..earlier.messages.len()]);
+        let last = noted.messages.last().unwrap();
+        assert_eq!(last.role, Role::User);
+        assert!(
+            last.blocks
+                .iter()
+                .any(|block| matches!(block, Block::Text(text) if text.contains("child canary")))
+        );
+        request
+            .input
+            .tools
+            .as_mut()
+            .unwrap()
+            .steps
+            .push(step("second", "src/main.rs"));
+        let continued = conversation(&request).unwrap();
+        assert_eq!(noted.messages, continued.messages[..noted.messages.len()]);
+    }
+}

@@ -1,13 +1,13 @@
 use super::history::{History, MessageKind, notice_kind};
-use super::view::{AGENT_CHAT_ROWS, draw_agent_chat_frame};
+use super::view::{AGENT_CHAT_ROWS, AgentChatFrame, draw_agent_chat_frame};
 use super::{
-    AttachedTerminal, Composer, TerminalError, TerminalInput, TerminalMode, TerminalNotice,
-    dialog_area, draw_history_above,
+    AttachedTerminal, Composer, ComposerEdit, TerminalError, TerminalInput, TerminalMode,
+    TerminalNotice, dialog_area, draw_history_above,
 };
 use crate::presentation::{
     AgentTarget, AgentTranscript, Appended, TranscriptPart, agent_targets, run_targets,
 };
-use arany::{AgentRunId, RunId, SessionId, SessionView};
+use arany::{AgentRunId, ChildSteeringTarget, RunId, RunSteering, SessionId, SessionView};
 use std::io;
 
 const MAX_CHOICE_BYTES: usize = 16;
@@ -22,6 +22,11 @@ const INVALID_CHOICE: &str = "Invalid agent choice; type a number, n, p or q";
 pub enum AgentChatInput {
     // The input keeps its ordinary meaning.
     Pass,
+    ChildMessage {
+        target: ChildSteeringTarget,
+        text: String,
+    },
+    ChildEdited(ChildSteeringTarget),
     Handled,
     // The primary chat owns input again; the caller redraws it.
     Returned,
@@ -37,7 +42,79 @@ pub enum AgentChatFollow {
     Closed(&'static str),
 }
 
-// A read-only transcript fed by committed Events; the primary keeps its History, draft and anchors.
+pub(super) struct ChildDraft {
+    target: ChildSteeringTarget,
+    composer: Composer,
+    offered: Option<ChildOffer>,
+    notice: Option<String>,
+}
+
+struct ChildOffer {
+    text: String,
+    seen: usize,
+    state: ChildOfferState,
+}
+
+enum ChildOfferState {
+    Waiting,
+    Unknown,
+}
+
+impl ChildDraft {
+    fn acknowledge(&mut self, view: &SessionView) -> bool {
+        let Some(offer) = &self.offered else {
+            return false;
+        };
+        let agent = (view.id == self.target.session_id)
+            .then(|| {
+                view.runs
+                    .iter()
+                    .find(|run| run.id == self.target.run_id)
+                    .and_then(|run| {
+                        run.agents
+                            .iter()
+                            .find(|agent| agent.id == self.target.agent_run_id)
+                    })
+            })
+            .flatten();
+        let Some(agent) = agent.filter(|agent| {
+            agent
+                .steering_notes
+                .get(offer.seen..)
+                .is_some_and(|notes| notes.contains(&offer.text))
+        }) else {
+            return false;
+        };
+        if self.composer.text() == offer.text {
+            self.composer.clear();
+        }
+        self.notice = Some(format!(
+            "Steering note recorded for child {}",
+            agent.ordinal
+        ));
+        self.offered = None;
+        true
+    }
+}
+
+fn editable_child(view: &SessionView, target: ChildSteeringTarget) -> bool {
+    view.id == target.session_id
+        && view.runs.last().is_some_and(|run| {
+            run.id == target.run_id
+                && run.status == arany::RunStatus::Active
+                && run.workers.stop.is_none()
+                && run.agents.iter().any(|agent| {
+                    agent.id == target.agent_run_id
+                        && agent.role == arany::AgentRole::Child
+                        && agent.status == arany::AgentStatus::Active
+                })
+                && view.goals.iter().any(|goal| {
+                    goal.status == arany::GoalStatus::Running && goal.active_run == Some(run.id)
+                })
+        })
+}
+
+// A transcript fed by committed Events; the primary keeps its History, draft and anchors.
 pub(super) struct AgentChat {
     session: SessionId,
     run: RunId,
@@ -52,6 +129,8 @@ pub(super) struct AgentChat {
     shown: bool,
     choice: String,
     invalid: bool,
+    editable: bool,
+    last_child_notice: Option<String>,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -90,6 +169,14 @@ pub(super) fn agent_key(
 }
 
 impl AgentChat {
+    fn target(&self) -> Option<ChildSteeringTarget> {
+        (self.selected != 0).then(|| ChildSteeringTarget {
+            session_id: self.session,
+            run_id: self.run,
+            agent_run_id: self.targets[self.selected].id,
+        })
+    }
+
     fn label(&self) -> &str {
         self.transcript
             .as_ref()
@@ -106,7 +193,10 @@ impl AgentChat {
         }
         let id = self.targets.get(self.selected)?.id;
         let fresh = AgentTranscript::from_session(view, self.run, id)?;
-        let changed = !fresh.same_display(shown);
+        let editable = self
+            .target()
+            .is_some_and(|target| editable_child(view, target));
+        let changed = !fresh.same_display(shown) || self.editable != editable;
         self.transcript = Some(fresh);
         Some(changed)
     }
@@ -134,7 +224,11 @@ impl AgentChat {
     // Lines for the first linear print of this view.
     fn linear_lines(&mut self) -> Vec<String> {
         if let Some(transcript) = &self.transcript {
-            return transcript.linear_lines(&mut self.appended);
+            let mut lines = transcript.linear_lines(&mut self.appended);
+            if self.editable {
+                lines[0] = format!("Viewing {} (message)", transcript.label);
+            }
+            return lines;
         }
         if !self.listing {
             return vec![PRIMARY_LINE.into()];
@@ -168,7 +262,17 @@ impl AttachedTerminal {
         else {
             return Ok(AgentChatFollow::Redraw);
         };
-        match chat.refresh(view) {
+        let was_editable = chat.editable;
+        let refreshed = chat.refresh(view);
+        chat.editable = chat
+            .target()
+            .is_some_and(|target| editable_child(view, target));
+        if refreshed.is_some() && was_editable != chat.editable {
+            self.cancel_clipboard_paste();
+            self.admit_agent_chat(view).await?;
+            return Ok(AgentChatFollow::Redraw);
+        }
+        match refreshed {
             Some(true) => Ok(AgentChatFollow::Redraw),
             Some(false) => Ok(AgentChatFollow::Unchanged),
             None => {
@@ -185,6 +289,7 @@ impl AttachedTerminal {
         input: TerminalInput,
         composer: &Composer,
     ) -> Result<AgentChatInput, TerminalError> {
+        self.primary_draft_bytes = composer.text().len();
         if self.agent_chat.is_none() {
             if !matches!(
                 input,
@@ -214,11 +319,16 @@ impl AttachedTerminal {
                 self.rearm_agent_chat(view).await
             }
             TerminalInput::Resize => self.rearm_agent_chat(view).await,
-            TerminalInput::Paste => {
-                let _ = self.take_paste();
-                Ok(AgentChatInput::Handled)
+            TerminalInput::Paste | TerminalInput::ClipboardPaste | TerminalInput::Submit => {
+                self.edit_child(view, input).await
             }
             TerminalInput::AgentNext | TerminalInput::AgentPrevious | TerminalInput::Escape => {
+                let empty = self
+                    .selected_child_draft()
+                    .is_none_or(|draft| draft.composer.is_empty());
+                if input != TerminalInput::Escape && (!empty || self.clipboard.is_some()) {
+                    return Ok(AgentChatInput::Handled);
+                }
                 self.navigate(view, input, true).await
             }
             TerminalInput::PageUp
@@ -240,8 +350,7 @@ impl AttachedTerminal {
                 self.draw_agent_chat(view, None)?;
                 Ok(AgentChatInput::Handled)
             }
-            // The composer is disabled: text, Enter and other keys neither edit nor submit.
-            _ => Ok(AgentChatInput::Handled),
+            _ => self.edit_child(view, input).await,
         }
     }
 
@@ -340,6 +449,27 @@ impl AttachedTerminal {
             self.arm_dialog().await?;
             return Ok(AgentChatInput::Notice(MISSING_AGENT));
         };
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: run,
+            agent_run_id: target.id,
+        };
+        let editable = selected != 0 && editable_child(view, target);
+        if editable && !self.child_drafts.iter().any(|draft| draft.target == target) {
+            self.child_drafts
+                .retain(|draft| !draft.composer.is_empty() || draft.offered.is_some());
+            if self.child_drafts.len() == 8 {
+                return Ok(AgentChatInput::Notice(
+                    "Eight child drafts are retained; clear one before opening another message",
+                ));
+            }
+            self.child_drafts.push(ChildDraft {
+                target,
+                composer: Composer::text_only(),
+                offered: None,
+                notice: None,
+            });
+        }
         self.cancel_clipboard_paste();
         self.agent_chat = Some(AgentChat {
             session: view.id,
@@ -353,18 +483,31 @@ impl AttachedTerminal {
             shown: false,
             choice: String::new(),
             invalid: false,
+            editable,
+            last_child_notice: None,
         });
         self.rearm_agent_chat(view).await
     }
 
-    // Draws unarmed, discards input read before this view existed, then draws armed.
+    // Discards input read before this view existed.
+    async fn admit_agent_chat(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        self.begin_dialog();
+        self.draw_agent_chat(view, None)?;
+        self.arm_dialog().await?;
+        let bytes = if self.linear.is_some() {
+            0
+        } else {
+            self.selected_child_draft()
+                .map_or(0, |draft| draft.composer.text().len())
+        };
+        self.restore_draft_input(bytes)
+    }
+
     async fn rearm_agent_chat(
         &mut self,
         view: &SessionView,
     ) -> Result<AgentChatInput, TerminalError> {
-        self.begin_dialog();
-        self.draw_agent_chat(view, None)?;
-        self.arm_dialog().await?;
+        self.admit_agent_chat(view).await?;
         self.draw_agent_chat(view, None)?;
         Ok(AgentChatInput::Handled)
     }
@@ -374,11 +517,13 @@ impl AttachedTerminal {
         // Keys meant for the child view must not reach the primary draft.
         self.begin_dialog();
         self.arm_dialog().await?;
+        self.restore_draft_input(self.primary_draft_bytes)?;
         Ok(AgentChatInput::Returned)
     }
 
     // Closes the view without input admission, as when Tool approval preempts it.
     pub(super) fn end_agent_chat(&mut self) -> Result<(), TerminalError> {
+        self.cancel_clipboard_paste();
         let Some(chat) = self.agent_chat.take() else {
             return Ok(());
         };
@@ -393,6 +538,200 @@ impl AttachedTerminal {
         Ok(())
     }
 
+    fn selected_child_draft(&self) -> Option<&ChildDraft> {
+        let target = self.agent_chat.as_ref()?.target()?;
+        self.child_drafts
+            .iter()
+            .find(|draft| draft.target == target)
+    }
+
+    fn selected_child_draft_mut(&mut self) -> Option<&mut ChildDraft> {
+        let target = self.agent_chat.as_ref()?.target()?;
+        self.child_drafts
+            .iter_mut()
+            .find(|draft| draft.target == target)
+    }
+
+    pub fn child_note_feedback(
+        &mut self,
+        target: ChildSteeringTarget,
+        notice: String,
+        offered: Option<(String, usize)>,
+    ) {
+        if let Some(draft) = self
+            .child_drafts
+            .iter_mut()
+            .find(|draft| draft.target == target)
+        {
+            draft.notice = Some(notice);
+            if let Some(offered) = offered {
+                draft.offered = Some(ChildOffer {
+                    text: offered.0,
+                    seen: offered.1,
+                    state: ChildOfferState::Waiting,
+                });
+            }
+        }
+    }
+
+    pub fn withdraw_child_offer(&mut self, target: ChildSteeringTarget, steering: &RunSteering) {
+        if let Some(draft) = self
+            .child_drafts
+            .iter_mut()
+            .find(|draft| draft.target == target)
+            && draft.offered.is_some()
+        {
+            let withdrawn = steering.withdraw_child_note(target).is_some();
+            if withdrawn || draft.composer.is_empty() {
+                draft.offered = None;
+            } else if let Some(offer) = &mut draft.offered {
+                offer.state = ChildOfferState::Unknown;
+            }
+            draft.notice = Some(
+                if withdrawn {
+                    "Steering note withdrawn; child draft retained"
+                } else {
+                    "Steering note outcome unknown; check child history; draft retained"
+                }
+                .into(),
+            );
+        }
+    }
+
+    pub fn restore_selected_draft_input(
+        &mut self,
+        primary_bytes: usize,
+    ) -> Result<(), TerminalError> {
+        let bytes = if self.agent_chat.is_some() {
+            if self.linear.is_some() {
+                0
+            } else {
+                self.selected_child_draft()
+                    .map_or(0, |draft| draft.composer.text().len())
+            }
+        } else {
+            primary_bytes
+        };
+        self.restore_draft_input(bytes)
+    }
+
+    pub fn child_notes_pending(&self) -> bool {
+        self.child_drafts
+            .iter()
+            .any(|draft| draft.offered.is_some())
+    }
+
+    pub fn settle_child_notes(
+        &mut self,
+        view: &SessionView,
+        steering: &RunSteering,
+        stopped: bool,
+    ) -> bool {
+        let mut changed = false;
+        for draft in &mut self.child_drafts {
+            if draft.acknowledge(view) {
+                changed = true;
+                continue;
+            }
+            if draft.offered.is_some() && (stopped || !editable_child(view, draft.target)) {
+                let withdrawn = steering.withdraw_child_note(draft.target).is_some();
+                if withdrawn {
+                    draft.offered = None;
+                } else if let Some(offer) = &mut draft.offered {
+                    offer.state = ChildOfferState::Unknown;
+                }
+                let notice = if withdrawn {
+                    "Note not delivered; child draft retained"
+                } else {
+                    "Steering note outcome unknown; check child history; draft retained"
+                };
+                changed |= draft.notice.as_deref() != Some(notice);
+                draft.notice = Some(notice.into());
+            }
+        }
+        changed
+    }
+
+    async fn edit_child(
+        &mut self,
+        view: &SessionView,
+        input: TerminalInput,
+    ) -> Result<AgentChatInput, TerminalError> {
+        let Some(target) = self.agent_chat.as_ref().and_then(AgentChat::target) else {
+            return Ok(AgentChatInput::Handled);
+        };
+        let editable = editable_child(view, target);
+        if !editable {
+            if matches!(input, TerminalInput::Backspace | TerminalInput::Delete)
+                && let Some(draft) = self.selected_child_draft_mut()
+            {
+                draft.composer.clear();
+                return Ok(AgentChatInput::ChildEdited(target));
+            }
+            if input == TerminalInput::Paste {
+                let _ = self.take_paste();
+            }
+            return Ok(AgentChatInput::Notice(
+                "This child is read-only; draft retained",
+            ));
+        }
+        if input == TerminalInput::ClipboardPaste {
+            return Ok(match self.request_clipboard_paste() {
+                Ok(()) => AgentChatInput::Handled,
+                Err(text) => AgentChatInput::Notice(text),
+            });
+        }
+        if input == TerminalInput::Submit {
+            let draft = self.selected_child_draft().expect("editable child draft");
+            return Ok(if let Some(offer) = &draft.offered {
+                AgentChatInput::Notice(match offer.state {
+                    ChildOfferState::Waiting => "Note waiting for this child's next step",
+                    ChildOfferState::Unknown => {
+                        "Steering note outcome unknown; check child history; draft retained"
+                    }
+                })
+            } else {
+                AgentChatInput::ChildMessage {
+                    target,
+                    text: draft.composer.text().to_owned(),
+                }
+            });
+        }
+        let paste = if input == TerminalInput::Paste {
+            match self.take_paste() {
+                Ok(text) => Some(text),
+                Err(text) => return Ok(AgentChatInput::Notice(text)),
+            }
+        } else {
+            None
+        };
+        let draft = self
+            .selected_child_draft_mut()
+            .expect("editable child draft");
+        let before = draft.composer.text().to_owned();
+        let edit = match paste {
+            Some(text) => match draft.composer.insert_paste(&text) {
+                Ok(edit) => edit,
+                Err(text) => return Ok(AgentChatInput::Notice(text)),
+            },
+            None => draft.composer.apply(input),
+        };
+        let bytes = draft.composer.text().len();
+        let edited = before != draft.composer.text();
+        if edited && draft.offered.is_none() {
+            draft.notice = None;
+        }
+        self.restore_draft_input(bytes)?;
+        self.draw_agent_chat(view, None)?;
+        Ok(if edit == ComposerEdit::AtCapacity {
+            AgentChatInput::Notice("Child draft exceeds 8 KiB; text retained")
+        } else if edited {
+            AgentChatInput::ChildEdited(target)
+        } else {
+            AgentChatInput::Handled
+        })
+    }
+
     async fn linear_agent_input(
         &mut self,
         view: &SessionView,
@@ -401,7 +740,16 @@ impl AttachedTerminal {
         let chat = self.agent_chat.as_mut().expect("open agent chat");
         match input {
             TerminalInput::Character(character) => {
-                if character.is_ascii_graphic() && chat.choice.len() < MAX_CHOICE_BYTES {
+                let message = chat.choice.starts_with("/message ");
+                if !character.is_control()
+                    && (message || character.is_ascii())
+                    && chat.choice.len() + character.len_utf8()
+                        <= if message {
+                            super::composer::MAX_DRAFT_BYTES + 9
+                        } else {
+                            MAX_CHOICE_BYTES
+                        }
+                {
                     chat.choice.push(character);
                 } else {
                     chat.invalid = true;
@@ -414,9 +762,53 @@ impl AttachedTerminal {
             }
             TerminalInput::Submit => {
                 let choice = std::mem::take(&mut chat.choice);
+                let invalid = std::mem::take(&mut chat.invalid);
+                if let Some(text) = choice.strip_prefix("/message ") {
+                    if invalid
+                        || text.trim().is_empty()
+                        || text.len() > super::composer::MAX_DRAFT_BYTES
+                    {
+                        return Ok(AgentChatInput::Notice(
+                            "Child message is empty or exceeds 8 KiB; draft retained",
+                        ));
+                    }
+                    let target = chat.target();
+                    let Some(target) = target.filter(|target| editable_child(view, *target)) else {
+                        return Ok(AgentChatInput::Notice(
+                            "This child is read-only; message not offered",
+                        ));
+                    };
+                    let draft = self
+                        .child_drafts
+                        .iter_mut()
+                        .find(|draft| draft.target == target)
+                        .expect("editable child draft");
+                    if draft.offered.is_some()
+                        || (!draft.composer.is_empty() && draft.composer.text() != text)
+                    {
+                        return Ok(AgentChatInput::Notice(
+                            "Child draft retained; /clear clears it before a different message",
+                        ));
+                    }
+                    if draft.composer.is_empty() {
+                        draft.composer.insert_paste(text).expect("validated line");
+                    }
+                    return Ok(AgentChatInput::ChildMessage {
+                        target,
+                        text: text.to_owned(),
+                    });
+                }
+                if choice == "/clear" && !invalid {
+                    if let Some(draft) = self.selected_child_draft_mut() {
+                        draft.composer.clear();
+                        return Ok(AgentChatInput::ChildEdited(draft.target));
+                    }
+                    return Ok(AgentChatInput::Handled);
+                }
+                let chat = self.agent_chat.as_mut().expect("open agent chat");
                 let count = chat.targets.len();
                 let selected = chat.selected;
-                let next = if std::mem::take(&mut chat.invalid) {
+                let next = if invalid {
                     None
                 } else {
                     match choice.as_str() {
@@ -486,6 +878,13 @@ impl AttachedTerminal {
         view: &SessionView,
         notice: Option<TerminalNotice<'_>>,
     ) -> Result<(), TerminalError> {
+        let mut acknowledged = false;
+        for draft in &mut self.child_drafts {
+            acknowledged |= draft.acknowledge(view);
+        }
+        if acknowledged {
+            self.restore_selected_draft_input(self.primary_draft_bytes)?;
+        }
         let (history_notice, transient) = match notice {
             Some(TerminalNotice::History(text)) => (Some(text), None),
             Some(TerminalNotice::Transient(text)) => (None, Some(text)),
@@ -496,11 +895,38 @@ impl AttachedTerminal {
             .as_mut()
             .expect("open agent chat")
             .refresh(view);
+        let child_notice = self
+            .selected_child_draft()
+            .and_then(|draft| draft.notice.clone());
+        let retained = self
+            .selected_child_draft()
+            .is_some_and(|draft| !draft.composer.is_empty());
         if let Some(linear) = &mut self.linear {
             let chat = self.agent_chat.as_mut().expect("open agent chat");
-            let lines = chat.linear_draw_lines();
-            if !chat.shown || !lines.is_empty() || history_notice.is_some() {
-                linear.write_agent_chat(&mut io::stderr(), &lines, history_notice, true)?;
+            let mut lines = chat.linear_draw_lines();
+            if !chat.shown && chat.editable {
+                lines.push(format!(
+                    "Message {} with /message TEXT; /clear clears its retained draft",
+                    chat.label()
+                ));
+            }
+            if !chat.shown && retained {
+                lines.push("Child draft retained; /clear clears it".into());
+            }
+            let fresh_notice = child_notice
+                .as_ref()
+                .filter(|notice| chat.last_child_notice.as_ref() != Some(notice));
+            if let Some(notice) = fresh_notice {
+                lines.push(format!("Notice: {notice}"));
+                chat.last_child_notice = Some(notice.clone());
+            }
+            if !chat.shown || !lines.is_empty() || history_notice.is_some() || transient.is_some() {
+                linear.write_agent_chat(
+                    &mut io::stderr(),
+                    &lines,
+                    history_notice.or(transient),
+                    true,
+                )?;
                 chat.shown = true;
             }
             return Ok(());
@@ -533,6 +959,14 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let armed = self.dialog_armed;
+        let target = self.agent_chat.as_ref().and_then(AgentChat::target);
+        let draft = target
+            .and_then(|target| {
+                self.child_drafts
+                    .iter()
+                    .find(|draft| draft.target == target)
+            })
+            .map(|draft| &draft.composer);
         let chat = self.agent_chat.as_mut().expect("open agent chat");
         if !classic && let Some(transcript) = &chat.transcript {
             // Notices follow the rows they describe, so History takes the new records first.
@@ -555,7 +989,19 @@ impl AttachedTerminal {
             if !classic && let Some(transcript) = &chat.transcript {
                 draw_history_above(frame, &mut chat.history, &transcript.view, area.y, palette);
             }
-            draw_agent_chat_frame(frame, area, &label, armed, transient, !classic, palette);
+            draw_agent_chat_frame(
+                frame,
+                area,
+                AgentChatFrame {
+                    label: &label,
+                    draft,
+                    editable: chat.editable,
+                },
+                armed,
+                transient.or(child_notice.as_deref()),
+                !classic,
+                palette,
+            );
         })?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
@@ -564,7 +1010,7 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    // Classic appends whole records below a read-only boundary and never repaints scrollback.
+    // Classic appends whole records below the agent boundary and never repaints scrollback.
     fn write_native_agent_chat(&mut self) -> Result<(), TerminalError> {
         let chat = self.agent_chat.as_mut().expect("open agent chat");
         let Some(label) = chat.transcript.as_ref().map(|t| t.label.clone()) else {
@@ -574,11 +1020,19 @@ impl AttachedTerminal {
         if !chat.shown {
             records.push((
                 MessageKind::Notice,
-                format!("Viewing {label} (read-only); Esc returns to primary"),
+                format!(
+                    "Viewing {label} ({}); Esc returns to primary",
+                    if chat.editable {
+                        "message"
+                    } else {
+                        "read-only"
+                    }
+                ),
             ));
         }
         records.extend(chat.unappended().into_iter().map(|part| match part {
             TranscriptPart::Assignment(text) => (MessageKind::Assignment, text.to_owned()),
+            TranscriptPart::SteeringNote(text) => (MessageKind::SteeringNote, text.to_owned()),
             TranscriptPart::Tool(text) => (MessageKind::Tool, text),
             TranscriptPart::Result(text) => (MessageKind::AgentResult, text.to_owned()),
             TranscriptPart::Notice(text) => {
@@ -597,6 +1051,272 @@ impl AttachedTerminal {
 mod tests {
     use super::*;
 
+    fn active_child_view() -> SessionView {
+        let mut view = crate::presentation::team_view();
+        let workspace_identity = arany::WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        };
+        let facts = [
+            arany::Event::SessionStarted {
+                title: "team".into(),
+                workspace_identity,
+            },
+            arany::Event::GoalStarted {
+                goal_id: arany::GoalId::new(),
+                objective: "team".into(),
+                workspace_identity,
+                budget: Default::default(),
+                resource_settings: Default::default(),
+                phase: arany::GoalPhase::Implementation,
+                autonomous: false,
+                continues: None,
+            },
+        ];
+        let events: Vec<_> = facts
+            .into_iter()
+            .zip(1..)
+            .map(|(event, sequence)| arany::EventEnvelope {
+                session_id: view.id,
+                sequence,
+                run_id: None,
+                agent_run_id: None,
+                event,
+                created_at_ms: 0,
+            })
+            .collect();
+        view.goals = SessionView::replay(view.id, &events)
+            .unwrap()
+            .unwrap()
+            .goals;
+        view.goals[0].status = arany::GoalStatus::Running;
+        view.goals[0].active_run = Some(view.runs[0].id);
+        view.goals[0].run_ids.push(view.runs[0].id);
+        view.runs[0].status = arany::RunStatus::Active;
+        for agent in &mut view.runs[0].agents {
+            agent.status = arany::AgentStatus::Active;
+            agent.result = None;
+            agent.summary = None;
+        }
+        view
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn linear_child_message_preserves_navigation_and_prints_commit_once() {
+        async fn line(
+            terminal: &mut AttachedTerminal,
+            view: &SessionView,
+            text: &str,
+        ) -> AgentChatInput {
+            for ch in text.chars() {
+                terminal
+                    .linear_agent_input(view, TerminalInput::Character(ch))
+                    .await
+                    .unwrap();
+            }
+            terminal
+                .linear_agent_input(view, TerminalInput::Submit)
+                .await
+                .unwrap()
+        }
+        let mut view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: run,
+            agent_run_id: targets[2].id,
+        };
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(Some(
+            super::super::linear::LinearState::new("screen-reader"),
+        ));
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 2,
+            transcript: AgentTranscript::from_session(&view, run, target.agent_run_id),
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: false,
+            shown: false,
+            choice: String::new(),
+            invalid: false,
+            editable: true,
+            last_child_notice: None,
+        });
+        terminal.child_drafts.push(ChildDraft {
+            target,
+            composer: Composer::text_only(),
+            offered: None,
+            notice: None,
+        });
+        assert!(matches!(
+            line(&mut terminal, &view, "/message ").await,
+            AgentChatInput::Notice(_)
+        ));
+        assert!(matches!(
+            line(
+                &mut terminal,
+                &view,
+                &format!(
+                    "/message {}",
+                    "x".repeat(super::super::composer::MAX_DRAFT_BYTES + 1)
+                )
+            )
+            .await,
+            AgentChatInput::Notice(_)
+        ));
+        assert_eq!(terminal.agent_chat.as_ref().unwrap().selected, 2);
+        let action = line(&mut terminal, &view, "/message /literal").await;
+        assert!(
+            matches!(action, AgentChatInput::ChildMessage { target: id, text } if id == target && text == "/literal")
+        );
+        assert_eq!(terminal.child_drafts[0].composer.text(), "/literal");
+        terminal.child_note_feedback(target, "waiting".into(), Some(("/literal".into(), 0)));
+        terminal.withdraw_child_offer(target, &RunSteering::new());
+        assert!(matches!(
+            terminal
+                .edit_child(&view, TerminalInput::Submit)
+                .await
+                .unwrap(),
+            AgentChatInput::Notice(
+                "Steering note outcome unknown; check child history; draft retained"
+            )
+        ));
+
+        let mut output = Vec::new();
+        let mut state = super::super::linear::LinearState::new("screen-reader");
+        let before = terminal.agent_chat.as_mut().unwrap().linear_draw_lines();
+        state
+            .write_agent_chat(&mut output, &before, None, true)
+            .unwrap();
+        terminal.agent_chat.as_mut().unwrap().shown = true;
+        view.runs[0].agents[2]
+            .steering_notes
+            .push("/literal".into());
+        view.last_sequence += 1;
+        terminal.agent_chat.as_mut().unwrap().refresh(&view);
+        let committed = terminal.agent_chat.as_mut().unwrap().linear_draw_lines();
+        state
+            .write_agent_chat(
+                &mut output,
+                &committed,
+                Some("Steering note recorded for child 2"),
+                true,
+            )
+            .unwrap();
+        assert_eq!(
+            committed,
+            ["New activity from child 2:", "Steering note:", "  /literal"]
+        );
+        assert!(
+            terminal
+                .agent_chat
+                .as_mut()
+                .unwrap()
+                .linear_draw_lines()
+                .is_empty()
+        );
+        let output = String::from_utf8(output).unwrap();
+        assert_eq!(output.matches("Steering note:").count(), 1);
+        assert!(output.contains("number opens, n next, p previous, q returns to primary:"));
+        assert!(!output.contains(['\r', '\u{1b}']));
+        view.runs[0].agents[2].status = arany::AgentStatus::Finished;
+        assert!(matches!(
+            line(&mut terminal, &view, "/message other").await,
+            AgentChatInput::Notice(_)
+        ));
+        assert_eq!(terminal.child_drafts[0].composer.text(), "/literal");
+        assert!(
+            matches!(line(&mut terminal, &view, "/clear").await, AgentChatInput::ChildEdited(id) if id == target)
+        );
+        assert!(terminal.child_drafts[0].composer.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_message_input_stays_with_its_armed_target() {
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        let mut view = crate::presentation::team_view();
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: view.runs[0].id,
+            agent_run_id: view.runs[0].agents[2].id,
+        };
+        let sibling = ChildSteeringTarget {
+            agent_run_id: view.runs[0].agents[1].id,
+            ..target
+        };
+        let mut primary = Composer::default();
+        primary.restore_prompt("primary draft").unwrap();
+        primary.apply(TerminalInput::Left);
+        let caret = primary.cursor_byte_offset();
+        let mut composer = Composer::text_only();
+        composer.restore_prompt("/literal").unwrap();
+        assert!(!composer.has_open_menu());
+        assert!(composer.file_query().is_none());
+        assert!(matches!(
+            composer.submission(),
+            Ok(super::super::Submission::Objective("/literal"))
+        ));
+        composer.apply(TerminalInput::Tab);
+        assert_eq!(composer.text(), "/literal");
+        terminal.child_drafts.push(ChildDraft {
+            target,
+            composer,
+            offered: None,
+            notice: None,
+        });
+        terminal.child_note_feedback(target, "waiting".into(), Some(("/literal".into(), 0)));
+        view.runs[0].agents[1]
+            .steering_notes
+            .push("/literal".into());
+        assert!(terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        assert_eq!(
+            terminal.child_drafts[0].composer.text(),
+            "/literal",
+            "sibling cannot acknowledge target"
+        );
+        assert!(
+            terminal.child_drafts[0]
+                .notice
+                .as_ref()
+                .unwrap()
+                .contains("unknown")
+        );
+        view.runs[0].agents[2]
+            .steering_notes
+            .push("/literal".into());
+        assert!(terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        assert!(terminal.child_drafts[0].composer.is_empty());
+        assert_eq!(
+            terminal.child_drafts[0].notice.as_deref(),
+            Some("Steering note recorded for child 2")
+        );
+        assert!(!terminal.settle_child_notes(&view, &RunSteering::new(), false));
+        terminal.child_drafts[0]
+            .composer
+            .insert_paste("newer")
+            .unwrap();
+        terminal.child_note_feedback(target, "waiting".into(), Some(("older".into(), 1)));
+        view.runs[0].agents[2].steering_notes.push("older".into());
+        terminal.settle_child_notes(&view, &RunSteering::new(), false);
+        assert_eq!(terminal.child_drafts[0].composer.text(), "newer");
+        assert_eq!(primary.text(), "primary draft");
+        assert_eq!(primary.cursor_byte_offset(), caret);
+        assert!(!editable_child(&view, sibling));
+        terminal.child_note_feedback(
+            ChildSteeringTarget {
+                run_id: RunId::new(),
+                ..target
+            },
+            "stale".into(),
+            None,
+        );
+        assert_ne!(terminal.child_drafts[0].notice.as_deref(), Some("stale"));
+    }
+
     #[test]
     fn a_linear_listing_prints_once_across_redraws() {
         let view = crate::presentation::team_view();
@@ -613,6 +1333,8 @@ mod tests {
             shown: false,
             choice: String::new(),
             invalid: false,
+            editable: false,
+            last_child_notice: None,
         };
         let first = chat.linear_draw_lines();
         assert_eq!(first[0], "Agent chats in this Run:");

@@ -131,7 +131,7 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -141,6 +141,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("GoalPlanContractRecorded", 7),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
+    ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
@@ -347,6 +348,12 @@ pub enum Event {
     GoalSteeringNoteRecorded {
         goal_id: GoalId,
         run_id: RunId,
+        text: String,
+    },
+    AgentSteeringNoteRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
         text: String,
     },
     AssistantDisplayRecorded {
@@ -680,6 +687,7 @@ impl Event {
             Self::GoalContextCompacted { .. } => "GoalContextCompacted",
             Self::ToolResultsCleared { .. } => "ToolResultsCleared",
             Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
+            Self::AgentSteeringNoteRecorded { .. } => "AgentSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
@@ -723,7 +731,12 @@ impl Event {
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
-            Self::WorkerDataChunk {
+            Self::AgentSteeringNoteRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerDataChunk {
                 run_id,
                 agent_run_id,
                 ..
@@ -989,7 +1002,8 @@ impl Event {
                 covered_tool_count: *covered_tool_count,
                 record: record.clone(),
             }),
-            Self::GoalSteeringNoteRecorded { goal_id, text, .. } => {
+            Self::GoalSteeringNoteRecorded { goal_id, text, .. }
+            | Self::AgentSteeringNoteRecorded { goal_id, text, .. } => {
                 serialize(&GoalSteeringNotePayload {
                     goal_id: *goal_id,
                     text: text.clone(),
@@ -1317,6 +1331,15 @@ impl Event {
                     text: data.text,
                 }
             }
+            "AgentSteeringNoteRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: GoalSteeringNotePayload = parse(payload)?;
+                Self::AgentSteeringNoteRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: data.text,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
                 let data: ToolStartedPayload = parse(payload)?;
                 Self::ToolStarted {
@@ -1395,6 +1418,7 @@ impl Event {
             | "GoalContextCompacted"
             | "ToolResultsCleared"
             | "GoalSteeringNoteRecorded"
+            | "AgentSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"

@@ -528,6 +528,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: *grant,
                 tools: Vec::new(),
                 status: AgentStatus::Active,

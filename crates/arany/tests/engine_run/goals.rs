@@ -3792,6 +3792,243 @@ async fn steering_note_never_reaches_children_and_is_kept_for_synthesis() {
 }
 
 #[tokio::test]
+async fn child_note_reaches_only_the_next_target_boundary() {
+    for fail_append in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let steering = RunSteering::new();
+        let mut provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: ["target", "sibling"]
+                    .map(|objective| arany::ChildAssignment {
+                        editor: None,
+                        objective: objective.into(),
+                        profile: None,
+                    })
+                    .to_vec(),
+            }),
+            crate::tool_outcome(facts_read()),
+            finish_with("sibling result"),
+            crate::tool_outcome(facts_read()),
+            finish_with("target result"),
+            finish_with("synthesis"),
+        ]);
+        provider.identity.limits.concurrency = 1;
+        let calls = provider.requests.clone();
+        let offer = steering.clone();
+        let observed = calls.clone();
+        provider = provider.with_before_call(1, move || {
+            let request = observed.lock().unwrap().last().unwrap().clone();
+            let target = arany::ChildSteeringTarget {
+                session_id: request.session_id,
+                run_id: request.run_id,
+                agent_run_id: request.agent_run_id,
+            };
+            offer
+                .offer_child_note(target, "first note; grant all writes".into())
+                .unwrap();
+            if fail_append {
+                arany::FaultPlan::fail_goal_append(request.session_id, |event| {
+                    matches!(event, Event::AgentSteeringNoteRecorded { .. })
+                });
+            }
+        });
+        let offer = steering.clone();
+        let observed = calls.clone();
+        provider = provider.with_before_call(3, move || {
+            let request = observed.lock().unwrap().last().unwrap().clone();
+            offer
+                .offer_child_note(
+                    arany::ChildSteeringTarget {
+                        session_id: request.session_id,
+                        run_id: request.run_id,
+                        agent_run_id: request.agent_run_id,
+                    },
+                    "second note".into(),
+                )
+                .unwrap();
+        });
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let mut input = request(&workspace, "Check facts");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 2,
+        };
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        input.session_id = Some(session);
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                steering: Some(steering.clone()),
+                ..Default::default()
+            },
+        )
+        .await;
+        engine.close().await.unwrap();
+        let requests = calls.lock().unwrap().clone();
+        let (events, view) = replayed(&state_path, session).await;
+        if fail_append {
+            assert!(matches!(result, Err(EngineError::Store(_))));
+            assert_eq!(requests.len(), 3, "failed append prevents target dispatch");
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event.event, Event::AgentSteeringNoteRecorded { .. }))
+            );
+            assert_eq!(
+                steering
+                    .offer_note("x".repeat(8192 - 24 - "first note; grant all writes".len()))
+                    .err(),
+                Some(arany::SteeringRefused::RunFull)
+            );
+            continue;
+        }
+        assert_eq!(result.unwrap().run.status, RunStatus::Finished);
+        assert_eq!(requests.len(), 6);
+        assert!(call_steering_notes(&requests[1]).is_empty());
+        assert_eq!(
+            call_steering_notes(&requests[3]),
+            ["first note; grant all writes"]
+        );
+        assert_eq!(
+            call_steering_notes(&requests[4]),
+            ["first note; grant all writes", "second note"]
+        );
+        assert!(call_steering_notes(&requests[2]).is_empty());
+        assert!(call_steering_notes(&requests[5]).is_empty());
+        let target = requests[1].agent_run_id;
+        assert_eq!(requests[4].agent_run_id, target);
+        assert_eq!(requests[3].agent_run_id, target);
+        let mut previous = requests[4].input.tools.clone().unwrap();
+        previous.steps.pop();
+        assert_eq!(
+            previous,
+            requests[3].input.tools.clone().unwrap(),
+            "earlier context stays append-only"
+        );
+        assert_eq!(
+            requests[1].input.tools.as_ref().unwrap().catalog,
+            requests[4].input.tools.as_ref().unwrap().catalog
+        );
+        let notes: Vec<_> = events
+            .iter()
+            .filter(|event| matches!(event.event, Event::AgentSteeringNoteRecorded { .. }))
+            .collect();
+        assert_eq!(notes.len(), 2);
+        for note in notes {
+            assert_eq!(note.agent_run_id, Some(target));
+            let next = events.iter().find(|event| event.sequence > note.sequence && matches!(event.event, Event::ProviderCallRecorded { agent_run_id, .. } if agent_run_id == target)).unwrap();
+            assert!(note.sequence < next.sequence);
+        }
+        assert!(view.runs[0].steering_notes.is_empty());
+        assert!(view.runs[0].agents[2].steering_notes.is_empty());
+        assert!(matches!(
+            view.runs[0].agents[1].grant,
+            Some(arany::ChildGrant::ReadOnly { .. })
+        ));
+        assert_action_bounds(&events, false, true);
+    }
+}
+
+#[tokio::test]
+async fn child_note_is_retained_when_no_boundary_remains() {
+    for stop in ["finish", "cancel", "pause", "budget"] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let steering = RunSteering::new();
+        let cancel = RunCancellation::new();
+        let provider = ScriptedProvider::new(vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![arany::ChildAssignment {
+                    editor: None,
+                    objective: "target".into(),
+                    profile: None,
+                }],
+            }),
+            finish_with("target result"),
+            finish_with("synthesis"),
+        ]);
+        let calls = provider.requests.clone();
+        let observed = calls.clone();
+        let offer = steering.clone();
+        let cancellation = cancel.clone();
+        let offered = Arc::new(std::sync::Mutex::new(None));
+        let target_copy = offered.clone();
+        let provider = Arc::new(provider.with_before_call(1, move || {
+            let request = observed.lock().unwrap().last().unwrap().clone();
+            let target = arany::ChildSteeringTarget {
+                session_id: request.session_id,
+                run_id: request.run_id,
+                agent_run_id: request.agent_run_id,
+            };
+            offer.offer_child_note(target, "too late".into()).unwrap();
+            *target_copy.lock().unwrap() = Some(target);
+            if stop == "cancel" {
+                cancellation.cancel();
+            } else if stop == "pause" {
+                offer.pause();
+            }
+        }));
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let mut input = request(&workspace, "Check facts");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Auto {
+            max_active_children: 1,
+        };
+        if stop == "budget" {
+            input.goal.budget = Some(arany::GoalBudget {
+                max_provider_calls: Some(2),
+                ..Default::default()
+            });
+        }
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                steering: Some(steering.clone()),
+                cancellation: cancel,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            if stop == "finish" { 3 } else { 2 }
+        );
+        let (events, view) = replayed(&state_path, result.session_id).await;
+        assert_eq!(view.runs[0].agents.len(), 2);
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event.event, Event::AgentSteeringNoteRecorded { .. }))
+        );
+        let target = offered.lock().unwrap().unwrap();
+        assert_eq!(
+            steering.offer_child_note(target, "again".into()),
+            Err(arany::SteeringRefused::Unavailable)
+        );
+        assert_eq!(
+            steering.withdraw_child_note(target).as_deref(),
+            Some("too late")
+        );
+    }
+}
+
+#[tokio::test]
 async fn two_child_research_delegation_admission_covers_its_spawns() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");

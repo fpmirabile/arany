@@ -126,7 +126,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
 };
 
 // Payload versions when migrations landed; older history is archived, never upgraded.
-const EVENT_FLOOR: [(&str, i64); 41] = [
+const EVENT_FLOOR: [(&str, i64); 42] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -136,6 +136,7 @@ const EVENT_FLOOR: [(&str, i64); 41] = [
     ("GoalPlanContractRecorded", 6),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
+    ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),

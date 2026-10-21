@@ -959,6 +959,25 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    let kind = "AgentSteeringNoteRecorded";
+    assert_eq!(
+        EVENT_FLOOR
+            .iter()
+            .find(|(name, _)| *name == kind)
+            .map(|(_, version)| *version),
+        Some(1)
+    );
+    let fixture = r#"{"goal_id":"01900000-0000-7000-8000-000000000001","text":"child note"}"#;
+    let current = crate::Event::decode(
+        kind,
+        1,
+        fixture,
+        Some(RunId::new()),
+        Some(AgentRunId::new()),
+    )
+    .unwrap();
+    assert_eq!(current.payload().unwrap(), fixture);
+    assert!(REGISTRY.event_step(kind, 0).is_none());
     // History older than the glob Tool cannot name it, so such a row is forged and refuses.
     let forged = GLOB_TOOLSTARTED.replace(
         r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,

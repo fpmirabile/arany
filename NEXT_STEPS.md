@@ -89,6 +89,8 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
 - On native Terminal.app, iTerm2, a Linux VTE or xterm emulator and tmux, record the bytes Option or Alt+Left/Right send (for example `ESC [1;3D` or `ESC b`), then confirm they switch [agent chats](./docs/specs/terminal.md#agent-chats) only on an empty composer while a draft keeps them, and review the read-only view, its live `New activity from child N:` lines, `/transcript agents` and the [`/agents` picker](./docs/specs/terminal.md#agent-picker)'s search, idle group and `o` choice with real screen readers. Synthetic decoder rows and the Linux PTY journey establish none of these claims.
 
+Child messaging needs native macOS Option-key/PTY and human assistive-technology evidence: open a running child, offer literal text, observe waiting then committed recording, return with the primary draft intact, and verify final-call non-delivery retains the child draft without another call. The [terminal](./docs/specs/terminal.md#agent-chats) and [Goal](./docs/specs/goals.md#steering-notes-and-pause) contracts own the expected behavior.
+
 ## ChatGPT coding loop: owner-run live checks
 
 Owner: use a ChatGPT-plan account with explicit usage consent, a new Session and attached chat in a trusted disposable project. Follow [Provider encoding](./docs/specs/provider.md#structured-outcomes-and-tool-encoding), [Tools](./docs/specs/tools.md#limits-and-failure-behavior) and [terminal output](./docs/specs/terminal.md#conversation-progress-and-history). Synthetic fixtures do not establish live or native support.
