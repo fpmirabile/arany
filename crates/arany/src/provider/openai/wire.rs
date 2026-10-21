@@ -269,7 +269,13 @@ fn tool_failure_stage(
             Stage::OutcomeToolTextSize
         }
         ToolCall::Write { content, .. } if content.len() > 8 * 1024 => Stage::OutcomeToolTextSize,
-        ToolCall::Search { query, .. } if query.is_empty() || query.len() > 512 => {
+        ToolCall::Search { query, include, .. }
+            if query.is_empty()
+                || query.len() > 512
+                || include
+                    .as_ref()
+                    .is_some_and(|glob| glob.is_empty() || glob.len() > 512) =>
+        {
             Stage::OutcomeToolTextSize
         }
         ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. }

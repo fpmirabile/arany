@@ -343,12 +343,35 @@ pub(crate) fn narrows(original: &ToolCall, updated: &ToolCall) -> bool {
         (List { path }, List { path: new_path })
         | (GitStatus { path }, GitStatus { path: new_path }) => within(path, new_path),
         (
-            Search { path, query },
+            Search {
+                path,
+                query,
+                regex,
+                include,
+                case_sensitive,
+                offset,
+                limit,
+            },
             Search {
                 path: new_path,
                 query: new_query,
+                regex: new_regex,
+                include: new_include,
+                case_sensitive: new_case,
+                offset: new_offset,
+                limit: new_limit,
             },
-        ) => query == new_query && within(path, new_path),
+        ) => {
+            // A filtered subtree renumbers its rows, so only an unpaged subtree narrows.
+            (query, regex, include, case_sensitive) == (new_query, new_regex, new_include, new_case)
+                && if path == new_path {
+                    new_offset >= offset
+                        && u64::from(*new_offset) + u64::from(*new_limit)
+                            <= u64::from(*offset) + u64::from(*limit)
+                } else {
+                    within(path, new_path) && *offset == 0 && *new_offset == 0 && new_limit <= limit
+                }
+        }
         (
             GitDiff {
                 path,

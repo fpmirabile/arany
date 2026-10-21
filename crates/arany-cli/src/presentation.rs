@@ -110,7 +110,30 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::ParseAgentDefinition { .. } => "Parse agent definition()".into(),
         ToolCall::List { path } => format!("List({path})"),
         ToolCall::Read { path, .. } => format!("Read({path})"),
-        ToolCall::Search { path, query } => format!("Search({query}, {path})"),
+        ToolCall::Search {
+            path,
+            query,
+            regex,
+            include,
+            case_sensitive,
+            offset,
+            ..
+        } => {
+            let mut options = String::new();
+            if *regex {
+                options.push_str(", regex");
+            }
+            if let Some(include) = include {
+                options.push_str(&format!(", include {include}"));
+            }
+            if !case_sensitive {
+                options.push_str(", ignore case");
+            }
+            if *offset > 0 {
+                options.push_str(&format!(", offset {offset}"));
+            }
+            format!("Search({query}, {path}{options})")
+        }
         ToolCall::Mkdir { path } => format!("Create folder({path})"),
         ToolCall::Write { path, .. } => format!("Write({path})"),
         ToolCall::Edit { path, .. } => format!("Edit({path})"),
@@ -2252,6 +2275,19 @@ mod peer_row_tests {
                 },
                 r#"{"text":"one\ntwo\n","truncated":true}"#,
                 "⏺ Read(src/界.rs)\n  ⎿ 2 lines (truncated)",
+            ),
+            (
+                ToolCall::Search {
+                    path: "src".into(),
+                    query: "fn \\w+".into(),
+                    regex: true,
+                    include: Some("**/*.rs".into()),
+                    case_sensitive: false,
+                    offset: 100,
+                    limit: 100,
+                },
+                r#"{"entries":[{"path":"src/a.rs","line":1,"text":"fn a"}],"limit":100,"may_be_truncated":true,"next_offset":101}"#,
+                "⏺ Search(fn \\w+, src, regex, include **/*.rs, ignore case, offset 100)\n  ⎿ 1 entry (truncated)",
             ),
             (
                 ToolCall::Skill {

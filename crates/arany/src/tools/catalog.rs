@@ -101,7 +101,7 @@ pub(crate) static ALL: [OperationFacts; 17] = [
         "search",
         Family::File,
         2,
-        "Search literal UTF-8 content in a Workspace file or directory. Use Read or an include for edit SHA-256.",
+        "Search UTF-8 lines in a Workspace file or directory; literal unless regex is true. Pages hold up to 100 matching lines in path and line order; continue from next_offset. For an edit SHA-256 use Read or a file include.",
     ),
     write_row(
         "mkdir",
@@ -255,8 +255,8 @@ pub(crate) fn git_operations() -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal UTF-8 content in a file or directory; use Read or an include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
-pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal UTF-8 content in a file or directory)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
+pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
 
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
@@ -476,6 +476,11 @@ mod tests {
             ToolCall::Search {
                 path: path(),
                 query: "q".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
             },
             ToolCall::Mkdir { path: path() },
             ToolCall::Write {

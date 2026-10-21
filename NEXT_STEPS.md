@@ -24,7 +24,7 @@ The goal: one normal engineering day in this repository (explore, multi-file edi
 7. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
 8. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
 9. **Git write workflow.** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
-10. **Tool ergonomics.** [Regex and glob Search beyond 64 rows](./planning/search-regex/README.md), a [Glob Tool](./planning/glob-tool/README.md), [larger Write/Edit](./planning/large-file-edits/README.md), MultiEdit, typed delete and move; parallel reads with Pursue item 10.
+10. **Tool ergonomics.** a [Glob Tool](./planning/glob-tool/README.md), [larger Write/Edit](./planning/large-file-edits/README.md), MultiEdit, typed delete and move; parallel reads with Pursue item 10.
 11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
 12. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
 13. **Terminal: live evidence.** Owner: run the [terminal checks](#terminal); remaining feature work is in [Terminal follow-ups](#terminal-follow-ups).

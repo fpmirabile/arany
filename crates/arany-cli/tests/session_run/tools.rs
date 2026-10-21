@@ -778,7 +778,12 @@ impl Provider for InProcessReads {
             1 => crate::tool_outcome(ToolCall::List { path: "src".into() }),
             _ => crate::tool_outcome(ToolCall::Search {
                 path: "src".into(),
-                query: "main".into(),
+                query: r"^INT \w+\(".into(),
+                regex: true,
+                include: Some("*.c".into()),
+                case_sensitive: false,
+                offset: 0,
+                limit: 2,
             }),
         };
         Ok(ProviderResponse {
@@ -852,6 +857,12 @@ async fn in_process_reads_are_attested_and_replay_after_exit_or_a_crash() {
         ));
         assert!(!observation.output.contains("secret-canary"));
         assert!(!observation.output.contains(".env"));
+        if matches!(tool.intent.call, ToolCall::Search { .. }) {
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&observation.output).unwrap(),
+                serde_json::json!({"entries":[{"path":"src/main.c","line":1,"text":"int main(void) { return 0; }"}],"limit":2,"may_be_truncated":false,"next_offset":null})
+            );
+        }
     }
 
     // A fresh read-only Store stands in for the next process.
@@ -1814,6 +1825,11 @@ async fn guard_failure_corpus_does_not_widen_paths_or_lose_effect_facts() {
     let search = |path: &str| ToolCall::Search {
         path: path.into(),
         query: "OUTSIDE_GUARD_CANARY".into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
     };
     let deep_path = format!("deep/{}note.txt", "d/".repeat(16));
     std::fs::create_dir_all(workspace.join(&deep_path).parent().unwrap()).unwrap();
