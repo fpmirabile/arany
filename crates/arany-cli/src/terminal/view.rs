@@ -1802,17 +1802,17 @@ fn settings_stacked(rows: &[String], width: usize) -> bool {
         .any(|(index, row)| numbered_label(index, row, false).width() > width)
 }
 
-// Selector lists show at most this many rows and scroll inside, like Codex's
+// Classic selector lists show at most this many rows and scroll inside, like Codex's
 // MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
 pub(super) const SELECTOR_ROWS: usize = 10;
 
-pub(super) fn settings_height(rows: &[String], width: u16) -> u16 {
+pub(super) fn settings_height(rows: &[String], width: u16, max_rows: usize) -> u16 {
     let lines_per_row = if settings_stacked(rows, usize::from(width)) {
         2
     } else {
         1
     };
-    u16::try_from(rows.len().min(SELECTOR_ROWS) * lines_per_row + 2).unwrap_or(u16::MAX)
+    u16::try_from(rows.len().min(max_rows) * lines_per_row + 2).unwrap_or(u16::MAX)
 }
 
 pub(super) fn draw_settings_frame(

@@ -2217,9 +2217,14 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
+        let max_rows = if self.mode == TerminalMode::Classic {
+            view::SELECTOR_ROWS
+        } else {
+            rows.len()
+        };
         self.draw_dialog(
             Some(session),
-            view::settings_height(rows, width),
+            view::settings_height(rows, width, max_rows),
             |frame, area| draw_settings_frame(frame, area, rows, selected, armed, notice, palette),
         )?;
         Ok(())
@@ -2285,8 +2290,13 @@ impl AttachedTerminal {
     fn draw_help(&mut self, selected: usize, session: &SessionView) -> Result<(), TerminalError> {
         let palette = self.palette();
         let armed = self.dialog_armed;
-        // Header, the capped command rows, the focused description and the key hint.
-        let height = u16::try_from(view::SELECTOR_ROWS + 3).unwrap_or(u16::MAX);
+        // Classic shows the header, the capped command rows, the focused description and the
+        // key hint; Fullscreen keeps its 20-row panel below live history.
+        let height = if self.mode == TerminalMode::Classic {
+            u16::try_from(view::SELECTOR_ROWS + 3).unwrap_or(u16::MAX)
+        } else {
+            20
+        };
         self.draw_dialog(Some(session), height, |frame, area| {
             draw_help_frame(frame, area, selected, armed, palette);
         })?;

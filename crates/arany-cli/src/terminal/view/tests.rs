@@ -2485,7 +2485,11 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                     ("quick actions", 6, "› 2. "),
                     ("resume", 9, "› 1. "),
                     ("help", 20, "› 1. /help"),
-                    ("settings", settings_height(&settings, width), "› 4. "),
+                    (
+                        "settings",
+                        settings_height(&settings, width, SELECTOR_ROWS),
+                        "› 4. ",
+                    ),
                     ("agents", 8, "› 2. "),
                 ];
                 for (name, dialog_height, focused) in cases {
