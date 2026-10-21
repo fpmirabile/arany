@@ -923,6 +923,7 @@ fn task_bytes(
         intent: intent.clone(),
         cache,
         hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+        hidden: runtime.hidden_paths(&intent.call),
         parent_namespaces,
     })
 }
@@ -1665,6 +1666,7 @@ mod tests {
                 Path::new("/scratch"),
                 &git,
                 &ToolCall::GitStatus { path: ".".into() },
+                &Default::default(),
                 16 * 1024,
                 Duration::from_secs(20),
             ))

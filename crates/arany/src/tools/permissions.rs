@@ -246,7 +246,19 @@ impl PermissionConfig {
     }
 
     // A restriction matching the call itself already denied it or had it approved, so only the others hide rows.
-    pub(crate) fn hidden_paths(&self, call: &ToolCall) -> HiddenPaths<'_> {
+    pub(crate) fn hidden_paths(&self, call: &ToolCall) -> HiddenPaths {
+        use ToolCall::{GitDiff, GitLog, GitStatus, Glob, List, Search};
+        if !matches!(
+            call,
+            List { .. }
+                | Search { .. }
+                | Glob { .. }
+                | GitStatus { .. }
+                | GitDiff { .. }
+                | GitLog { .. }
+        ) {
+            return HiddenPaths::default();
+        }
         HiddenPaths(
             self.rules
                 .iter()
@@ -255,9 +267,40 @@ impl PermissionConfig {
                         && rule.matches_tool(call, *decision)
                         && !rule.matches_worker_paths(call, *decision, None)
                 })
-                .filter_map(|(decision, rule)| Some((*decision, rule.pattern.as_ref()?)))
+                .filter_map(|(_, rule)| rule.pattern.clone())
                 .collect(),
         )
+    }
+
+    // A Skill file inside the Workspace is a file read, so Read restrictions on its path also apply.
+    pub(crate) fn evaluate_skill_file(
+        &self,
+        call: &ToolCall,
+        workspace_path: Option<&str>,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        let verdict = self.evaluate(call);
+        let Some(path) = workspace_path else {
+            return verdict;
+        };
+        let read = self.evaluate(&ToolCall::Read {
+            path: path.to_owned(),
+            offset: None,
+            limit: None,
+        });
+        if verdict.0.narrow(read.0) == verdict.0 {
+            verdict
+        } else {
+            read
+        }
+    }
+
+    pub(crate) fn restricts_read(&self, path: &str) -> bool {
+        self.evaluate(&ToolCall::Read {
+            path: path.to_owned(),
+            offset: None,
+            limit: None,
+        })
+        .0 != Decision::Allow
     }
 
     fn decision_with_source(&self, call: &ToolCall) -> (Decision, PermissionSource) {
@@ -319,20 +362,41 @@ impl PermissionConfig {
     }
 }
 
-// Every restrictive path pattern ends in `(?:/.*)?` and a non-ASCII parent has non-ASCII children,
+// Restrictive path patterns only. Each ends in `(?:/.*)?` and a non-ASCII parent has non-ASCII children,
 // so a covered directory covers its whole subtree and walks may prune it unopened.
-#[derive(Default)]
-pub(crate) struct HiddenPaths<'a>(Vec<(Decision, &'a Regex)>);
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HiddenPaths(Vec<Regex>);
 
-impl HiddenPaths<'_> {
+impl HiddenPaths {
     pub(crate) fn covers(&self, path: &str) -> bool {
         self.0
             .iter()
-            .any(|(decision, pattern)| path_matches(pattern, path, *decision))
+            .any(|pattern| path_matches(pattern, path, Decision::Deny))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+}
+
+// The Guard receives the patterns as source text and recompiles them with the same bounds.
+impl Serialize for HiddenPaths {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(Regex::as_str))
+    }
+}
+
+impl<'de> Deserialize<'de> for HiddenPaths {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sources = Vec::<String>::deserialize(deserializer)?;
+        if sources.len() > MAX_RULES {
+            return Err(serde::de::Error::custom("too many hidden path patterns"));
+        }
+        sources
+            .iter()
+            .map(|source| compile(source).map_err(serde::de::Error::custom))
+            .collect::<Result<_, _>>()
+            .map(Self)
     }
 }
 

@@ -962,6 +962,7 @@ impl Task {
             intent: intent.clone(),
             cache,
             hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+            hidden: runtime.hidden_paths(&intent.call),
             definition: runtime.definitions.payload(&intent.call)?,
             worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
             handover: runtime
@@ -1004,6 +1005,7 @@ impl Task {
             )
             .into(),
             permissions: None,
+            result_filter: Some(self.hidden),
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
@@ -1461,6 +1463,7 @@ mod tests {
             config,
             cache: None,
             hook_stdin: None,
+            hidden: Default::default(),
             workspace,
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
@@ -1665,6 +1668,7 @@ mod tests {
             config,
             cache: None,
             hook_stdin: None,
+            hidden: Default::default(),
             workspace: workspace.clone(),
             guard_executable: std::env::current_exe().unwrap(),
             system_programs: None,
@@ -1768,6 +1772,7 @@ mod tests {
                 &root,
                 &git,
                 &call,
+                &Default::default(),
                 16 * 1024,
                 Duration::from_secs(20),
             ))
@@ -1792,6 +1797,7 @@ mod tests {
                 &root,
                 &git,
                 &log,
+                &Default::default(),
                 16 * 1024,
                 Duration::from_secs(20),
             ))

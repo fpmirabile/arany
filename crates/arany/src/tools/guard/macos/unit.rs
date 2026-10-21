@@ -2003,6 +2003,7 @@ done
             handover: None,
             definitions: Default::default(),
             permissions: None,
+            result_filter: None,
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,

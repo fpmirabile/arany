@@ -42,6 +42,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2157,6 +2158,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2275,6 +2277,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2337,6 +2340,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -3531,4 +3535,61 @@ async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened
         std::fs::set_permissions(workspace.join(path), std::fs::Permissions::from_mode(0o700))
             .unwrap();
     }
+}
+
+#[test]
+fn read_restrictions_cover_workspace_skill_files_and_catalog_previews() {
+    use super::permissions::{Decision, PermissionConfig};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    for (path, text) in [
+        (
+            ".agents/skills/x/SKILL.md",
+            "---\ndescription: shown x\n---\n",
+        ),
+        (".agents/skills/x/private/key", "DENY_CANARY\n"),
+        (
+            ".agents/skills/y/SKILL.md",
+            "---\ndescription: ASK_CANARY\n---\n",
+        ),
+    ] {
+        std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+        std::fs::write(workspace.join(path), text).unwrap();
+    }
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    runtime.config.discover_skills(&workspace).unwrap();
+    let settings = br#"{"permissions":{"deny":["Read(./.agents/skills/x/private/**)"],"ask":["Read(./.agents/skills/y/**)"]}}"#;
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(PermissionConfig::parse(settings).unwrap()),
+        digest: digest(settings),
+    });
+    let config = runtime.permissions().unwrap();
+    let skill = |name: &str, resource: Option<&str>| ToolCall::Skill {
+        name: name.into(),
+        resource: resource.map(str::to_owned),
+    };
+    let decide = |call: &ToolCall| {
+        let (decision, _, approval) =
+            config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref());
+        (decision, approval)
+    };
+    let unrestricted = config.evaluate(&skill("x", None));
+    assert_eq!(decide(&skill("x", None)), (unrestricted.0, unrestricted.2));
+    assert_eq!(
+        decide(&skill("x", Some("private/key"))),
+        (Decision::Deny, None)
+    );
+    assert_eq!(
+        decide(&skill("y", None)),
+        (Decision::Ask, Some(super::ApprovalMode::Request))
+    );
+    let catalog = runtime.context().unwrap().catalog;
+    assert!(
+        catalog.contains("shown x") && !catalog.contains("ASK_CANARY"),
+        "{catalog}"
+    );
+    assert!(!catalog.contains("\"y\""), "{catalog}");
 }
