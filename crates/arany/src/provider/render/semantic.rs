@@ -154,6 +154,51 @@ pub fn messages_content(value: &Value) -> Value {
     }
 }
 
+pub fn messages_stream(response: &Value) -> String {
+    let mut start = response.clone();
+    start["content"] = json!([]);
+    start["stop_reason"] = Value::Null;
+    start["usage"]["output_tokens"] = json!(0);
+    let mut events = vec![json!({"type":"message_start", "message":start})];
+    for (index, block) in response["content"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .enumerate()
+    {
+        let mut initial = block.clone();
+        let delta = match block["type"].as_str().expect("content type") {
+            "text" => {
+                initial["text"] = json!("");
+                json!({"type":"text_delta", "text":block["text"]})
+            }
+            "tool_use" => {
+                initial["input"] = json!({});
+                json!({"type":"input_json_delta", "partial_json":block["input"].to_string()})
+            }
+            _ => panic!("synthetic stream supports text and tool_use"),
+        };
+        events.extend([
+            json!({"type":"content_block_start", "index":index, "content_block":initial}),
+            json!({"type":"content_block_delta", "index":index, "delta":delta}),
+            json!({"type":"content_block_stop", "index":index}),
+        ]);
+    }
+    events.extend([
+        json!({"type":"message_delta", "delta":{"stop_reason":response["stop_reason"]}, "usage":response["usage"]}),
+        json!({"type":"message_stop"}),
+    ]);
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                ": keep-alive\nevent: {}\ndata: {event}\n\n",
+                event["type"].as_str().expect("event type")
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

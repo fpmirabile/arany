@@ -46,6 +46,11 @@ pub(super) fn wait_product(child: Child) -> Output {
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
+    read_request_for(stream, "/v1/responses", "authorization: bearer test-key")
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("request deadline");
@@ -58,12 +63,19 @@ pub(super) fn read_request(stream: &mut TcpStream) -> Vec<u8> {
         if let Some(end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
             let header_end = end + 4;
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
-            );
+            assert!(header.starts_with(&format!("POST {path} HTTP/1.1\r\n")));
+            let header = header.to_ascii_lowercase();
+            assert!(header.contains(&format!("{auth}\r\n")));
+            if path.ends_with("/messages") {
+                assert!(header.contains("anthropic-version: 2023-06-01\r\n"));
+                assert!(header.contains(concat!("user-agent: arany/", env!("CARGO_PKG_VERSION"))));
+                assert!(!header.contains("anthropic-workspace-id:"));
+                assert!(!header.contains(if auth.starts_with("x-api-key:") {
+                    "authorization:"
+                } else {
+                    "x-api-key:"
+                }));
+            }
             let body_len = header
                 .lines()
                 .find_map(|line| {
@@ -122,6 +134,29 @@ pub(super) fn send_response_for(
         response.len()
     )
     .expect("synthetic response");
+}
+
+#[cfg(target_os = "linux")]
+pub(super) fn send_messages_response_for(
+    stream: &mut TcpStream,
+    index: usize,
+    text: serde_json::Value,
+    streaming: bool,
+) {
+    let response = serde_json::json!({
+        "id": format!("msg_{}", index + 1), "type":"message", "role":"assistant", "model":"model-1",
+        "stop_reason": if text.is_object() { "tool_use" } else { "end_turn" },
+        "content": arany::semantic::messages_content(&text), "usage":{"input_tokens":20,"output_tokens":10}
+    });
+    let (content_type, body) = if streaming {
+        (
+            "text/event-stream",
+            arany::semantic::messages_stream(&response),
+        )
+    } else {
+        ("application/json", response.to_string())
+    };
+    write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).expect("Messages response");
 }
 
 pub(super) fn responses_stream(mut response: serde_json::Value) -> String {

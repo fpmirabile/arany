@@ -11,7 +11,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "openai-responses-goal-contract-conformance-effort-stream-v30";
+const CHECK_VERSION: &str = "custom-protocol-goal-contract-conformance-effort-stream-v31";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -75,7 +75,7 @@ async fn probe(
     destination: &PinnedDestination,
     key: String,
 ) -> Result<ProviderEvidenceRecord, CustomProfileError> {
-    let transport = CustomTransport::new(destination, key)?;
+    let transport = CustomTransport::new(profile, destination, key)?;
     let session_id = SessionId::new();
     let direct = ProviderRequest {
         session_id,
@@ -194,6 +194,18 @@ async fn probe(
 }
 
 pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
+    let (protocol, base, encoding, auth) = match &profile.protocol {
+        super::Protocol::OpenaiResponses => ("openai-responses", "", "json_schema", "bearer"),
+        super::Protocol::AnthropicMessages { base_url, auth } => (
+            "anthropic-messages",
+            base_url.as_str(),
+            "native_tools",
+            match auth {
+                super::MessagesAuth::Bearer => "bearer",
+                super::MessagesAuth::ApiKey => "x-api-key",
+            },
+        ),
+    };
     let mut digest = Sha256::new();
     for field in [
         env!("CARGO_PKG_VERSION"),
@@ -202,8 +214,11 @@ pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
         profile.endpoint(),
         profile.model(),
         profile.credential_env(),
-        "openai-responses",
-        "json_schema",
+        "2",
+        protocol,
+        base,
+        encoding,
+        auth,
         "user_authorized",
         "4096",
     ] {
@@ -235,6 +250,9 @@ mod tests {
     enum ProbeReply {
         Valid,
         ValidEfforts,
+        CompactionRejected,
+        ZeroUsage,
+        AggregateJsonNodes,
         WrongModel,
         Redirect,
         Oversize,
@@ -248,10 +266,14 @@ mod tests {
         InputAboveLimit,
     }
 
-    async fn serve_probe(listener: TcpListener, reply: ProbeReply) {
+    async fn serve_probe(
+        listener: TcpListener,
+        reply: ProbeReply,
+        messages: Option<super::super::MessagesAuth>,
+    ) {
         let count = if matches!(reply, ProbeReply::ValidEfforts) {
             5
-        } else if matches!(reply, ProbeReply::Valid) {
+        } else if matches!(reply, ProbeReply::Valid | ProbeReply::CompactionRejected) {
             3
         } else {
             1
@@ -284,21 +306,50 @@ mod tests {
                 }
             };
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
-            assert!(header.starts_with("POST /v1/responses HTTP/1.1\r\n"));
-            assert!(
-                header
-                    .to_ascii_lowercase()
-                    .contains("authorization: bearer test-key")
+            let header = header.to_ascii_lowercase();
+            assert!(header.starts_with(if messages.is_some() {
+                "post /anthropic/v1/messages http/1.1\r\n"
+            } else {
+                "post /v1/responses http/1.1\r\n"
+            }));
+            assert!(header.contains(concat!("user-agent: arany/", env!("CARGO_PKG_VERSION"))));
+            assert!(!header.contains("anthropic-workspace-id"));
+            if messages == Some(super::super::MessagesAuth::ApiKey) {
+                assert!(header.contains("x-api-key: test-key\r\n"));
+                assert!(!header.contains("authorization:"));
+            } else {
+                assert!(header.contains("authorization: bearer test-key\r\n"));
+                assert!(!header.contains("x-api-key:"));
+            }
+            assert_eq!(
+                header.contains("anthropic-version: 2023-06-01\r\n"),
+                messages.is_some()
             );
             let body: serde_json::Value =
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("JSON request");
             let streaming = body["stream"] == true;
-            let compaction = body["text"]["format"]["name"] == "arany_compaction";
+            let compaction = if messages.is_some() {
+                body["output_config"]["format"]["type"] == "json_schema"
+            } else {
+                body["text"]["format"]["name"] == "arany_compaction"
+            };
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body["store"], false);
-            assert_eq!(body["truncation"], "disabled");
-            assert_eq!(body.get("text").is_some(), compaction);
+            if messages.is_some() {
+                assert!(body.get("thinking").is_none());
+                if compaction {
+                    assert_eq!(
+                        body["output_config"]["format"]["schema"],
+                        crate::provider::summary_schema()
+                    );
+                } else {
+                    assert_eq!(body.get("output_config").is_some(), index >= 3);
+                }
+            } else {
+                assert_eq!(body["store"], false);
+                assert_eq!(body["truncation"], "disabled");
+                assert_eq!(body.get("text").is_some(), compaction);
+            }
             if let Some(delegate) =
                 body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
                     .as_array()
@@ -315,8 +366,12 @@ mod tests {
                 assert_eq!(assignment["properties"]["profile"]["enum"], json!([null]));
             }
             assert_eq!(
-                body.get("reasoning")
-                    .map(|value| value["effort"].as_str().unwrap()),
+                body.get(if messages.is_some() {
+                    "output_config"
+                } else {
+                    "reasoning"
+                })
+                .and_then(|value| value["effort"].as_str()),
                 match index {
                     3 => Some("low"),
                     4 => Some("high"),
@@ -324,7 +379,11 @@ mod tests {
                 }
             );
             assert_eq!(
-                body["max_output_tokens"],
+                body[if messages.is_some() {
+                    "max_tokens"
+                } else {
+                    "max_output_tokens"
+                }],
                 if index == 0 && !compaction { 4096 } else { 128 }
             );
             assert!(
@@ -332,6 +391,11 @@ mod tests {
                     .windows(b"OMITTED_WORKSPACE_CANARY".len())
                     .any(|window| window == b"OMITTED_WORKSPACE_CANARY")
             );
+
+            if compaction && matches!(reply, ProbeReply::CompactionRejected) {
+                stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                continue;
+            }
 
             if matches!(
                 reply,
@@ -360,6 +424,9 @@ mod tests {
                 ProbeReply::Oversize => ("200 OK", String::new()),
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
+                | ProbeReply::CompactionRejected
+                | ProbeReply::ZeroUsage
+                | ProbeReply::AggregateJsonNodes
                 | ProbeReply::ValidEfforts
                 | ProbeReply::WrongModel
                 | ProbeReply::ChunkedAtLimit
@@ -399,6 +466,17 @@ mod tests {
                         "output": crate::provider::render::semantic::responses_output(&text),
                         "usage": {"input_tokens":20,"output_tokens":10}
                     });
+                    if messages.is_some() {
+                        response = json!({
+                            "id": format!("msg_{}", index + 1), "type":"message", "role":"assistant",
+                            "model":model, "stop_reason":if text.is_object() { "tool_use" } else { "end_turn" },
+                            "content":crate::provider::render::semantic::messages_content(&text),
+                            "usage":{"input_tokens":20,"output_tokens":10}
+                        });
+                    }
+                    if matches!(reply, ProbeReply::ZeroUsage) {
+                        response["usage"] = json!({"input_tokens":0,"output_tokens":0});
+                    }
                     if matches!(reply, ProbeReply::MissingUsage) {
                         response.as_object_mut().unwrap().remove("usage");
                     }
@@ -437,6 +515,40 @@ mod tests {
                     .write_all(response.as_bytes())
                     .await
                     .expect("chunked response");
+                continue;
+            }
+            if matches!(reply, ProbeReply::AggregateJsonNodes) {
+                assert!(streaming && messages.is_some());
+                let mut start: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+                start["content"] = json!([]);
+                start["stop_reason"] = serde_json::Value::Null;
+                start["usage"]["output_tokens"] = json!(0);
+                start["usage"]["first_extra"] = json!(vec![0; 132_000]);
+                let events = [
+                    json!({"type":"message_start","message":start}),
+                    json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"ok"}}),
+                    json!({"type":"content_block_stop","index":0}),
+                    json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":10,"second_extra":vec![0;132_000]}}),
+                    json!({"type":"message_stop"}),
+                ];
+                let body: String = events
+                    .iter()
+                    .map(|event| {
+                        format!(
+                            "event: {}\ndata: {event}\n\n",
+                            event["type"].as_str().unwrap()
+                        )
+                    })
+                    .collect();
+                assert!(body.len() < CONTRACT_RESPONSE_BYTES);
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
+                continue;
+            }
+            if streaming && messages.is_some() && !response_body.is_empty() {
+                let response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+                let body = crate::provider::render::semantic::messages_stream(&response);
+                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 continue;
             }
             if streaming && !response_body.is_empty() {
@@ -487,12 +599,20 @@ mod tests {
     }
 
     async fn run_case(reply: ProbeReply) -> Result<ProviderEvidenceRecord, CustomProfileError> {
+        run_case_protocol(reply, None).await
+    }
+
+    async fn run_case_protocol(
+        reply: ProbeReply,
+        messages: Option<super::super::MessagesAuth>,
+    ) -> Result<ProviderEvidenceRecord, CustomProfileError> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback listener");
         let port = listener.local_addr().expect("listener address").port();
-        let profile = CustomProfile {
+        let mut profile = CustomProfile {
             name: "local".into(),
+            protocol: super::super::Protocol::OpenaiResponses,
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
@@ -503,12 +623,17 @@ mod tests {
                 Vec::new()
             },
         };
+        if let Some(auth) = messages {
+            let base_url = format!("http://127.0.0.1:{port}/anthropic");
+            profile.endpoint = format!("{base_url}/v1/messages");
+            profile.protocol = super::super::Protocol::AnthropicMessages { base_url, auth };
+        }
         assert_eq!(Url::parse(profile.endpoint()).unwrap().port(), Some(port));
         let destination = profile
             .resolve_destination()
             .await
             .expect("pinned loopback");
-        let server = tokio::spawn(serve_probe(listener, reply));
+        let server = tokio::spawn(serve_probe(listener, reply, messages));
         let result = probe(&profile, &destination, "test-key".into()).await;
         server.await.expect("server completed");
         result
@@ -517,25 +642,40 @@ mod tests {
     async fn run_transport_case(
         reply: ProbeReply,
         compaction: bool,
+        messages: bool,
     ) -> Result<(), super::super::transport::TransportError> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("loopback listener");
         let port = listener.local_addr().expect("listener address").port();
-        let profile = CustomProfile {
+        let mut profile = CustomProfile {
             name: "local".into(),
+            protocol: super::super::Protocol::OpenaiResponses,
             endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
             capability_evidence_version: 2,
             efforts: Vec::new(),
         };
+        if messages {
+            let base_url = format!("http://127.0.0.1:{port}/anthropic");
+            profile.endpoint = format!("{base_url}/v1/messages");
+            profile.protocol = super::super::Protocol::AnthropicMessages {
+                base_url,
+                auth: super::super::MessagesAuth::ApiKey,
+            };
+        }
         let destination = profile
             .resolve_destination()
             .await
             .expect("pinned loopback");
-        let server = tokio::spawn(serve_probe(listener, reply));
-        let transport = CustomTransport::new(&destination, "test-key".into()).expect("transport");
+        let server = tokio::spawn(serve_probe(
+            listener,
+            reply,
+            messages.then_some(super::super::MessagesAuth::ApiKey),
+        ));
+        let transport =
+            CustomTransport::new(&profile, &destination, "test-key".into()).expect("transport");
         let request = ProviderRequest {
             session_id: crate::session::SessionId::new(),
             run_id: RunId::new(),
@@ -567,6 +707,14 @@ mod tests {
                 .await
                 .expect("compaction transport deadline")
                 .map(|_| ())
+        } else if messages {
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                transport.run_streamed(&request, None, None),
+            )
+            .await
+            .expect("Messages stream rejection deadline")
+            .map(|_| ())
         } else {
             tokio::time::timeout(Duration::from_secs(10), transport.run(&request, None))
                 .await
@@ -580,20 +728,27 @@ mod tests {
     #[tokio::test]
     async fn transport_accepts_exact_cap_and_rejects_excess_or_encoding() {
         assert!(
-            run_transport_case(ProbeReply::ChunkedAtLimit, false)
+            matches!(
+                run_transport_case(ProbeReply::AggregateJsonNodes, false, true).await,
+                Err(super::super::transport::TransportError::InvalidOutcome)
+            ),
+            "assembled Messages JSON retains the aggregate node bound"
+        );
+        assert!(
+            run_transport_case(ProbeReply::ChunkedAtLimit, false, false)
                 .await
                 .is_ok()
         );
         for compaction in [false, true] {
             assert!(
-                run_transport_case(ProbeReply::InputAtLimit, compaction)
+                run_transport_case(ProbeReply::InputAtLimit, compaction, false)
                     .await
                     .is_ok(),
                 "maximum reported input remains valid; compaction={compaction}"
             );
             assert!(
                 matches!(
-                    run_transport_case(ProbeReply::InputAboveLimit, compaction).await,
+                    run_transport_case(ProbeReply::InputAboveLimit, compaction, false).await,
                     Err(super::super::transport::TransportError::InvalidOutcome)
                 ),
                 "reported input above shared ceiling must reject; compaction={compaction}"
@@ -606,14 +761,192 @@ mod tests {
             ProbeReply::EncodedBodyAfterIdentity,
         ] {
             assert!(matches!(
-                run_transport_case(reply, false).await,
+                run_transport_case(reply, false, false).await,
                 Err(super::super::transport::TransportError::InvalidOutcome)
             ));
         }
     }
 
     #[tokio::test]
+    async fn messages_evidence_binds_protocol_base_and_auth() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let root = StateRoot::admit(&path).unwrap();
+        let original = json!({"version":2,"profiles":[{
+            "name":"local","protocol":"anthropic-messages","base_url":"http://127.0.0.1:9321/anthropic",
+            "auth":"x-api-key","model":"model-1","credential_env":"ARANY_PROVIDER_EVIDENCE_TEST_ABSENT",
+            "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,
+            "capability_evidence_version":2,"efforts":[]
+        }]});
+        let write = |document: &serde_json::Value| {
+            use std::os::unix::fs::PermissionsExt;
+            let file = path.join("provider-profiles.json");
+            std::fs::write(&file, serde_json::to_vec(document).unwrap()).unwrap();
+            std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        };
+        write(&original);
+        let profile = CustomProfile::load_named(&root, "local").unwrap();
+        let destination = profile.resolve_destination().await.unwrap();
+        let now = i64::try_from(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis(),
+        )
+        .unwrap();
+        let evidence = ProviderEvidenceRecord {
+            name: "local".into(),
+            digest: fingerprint(&profile),
+            addresses: destination.addresses().to_vec(),
+            checked_at_ms: now,
+            expires_at_ms: now + EVIDENCE_AGE_MS,
+        };
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        store
+            .record_provider_evidence(evidence.clone())
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::CredentialUnavailable)
+        ));
+        for (field, value) in [
+            ("base_url", json!("http://127.0.0.1:9321/other")),
+            ("base_url", json!("http://127.0.0.1:9322/anthropic")),
+            ("auth", json!("bearer")),
+            ("efforts", json!(["low"])),
+            ("credential_env", json!("ARANY_PROVIDER_OTHER_ABSENT")),
+        ] {
+            let mut changed = original.clone();
+            changed["profiles"][0][field] = value;
+            write(&changed);
+            assert!(
+                matches!(
+                    super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+                    Err(CustomProfileError::EvidenceUnavailable)
+                ),
+                "{field} must refuse before key lookup"
+            );
+        }
+        let mut responses = original.clone();
+        let entry = responses["profiles"][0].as_object_mut().unwrap();
+        entry.remove("base_url");
+        entry.remove("auth");
+        entry.insert("protocol".into(), json!("openai-responses"));
+        entry.insert(
+            "endpoint".into(),
+            json!("http://127.0.0.1:9321/v1/responses"),
+        );
+        entry.insert("outcome_encoding".into(), json!("json_schema"));
+        write(&responses);
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::EvidenceUnavailable)
+        ));
+        // Reproduce the prior check contract rather than treating a random digest as old evidence.
+        let responses_profile = CustomProfile::load_named(&root, "local").unwrap();
+        let mut v30 = Sha256::new();
+        for field in [
+            env!("CARGO_PKG_VERSION"),
+            "openai-responses-goal-contract-conformance-effort-stream-v30",
+            responses_profile.name(),
+            responses_profile.endpoint(),
+            responses_profile.model(),
+            responses_profile.credential_env(),
+            "openai-responses",
+            "json_schema",
+            "user_authorized",
+            "4096",
+        ] {
+            v30.update((field.len() as u64).to_be_bytes());
+            v30.update(field.as_bytes());
+        }
+        v30.update(2_u32.to_be_bytes());
+        let old = ProviderEvidenceRecord {
+            digest: v30.finalize().into(),
+            ..evidence.clone()
+        };
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        store.record_provider_evidence(old).await.unwrap();
+        store.close().await.unwrap();
+        responses["version"] = json!(1);
+        write(&responses);
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::EvidenceUnavailable)
+        ));
+        write(&original);
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::EvidenceUnavailable)
+        ));
+        let store = Store::open(root.try_clone().unwrap()).unwrap();
+        let mut drifted = evidence;
+        drifted.addresses[0].set_port(9322);
+        store.record_provider_evidence(drifted).await.unwrap();
+        store.close().await.unwrap();
+        assert!(matches!(
+            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+            Err(CustomProfileError::EvidenceUnavailable)
+        ));
+    }
+
+    #[tokio::test]
+    async fn messages_compaction_rejection_clears_admission() {
+        for auth in [
+            super::super::MessagesAuth::Bearer,
+            super::super::MessagesAuth::ApiKey,
+        ] {
+            assert!(matches!(
+                run_case_protocol(ProbeReply::CompactionRejected, Some(auth)).await,
+                Err(CustomProfileError::ConformanceFailed)
+            ));
+        }
+    }
+
+    #[tokio::test]
     async fn synthetic_conformance_checks_exact_wire_and_reopens_evidence() {
+        for auth in [
+            super::super::MessagesAuth::Bearer,
+            super::super::MessagesAuth::ApiKey,
+        ] {
+            for reply in [ProbeReply::Valid, ProbeReply::ValidEfforts] {
+                let record = run_case_protocol(reply, Some(auth))
+                    .await
+                    .expect("Messages conformance");
+                let temp = tempfile::tempdir().unwrap();
+                let path = temp.path().join("state");
+                let store = Store::open(StateRoot::admit(&path).unwrap()).unwrap();
+                store
+                    .record_provider_evidence(record.clone())
+                    .await
+                    .unwrap();
+                store.close().await.unwrap();
+                let store =
+                    Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+                assert_eq!(
+                    store
+                        .load_provider_evidence(record.name.clone())
+                        .await
+                        .unwrap(),
+                    Some(record)
+                );
+                store.close().await.unwrap();
+            }
+            for reply in [
+                ProbeReply::WrongModel,
+                ProbeReply::Redirect,
+                ProbeReply::EscapedCredential,
+                ProbeReply::MissingUsage,
+                ProbeReply::ZeroUsage,
+            ] {
+                assert!(matches!(
+                    run_case_protocol(reply, Some(auth)).await,
+                    Err(CustomProfileError::ConformanceFailed)
+                ));
+            }
+        }
         let effort_record = run_case(ProbeReply::ValidEfforts)
             .await
             .expect("strict effort conformance");

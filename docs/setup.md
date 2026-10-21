@@ -169,6 +169,74 @@ API workspace; saved selections never inherit ambient workspace variables.
 [Provider account spec](./specs/provider.md#native-models-and-accounts)
 own workspace validation and admission.
 
+## Anthropic-compatible custom routes
+
+Generic Messages routes require a private version-2 `provider-profiles.json` in
+`STATE` and exact conformance before use. Only the selected `ARANY_PROVIDER_*`
+environment key is used; native Anthropic accounts and workspace headers do not
+supply credentials. Keep the file private (`0600` on Unix).
+
+**DeepSeek is UNAVAILABLE.** These are candidate profiles for inspection, not
+working recipes. DeepSeek documents `output_config.effort`, but lacks evidence
+for the provider-enforced compaction schema Arany requires. Ordinary answers or
+successful delegation cannot establish compatibility. Never repair JSON, skip
+compaction or loosen the schema to enable these candidates.
+
+```json
+{
+  "version": 2,
+  "profiles": [
+    {
+      "name": "deepseek-flash",
+      "protocol": "anthropic-messages",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "auth": "x-api-key",
+      "model": "deepseek-flash",
+      "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
+      "outcome_encoding": "native_tools",
+      "privacy": "user_authorized",
+      "max_output_tokens": 4096,
+      "capability_evidence_version": 2,
+      "efforts": []
+    },
+    {
+      "name": "deepseek-v4-pro",
+      "protocol": "anthropic-messages",
+      "base_url": "https://api.deepseek.com/anthropic",
+      "auth": "x-api-key",
+      "model": "deepseek-v4-pro",
+      "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
+      "outcome_encoding": "native_tools",
+      "privacy": "user_authorized",
+      "max_output_tokens": 4096,
+      "capability_evidence_version": 2,
+      "efforts": []
+    }
+  ]
+}
+```
+
+For an independently compatible service, configure its exact base, model and
+selected key reference outside the repository. Run the potentially billable
+owner check, which sends synthetic data only:
+
+```sh
+arany provider check custom:NAME --state-dir STATE
+```
+
+Bare `NAME` also works. Only after that exact check succeeds, select the route:
+
+```sh
+arany exec --state-dir STATE --provider custom:NAME --model EXACT "Your task"
+```
+
+An empty effort list sends no effort override. A base path is preserved:
+`https://example.com/anthropic/` sends to
+`https://example.com/anthropic/v1/messages`. Existing valid version-1 Responses
+profiles migrate automatically and require a fresh check. Kimi platform, Kimi
+Code and GLM Standard-key recipes remain planned. Live acceptance and native
+platform evidence remain [owner checks](../NEXT_STEPS.md#daily-use-first).
+
 ## Select a private roster preset
 
 Create a private `provider-roster.json` in the State directory outside the Workspace, using owner-only file permissions:
