@@ -522,11 +522,14 @@ fn inline_model_catalog_at_width(width: u16) {
     );
     let before_edit = capture_from;
     input.write_all(b"X").expect("edit returned draft");
-    // The composer is found by its border on the decoded screen and its caret column proves
-    // draft restoration, wherever the Classic viewport places the composer row.
+    // The catalog redraws the composer caret too, so wait until its hint is gone.
     let composer_ready = |transcript: &[u8], from: usize, draft: &str, column: usize| {
         crate::composer_caret(transcript, from, width.into(), 24).is_some_and(|(caret, screen)| {
-            caret == column && screen.iter().any(|row| row.starts_with(draft))
+            caret == column
+                && screen.iter().any(|row| row.starts_with(draft))
+                && !screen
+                    .iter()
+                    .any(|row| row.contains("L/R effort") || row.contains("Left/Right reasoning"))
         })
     };
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -600,15 +603,18 @@ fn inline_model_catalog_at_width(width: u16) {
                 loop {
                     // Each check needs a frame drawn after the keys, never the stale screen.
                     let complete = if hide_cursor {
-                        crate::armed_selector(&transcript, start, width.into(), 24)
-                            .is_some_and(|screen| screen.iter().any(|row| row.contains(text)))
+                        crate::armed_selector(&transcript, start, width.into(), 24).is_some_and(
+                            |screen| {
+                                screen != before && screen.iter().any(|row| row.contains(text))
+                            },
+                        )
                     } else if let Some(column) = caret {
                         composer_ready(&transcript, start, text, column)
                     } else {
                         // Selection notices are inserted into native scrollback above the
                         // viewport, so they are read from the bytes drawn after the keys.
                         screen_rows(&transcript, width.into(), 24) != before
-                            && crate::composer_caret(&transcript, start, width.into(), 24).is_some()
+                            && composer_ready(&transcript, start, "> ", 3)
                             && visible_text_contains(&transcript[start..], text)
                     };
                     if complete {
