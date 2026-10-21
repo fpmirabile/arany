@@ -282,13 +282,15 @@ fn metadata_program() -> Result<BpfProgram, ToolError> {
     }
 }
 
-// The newest syscall this policy knows; any later one could be a new metadata setter, so the Git
-// child gets ENOSYS for it, which libc treats as an older kernel and falls back from.
+// Any later syscall may be a new metadata setter: ENOSYS fails closed and reads as an old kernel.
 const LAST_KNOWN_SYSCALL: u32 = 469;
 
-// One range check, too wide for per-number rules: load `nr`, return ENOSYS above the last known
-// number, else allow. Every other architecture refusal stays with the Guard's own filters.
+// A range check too wide for per-number rules; architecture refusals stay with the Guard filters.
 fn unknown_syscalls_program() -> Result<BpfProgram, ToolError> {
+    above_program(LAST_KNOWN_SYSCALL)
+}
+
+fn above_program(last: u32) -> Result<BpfProgram, ToolError> {
     use seccompiler::sock_filter;
     const LOAD_NR: u16 = 0x20;
     const JUMP_ABOVE: u16 = 0x25;
@@ -298,14 +300,13 @@ fn unknown_syscalls_program() -> Result<BpfProgram, ToolError> {
     let instruction = |code, jt, jf, k| sock_filter { code, jt, jf, k };
     Ok(vec![
         instruction(LOAD_NR, 0, 0, 0),
-        instruction(JUMP_ABOVE, 0, 1, LAST_KNOWN_SYSCALL),
+        instruction(JUMP_ABOVE, 0, 1, last),
         instruction(RETURN, 0, 0, RET_ERRNO | libc::ENOSYS as u32),
         instruction(RETURN, 0, 0, RET_ALLOW),
     ])
 }
 
-// Every ioctl: requests such as inode-flag, fsxattr or filesystem-version setters change metadata
-// through a read-only descriptor. Git without a terminal needs none; ENOTTY keeps isatty honest.
+// Inode-flag, fsxattr and version ioctls bypass read-only descriptors; ENOTTY keeps isatty honest.
 fn ioctl_program() -> Result<BpfProgram, ToolError> {
     compile(
         [(libc::SYS_ioctl, Vec::new())].into(),
@@ -323,6 +324,11 @@ pub(super) fn install_metadata_filter() -> Result<(), ToolError> {
         seccompiler::apply_filter(&program).map_err(|_| ToolError::ProtectionUnavailable)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn install_above(last: u32) -> Result<(), ToolError> {
+    seccompiler::apply_filter(&above_program(last)?).map_err(|_| ToolError::ProtectionUnavailable)
 }
 
 pub(super) fn install_non_spawning() -> Result<(), ToolError> {

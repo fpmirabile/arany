@@ -135,7 +135,7 @@ pub enum ToolError {
     #[error("Tool effect completion is uncertain")]
     Uncertain,
     #[error(
-        "an interrupted Git write left these locks: {0}; once no Git process is running, remove them yourself, then retry"
+        "Git locks left by an interrupted write: {0}; remove them after checking that no git process is running"
     )]
     StaleGitLocks(String),
     #[error("Guard rejected its {0} stage")]
@@ -1262,7 +1262,7 @@ fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     }
 }
 
-fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) -> CacheUpdate {
+pub(super) fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) -> CacheUpdate {
     if cache_selected && matches!(call, ToolCall::Command { .. }) {
         CacheUpdate::NotAttempted
     } else {
@@ -1337,7 +1337,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     }
 }
 
-fn uncertain_observation(
+pub(super) fn uncertain_observation(
     intent: EffectIntent,
     error: ToolError,
     cache_update: crate::tools::CacheUpdate,

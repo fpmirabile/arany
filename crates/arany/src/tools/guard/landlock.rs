@@ -223,6 +223,29 @@ mod tests {
         };
         assert_eq!(errno(469), (-1, Some(libc::EPERM)));
         assert_eq!(errno(1000), (-1, Some(libc::ENOSYS)));
+        // The range check itself, against an implemented syscall placed just above its boundary:
+        // getrandom with a zero length succeeds unless the filter answers ENOSYS.
+        let getrandom = |last: Option<u32>| {
+            std::thread::spawn(move || {
+                if let Some(last) = last {
+                    super::super::profile::install_above(last).unwrap();
+                }
+                // SAFETY: a zero-length getrandom writes no memory.
+                let result =
+                    unsafe { libc::syscall(libc::SYS_getrandom, std::ptr::null_mut::<u8>(), 0, 0) };
+                (result, std::io::Error::last_os_error().raw_os_error())
+            })
+            .join()
+            .unwrap()
+        };
+        let number = u32::try_from(libc::SYS_getrandom).unwrap();
+        assert_eq!(getrandom(None).0, 0);
+        assert_eq!(
+            getrandom(Some(number)).0,
+            0,
+            "the boundary itself is allowed"
+        );
+        assert_eq!(getrandom(Some(number - 1)), (-1, Some(libc::ENOSYS)));
         std::fs::write(workspace.join("guard.txt"), "guard").unwrap();
     }
 }

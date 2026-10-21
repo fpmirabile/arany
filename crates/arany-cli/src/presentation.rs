@@ -207,7 +207,17 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 if observation.output.is_empty() {
                     state.into()
                 } else {
-                    format!("{state}: {}", safe_truncate(&observation.output, 160))
+                    // An uncertain Git write may lead with locks the owner must remove: use the whole row.
+                    let limit = match (disposition, &tool.intent.call) {
+                        (
+                            ToolDisposition::Uncertain,
+                            ToolCall::GitCommit { .. }
+                            | ToolCall::GitBranch { .. }
+                            | ToolCall::GitSwitch { .. },
+                        ) => usize::MAX,
+                        _ => 160,
+                    };
+                    format!("{state}: {}", safe_truncate(&observation.output, limit))
                 }
             }
         },
@@ -2256,6 +2266,19 @@ mod peer_row_tests {
                 expected
             );
         }
+        let locks = "Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/feature/long-branch-name.lock, .git/packed-refs.lock; remove them after checking that no git process is running. Guard execution unconfirmed; effects may have occurred. Do not retry automatically.";
+        let mut uncertain = tool_fixture(
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
+            },
+            locks,
+        );
+        uncertain.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
+        let summary = tool_summary(&uncertain);
+        assert!(
+            summary.starts_with("⏺ Git switch(topic)\n  ⎿ uncertain: Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/feature/long-branch-name.lock, .git/packed-refs.lock; remove them after checking that no git process is running."),
+            "{summary}"
+        );
         let mut failed = tool_fixture(
             ToolCall::GitSwitch {
                 branch: "topic".into(),

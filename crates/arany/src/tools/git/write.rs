@@ -1120,8 +1120,7 @@ fn valid_lock_path(path: &str) -> bool {
             })
 }
 
-// After a Guard died, its recorded locks can no longer be proven exclusively ours, so they are
-// only reported for manual cleanup; once none remains, its own record goes. Nothing is retried.
+// A dead Guard's locks cannot be proven exclusively ours, so they are only reported, never moved.
 pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), ToolError> {
     let root = super::super::fs::open_directory(workspace)?;
     let Ok(git_dir) = root.open_dir_nofollow(".git") else {
@@ -1151,11 +1150,14 @@ pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), 
                 }
             }
         }
-        // A different file at the path belongs to someone else and is not reported.
+        // Another inode or other bytes at the path belong to someone else and are not reported.
         let ours = present
-            && directory.symlink_metadata(leaf).is_ok_and(|metadata| {
-                use cap_std::fs::MetadataExt;
-                (metadata.dev(), metadata.ino()) == (record.device, record.inode)
+            && super::open_optional(&directory, leaf)?.is_some_and(|file| {
+                use std::os::unix::fs::MetadataExt;
+                file.metadata().is_ok_and(|metadata| {
+                    (metadata.dev(), metadata.ino()) == (record.device, record.inode)
+                }) && super::super::fs::read_regular(file, MAX_SNAPSHOT_BYTES)
+                    .is_ok_and(|bytes| hex_digest(&bytes) == record.sha256)
             });
         if ours {
             stale.push(format!(".git/{}", record.path));

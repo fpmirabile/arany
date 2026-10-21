@@ -608,6 +608,33 @@ fn goal_context_metadata_reservation(
         .ok_or(EngineError::ContextTooLarge)
 }
 
+// Locks a dead Guard's Git write left are reported, with their paths, before admission refuses
+// to resume past its unsettled effect; nothing is moved or retried.
+async fn report_stale_git_locks(
+    view: &crate::SessionView,
+    tools: bool,
+    workspace: &std::path::Path,
+) -> Result<(), EngineError> {
+    let git_writes: Vec<_> = view
+        .runs
+        .iter()
+        .flat_map(|r| &r.tools)
+        .filter(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop())
+        .map(|t| t.intent.id)
+        .collect();
+    if git_writes.is_empty() {
+        return Ok(());
+    }
+    if !tools {
+        return Err(EngineError::GoalUnavailable);
+    }
+    crate::tools::worker::recover_private(&git_writes).await?;
+    for id in git_writes {
+        crate::tools::report_git_locks(workspace, id)?;
+    }
+    Ok(())
+}
+
 fn resolve_goal_admission(
     request: &RunRequest,
     history: Option<&crate::session::SessionView>,
@@ -1525,6 +1552,11 @@ impl Engine {
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity)?;
         }
+        if entry == GoalEntry::Resume
+            && let Some(view) = &history
+        {
+            report_stale_git_locks(view, submission.tools.is_some(), &request.workspace).await?;
+        }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         if goal.entry == GoalEntry::Resume {
             let view = history.as_ref().ok_or(EngineError::InvalidHistory)?;
@@ -1541,26 +1573,6 @@ impl Engine {
                     return Err(EngineError::GoalUnavailable);
                 }
                 crate::tools::worker::recover_private(&ids).await?;
-            }
-            // A Git write whose Guard died may have left locks, reported once its unit is gone.
-            let git_writes: Vec<_> = view
-                .runs
-                .iter()
-                .filter(|r| stored.run_ids.contains(&r.id))
-                .flat_map(|r| &r.tools)
-                .filter(|t| {
-                    t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop()
-                })
-                .map(|t| t.intent.id)
-                .collect();
-            if !git_writes.is_empty() {
-                if submission.tools.is_none() {
-                    return Err(EngineError::GoalUnavailable);
-                }
-                crate::tools::worker::recover_private(&git_writes).await?;
-                for id in git_writes {
-                    crate::tools::report_git_locks(&request.workspace, id)?;
-                }
             }
         }
         if entry == GoalEntry::Resume {

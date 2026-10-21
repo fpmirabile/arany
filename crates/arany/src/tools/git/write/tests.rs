@@ -841,9 +841,12 @@ fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
             std::fs::remove_file(link).unwrap();
         }
     }
-    // A lock replaced by another Git is not ours and is not reported.
-    std::fs::remove_file(git_dir.join("HEAD.lock")).unwrap();
-    std::fs::write(git_dir.join("HEAD.lock"), "").unwrap();
+    // A lock another Git put in place is not ours and is not reported. The stash link keeps the
+    // original inode alive so the replacement can never reuse its number.
+    let original = stash.join("HEAD.original");
+    std::fs::hard_link(git_dir.join("HEAD.lock"), &original).unwrap();
+    std::fs::write(git_dir.join("HEAD.replacement"), "").unwrap();
+    std::fs::rename(git_dir.join("HEAD.replacement"), git_dir.join("HEAD.lock")).unwrap();
     let before = tree(&git_dir);
     recover_locks(&repo.workspace, uuid::Uuid::now_v7()).unwrap();
     // Exclusion over a dead Guard's locks cannot be proven, so they are reported, never touched.
