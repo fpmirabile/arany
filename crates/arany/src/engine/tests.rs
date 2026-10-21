@@ -568,3 +568,72 @@ fn a_ninth_active_child_gets_its_own_refusal() {
         Err(SteeringRefused::ChildLimit)
     );
 }
+
+mod stale_git_lock_scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_the_resumed_goals_unsettled_git_writes_are_considered() {
+        let fixture = crate::session::worker_protocol_fixture();
+        let mut view = crate::SessionView::replay(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap();
+        let goal = view.goals[0].clone();
+        let mut write = view
+            .runs
+            .iter()
+            .flat_map(|run| &run.tools)
+            .next()
+            .expect("a fixture Tool")
+            .clone();
+        write.intent.call = crate::tools::ToolCall::GitSwitch {
+            branch: "topic".into(),
+        };
+        write.observation = None;
+        let mut other = view.runs[0].clone();
+        other.id = crate::session::RunId::new();
+        other.tools = vec![write.clone()];
+        view.runs.push(other);
+        let workspace = tempfile::tempdir().unwrap();
+        // Without Tools an in-scope unsettled write refuses; another Goal's write must not.
+        assert!(
+            report_stale_git_locks(&view, goal.id, false, workspace.path())
+                .await
+                .is_ok()
+        );
+        let own = view
+            .runs
+            .iter()
+            .position(|run| goal.run_ids.contains(&run.id))
+            .unwrap();
+        view.runs[own].tools.push(write);
+        assert!(matches!(
+            report_stale_git_locks(&view, goal.id, false, workspace.path()).await,
+            Err(EngineError::GoalUnavailable)
+        ));
+    }
+}
+
+#[test]
+fn stale_run_notes_do_not_count_against_the_active_run() {
+    let steering = RunSteering::new();
+    let session_id = SessionId::new();
+    let first = RunId::new();
+    steering.begin_run(session_id, first);
+    let target = |run_id| ChildSteeringTarget {
+        session_id,
+        run_id,
+        agent_run_id: crate::session::AgentRunId::new(),
+    };
+    let stale: Vec<_> = (0..8).map(|_| target(first)).collect();
+    for child in &stale {
+        steering.register_child(*child);
+        steering.offer_child_note(*child, "x".repeat(900)).unwrap();
+    }
+    let second = RunId::new();
+    steering.begin_run(session_id, second);
+    let fresh = target(second);
+    steering.register_child(fresh);
+    assert_eq!(steering.offer_child_note(fresh, "x".repeat(4096)), Ok(()));
+    assert!(steering.withdraw_child_note(stale[0]).is_some());
+}

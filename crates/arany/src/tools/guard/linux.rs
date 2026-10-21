@@ -661,7 +661,7 @@ fn unit_command(
             | ToolCall::Edit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }
-    ) || intent.call.is_git_read();
+    ) || intent.call.is_git();
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())

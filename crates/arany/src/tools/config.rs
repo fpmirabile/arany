@@ -21,6 +21,40 @@ pub(crate) struct Config {
     pub runtime_grants: Vec<RuntimeGrant>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<Program>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_identity: Option<GitIdentity>,
+}
+
+// Author and committer of typed Git commits; never read from repository configuration.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GitIdentity {
+    pub name: String,
+    pub email: String,
+}
+
+impl Default for GitIdentity {
+    fn default() -> Self {
+        Self {
+            name: "Arany".into(),
+            email: "arany@localhost.invalid".into(),
+        }
+    }
+}
+
+impl GitIdentity {
+    pub(crate) fn valid(&self) -> bool {
+        let field = |value: &str, limit: usize| {
+            !value.trim().is_empty()
+                && value.len() <= limit
+                && !value
+                    .chars()
+                    .any(|character| character.is_control() || matches!(character, '<' | '>'))
+        };
+        field(&self.name, 256)
+            && field(&self.email, 256)
+            && !self.email.contains(char::is_whitespace)
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -101,6 +135,13 @@ impl Config {
             || self.commands.len() > 8
             || self.skills.len() > MAX_SKILLS
             || self.mcp.len() > 4
+        {
+            return Err(ToolError::Configuration);
+        }
+        if self
+            .git_identity
+            .as_ref()
+            .is_some_and(|identity| !identity.valid())
         {
             return Err(ToolError::Configuration);
         }
@@ -287,8 +328,14 @@ impl Config {
             ToolCall::McpList { server } => {
                 return self.mcp.iter().any(|value| &value.name == server);
             }
-            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. } => {
-                return self.git_available();
+            ToolCall::GitStatus { .. }
+            | ToolCall::GitDiff { .. }
+            | ToolCall::GitLog { .. }
+            | ToolCall::GitCommit { .. }
+            | ToolCall::GitBranch { .. }
+            | ToolCall::GitSwitch { .. } => {
+                return self.git_available()
+                    && (!call.mutates() || super::guard::git_writes_available());
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

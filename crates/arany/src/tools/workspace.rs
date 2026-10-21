@@ -490,6 +490,7 @@ impl WorkspacePermissions {
             mcp: Vec::new(),
             runtime_grants: self.runtime_grants.clone(),
             git: super::git::discover(),
+            git_identity: super::git::user_identity(),
         };
         config.validate()?;
         Ok(config)

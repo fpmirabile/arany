@@ -35,9 +35,25 @@ pub(super) fn payload_report_deadline(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod landlock;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 mod profile;
+#[cfg(target_os = "linux")]
+pub(super) use landlock::spawn_confined;
+
+pub(super) fn git_writes_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        landlock::available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -695,11 +711,64 @@ pub(super) async fn execute(
     .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
+    // Unless cleanup failed the unit is stopped, so leftover Git locks are reported, never moved.
+    let stale = if dispatched
+        && intent.call.is_git()
+        && intent.call.mutates()
+        && !matches!(
+            result,
+            Err(ToolError::GuardRejected(GuardStage::ProcessCleanup))
+        ) {
+        match super::git::recover_locks(&runtime.workspace, intent.id) {
+            Ok(()) => None,
+            Err(error @ ToolError::StaleGitLocks(_)) => Some(error.to_string()),
+            Err(error) => {
+                crate::diagnostics::tool_failure("Guard", &error);
+                None
+            }
+        }
+    } else {
+        None
+    };
     #[cfg(any(test, feature = "test-support"))]
-    if result.is_ok() && crate::fault::FaultPlan::guard_receipt_lost(intent.id) {
-        return Err(ToolError::Uncertain);
+    let result = if result.is_ok() && crate::fault::FaultPlan::guard_receipt_lost(intent.id) {
+        Err(ToolError::Uncertain)
+    } else {
+        result
+    };
+    let result = dispatch_result(intent, dispatched, result);
+    let Some(report) = stale else {
+        return result;
+    };
+    let cache = super::guard_error_cache_update(&intent.call, runtime.cache_state.is_some());
+    Ok(report_stale_locks(
+        uncertain_after_stale(intent, result, cache),
+        &report,
+    ))
+}
+
+fn uncertain_after_stale(
+    intent: &EffectIntent,
+    result: Result<ToolObservation, ToolError>,
+    cache: CacheUpdate,
+) -> ToolObservation {
+    match result {
+        Ok(observation) if observation.disposition == ToolDisposition::Uncertain => observation,
+        other => super::uncertain_observation(
+            intent.clone(),
+            other.err().unwrap_or(ToolError::Uncertain),
+            cache,
+        ),
     }
-    dispatch_result(intent, dispatched, result)
+}
+
+// The owner removes these by hand, so the report leads the journaled observation.
+pub(super) fn report_stale_locks(
+    mut observation: ToolObservation,
+    report: &str,
+) -> ToolObservation {
+    observation.output = format!("{report}. {}", observation.output);
+    observation
 }
 
 pub(super) fn dispatch_result(
@@ -1832,6 +1901,7 @@ fn parser_config(config: &Config) -> Config {
         skills: Vec::new(),
         mcp: Vec::new(),
         git: None,
+        git_identity: None,
         runtime_grants: Vec::new(),
         ..config.clone()
     }
@@ -2764,6 +2834,7 @@ mod tests {
             mcp: Vec::new(),
             runtime_grants,
             git: None,
+            git_identity: None,
         }
     }
 
@@ -3414,6 +3485,50 @@ mod tests {
         file.read_to_end(&mut bytes).unwrap();
         assert_eq!(length, bytes.len() as u64);
         assert_eq!(bytes, empty_archive(&identity));
+    }
+
+    #[test]
+    fn stale_git_locks_lead_the_uncertain_observation_the_owner_sees() {
+        let commit = intent(ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        });
+        let report = ToolError::StaleGitLocks(".git/index.lock, .git/refs/heads/main.lock".into());
+        let observation = report_stale_locks(
+            super::super::uncertain_observation(
+                commit,
+                ToolError::Uncertain,
+                CacheUpdate::NotApplicable,
+            ),
+            &report.to_string(),
+        );
+        assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+        assert!(
+            observation.output.starts_with(
+                "Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/main.lock; remove them after checking that no git process is running. "
+            ),
+            "{}",
+            observation.output
+        );
+        assert!(observation.output.contains("Do not retry automatically"));
+    }
+
+    #[test]
+    fn stale_locks_turn_a_failed_observation_uncertain() {
+        let commit = intent(ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        });
+        let mut failed = super::super::uncertain_observation(
+            commit.clone(),
+            ToolError::Uncertain,
+            CacheUpdate::NotApplicable,
+        );
+        failed.disposition = ToolDisposition::Failed;
+        let settled = uncertain_after_stale(&commit, Ok(failed), CacheUpdate::NotApplicable);
+        assert_eq!(settled.disposition, ToolDisposition::Uncertain);
     }
 
     #[test]

@@ -1564,10 +1564,10 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
     let expected = [
         ("RunStarted", 19),
         ("AgentSpawned", 12),
-        ("ProviderCallRecorded", 14),
+        ("ProviderCallRecorded", 15),
         ("AgentFinished", 10),
-        ("ToolStarted", 14),
-        ("ToolFinished", 20),
+        ("ToolStarted", 15),
+        ("ToolFinished", 21),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),

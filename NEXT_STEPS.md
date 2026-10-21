@@ -23,12 +23,12 @@ The goal: one normal engineering day in this repository (explore, multi-file edi
 6. **`cargo test` here inside the Guard.** Toolchain and Cargo cache selection in folder trust, and a Build profile on more cores; measure `cargo test -p arany --lib`.
 7. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
 8. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
-9. **[Git write workflow](./planning/git-write-workflow/README.md).** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
+9. **[Git write workflow](./planning/git-write-workflow/README.md).** Remembered typed prefix rules (S2), then human-approved host `git push` and `gh pr create` (S3). [Typed Git writes](./docs/specs/tools.md#typed-git-writes) (S1) run on Linux with a Landlock and seccomp-confined Git child and are refused on macOS. Owner, native macOS: launch the Git executor through the existing unit supervisor under its own Seatbelt profile that denies Workspace `file-write*` and allows only private-view writes, close every mutation descriptor before it starts, exchange the view over bounded IPC and keep publication in the Guard worker, since one shared profile cannot both confine Git and publish ([Chromium's Seatbelt design](https://raw.githubusercontent.com/chromium/chromium/main/sandbox/mac/seatbelt_sandbox_design.md)); then enable it with native hostile-configuration, lock and recovery evidence.
 10. **Tool ergonomics.** MultiEdit, typed delete and move; parallel reads with Pursue item 10. Remaining (owner, live): a 64 KiB [Write and Edit](./docs/specs/tools.md#limits-and-failure-behavior) completes on each Provider route; it has synthetic evidence only.
 11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
 12. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
 13. **Terminal: live evidence.** Owner: run the [terminal checks](#terminal); remaining feature work is in [Terminal follow-ups](#terminal-follow-ups).
-14. **[Anthropic-compatible custom routes](./planning/anthropic-compatible-routes/README.md).** DeepSeek API, Kimi API and Kimi Code console keys with an honest User-Agent, and GLM Standard API keys; exclude GLM Coding Plan benefits. Resolve DeepSeek strict compaction before admission. Remaining (owner, live): `arany provider check custom:NAME` for each exact vendor/model profile, including both Kimi billing routes, using the owner's own keys outside the repo. No live compatibility is established.
+14. **[Anthropic-compatible custom routes](./planning/anthropic-compatible-routes/README.md).** DeepSeek API, Kimi API and Kimi Code console keys with an honest User-Agent, and GLM Standard API keys; exclude GLM Coding Plan benefits. S1 ships generic Messages routes; DeepSeek candidates remain **UNAVAILABLE** until provider-enforced strict compaction has primary-source evidence and exact conformance. Native Linux/macOS and live vendor acceptance are not established by synthetic fixtures. Remaining (owner, live): `arany provider check custom:NAME` for each exact vendor/model profile, including both Kimi billing routes, using the owner's own keys outside the repo. No live compatibility is established.
 
 Exit: a week of dogfooding with every fallback to another harness recorded here; done when a full day passes without one.
 
@@ -66,7 +66,7 @@ Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) w
 
 ### Frozen areas
 
-The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
+The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan, and for the typed Git writes of Daily use first item 9 ([Git write workflow](./planning/git-write-workflow/README.md)); it stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
@@ -189,7 +189,7 @@ to the user's credential store or clipboard.
    then inspect/edit, run an offline check, load pinned Skill data and call local
    MCP. Inspect files and reopened observations; command changes publish only through
    a matching validated changeset receipt, MCP writes stay private, uncertainty
-   stops continuation and no action retries itself. On Linux and macOS (Command Line Tools Git), also inspect typed Git status, diff and log on a repository with local changes.
+   stops continuation and no action retries itself. On Linux and macOS (Command Line Tools Git), also inspect typed Git status, diff and log on a repository with local changes, then, on Linux, commit selected paths, create a branch and switch to it, and confirm with your own `git log` and `git status`.
    Validate the chosen real model's strict Tool encoding before claiming support. Include real-model agent-definition selection and explicit ID reassignment, confirming fresh authority/base/lease, source lineage and no historical effect re-execution.
 8. **Native macOS stores and clipboard.** On a macOS account, verify setup,
    restart/reuse, replacement, refresh and logout through the login Keychain,

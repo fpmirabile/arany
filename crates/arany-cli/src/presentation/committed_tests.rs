@@ -195,7 +195,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                     if let Event::ProviderCallRecorded { record, .. } = &envelope.event {
                         let document: serde_json::Value =
                             serde_json::from_str(line).expect("canonical JSONL");
-                        assert_eq!(document["event_version"], 14);
+                        assert_eq!(document["event_version"], 15);
                         assert_eq!(document["payload"], serde_json::to_value(record).unwrap());
                     }
                 }

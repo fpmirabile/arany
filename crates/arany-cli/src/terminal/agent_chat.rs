@@ -472,7 +472,7 @@ impl AttachedTerminal {
             agent_run_id: target.id,
         };
         let editable = selected != 0 && editable_child(view, target);
-        if editable && !self.open_child_draft(target) {
+        if editable && !self.open_child_draft(view, target) {
             return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
         }
         self.cancel_clipboard_paste();
@@ -657,12 +657,21 @@ impl AttachedTerminal {
         changed
     }
 
-    fn open_child_draft(&mut self, target: ChildSteeringTarget) -> bool {
+    fn open_child_draft(&mut self, view: &SessionView, target: ChildSteeringTarget) -> bool {
         if self.child_drafts.iter().any(|draft| draft.target == target) {
             return true;
         }
-        self.child_drafts
-            .retain(|draft| !draft.composer.is_empty() || draft.offered.is_some());
+        // Drafts of Runs the picker can no longer open are unreachable, so only offers outlive them.
+        self.child_drafts.retain(|draft| {
+            draft.offered.is_some()
+                || (!draft.composer.is_empty()
+                    && view
+                        .runs
+                        .iter()
+                        .rev()
+                        .take(crate::presentation::MAX_RECENT_RUNS)
+                        .any(|run| run.id == draft.target.run_id))
+        });
         if self.child_drafts.len() >= MAX_CHILD_DRAFTS {
             return false;
         }
@@ -698,7 +707,7 @@ impl AttachedTerminal {
                 "This child is read-only; draft retained",
             ));
         }
-        if !self.open_child_draft(target) {
+        if !self.open_child_draft(view, target) {
             return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
         }
         if input == TerminalInput::ClipboardPaste {
@@ -806,7 +815,7 @@ impl AttachedTerminal {
                             "This child is read-only; message not offered",
                         ));
                     };
-                    if !self.open_child_draft(target) {
+                    if !self.open_child_draft(view, target) {
                         return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
                     }
                     let Some(draft) = self
@@ -864,7 +873,7 @@ impl AttachedTerminal {
                     return self.invalid_agent_choice();
                 };
                 let run = chat.run;
-                let targets = std::mem::take(&mut chat.targets);
+                let targets = chat.targets.clone();
                 self.show_agent(view, run, targets, index, false).await
             }
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
@@ -1279,6 +1288,83 @@ mod tests {
             matches!(line(&mut terminal, &view, "/clear").await, AgentChatInput::ChildEdited(id) if id == target)
         );
         assert!(terminal.child_drafts[0].composer.is_empty());
+    }
+
+    fn filled_draft(run_id: RunId) -> ChildDraft {
+        let mut composer = Composer::text_only();
+        composer.insert_paste("kept").unwrap();
+        ChildDraft {
+            target: ChildSteeringTarget {
+                session_id: SessionId::new(),
+                run_id,
+                agent_run_id: arany::AgentRunId::new(),
+            },
+            composer,
+            offered: None,
+            notice: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_draft_table_refuses_without_dropping_the_shown_chat_and_prunes_old_runs() {
+        let view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: run,
+            agent_run_id: targets[2].id,
+        };
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(Some(
+            super::super::linear::LinearState::new("screen-reader"),
+        ));
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 0,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: true,
+            shown: false,
+            choice: String::new(),
+            invalid: false,
+            editable: false,
+            last_child_notice: None,
+        });
+        terminal.child_drafts = (0..MAX_CHILD_DRAFTS).map(|_| filled_draft(run)).collect();
+        for ch in "3".chars() {
+            terminal
+                .linear_agent_input(&view, TerminalInput::Character(ch))
+                .await
+                .unwrap();
+        }
+        let action = terminal
+            .linear_agent_input(&view, TerminalInput::Submit)
+            .await
+            .unwrap();
+        assert!(matches!(action, AgentChatInput::Notice(DRAFT_CAP_NOTICE)));
+        assert!(!terminal.agent_chat.as_ref().unwrap().targets.is_empty());
+
+        terminal.child_drafts = (0..MAX_CHILD_DRAFTS)
+            .map(|_| filled_draft(RunId::new()))
+            .collect();
+        assert!(terminal.open_child_draft(&view, target));
+        assert_eq!(terminal.child_drafts.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn child_drafts_and_primary_bytes_survive_a_released_terminal() {
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.child_drafts = vec![filled_draft(RunId::new())];
+        terminal.primary_draft_bytes = 7;
+        terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
+            None,
+        ));
+        assert_eq!(terminal.child_drafts.len(), 1);
+        assert_eq!(terminal.primary_draft_bytes, 7);
     }
 
     #[cfg(unix)]

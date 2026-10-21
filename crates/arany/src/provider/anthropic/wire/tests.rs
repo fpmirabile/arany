@@ -21,7 +21,7 @@ fn decode(request: &ProviderRequest, fixture: &Value) -> Result<ProviderResponse
     decode_run(
         &serde_json::to_vec(fixture).unwrap(),
         &RunScope {
-            model: MODEL,
+            model: &request.model,
             output_cap: request.max_output_tokens,
             secret: KEY,
             offered: &conversation
@@ -127,6 +127,9 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_mcp_call",
             "arany_command_unguarded",
             "arany_glob",
+            "arany_git_commit",
+            "arany_git_branch",
+            "arany_git_switch",
             "arany_plan"
         ]
     );
@@ -243,6 +246,18 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
     }
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
+    for model in ["deepseek-flash", "vendor.other/exact-1"] {
+        let request = primary_request(model);
+        let mut fixture = response("tool_use", content.clone());
+        fixture["model"] = json!(model);
+        let accepted = decode(&request, &fixture).unwrap();
+        assert_eq!(
+            accepted.turn.items("anthropic").unwrap(),
+            content.as_array().unwrap().clone()
+        );
+        fixture["model"] = json!("claude-sonnet-5");
+        assert!(decode(&request, &fixture).is_err());
+    }
 }
 
 #[test]
@@ -489,6 +504,55 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
 }
 
 #[test]
+fn custom_messages_optional_effort_preserves_strict_compaction() {
+    let request = read_only_request("deepseek-flash");
+    let conversation = render::conversation(&request).unwrap();
+    let omitted = run_body_with_optional_effort(&request, &conversation, None).unwrap();
+    assert!(omitted.get("output_config").is_none());
+    assert!(omitted.get("thinking").is_none());
+    assert_eq!(omitted["model"], "deepseek-flash");
+    let compact = CompactionRequest {
+        session_id: request.session_id,
+        covered_run_id: request.run_id,
+        model: request.model.clone(),
+        previous_summary: None,
+        items: vec![],
+        max_output_tokens: 1024,
+    };
+    let strict = compaction_body_with_optional_effort(&compact, None);
+    assert!(strict["output_config"].get("effort").is_none());
+    assert_eq!(
+        strict["output_config"]["format"]["schema"],
+        summary_schema()
+    );
+    assert!(strict.get("thinking").is_none());
+    for effort in Effort::ALL {
+        assert_eq!(
+            run_body_with_optional_effort(&request, &conversation, Some(effort)).unwrap(),
+            run_body(&request, &conversation, effort).unwrap()
+        );
+        assert_eq!(
+            compaction_body_with_optional_effort(&compact, Some(effort)),
+            compaction_body(&compact, effort)
+        );
+        assert_eq!(
+            compaction_body_with_optional_effort(&compact, Some(effort))["output_config"]["effort"],
+            effort.as_str()
+        );
+    }
+    let mut review = request;
+    review.phase = AgentPhase::ToolReview;
+    review.input.role = crate::provider::PromptRole::ToolReview;
+    let conversation = render::conversation(&review).unwrap();
+    let strict = run_body_with_optional_effort(&review, &conversation, None).unwrap();
+    assert_eq!(
+        strict["output_config"]["format"]["schema"],
+        conversation.outcome
+    );
+    assert!(strict["output_config"].get("effort").is_none());
+}
+
+#[test]
 fn anthropic_usage_reports_cache_read_and_creation_separately() {
     let answer = decode(
         &read_only_request(MODEL),
@@ -500,6 +564,11 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
     assert_eq!(answer.usage.cache_creation_input_tokens, Some(3));
     assert_eq!(answer.usage.output_tokens, Some(8));
     assert!(answer.usage.cache_consistent());
+    let mut missing = response("end_turn", json!([text_block(answer_text())]));
+    missing["usage"] = json!({"input_tokens":12,"output_tokens":8});
+    let usage = decode(&read_only_request(MODEL), &missing).unwrap().usage;
+    assert_eq!(usage.cache_read_input_tokens, None);
+    assert_eq!(usage.cache_creation_input_tokens, None);
     for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
         for invalid in [
             json!(-1),
@@ -1719,17 +1788,22 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
 
 #[test]
 fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
-    let mut request = primary_request(MODEL);
+    let mut request = primary_request("deepseek-flash");
     request.collaboration = CollaborationPolicy::Auto {
         max_active_children: 2,
     };
-    let reply = response(
+    let mut reply = response(
         "tool_use",
         json!([tool_use(
             "delegate_1",
             "arany_delegate",
             json!({"children":[{"objective":"inspect","profile":null}], "agent":null})
         )]),
+    );
+    reply["model"] = json!("deepseek-flash");
+    reply["content"].as_array_mut().unwrap().insert(
+        0,
+        json!({"type":"thinking","thinking":"opaque","signature":"unchanged"}),
     );
     let delegated = decode(&request, &reply).unwrap();
     request.phase = AgentPhase::RootSynthesis;
@@ -1761,8 +1835,16 @@ fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
         .clone();
     let call = messages
         .iter()
-        .position(|message| message["content"][0]["type"] == "tool_use")
+        .position(|message| {
+            message["content"]
+                .as_array()
+                .is_some_and(|blocks| blocks.iter().any(|block| block["type"] == "tool_use"))
+        })
         .expect("replayed delegate");
+    assert_eq!(
+        messages[call]["content"][0],
+        json!({"type":"thinking","thinking":"opaque","signature":"unchanged"})
+    );
     assert_eq!(
         messages[call + 1]["content"][0],
         json!({"type": "tool_result", "tool_use_id": "delegate_1", "content": DELEGATED_OUTPUT})

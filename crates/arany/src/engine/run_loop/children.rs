@@ -2327,7 +2327,11 @@ impl RunLoop<'_> {
                             .sum::<usize>()
                         + context.as_ref().map_or(0, String::len)
                         + CHILD_INTENT_RESERVE_BYTES
-                        + crate::session::MAX_STEERING_CONTEXT_BYTES,
+                        + if self.controls.steering.is_some() {
+                            crate::session::MAX_STEERING_CONTEXT_BYTES
+                        } else {
+                            0
+                        },
                     crate::tools::ToolRuntime::step_context_reserve(
                         false,
                         Self::maximum_feedback_reserve(runtime),
@@ -2675,13 +2679,24 @@ mod delegation_bound_tests {
                 false,
                 RunLoop::maximum_feedback_reserve(&runtime),
             );
-            for (headroom, answer_only) in [(0, true), (reserve - 1, true), (reserve, false)] {
+            for (steering, (headroom, answer_only)) in [None, Some(crate::RunSteering::new())]
+                .into_iter()
+                .flat_map(|steering| {
+                    [(0, true), (reserve - 1, true), (reserve, false)]
+                        .into_iter()
+                        .map(move |case| (steering.clone(), case))
+                })
+            {
                 let tools = runtime.research_context(16).unwrap();
                 runtime
                     .set_context_limit(
                         tools.rendered_len()
                             + CHILD_INTENT_RESERVE_BYTES
-                            + crate::session::MAX_STEERING_CONTEXT_BYTES
+                            + if steering.is_some() {
+                                crate::session::MAX_STEERING_CONTEXT_BYTES
+                            } else {
+                                0
+                            }
                             + MIN_CHILD_RESULT_BYTES
                             + headroom,
                     )
@@ -2702,7 +2717,7 @@ mod delegation_bound_tests {
                         cancellation: Default::default(),
                         tools: Some(&runtime),
                         approvals: None,
-                        steering: None,
+                        steering,
                     },
                     &ledger,
                     None,

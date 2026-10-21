@@ -5,7 +5,7 @@ use arany::{
     AgentRole, AgentRunId, AgentStatus, AgentView, RunId, RunStatus, RunView, SessionView,
 };
 
-const MAX_RECENT_RUNS: usize = 16;
+pub(crate) const MAX_RECENT_RUNS: usize = 16;
 const MAX_AGENTS_PER_RUN: usize = 9;
 const MAX_EXPANDED_IDLE: usize = 3;
 const MAX_OBJECTIVE_PREVIEW: usize = 64;
@@ -325,6 +325,7 @@ fn agent_lines(
     lines
 }
 
+#[derive(Clone)]
 pub(crate) struct AgentTarget {
     pub(crate) id: AgentRunId,
     // Bounded inert `label · status · objective` text for numbered linear choices.
