@@ -50,6 +50,9 @@ impl RecordFormat {
     }
 
     fn behind(&self, record: &[u8]) -> Option<Value> {
+        if self.floor == self.current {
+            return None;
+        }
         let limit = self.kind.limit();
         // The bounded parser also refuses duplicate keys, so a transform never repairs them away.
         let value = crate::tools::parse_json_bounded(record, limit, limit, MAX_DEPTH).ok()?;
