@@ -85,6 +85,32 @@ mod goal_success_tests {
     }
 
     #[test]
+    fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        };
+        let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call.clone()),
+        });
+        let passed = observation(
+            call,
+            ToolDisposition::Succeeded,
+            serde_json::json!({"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+        );
+        assert!(matches_success(&contract, std::slice::from_ref(&passed)));
+        let switch = observation(
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
+            },
+            ToolDisposition::Succeeded,
+            "{}".into(),
+        );
+        assert!(!matches_success(&contract, &[passed, switch]));
+    }
+
+    #[test]
     fn skill_only_plan_requires_an_exact_binding_and_successful_receipt() {
         let call = ToolCall::Skill {
             name: "review".into(),

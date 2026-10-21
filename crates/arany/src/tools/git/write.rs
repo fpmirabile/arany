@@ -40,15 +40,26 @@ const DETACHED: &str =
     "HEAD is not on a local branch; create or switch to a branch before committing.";
 const DRIFT: &str = "The repository changed or another Git process holds its lock; nothing was published. Inspect the repository and try again.";
 const PROTECTED: &str = "Switching would change a protected, invalid or deeply nested path; switch in your own terminal instead.";
+const CASE_ALIAS: &str = "Switching would change paths that differ only by letter case, or one that aliases an existing name by case; switch in your own terminal instead.";
 const UNSUPPORTED_ENTRY: &str = "Switching would change a symbolic link or submodule entry, which typed Git writes do not support.";
 
+// What a write replaces, plus `holds`: refs it read and only locks so they cannot move meanwhile.
 #[derive(Default)]
 struct Publication {
     files: Vec<FileChange>,
     objects: Vec<String>,
     reference: Option<RefUpdate>,
+    holds: Vec<String>,
     index: Option<Vec<u8>>,
     head: Option<Vec<u8>>,
+}
+
+// Every ref a write can depend on, compared whole at publication: HEAD, packed-refs and each loose ref.
+#[derive(PartialEq)]
+struct RefState {
+    head: Vec<u8>,
+    packed: Option<Vec<u8>>,
+    loose: Vec<(String, Vec<u8>)>,
 }
 
 struct RefUpdate {
@@ -73,6 +84,7 @@ struct Git<'a> {
     executable: &'a Path,
     env: Vec<(&'static str, std::ffi::OsString)>,
     workspace: &'a Path,
+    scratch: &'a Path,
     view: Dir,
     deadline: tokio::time::Instant,
     max_bytes: usize,
@@ -93,8 +105,11 @@ impl Git<'_> {
             &self.env,
             self.workspace,
             self.deadline,
-            stdin,
-            stdout_bytes,
+            super::Io {
+                stdin,
+                stdout_bytes,
+                writable: Some(self.scratch),
+            },
         )
         .await
     }
@@ -156,9 +171,12 @@ pub(super) async fn execute(
         return Ok(failure(IN_PROGRESS_MESSAGE, &[], max_bytes));
     }
     let view = scratch.join(VIEW);
-    if let Err(message) = prepare(&repository, workspace, &view)? {
-        return Ok(failure(message, &[], max_bytes));
-    }
+    let snapshot = match prepare(&repository, workspace, &view)? {
+        Ok(snapshot) => snapshot,
+        Err(message) => return Ok(failure(message, &[], max_bytes)),
+    };
+    #[cfg(all(test, target_os = "linux"))]
+    tests::race(workspace, tests::Stage::Snapshot);
     let mut env = environment(&view, workspace, scratch);
     for (key, value) in [
         ("GIT_AUTHOR_NAME", &identity.name),
@@ -172,6 +190,7 @@ pub(super) async fn execute(
         executable: Path::new(&git.executable),
         env,
         workspace,
+        scratch,
         view: Dir::open_ambient_dir(&view, cap_std::ambient_authority())
             .map_err(|_| ToolError::Operation)?,
         deadline,
@@ -186,7 +205,7 @@ pub(super) async fn execute(
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
-        } => branch(&git, &repository, name, start_point.as_deref()).await?,
+        } => branch(&git, name, start_point.as_deref()).await?,
         ToolCall::GitSwitch { branch } => switch(&git, &repository, branch).await?,
         _ => return Err(ToolError::Configuration),
     };
@@ -194,10 +213,13 @@ pub(super) async fn execute(
         Ok(planned) => planned,
         Err(failure) => return Ok(failure),
     };
-    result["publication"] = match publish(workspace, &git.view, &repository, &publication)? {
-        Ok(receipt) => receipt,
-        Err(message) => return Ok(failure(message, &[], max_bytes)),
-    };
+    #[cfg(all(test, target_os = "linux"))]
+    tests::race(workspace, tests::Stage::Planned);
+    result["publication"] =
+        match publish(workspace, &git.view, &repository, &snapshot, &publication)? {
+            Ok(receipt) => receipt,
+            Err(message) => return Ok(failure(message, &[], max_bytes)),
+        };
     let text = result.to_string();
     if text.len() > max_bytes {
         // Unreachable within RECEIPT_BYTES; a published effect without its receipt is unknown.
@@ -210,7 +232,11 @@ fn prepare(
     repository: &Repository,
     workspace: &Path,
     view: &Path,
-) -> Result<Result<(), &'static str>, ToolError> {
+) -> Result<Result<RefState, &'static str>, ToolError> {
+    let snapshot = match ref_state(&repository.git_dir, repository.head.clone())? {
+        Ok(snapshot) => snapshot,
+        Err(message) => return Ok(Err(message)),
+    };
     write_view_base(repository, view, WRITE_CONFIG)?;
     let objects = view.join("objects");
     std::fs::create_dir_all(objects.join("info")).map_err(|_| ToolError::Operation)?;
@@ -220,27 +246,52 @@ fn prepare(
         .into_encoded_bytes();
     alternate.push(b'\n');
     std::fs::write(objects.join("info/alternates"), alternate).map_err(|_| ToolError::Operation)?;
-    for name in ["packed-refs", "shallow"] {
-        match read_optional(&repository.git_dir, name, MAX_SNAPSHOT_BYTES) {
-            Ok(Some(bytes)) => {
-                std::fs::write(view.join(name), bytes).map_err(|_| ToolError::Operation)?
-            }
-            Ok(None) => {}
-            Err(ToolError::Path) => return Ok(Err(super::UNSUPPORTED_LAYOUT)),
-            Err(error) => return Err(error),
+    match read_optional(&repository.git_dir, "shallow", MAX_SNAPSHOT_BYTES) {
+        Ok(Some(bytes)) => {
+            std::fs::write(view.join("shallow"), bytes).map_err(|_| ToolError::Operation)?;
         }
+        Ok(None) => {}
+        Err(ToolError::Path) => return Ok(Err(super::UNSUPPORTED_LAYOUT)),
+        Err(error) => return Err(error),
     }
-    let refs = repository
-        .git_dir
-        .open_dir_nofollow("refs")
-        .map_err(|_| ToolError::Path)?;
+    if let Some(bytes) = &snapshot.packed {
+        std::fs::write(view.join("packed-refs"), bytes).map_err(|_| ToolError::Operation)?;
+    }
     std::fs::create_dir(view.join("refs")).map_err(|_| ToolError::Operation)?;
-    copy_refs(&refs, &view.join("refs"), &mut 0)
+    for (name, bytes) in &snapshot.loose {
+        let path = view.join(name);
+        std::fs::create_dir_all(path.parent().ok_or(ToolError::Operation)?)
+            .map_err(|_| ToolError::Operation)?;
+        std::fs::write(path, bytes).map_err(|_| ToolError::Operation)?;
+    }
+    Ok(Ok(snapshot))
 }
 
-fn copy_refs(
+fn ref_state(git_dir: &Dir, head: Vec<u8>) -> Result<Result<RefState, &'static str>, ToolError> {
+    let packed = match read_optional(git_dir, "packed-refs", MAX_SNAPSHOT_BYTES) {
+        Ok(packed) => packed,
+        Err(ToolError::Path) => return Ok(Err(super::UNSUPPORTED_LAYOUT)),
+        Err(error) => return Err(error),
+    };
+    let refs = git_dir
+        .open_dir_nofollow("refs")
+        .map_err(|_| ToolError::Path)?;
+    let mut loose = Vec::new();
+    if let Err(message) = loose_refs(&refs, "refs", &mut loose, &mut 0)? {
+        return Ok(Err(message));
+    }
+    loose.sort();
+    Ok(Ok(RefState {
+        head,
+        packed,
+        loose,
+    }))
+}
+
+fn loose_refs(
     source: &Dir,
-    target: &Path,
+    prefix: &str,
+    entries: &mut Vec<(String, Vec<u8>)>,
     count: &mut usize,
 ) -> Result<Result<(), &'static str>, ToolError> {
     for entry in source.entries().map_err(|_| ToolError::Path)? {
@@ -253,24 +304,24 @@ fn copy_refs(
         let Some(name) = name.to_str() else {
             return Ok(Err(super::UNSUPPORTED_LAYOUT));
         };
-        // Another Git's lock is not a ref; publication meets it and refuses.
+        // A lock is not a ref; one held by another Git meets our own lock and refuses.
         if name.ends_with(".lock") {
             continue;
         }
+        let path = format!("{prefix}/{name}");
         let kind = entry.file_type().map_err(|_| ToolError::Path)?;
         if kind.is_dir() {
-            std::fs::create_dir(target.join(name)).map_err(|_| ToolError::Operation)?;
             let nested = source
                 .open_dir_nofollow(name)
                 .map_err(|_| ToolError::Path)?;
-            if let Err(message) = copy_refs(&nested, &target.join(name), count)? {
+            if let Err(message) = loose_refs(&nested, &path, entries, count)? {
                 return Ok(Err(message));
             }
         } else if kind.is_file() {
             let Some(bytes) = read_optional(source, name, REF_BYTES)? else {
                 return Ok(Err(super::UNSUPPORTED_LAYOUT));
             };
-            std::fs::write(target.join(name), bytes).map_err(|_| ToolError::Operation)?;
+            entries.push((path, bytes));
         } else {
             return Ok(Err(super::UNSUPPORTED_LAYOUT));
         }
@@ -297,7 +348,8 @@ async fn commit(
         return Ok(Err(failure(DETACHED, &[], git.max_bytes)));
     };
     let name = format!("refs/heads/{branch}");
-    let before = resolve(&repository.git_dir, &name)?;
+    // The parent is the snapshot's value; publication requires the live ref to still hold it.
+    let before = resolve(&git.view, &name)?;
     let message = format!("--message={message}");
     let mut argv = vec![
         "commit",
@@ -330,6 +382,7 @@ async fn commit(
                 before,
                 after: after.clone(),
             }),
+            holds: vec!["HEAD".into(), "packed-refs".into()],
             index: Some(index),
             ..Publication::default()
         },
@@ -339,12 +392,11 @@ async fn commit(
 
 async fn branch(
     git: &Git<'_>,
-    repository: &Repository,
     branch: &str,
     start_point: Option<&str>,
 ) -> Result<Planned, ToolError> {
     let name = format!("refs/heads/{branch}");
-    if resolve(&repository.git_dir, &name)?.is_some() {
+    if resolve(&git.view, &name)?.is_some() {
         return Ok(Err(failure(
             "A branch with that name already exists.",
             &[],
@@ -362,6 +414,7 @@ async fn branch(
                 before: None,
                 after: after.clone(),
             }),
+            holds: vec!["HEAD".into(), "packed-refs".into()],
             ..Publication::default()
         },
         json!({"branch": branch, "oid": after}),
@@ -374,7 +427,7 @@ async fn switch(
     branch: &str,
 ) -> Result<Planned, ToolError> {
     let name = format!("refs/heads/{branch}");
-    let Some(target) = resolve(&repository.git_dir, &name)? else {
+    let Some(target) = resolve(&git.view, &name)? else {
         return Ok(Err(failure(
             "No local branch has that name.",
             &[],
@@ -429,13 +482,57 @@ async fn switch(
     if fields.len() / 2 > MAX_SNAPSHOT_FILES {
         return Err(ToolError::Limit);
     }
+    #[cfg(all(test, target_os = "linux"))]
+    tests::race(git.workspace, tests::Stage::Checked);
+    let (mut files, blobs) = step!(changed_files(git, &fields, &dirty)?);
+    for (content, (_, executable, index)) in read_blobs(git, &blobs).await?.into_iter().zip(&blobs)
+    {
+        files[*index].after = Some(FileVersion::from_bytes(&content, *executable));
+    }
+    step!(
+        git.checked(&[
+            "read-tree",
+            "-m",
+            "--end-of-options",
+            "HEAD",
+            target.as_str()
+        ])
+        .await?
+    );
+    let index =
+        read_optional(&git.view, "index", MAX_SNAPSHOT_BYTES)?.ok_or(ToolError::Operation)?;
+    let count = files.len();
+    let mut holds = vec![name];
+    holds.extend(branch_of(&repository.head).map(|source| format!("refs/heads/{source}")));
+    holds.push("packed-refs".into());
+    Ok(Ok((
+        Publication {
+            files,
+            holds,
+            index: Some(index),
+            head: Some(head),
+            ..Publication::default()
+        },
+        json!({"branch": branch, "switched": true, "files": count}),
+    )))
+}
+
+// A blob to read: its object name, whether it is executable and the index of its file.
+type Blob<'a> = (&'a str, bool, usize);
+
+// The switch's file changes with verified preimages and the blobs to read, or the refusal.
+fn changed_files<'a>(
+    git: &Git<'_>,
+    fields: &[&'a [u8]],
+    dirty: &BTreeSet<&[u8]>,
+) -> Result<Result<(Vec<FileChange>, Vec<Blob<'a>>), String>, ToolError> {
     let root = super::super::fs::open_directory(git.workspace)?;
     let mut files = Vec::with_capacity(fields.len() / 2);
     let mut blobs = Vec::new();
     let mut conflicts = Vec::new();
     for pair in fields.chunks(2) {
         let header = std::str::from_utf8(pair[0]).map_err(|_| ToolError::Operation)?;
-        let [old_mode, new_mode, _, new_oid, _] = header
+        let [old_mode, new_mode, old_oid, new_oid, _] = header
             .strip_prefix(':')
             .ok_or(ToolError::Operation)?
             .split(' ')
@@ -457,7 +554,14 @@ async fn switch(
             continue;
         }
         let before = match old {
-            Some(_) => Some(current_version(&root, path)?),
+            Some(executable) => match current_version(&root, path, old_oid, executable)? {
+                Some(version) => Some(version),
+                // Edited after the cleanliness check: that edit must not become the preimage.
+                None => {
+                    conflicts.push(path);
+                    continue;
+                }
+            },
             // An untracked file or directory at an added path would be overwritten.
             None if root
                 .symlink_metadata(path)
@@ -495,32 +599,15 @@ async fn switch(
             git.max_bytes,
         )));
     }
-    for (content, (_, executable, index)) in read_blobs(git, &blobs).await?.into_iter().zip(&blobs)
-    {
-        files[*index].after = Some(FileVersion::from_bytes(&content, *executable));
+    // Paths differing only by ASCII case would alias each other on a case-insensitive volume.
+    let folded: BTreeSet<String> = files
+        .iter()
+        .map(|file| file.path.to_ascii_lowercase())
+        .collect();
+    if folded.len() != files.len() {
+        return Ok(Err(failure(CASE_ALIAS, &[], git.max_bytes)));
     }
-    step!(
-        git.checked(&[
-            "read-tree",
-            "-m",
-            "--end-of-options",
-            "HEAD",
-            target.as_str()
-        ])
-        .await?
-    );
-    let index =
-        read_optional(&git.view, "index", MAX_SNAPSHOT_BYTES)?.ok_or(ToolError::Operation)?;
-    let count = files.len();
-    Ok(Ok((
-        Publication {
-            files,
-            index: Some(index),
-            head: Some(head),
-            ..Publication::default()
-        },
-        json!({"branch": branch, "switched": true, "files": count}),
-    )))
+    Ok(Ok((files, blobs)))
 }
 
 // None: absent; Some(executable) for a regular blob. Links and submodules are unsupported.
@@ -533,7 +620,13 @@ fn entry_mode(mode: &str) -> Option<Option<bool>> {
     }
 }
 
-fn current_version(root: &Dir, path: &str) -> Result<FileVersion, ToolError> {
+// The tracked file's bytes and mode, only when they still equal HEAD's blob; None otherwise.
+fn current_version(
+    root: &Dir,
+    path: &str,
+    blob: &str,
+    blob_executable: bool,
+) -> Result<Option<FileVersion>, ToolError> {
     use std::os::unix::fs::PermissionsExt;
     let file = super::super::fs::open_file(root, path)?;
     let executable = file
@@ -544,12 +637,28 @@ fn current_version(root: &Dir, path: &str) -> Result<FileVersion, ToolError> {
         & 0o111
         != 0;
     let bytes = super::super::fs::read_regular(file, MAX_FILE_BYTES)?;
+    if executable != blob_executable || blob_id(&bytes) != blob {
+        return Ok(None);
+    }
     // Publication compares only the digest and executable bit of a before version.
-    Ok(FileVersion {
+    Ok(Some(FileVersion {
         sha256: hex_digest(&bytes),
         content: String::new(),
         executable,
-    })
+    }))
+}
+
+// Git's SHA-1 object name of a blob; SHA-256 repositories are refused as unsupported.
+fn blob_id(bytes: &[u8]) -> String {
+    let mut context = aws_lc_rs::digest::Context::new(&aws_lc_rs::digest::SHA1_FOR_LEGACY_USE_ONLY);
+    context.update(format!("blob {}\0", bytes.len()).as_bytes());
+    context.update(bytes);
+    context
+        .finish()
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 async fn read_blobs(
@@ -768,12 +877,14 @@ fn sync_directory(directory: &Dir) -> Result<(), ToolError> {
         .map_err(|_| ToolError::Uncertain)
 }
 
-// Locks and rechecks every target against the inspected state, then publishes files, objects, the
-// ref, the index and HEAD in that order. After the first effect any failure is Uncertain.
+// Locks every replaced or depended-on target, then requires the live refs, HEAD and index to equal
+// the snapshot Git worked from, and publishes files, objects, the ref, the index and HEAD in that
+// order. After the first effect any failure is Uncertain.
 fn publish(
     workspace: &Path,
     view: &Dir,
     repository: &Repository,
+    snapshot: &RefState,
     publication: &Publication,
 ) -> Result<Result<Value, &'static str>, ToolError> {
     let root = super::super::fs::open_directory(workspace)?;
@@ -788,29 +899,24 @@ fn publish(
         .as_ref()
         .map(|(bytes, _)| hex_digest(bytes));
     let locked = (|| {
-        let reference = publication
-            .reference
-            .as_ref()
-            .map(|update| {
-                let mut lock = Lock::acquire(&git_dir, &update.name)?;
-                if resolve(&git_dir, &update.name)? != update.before {
-                    return Err(ToolError::Conflict);
-                }
-                lock.write(format!("{}\n", update.after).as_bytes())?;
-                Ok(lock)
-            })
-            .transpose()?;
+        let mut reference = None;
+        if let Some(update) = &publication.reference {
+            let mut lock = Lock::acquire(&git_dir, &update.name)?;
+            lock.write(format!("{}\n", update.after).as_bytes())?;
+            reference = Some(lock);
+        }
+        let holds = publication
+            .holds
+            .iter()
+            .map(|name| Lock::acquire(&git_dir, name))
+            .collect::<Result<Vec<_>, _>>()?;
         let index = publication
             .index
             .as_ref()
             .map(|bytes| {
                 let mut lock = Lock::acquire(&git_dir, "index")?;
-                let current = read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES)?;
-                if current.as_deref().map(hex_digest) != index_before {
-                    return Err(ToolError::Conflict);
-                }
                 lock.write(bytes)?;
-                Ok(lock)
+                Ok::<_, ToolError>(lock)
             })
             .transpose()?;
         let head = publication
@@ -818,23 +924,33 @@ fn publish(
             .as_ref()
             .map(|bytes| {
                 let mut lock = Lock::acquire(&git_dir, "HEAD")?;
-                if read_optional(&git_dir, "HEAD", super::HEAD_BYTES)?
-                    != Some(repository.head.clone())
-                {
-                    return Err(ToolError::Conflict);
-                }
                 lock.write(bytes)?;
-                Ok(lock)
+                Ok::<_, ToolError>(lock)
             })
             .transpose()?;
-        Ok::<_, ToolError>((reference, index, head))
+        let live_head =
+            read_optional(&git_dir, "HEAD", super::HEAD_BYTES)?.ok_or(ToolError::Conflict)?;
+        let live_index = read_optional(&git_dir, "index", MAX_SNAPSHOT_BYTES)?;
+        if !matches!(ref_state(&git_dir, live_head)?, Ok(live) if live == *snapshot)
+            || live_index.as_deref().map(hex_digest) != index_before
+        {
+            return Err(ToolError::Conflict);
+        }
+        Ok::<_, ToolError>((reference, holds, index, head))
     })();
-    let (reference, index, head) = match locked {
+    // Held locks stay until every replaced target is published, then drop and disappear.
+    let (reference, _holds, index, head) = match locked {
         Ok(locks) => locks,
         Err(ToolError::Conflict | ToolError::Path | ToolError::NotFound) => return Ok(Err(DRIFT)),
         Err(error) => return Err(error),
     };
     if !publication.files.is_empty() {
+        // The shared publisher's exact-case admission: never write through a case alias.
+        match super::super::fs::worker_publication_paths(&root, &publication.files) {
+            Ok(()) => {}
+            Err(ToolError::Path) => return Ok(Err(CASE_ALIAS)),
+            Err(error) => return Err(error),
+        }
         // Validates every before digest first and reports Uncertain itself after a partial change.
         match super::super::fs::apply_files(&root, &publication.files) {
             Ok(_) => {}
@@ -948,5 +1064,5 @@ fn copy_objects(view: &Dir, git_dir: &Dir, names: &[String]) -> Result<(), ToolE
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 pub(super) mod tests;

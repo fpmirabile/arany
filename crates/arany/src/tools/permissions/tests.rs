@@ -79,6 +79,26 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
         config(json!({"deny": ["Read(./src/**)"]})).decision(&git_write),
         Deny
     );
+    for paths in [
+        vec![],
+        vec![".".to_owned()],
+        vec!["docs".to_owned(), ".".to_owned()],
+    ] {
+        let whole = ToolCall::GitCommit {
+            message: "m".into(),
+            staged: paths.is_empty(),
+            paths,
+        };
+        assert_eq!(
+            config(json!({"deny": ["Read(./private/**)"]})).decision(&whole),
+            Deny,
+            "{whole:?}"
+        );
+        assert_eq!(
+            config(json!({"allow": ["git_commit(./src/**)"]})).decision(&whole),
+            Ask
+        );
+    }
     let switch = ToolCall::GitSwitch {
         branch: "topic".into(),
     };

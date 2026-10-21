@@ -273,6 +273,7 @@ impl GoalPlanContract {
                             | ToolCall::Edit { .. }
                             | ToolCall::ApplyChangeset { .. }
                             | ToolCall::McpCall { .. }
+                            | ToolCall::GitSwitch { .. }
                     )
                 {
                     *satisfied = false;

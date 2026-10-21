@@ -636,10 +636,6 @@ fn install_git(task: &Task, stage: &mut super::BootstrapStage) -> Result<PathBuf
         git_path,
     )?;
     profile.grant("allow file-read*", "subpath", &task.workspace)?;
-    // A Git write publishes its validated result into the Workspace and its `.git` itself.
-    if task.intent.call.mutates() {
-        profile.rule("allow file-write*", "subpath", &task.workspace)?;
-    }
     let view = root.join(crate::tools::git::VIEW);
     profile.grant("allow file-read* file-write*", "subpath", &view)?;
     profile.rule(

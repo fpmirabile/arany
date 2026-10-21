@@ -605,7 +605,44 @@ async fn spawn_git(
     workspace: &Path,
     deadline: tokio::time::Instant,
 ) -> Result<Captured, ToolError> {
-    spawn_git_with(git, argv, env, workspace, deadline, None, CAPTURE_BYTES).await
+    spawn_git_with(git, argv, env, workspace, deadline, Io::default()).await
+}
+
+// Optional stdin, the stdout capture bound, and the only path a write's Git child may modify.
+struct Io<'a> {
+    stdin: Option<&'a [u8]>,
+    stdout_bytes: usize,
+    writable: Option<&'a Path>,
+}
+
+impl Default for Io<'_> {
+    fn default() -> Self {
+        Self {
+            stdin: None,
+            stdout_bytes: CAPTURE_BYTES,
+            writable: None,
+        }
+    }
+}
+
+// A write's Git child may modify only `writable` (its private view); publication stays with the Guard.
+fn spawn_confined_before(
+    command: &mut tokio::process::Command,
+    writable: &Path,
+    deadline: tokio::time::Instant,
+) -> Result<tokio::process::Child, ToolError> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(ToolError::Timeout(String::new()));
+    }
+    #[cfg(target_os = "linux")]
+    {
+        super::guard::spawn_confined(command, &[writable, Path::new("/dev/null")])
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, writable);
+        Err(ToolError::ProtectionUnavailable)
+    }
 }
 
 async fn spawn_git_with(
@@ -614,25 +651,31 @@ async fn spawn_git_with(
     env: &[(&'static str, OsString)],
     workspace: &Path,
     deadline: tokio::time::Instant,
-    stdin: Option<&[u8]>,
-    stdout_bytes: usize,
+    io: Io<'_>,
 ) -> Result<Captured, ToolError> {
-    let mut child = super::guard::spawn_before(
-        tokio::process::Command::new(git)
-            .args(argv)
-            .env_clear()
-            .envs(env.iter().map(|(key, value)| (key, value)))
-            .current_dir(workspace)
-            .stdin(if stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true),
-        deadline,
-    )?;
+    let Io {
+        stdin,
+        stdout_bytes,
+        writable,
+    } = io;
+    let mut command = tokio::process::Command::new(git);
+    command
+        .args(argv)
+        .env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .current_dir(workspace)
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = match writable {
+        Some(writable) => spawn_confined_before(&mut command, writable, deadline)?,
+        None => super::guard::spawn_before(&mut command, deadline)?,
+    };
     let input = child.stdin.take();
     let stdout = child.stdout.take().ok_or(ToolError::Operation)?;
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
@@ -1068,7 +1111,8 @@ pub(super) mod tests {
         std::fs::write(workspace.join("notes.md"), "notes\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=1\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=4\n").unwrap();
-        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=6\n").unwrap();
+        // A case variant in its own directory: beside `.env` it would alias it on case-insensitive APFS.
+        std::fs::write(workspace.join("cfg/.Env"), "SECRET_CANARY=6\n").unwrap();
         std::fs::write(workspace.join("cfg/.ssh/id"), "SECRET_CANARY key\n").unwrap();
         let big: String = (0..40_000).map(|n| format!("line-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), big).unwrap();
@@ -1080,7 +1124,7 @@ pub(super) mod tests {
         std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
         std::fs::write(workspace.join(".env"), "SECRET_CANARY=3\n").unwrap();
         std::fs::write(workspace.join(".env.local"), "SECRET_CANARY=5\n").unwrap();
-        std::fs::write(workspace.join(".Env"), "SECRET_CANARY=7\n").unwrap();
+        std::fs::write(workspace.join("cfg/.Env"), "SECRET_CANARY=7\n").unwrap();
         let rewritten: String = (0..40_000).map(|n| format!("LINE-{n:05}\n")).collect();
         std::fs::write(workspace.join("src/big.txt"), rewritten).unwrap();
         std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
@@ -2044,5 +2088,45 @@ pub(super) mod tests {
         let text = value["patch"].as_str().unwrap();
         assert!(text.contains("+ok"));
         assert!(!text.contains("SECRET_CANARY"));
+    }
+
+    #[test]
+    fn user_identity_reads_only_the_user_section_as_data() {
+        for (text, expected) in [
+            (
+                "[user]\n\tname = Ana Lima\n\temail = ana@example.com\n",
+                (Some("Ana Lima"), Some("ana@example.com")),
+            ),
+            (
+                "[User]\nName = \"Ana # Lima\"\nemail = ana@example.com ; work\n",
+                (Some("Ana # Lima"), Some("ana@example.com")),
+            ),
+            (
+                "[user \"x\"]\n\tname = sub\n[core]\n\tname = other\n",
+                (None, None),
+            ),
+            (
+                "[include]\n\tpath = elsewhere\n[user]\n\tname = \"esc\\\"aped\"\n",
+                (None, None),
+            ),
+        ] {
+            let (name, email) = user_section(text);
+            assert_eq!((name.as_deref(), email.as_deref()), expected, "{text}");
+        }
+        assert!(GitIdentity::default().valid());
+        for (name, email) in [
+            ("", "a@b"),
+            ("A <b>", "a@b"),
+            ("A", "a b@c"),
+            ("A\n", "a@b"),
+        ] {
+            assert!(
+                !GitIdentity {
+                    name: name.into(),
+                    email: email.into()
+                }
+                .valid()
+            );
+        }
     }
 }

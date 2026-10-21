@@ -34,9 +34,14 @@ pub(super) fn payload_report_deadline(
 }
 
 #[cfg(target_os = "linux")]
+#[allow(unsafe_code)]
+mod landlock;
+#[cfg(target_os = "linux")]
 mod linux;
 #[cfg(target_os = "linux")]
 mod profile;
+#[cfg(target_os = "linux")]
+pub(super) use landlock::spawn_confined;
 
 #[cfg(target_os = "macos")]
 mod macos;

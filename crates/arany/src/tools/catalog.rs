@@ -282,9 +282,12 @@ pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
     by_name(call["properties"]["operation"]["enum"][0].as_str()?)
 }
 
+// Git writes need a child-only filesystem restriction; macOS has none yet, so it fails closed.
+pub(crate) const GIT_WRITES: bool = cfg!(target_os = "linux");
+
 pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
     ALL.iter()
-        .filter(|facts| facts.family == Family::Git && (write || !facts.mutates))
+        .filter(|facts| facts.family == Family::Git && (write && GIT_WRITES || !facts.mutates))
         .map(|facts| facts.name)
         .collect()
 }
@@ -369,7 +372,11 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
             Family::Skill => ("skills", "name", MAX_SKILLS),
             Family::Mcp => ("mcp_servers", "server", 4),
             Family::Git => {
-                return catalog["git"].is_object() && (!facts.mutates || catalog["write"] == true);
+                return catalog["git"].is_object()
+                    && (!facts.mutates
+                        || catalog["git"]["operations"]
+                            .as_array()
+                            .is_some_and(|names| names.iter().any(|name| name == facts.name)));
             }
             Family::Preparation => return false,
         };

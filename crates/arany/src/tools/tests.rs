@@ -2195,17 +2195,11 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         json!(["git_status", "git_diff", "git_log"])
     );
     config.write = true;
-    assert_eq!(
-        catalog(config)["git"]["operations"],
-        json!([
-            "git_status",
-            "git_diff",
-            "git_log",
-            "git_commit",
-            "git_branch",
-            "git_switch"
-        ])
-    );
+    let mut operations = vec!["git_status", "git_diff", "git_log"];
+    if super::catalog::GIT_WRITES {
+        operations.extend(["git_commit", "git_branch", "git_switch"]);
+    }
+    assert_eq!(catalog(config)["git"]["operations"], json!(operations));
 }
 
 #[test]

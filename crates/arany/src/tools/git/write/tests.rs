@@ -6,6 +6,46 @@ use super::*;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum Stage {
+    Snapshot,
+    Checked,
+    Planned,
+}
+
+type Race = (PathBuf, Stage, Box<dyn FnOnce() + Send>);
+
+// Per-Workspace so parallel tests never trigger each other's races.
+static RACES: std::sync::Mutex<Vec<Race>> = std::sync::Mutex::new(Vec::new());
+
+pub(super) fn race(workspace: &Path, stage: Stage) {
+    let race = {
+        let mut races = RACES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        races
+            .iter()
+            .position(|(path, at, _)| path == workspace && *at == stage)
+            .map(|index| races.remove(index).2)
+    };
+    if let Some(race) = race {
+        race();
+    }
+}
+
+fn arm(repo: &Repo, stage: Stage, args: &'static [&'static [&'static str]]) {
+    let (workspace, home) = (repo.workspace.clone(), repo.home.clone());
+    RACES.lock().unwrap().push((
+        repo.workspace.clone(),
+        stage,
+        Box::new(move || {
+            for args in args {
+                host_git(&workspace, &home, args);
+            }
+        }),
+    ));
+}
+
 fn identity() -> GitIdentity {
     GitIdentity {
         name: "Arany Writer".into(),
@@ -182,7 +222,7 @@ fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
     repo.succeeded(commit(&["."], "everything"));
     assert_eq!(
         repo.git(&["status", "--porcelain=v1", "--untracked-files=no"]),
-        " M .Env\n M .env\n M .env.local\n"
+        " M .env\n M .env.local\n M cfg/.Env\n"
     );
     assert_eq!(repo.git(&["show", "HEAD:.env"]), "SECRET_CANARY=2\n");
 }
@@ -264,7 +304,7 @@ fn hostile_repository_configuration_never_executes_during_writes() {
 #[test]
 fn refusals_leave_the_repository_and_workspace_unchanged() {
     type Setup = fn(&Repo);
-    let cases: [(&str, Setup, ToolCall, &str); 10] = [
+    let cases: [(&str, Setup, ToolCall, &str); 12] = [
         (
             "detached HEAD",
             |repo| host_git(&repo.workspace, &repo.home, &["checkout", "-q", "--detach"]),
@@ -312,6 +352,31 @@ fn refusals_leave_the_repository_and_workspace_unchanged() {
             },
             switch("adds"),
             "untracked files in 1 path(s): src/new.txt",
+        ),
+        (
+            "paths differing only by case",
+            |repo| {
+                let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+                git(&["checkout", "-q", "-b", "cased"]);
+                git(&["mv", "notes.md", "NOTES.md"]);
+                git(&["commit", "-q", "-m", "cased"]);
+                git(&["checkout", "-q", "main"]);
+            },
+            switch("cased"),
+            CASE_ALIAS,
+        ),
+        (
+            "an added path aliasing an existing name by case",
+            |repo| {
+                let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+                git(&["checkout", "-q", "-b", "aliased"]);
+                std::fs::write(repo.workspace.join("src/NEW.txt"), "upper\n").unwrap();
+                git(&["add", "src/NEW.txt"]);
+                git(&["commit", "-q", "-m", "aliased"]);
+                git(&["checkout", "-q", "main"]);
+            },
+            switch("aliased"),
+            CASE_ALIAS,
         ),
         (
             "existing branch",
@@ -391,41 +456,150 @@ fn a_failure_after_the_first_published_effect_is_uncertain() {
 }
 
 #[test]
-fn user_identity_reads_only_the_user_section_as_data() {
-    for (text, expected) in [
+fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
+    type Setup = fn(&Repo);
+    let cases: [(&str, Setup, Stage, &[&[&str]], ToolCall); 6] = [
         (
-            "[user]\n\tname = Ana Lima\n\temail = ana@example.com\n",
-            (Some("Ana Lima"), Some("ana@example.com")),
+            "branch advanced after the snapshot",
+            |_| {},
+            Stage::Snapshot,
+            &[&["commit", "-q", "--allow-empty", "-m", "concurrent"]],
+            commit(&["src/a.txt"], "m"),
         ),
         (
-            "[User]\nName = \"Ana # Lima\"\nemail = ana@example.com ; work\n",
-            (Some("Ana # Lima"), Some("ana@example.com")),
+            "branch advanced before publication",
+            |_| {},
+            Stage::Planned,
+            &[&["commit", "-q", "--allow-empty", "-m", "concurrent"]],
+            commit(&["src/a.txt"], "m"),
         ),
         (
-            "[user \"x\"]\n\tname = sub\n[core]\n\tname = other\n",
-            (None, None),
+            "HEAD moved before a commit publishes",
+            |repo| host_git(&repo.workspace, &repo.home, &["branch", "other"]),
+            Stage::Planned,
+            &[&["symbolic-ref", "HEAD", "refs/heads/other"]],
+            commit(&["src/a.txt"], "m"),
         ),
         (
-            "[include]\n\tpath = elsewhere\n[user]\n\tname = \"esc\\\"aped\"\n",
-            (None, None),
+            "switch target advanced",
+            |repo| host_git(&repo.workspace, &repo.home, &["branch", "other"]),
+            Stage::Planned,
+            &[&["update-ref", "refs/heads/other", "HEAD~1"]],
+            switch("other"),
         ),
-    ] {
-        let (name, email) = super::super::user_section(text);
-        assert_eq!((name.as_deref(), email.as_deref()), expected, "{text}");
-    }
-    assert!(GitIdentity::default().valid());
-    for (name, email) in [
-        ("", "a@b"),
-        ("A <b>", "a@b"),
-        ("A", "a b@c"),
-        ("A\n", "a@b"),
-    ] {
+        (
+            "switch source advanced",
+            |repo| host_git(&repo.workspace, &repo.home, &["branch", "other"]),
+            Stage::Planned,
+            &[&["commit", "-q", "--allow-empty", "-m", "concurrent"]],
+            switch("other"),
+        ),
+        (
+            "refs packed before a branch publishes",
+            |_| {},
+            Stage::Planned,
+            &[&["pack-refs", "--all"]],
+            branch("topic", None),
+        ),
+    ];
+    for (name, setup, stage, race, call) in cases {
+        let mut repo = Repo::new();
+        setup(&repo);
+        arm(&repo, stage, race);
+        let value = repo.write(call).expect(name);
+        assert_eq!(value["failed"], DRIFT, "{name}: {value}");
+        let after_race = tree(&repo.workspace);
         assert!(
-            !GitIdentity {
-                name: name.into(),
-                email: email.into()
-            }
-            .valid()
+            !after_race
+                .iter()
+                .any(|(path, _)| path.extension().is_some_and(|e| e == "lock")),
+            "{name}: no lock remains"
+        );
+        assert!(
+            repo.git(&["log", "--format=%s", "main"])
+                .starts_with("concurrent")
+                || !name.contains("advanced")
+                || name.contains("target"),
+            "{name}: the concurrent commit is never overwritten"
+        );
+        assert!(
+            !repo.workspace.join(".git/refs/heads/topic").exists(),
+            "{name}: nothing was created"
         );
     }
+}
+
+#[test]
+fn an_edit_racing_the_switch_cleanliness_check_is_never_overwritten() {
+    let mut repo = Repo::new();
+    {
+        let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+        git(&["stash", "-q"]);
+        git(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(repo.workspace.join("src/a.txt"), "other\n").unwrap();
+        git(&["commit", "-q", "-am", "other"]);
+        git(&["checkout", "-q", "main"]);
+    }
+    assert_eq!(repo.file("src/a.txt").as_deref(), Some("bravo\n"));
+    let path = repo.workspace.join("src/a.txt");
+    RACES.lock().unwrap().push((
+        repo.workspace.clone(),
+        Stage::Checked,
+        Box::new(move || std::fs::write(path, "racing edit\n").unwrap()),
+    ));
+    let value = repo.write(switch("other")).unwrap();
+    assert!(
+        value["failed"]
+            .as_str()
+            .is_some_and(|failed| failed.contains("1 path(s): src/a.txt")),
+        "{value}"
+    );
+    assert_eq!(repo.file("src/a.txt").as_deref(), Some("racing edit\n"));
+    assert_eq!(repo.git(&["symbolic-ref", "HEAD"]), "refs/heads/main\n");
+}
+
+#[tokio::test]
+async fn the_git_child_cannot_write_the_workspace_directly() {
+    let repo = Repo::new();
+    let scratch = scratch(repo.temp.path(), 0);
+    let git = super::super::discover().expect("pinned system git");
+    // Without GIT_DIR, `git init TARGET` writes TARGET/.git itself.
+    let env: Vec<_> = super::super::environment(&scratch.join(VIEW), &repo.workspace, &scratch)
+        .into_iter()
+        .filter(|(key, _)| !key.starts_with("GIT_DIR") && *key != "GIT_WORK_TREE")
+        .collect();
+    let before = tree(&repo.workspace);
+    let init = |target: PathBuf| {
+        let argv = vec![
+            "init".to_owned(),
+            "-q".to_owned(),
+            target.display().to_string(),
+        ];
+        let env = env.clone();
+        let git = git.clone();
+        let workspace = repo.workspace.clone();
+        let scratch = scratch.clone();
+        async move {
+            super::super::spawn_git_with(
+                Path::new(&git.executable),
+                &argv,
+                &env,
+                &workspace,
+                tokio::time::Instant::now() + Duration::from_secs(20),
+                super::super::Io {
+                    stdin: None,
+                    stdout_bytes: CAPTURE_BYTES,
+                    writable: Some(&scratch),
+                },
+            )
+            .await
+            .expect("confined Git spawns")
+        }
+    };
+    let denied = init(repo.workspace.join(".git/injected")).await;
+    assert_ne!(denied.status, Some(0));
+    assert_unchanged(&repo.workspace, &before);
+    let allowed = init(scratch.join("private")).await;
+    assert_eq!(allowed.status, Some(0));
+    assert!(scratch.join("private/.git/HEAD").exists());
 }

@@ -322,7 +322,7 @@ impl Config {
             | ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }
             | ToolCall::GitSwitch { .. } => {
-                return self.git_available();
+                return self.git_available() && (!call.mutates() || super::catalog::GIT_WRITES);
             }
             ToolCall::McpCall { server, tool, .. } => {
                 return self

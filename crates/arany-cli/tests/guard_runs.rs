@@ -33,6 +33,7 @@ mod permissions;
 #[path = "guard_runs/unguarded.rs"]
 mod unguarded;
 
+#[cfg(target_os = "linux")]
 #[path = "guard_runs/git_writes.rs"]
 mod git_writes;
 

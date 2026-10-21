@@ -658,7 +658,9 @@ impl Rule {
                             .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
-            ToolCall::GitCommit { paths, .. } if !paths.is_empty() => {
+            ToolCall::GitCommit { paths, .. }
+                if !paths.is_empty() && !paths.iter().any(|path| path == ".") =>
+            {
                 if decision == Decision::Allow {
                     paths
                         .iter()
@@ -669,7 +671,7 @@ impl Rule {
                         .any(|path| path_matches(pattern, path, decision))
                 }
             }
-            // A staged commit or a switch publishes paths unknown before dispatch.
+            // A staged or whole-repository commit and a switch publish paths unknown before dispatch.
             ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
                 source:
