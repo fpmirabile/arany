@@ -294,7 +294,10 @@ pub(crate) const GIT_WRITES: bool = cfg!(target_os = "linux");
 
 pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
     ALL.iter()
-        .filter(|facts| facts.family == Family::Git && (write && GIT_WRITES || !facts.mutates))
+        .filter(|facts| {
+            facts.family == Family::Git
+                && (write && GIT_WRITES || !facts.mutates || facts.name == "git_branch")
+        })
         .map(|facts| facts.name)
         .collect()
 }
@@ -379,12 +382,22 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
             Family::Skill => ("skills", "name", MAX_SKILLS),
             Family::Mcp => ("mcp_servers", "server", 4),
             Family::Git => {
-                return catalog["git"].is_object()
-                    && (!facts.mutates
-                        || catalog["write"] == true
-                            && catalog["git"]["operations"]
-                                .as_array()
-                                .is_some_and(|names| names.iter().any(|name| name == facts.name)));
+                if !catalog["git"].is_object() {
+                    return false;
+                }
+                let listed = catalog["git"]["operations"]
+                    .as_array()
+                    .is_some_and(|names| names.iter().any(|name| name == facts.name));
+                if !facts.mutates || catalog["write"] == true && listed {
+                    return true;
+                }
+                // Without the write grant a listed `git_branch` stays offered as its read-only listing.
+                if facts.name == "git_branch" && listed {
+                    call["properties"]["name"] = json!({"type":"null", "description":"null lists local branches; creating one needs the write grant."});
+                    call["properties"]["start_point"] = json!({"type":"null"});
+                    return true;
+                }
+                return false;
             }
             Family::Preparation => return false,
         };
@@ -636,7 +649,14 @@ mod tests {
             .filter(|name| matches!(name.as_str(), "git_commit" | "git_branch" | "git_switch"))
             .collect()
         };
-        assert!(offered(false).is_empty());
+        assert_eq!(offered(false), ["git_branch"], "listing stays offered");
+        let listing =
+            catalog_call_schemas(&json!({"write": false, "git": {"operations": ["git_branch"]}}))
+                .into_iter()
+                .find(|call| facts_of(call).is_some_and(|facts| facts.name == "git_branch"))
+                .unwrap();
+        assert_eq!(listing["properties"]["name"]["type"], "null");
+        assert_eq!(listing["properties"]["start_point"]["type"], "null");
         assert_eq!(offered(true), ["git_commit", "git_branch", "git_switch"]);
     }
 
