@@ -25,6 +25,8 @@ const MARKER_TEMP: &str = "phase.tmp";
 const STAGED: &str = "staged.sqlite3";
 const MAX_MARKER_BYTES: usize = 4096;
 const STAGING_HEADROOM_BYTES: u64 = 4 * 1024 * 1024;
+// Cumulative events loaded while replaying every Session, ancestors included.
+const MAX_VALIDATION_EVENTS: usize = 1 << 20;
 
 pub(super) struct SchemaStep {
     pub(super) from: i64,
@@ -36,6 +38,8 @@ pub(super) struct EventStep {
     pub(super) from: i64,
     // Returns `None` when the old payload cannot prove a required fact.
     pub(super) transform: fn(Value) -> Option<Value>,
+    // Serializes a stored source-version payload exactly as that version's replay hashed it.
+    pub(super) canonical: fn(&str) -> Option<String>,
 }
 
 pub(super) struct Registry<'a> {
@@ -125,6 +129,24 @@ impl Registry<'_> {
         self.schema_steps.iter().find(|step| step.from == from)
     }
 
+    // `None` for a current payload; prefix digests of older versions hash this canonical text.
+    fn historical_payload(
+        &self,
+        kind: &str,
+        version: i64,
+        payload: &str,
+    ) -> Result<Option<String>, StoreError> {
+        if payload_version(kind) == Some(version) {
+            return Ok(None);
+        }
+        let step = self
+            .event_step(kind, version)
+            .ok_or(StoreError::InvalidHistory)?;
+        (step.canonical)(payload)
+            .map(Some)
+            .ok_or(StoreError::InvalidHistory)
+    }
+
     // `None` keeps the stored payload; an unsupported version or a refused step rejects.
     fn upgrade_payload(
         &self,
@@ -203,8 +225,11 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             if current != Some(marker.source) {
                 return Err(StoreError::MigrationConflict);
             }
-            remove_if_present(&dir, STAGED)?;
-            remove_if_present(&dir, &marker.backup)?;
+            // An interrupted copy can leave a rollback journal; it goes before its database.
+            for name in [STAGED, marker.backup.as_str()] {
+                remove_if_present(&dir, &format!("{name}-journal"))?;
+                remove_if_present(&dir, name)?;
+            }
         }
         Phase::Ready {
             source_digest,
@@ -212,22 +237,19 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             staged,
             staged_digest,
         } => {
-            if current == Some(marker.source) {
-                if digest(&root.dir, DATABASE_FILE)? != Some(*source_digest) {
-                    return Err(StoreError::MigrationConflict);
-                }
-                remove_if_present(&dir, STAGED)?;
-            } else if current == Some(*staged) {
-                if digest(&root.dir, DATABASE_FILE)? != Some(*staged_digest)
-                    || !recorded(&root.path().join(DATABASE_FILE), &marker.id)?
-                {
-                    return Err(StoreError::MigrationConflict);
-                }
+            let original = current == Some(marker.source);
+            let matches = if original {
+                digest(&root.dir, DATABASE_FILE)? == Some(*source_digest)
             } else {
+                current == Some(*staged)
+                    && digest(&root.dir, DATABASE_FILE)? == Some(*staged_digest)
+                    && recorded(&root.path().join(DATABASE_FILE), &marker.id)?
+            };
+            if !matches || digest(&dir, &marker.backup)? != Some(*backup_digest) {
                 return Err(StoreError::MigrationConflict);
             }
-            if digest(&dir, &marker.backup)? != Some(*backup_digest) {
-                return Err(StoreError::MigrationConflict);
+            if original {
+                remove_if_present(&dir, STAGED)?;
             }
         }
     }
@@ -241,9 +263,10 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
 // The caller holds the exclusive history lock and has found the history incompatible.
 pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool, StoreError> {
     let source_path = root.path().join(DATABASE_FILE);
-    let Some(from_schema) = migratable(&open_source(&source_path, false)?, registry)? else {
+    let Some(from_schema) = migratable(&open_source(&source_path, true)?, registry)? else {
         return Ok(false);
     };
+    drop(open_source(&source_path, false)?);
     for sidecar in &HISTORY_FILES[..3] {
         if identity_of(&root.dir, sidecar)?.is_some() {
             return Err(StoreError::InvalidStateDirectory);
@@ -253,12 +276,13 @@ pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool,
     let dir = private_subdirectory(&root.dir, DIR)?;
     sync(&root.dir)?;
     reserve_space(&dir, source.2)?;
+    let id = uuid::Uuid::now_v7().to_string();
     let mut marker = Marker {
-        id: uuid::Uuid::now_v7().to_string(),
+        backup: format!("{}-{id}.sqlite3", archive_name(now())),
+        id,
         source,
         from_schema,
         to_schema: SCHEMA_VERSION,
-        backup: format!("{}.sqlite3", archive_name(SystemTime::now())),
         phase: Phase::Preparing,
     };
     if identity_of(&dir, &marker.backup)?.is_some() {
@@ -359,7 +383,7 @@ fn stage(
                 rewritten,
                 marker.backup,
                 i64::try_from(
-                    SystemTime::now()
+                    now()
                         .duration_since(UNIX_EPOCH)
                         .map_or(0, |elapsed| elapsed.as_millis())
                 )
@@ -370,7 +394,7 @@ fn stage(
         step()?;
         transaction.commit()?;
     }
-    validate_all(&open_database(&staged_path, false)?)?;
+    validate_all(&open_database(&staged_path, false)?, MAX_VALIDATION_EVENTS)?;
     if identity_of(dir, &format!("{STAGED}-journal"))?.is_some() {
         return Err(StoreError::InvalidStateDirectory);
     }
@@ -379,14 +403,34 @@ fn stage(
     identity_of(dir, STAGED)?.ok_or(StoreError::HistoryChanged)
 }
 
+type Pins = ([u8; 32], [u8; 32]);
+
+#[derive(Default)]
+struct Lane {
+    historical: PrefixHasher,
+    upgraded: PrefixHasher,
+    tools: (PrefixHasher, PrefixHasher),
+}
+
+// A recorded digest must match the historical prefix before it is re-pinned to the upgraded one.
+fn repin(recorded: &mut [u8; 32], pins: Option<&Pins>) -> Result<(), StoreError> {
+    match pins {
+        Some((historical, upgraded)) if recorded == historical => {
+            *recorded = *upgraded;
+            Ok(())
+        }
+        _ => Err(StoreError::InvalidHistory),
+    }
+}
+
 fn rewrite_events(
     transaction: &rusqlite::Transaction<'_>,
     registry: &Registry<'_>,
 ) -> Result<i64, StoreError> {
-    let mut stored = HashMap::<String, PrefixHasher>::new();
-    let mut upgraded = HashMap::<SessionId, PrefixHasher>::new();
-    // Fork boundaries: (stored-bytes digest, upgraded digest) after each Run boundary row.
-    let mut boundaries = HashMap::<(SessionId, u64), ([u8; 32], [u8; 32])>::new();
+    let mut lanes = HashMap::<SessionId, Lane>::new();
+    // Digest pairs after fork and compaction boundaries, and after each ToolFinished.
+    let mut boundaries = HashMap::<(SessionId, u64), Pins>::new();
+    let mut tools = HashMap::<(SessionId, u64), Pins>::new();
     let mut statement = transaction.prepare(ROWS_AFTER_SQL)?;
     let (mut after, mut rewritten) = (0_i64, 0_i64);
     loop {
@@ -402,51 +446,72 @@ fn rewrite_events(
         after = last.sequence;
         for row in rows {
             let (sequence, original) = (row.sequence, (row.version, row.payload.clone()));
-            let stored_digest = {
-                let hasher = stored.entry(row.session_id.clone()).or_default();
-                hasher.update_row(&PrefixRow {
-                    sequence: u64::try_from(sequence).map_err(|_| StoreError::InvalidHistory)?,
-                    session_id: &row.session_id,
-                    run_id: row.run_id.as_deref(),
-                    agent_run_id: row.agent_run_id.as_deref(),
-                    kind: &row.kind,
-                    payload: &row.payload,
-                    created_at_ms: row.created_at_ms,
-                })?;
-                hasher.digest()
-            };
+            let historical = registry.historical_payload(&row.kind, row.version, &row.payload)?;
             let mut envelope = upgraded_row(registry, row)?.decode()?;
-            if let Event::SessionForked {
-                source_session_id,
-                source_sequence,
-                prefix_digest,
-                ..
-            } = &mut envelope.event
-                && *source_session_id != envelope.session_id
-            {
-                let (verified, recomputed) = boundaries
-                    .get(&(*source_session_id, *source_sequence))
-                    .ok_or(StoreError::InvalidHistory)?;
-                if prefix_digest != verified {
-                    return Err(StoreError::InvalidHistory);
+            let historical = match historical {
+                Some(payload) => payload,
+                None => envelope.event.payload()?,
+            };
+            let session = envelope.session_id;
+            let lane = lanes.entry(session).or_default();
+            let head = (lane.historical.digest(), lane.upgraded.digest());
+            match &mut envelope.event {
+                Event::SessionForked {
+                    source_session_id,
+                    source_sequence,
+                    prefix_digest,
+                    ..
+                } if *source_session_id != session => repin(
+                    prefix_digest,
+                    boundaries.get(&(*source_session_id, *source_sequence)),
+                )?,
+                Event::ContextCompacted { record, .. } => repin(
+                    &mut record.source_digest,
+                    boundaries.get(&(session, record.covered_sequence)),
+                )?,
+                Event::GoalContextCompacted { record, .. } => repin(
+                    &mut record.source_digest,
+                    tools.get(&(session, record.covered_sequence)),
+                )?,
+                Event::WorkspaceRewindStarted { record } => {
+                    repin(&mut record.prefix_digest, Some(&head))?;
                 }
-                *prefix_digest = *recomputed;
+                _ => {}
             }
             let version = envelope.event.version();
             let payload = envelope.event.payload()?;
             if payload.len() > event_payload_limit(envelope.event.kind(), version) {
                 return Err(StoreError::InvalidHistory);
             }
-            let hasher = upgraded.entry(envelope.session_id).or_default();
-            hasher.update(&envelope)?;
-            if matches!(
-                envelope.event,
-                Event::RunFinished { .. } | Event::SessionForked { .. }
-            ) {
-                boundaries.insert(
-                    (envelope.session_id, envelope.sequence),
-                    (stored_digest, hasher.digest()),
-                );
+            let (run_id, agent_run_id) = (
+                envelope.run_id.map(|id| id.to_string()),
+                envelope.agent_run_id.map(|id| id.to_string()),
+            );
+            let stored = PrefixRow {
+                sequence: envelope.sequence,
+                session_id: &session.to_string(),
+                run_id: run_id.as_deref(),
+                agent_run_id: agent_run_id.as_deref(),
+                kind: envelope.event.kind(),
+                payload: &historical,
+                created_at_ms: envelope.created_at_ms,
+            };
+            lane.historical.update_row(&stored)?;
+            lane.upgraded.update(&envelope)?;
+            let point = (session, envelope.sequence);
+            match envelope.event {
+                Event::RunFinished { .. }
+                | Event::SessionForked { .. }
+                | Event::WorkspaceRewindStarted { .. }
+                | Event::WorkspaceRewindFinished { .. } => {
+                    boundaries.insert(point, (lane.historical.digest(), lane.upgraded.digest()));
+                }
+                Event::ToolFinished { .. } => {
+                    lane.tools.0.update_row(&stored)?;
+                    lane.tools.1.update(&envelope)?;
+                    tools.insert(point, (lane.tools.0.digest(), lane.tools.1.digest()));
+                }
+                _ => {}
             }
             if (version, &payload) != (original.0, &original.1) {
                 transaction.execute(
@@ -468,7 +533,7 @@ fn upgraded_row(registry: &Registry<'_>, mut row: RawRow) -> Result<RawRow, Stor
     Ok(row)
 }
 
-fn validate_all(connection: &Connection) -> Result<(), StoreError> {
+fn validate_all(connection: &Connection, limit: usize) -> Result<(), StoreError> {
     validate_history(connection)?;
     // Inside a read transaction Session loads use the indexed per-Session query.
     let snapshot = connection.unchecked_transaction()?;
@@ -476,9 +541,13 @@ fn validate_all(connection: &Connection) -> Result<(), StoreError> {
         .prepare("SELECT DISTINCT session_id FROM events")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let mut loaded = 0;
     for session in sessions {
         let id = SessionId::from_str(&session).map_err(|_| StoreError::InvalidHistory)?;
-        resolve_view(&snapshot, id, 0, &mut 0)?;
+        resolve_view(&snapshot, id, 0, &mut loaded)?;
+        if loaded > limit {
+            return Err(StoreError::ReplayLimit);
+        }
     }
     Ok(())
 }
@@ -517,14 +586,13 @@ fn open_source(path: &std::path::Path, read_only: bool) -> Result<Connection, St
     let connection = Connection::open_with_flags(path, access | OpenFlags::SQLITE_OPEN_NOFOLLOW)?;
     connection.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
     connection.execute_batch("PRAGMA trusted_schema=OFF;")?;
-    // Writable opens finish SQLite recovery and fold any WAL into the main file.
-    let mode: String = if read_only {
-        connection.query_row("PRAGMA journal_mode", [], |row| row.get(0))?
-    } else {
-        connection.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?
-    };
-    if mode != "delete" {
-        return Err(StoreError::InvalidStateDirectory);
+    if !read_only {
+        // Writable opens finish SQLite recovery and fold any WAL into the main file.
+        let mode: String =
+            connection.query_row("PRAGMA journal_mode=DELETE", [], |row| row.get(0))?;
+        if mode != "delete" {
+            return Err(StoreError::InvalidStateDirectory);
+        }
     }
     Ok(connection)
 }
@@ -553,11 +621,14 @@ fn read_marker(root: &StateRoot) -> Result<Option<(Dir, Marker)>, StoreError> {
         .read_to_end(&mut bytes)?;
     let marker: Marker =
         serde_json::from_slice(&bytes).map_err(|_| StoreError::MigrationConflict)?;
+    let backup = marker
+        .backup
+        .strip_suffix(".sqlite3")
+        .and_then(|name| name.split_at_checked(28));
     if uuid::Uuid::parse_str(&marker.id).is_err()
-        || !marker
-            .backup
-            .strip_suffix(".sqlite3")
-            .is_some_and(valid_archive_name)
+        || !backup.is_some_and(|(stamp, id)| {
+            valid_archive_name(stamp) && id.strip_prefix('-') == Some(marker.id.as_str())
+        })
     {
         return Err(StoreError::MigrationConflict);
     }
@@ -637,6 +708,23 @@ fn reserve_space(dir: &Dir, source_bytes: u64) -> Result<(), StoreError> {
         return Err(StoreError::StorageFull);
     }
     Ok(())
+}
+
+#[cfg(not(test))]
+fn now() -> SystemTime {
+    SystemTime::now()
+}
+
+#[cfg(test)]
+thread_local! {
+    static CLOCK: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn now() -> SystemTime {
+    CLOCK
+        .with(|clock| clock.get())
+        .unwrap_or_else(SystemTime::now)
 }
 
 fn storage(error: StoreError) -> StoreError {
