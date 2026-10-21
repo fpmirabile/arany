@@ -13,6 +13,27 @@ This contract owns Provider selection and pinning, native and custom admission, 
 
 The primary Delegate envelope accepts optional nullable `agent`, selecting one admitted researcher definition for its `children` objectives. A child object keeps required `objective` and nullable `profile`; an editor additionally carries the closed `editor` assignment from the [worker protocol](./execution.md#worker-journal-protocol), repeats its mission as `objective`, and requires null `profile`. Its definition/digest come from the admitted catalog. The editor envelope requires `commands`: a sorted array of zero to eight unique admitted command names, each at most 64 bytes; missing, duplicate, unknown or extra names refuse admission. Both native function encodings share this envelope. The schema offers editor assignments whenever an admitted editor definition exists, so it stays constant within a Run; the Engine refuses an editor Delegate before a committed Goal plan, failing the Run before any capture or child call. Assignments offer foreground/background mode, bounded wave numbers and nullable current-Run supersession; nullable `resumes` accepts an exact historical child ID under the [fresh-assignment semantics](./session.md#worker-identity-and-explicit-reassignment). Editor calls use a compiled private-view prompt, Single policy and the restricted catalog, with text answers and no Delegate. [Execution](./execution.md#agent-definitions) owns its strict selection and authority intersection. Definition bodies stay in labelled untrusted user guidance; no new system role or Provider destination is introduced.
 
+## Provider support summary
+
+This table is a summary only; the sections below and the linked contracts own each row's behavior.
+
+| Vendor | Access | Route | Status |
+|---|---|---|---|
+| OpenAI | API key | Native Responses adapter | Supported |
+| OpenAI | ChatGPT plan (subscription) | Consented OAuth route, [ChatGPT contract](./chatgpt.md) | Supported |
+| Anthropic | API key | Native Messages adapter | Supported |
+| Anthropic | Claude subscription | — | Not admitted without Anthropic's prior approval |
+| Any OpenAI-Responses-compatible service | API key | `custom:NAME`, protocol `openai-responses` | Supported after `provider check` |
+| DeepSeek | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned: [Anthropic-compatible routes](../../planning/anthropic-compatible-routes/README.md) |
+| DeepSeek | Subscription | — | Not applicable: no coding subscription exists |
+| Kimi (Moonshot) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
+| Kimi (Moonshot) | Kimi Code subscription | `custom:NAME` with the plan's console key and an honest Arany User-Agent | Planned. Reusing kimi-cli's OAuth client would impersonate it and is excluded |
+| GLM (Z.ai) | API key | `custom:NAME`, Anthropic-compatible endpoint | Planned |
+| GLM (Z.ai) | GLM Coding Plan | — | Excluded: its terms allow only listed tools, and Arany is not listed. Revisit if Z.ai approves Arany |
+| OpenRouter | API key | Broker profile | Deferred behind its route and privacy gate |
+
+Sources and verification status: [DeepSeek, Kimi and GLM research](../research/deepseek-kimi-glm-providers-2026-10.md). "Supported" means synthetic evidence plus CI; live support per route still requires the owner-run checks in [NEXT_STEPS](../../NEXT_STEPS.md).
+
 ## Per-role selection and fallback
 
 `Providers { primary, child, review, compaction }` binds primary planning/synthesis, researcher or reasoning children, AI Tool review and summary calls. A child receives the same narrowing of instructions, Tools, authority and Goal facts regardless of its Provider. Each route retains its own immutable identity, account or custom conformance provenance, effort, output-token bound and call limits. Pinned role deadlines are positive and at most 20 minutes; compiled routes retain their narrower limits. The role-specific output caps still apply, and concurrent children fit both the primary and every admitted child route's concurrency ceiling.
