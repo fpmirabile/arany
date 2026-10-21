@@ -1106,6 +1106,8 @@ impl Drop for Ledger<'_> {
     }
 }
 
+// Only the ref-name alphabet typed writes create, so a planted record cannot carry controls or
+// bidirectional overrides into the cleanup report.
 fn valid_lock_path(path: &str) -> bool {
     matches!(path, "HEAD.lock" | "index.lock" | "packed-refs.lock")
         || path.len() <= 512
@@ -1115,7 +1117,9 @@ fn valid_lock_path(path: &str) -> bool {
                     !part.is_empty()
                         && part != "."
                         && part != ".."
-                        && !part.chars().any(char::is_control)
+                        && part
+                            .bytes()
+                            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
                 })
             })
 }

@@ -870,3 +870,31 @@ fn locks_left_by_a_dead_guard_are_reported_and_never_touched() {
         repo.git(&["rev-parse", "older"])
     );
 }
+
+#[test]
+fn a_lock_record_naming_controls_or_bidi_overrides_is_refused_not_reported() {
+    let repo = Repo::new();
+    let intent = uuid::Uuid::now_v7();
+    let ledger = repo
+        .workspace
+        .join(format!(".git/arany-locks-{intent}.json"));
+    for path in [
+        "refs/heads/\u{202e}kcol.x.lock",
+        "refs/heads/a\u{1b}[2J.lock",
+        "../escape.lock",
+    ] {
+        std::fs::write(
+            &ledger,
+            serde_json::to_vec(&json!([{"path": path, "device": 0, "inode": 0, "sha256": ""}]))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            matches!(
+                recover_locks(&repo.workspace, intent),
+                Err(ToolError::Operation)
+            ),
+            "{path:?}"
+        );
+    }
+}

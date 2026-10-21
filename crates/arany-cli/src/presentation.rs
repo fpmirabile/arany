@@ -207,17 +207,16 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 if observation.output.is_empty() {
                     state.into()
                 } else {
-                    // An uncertain Git write may lead with locks the owner must remove: use the whole row.
-                    let limit = match (disposition, &tool.intent.call) {
+                    match (disposition, &tool.intent.call) {
+                        // An uncertain Git write may lead with locks the owner must remove by hand.
                         (
                             ToolDisposition::Uncertain,
                             ToolCall::GitCommit { .. }
                             | ToolCall::GitBranch { .. }
                             | ToolCall::GitSwitch { .. },
-                        ) => usize::MAX,
-                        _ => 160,
-                    };
-                    format!("{state}: {}", safe_truncate(&observation.output, limit))
+                        ) => format!("{state}: {}", wrapped_rows(&observation.output)),
+                        _ => format!("{state}: {}", safe_truncate(&observation.output, 160)),
+                    }
                 }
             }
         },
@@ -1778,11 +1777,40 @@ fn escape_json_controls(value: &str) -> String {
     safe
 }
 
+const WRAPPED_ROW_CHARS: usize = 120;
+const MAX_WRAPPED_ROWS: usize = 8;
+
+// The escaped text across at most eight continuation rows, then an explicit remainder count.
+fn wrapped_rows(value: &str) -> String {
+    let escaped: Vec<char> = escape_terminal(value).chars().collect();
+    let mut rows: Vec<String> = escaped
+        .chunks(WRAPPED_ROW_CHARS)
+        .take(MAX_WRAPPED_ROWS)
+        .map(|row| row.iter().collect())
+        .collect();
+    let hidden = escaped
+        .len()
+        .saturating_sub(WRAPPED_ROW_CHARS * MAX_WRAPPED_ROWS);
+    if hidden > 0 {
+        rows.push(format!("… {hidden} more characters"));
+    }
+    rows.join("\n    ")
+}
+
 fn unsafe_display_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character as u32,
-            0x202a..=0x202e | 0x2066..=0x2069 | 0x061c | 0x200e | 0x200f | 0x2028 | 0x2029
+            0x00ad
+                | 0x061c
+                | 0x180e
+                // Zero-width joiners stay: emoji and many scripts need them.
+                | 0x200b
+                | 0x200e
+                | 0x200f
+                | 0x2028..=0x202e
+                | 0x2060..=0x2069
+                | 0xfeff
         )
 }
 
@@ -2266,19 +2294,39 @@ mod peer_row_tests {
                 expected
             );
         }
-        let locks = "Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/feature/long-branch-name.lock, .git/packed-refs.lock; remove them after checking that no git process is running. Guard execution unconfirmed; effects may have occurred. Do not retry automatically.";
-        let mut uncertain = tool_fixture(
-            ToolCall::GitSwitch {
-                branch: "topic".into(),
-            },
-            locks,
+        let long = format!(".git/refs/heads/{}.lock", "deeply/nested/branch".repeat(6));
+        let locks = format!(
+            "Git locks left by an interrupted write: .git/index.lock, {long}, .git/packed-refs.lock; remove them after checking that no git process is running. Guard execution unconfirmed; effects may have occurred. Do not retry automatically."
         );
-        uncertain.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
-        let summary = tool_summary(&uncertain);
+        let uncertain = |output: &str| {
+            let mut tool = tool_fixture(
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                output,
+            );
+            tool.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
+            tool_summary(&tool)
+        };
+        let summary = uncertain(&locks);
+        let rows: Vec<&str> = summary.lines().collect();
         assert!(
-            summary.starts_with("⏺ Git switch(topic)\n  ⎿ uncertain: Git locks left by an interrupted write: .git/index.lock, .git/refs/heads/feature/long-branch-name.lock, .git/packed-refs.lock; remove them after checking that no git process is running."),
-            "{summary}"
+            rows.len() > 3,
+            "the report wraps instead of being cut: {summary}"
         );
+        let joined: String = rows[1..]
+            .iter()
+            .map(|row| {
+                row.trim_start_matches("  ⎿ uncertain: ")
+                    .trim_start_matches("    ")
+            })
+            .collect();
+        assert_eq!(joined, locks, "every path and the instruction stay visible");
+        let flood = "x".repeat(2_000);
+        let summary = uncertain(&flood);
+        assert_eq!(summary.lines().count(), 1 + 8 + 1);
+        assert!(summary.ends_with("… 1040 more characters"), "{summary}");
+        assert!(uncertain("\u{202e}gol.kcol").contains("\\u{202e}"));
         let mut failed = tool_fixture(
             ToolCall::GitSwitch {
                 branch: "topic".into(),
