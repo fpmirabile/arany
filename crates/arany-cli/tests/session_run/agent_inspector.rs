@@ -919,6 +919,11 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
         text.contains("Viewing primary; its conversation is above"),
         "{text}"
     );
+    assert_eq!(
+        text.matches("Agent chats in this Run:").count(),
+        1,
+        "{text}"
+    );
     assert!(
         !text.contains("\x1b["),
         "linear output has no cursor rewriting"

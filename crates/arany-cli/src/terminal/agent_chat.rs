@@ -117,6 +117,18 @@ impl AgentChat {
             })
     }
 
+    // The whole view on its first print, then only a child's new records; a listing prints once.
+    fn linear_draw_lines(&mut self) -> Vec<String> {
+        if !self.shown {
+            return self.linear_lines();
+        }
+        self.transcript
+            .as_ref()
+            .map_or_else(Vec::new, |transcript| {
+                transcript.linear_update(&mut self.appended)
+            })
+    }
+
     // Lines for the first linear print of this view.
     fn linear_lines(&mut self) -> Vec<String> {
         if let Some(transcript) = &self.transcript {
@@ -461,11 +473,7 @@ impl AttachedTerminal {
             .refresh(view);
         if let Some(linear) = &mut self.linear {
             let chat = self.agent_chat.as_mut().expect("open agent chat");
-            let lines = if let Some(transcript) = chat.transcript.as_ref().filter(|_| chat.shown) {
-                transcript.linear_update(&mut chat.appended)
-            } else {
-                chat.linear_lines()
-            };
+            let lines = chat.linear_draw_lines();
             if !chat.shown || !lines.is_empty() || history_notice.is_some() {
                 linear.write_agent_chat(&mut io::stderr(), &lines, history_notice, true)?;
                 chat.shown = true;
@@ -563,6 +571,32 @@ impl AttachedTerminal {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_linear_listing_prints_once_across_redraws() {
+        let view = crate::presentation::team_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let mut chat = AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 0,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: true,
+            shown: false,
+            choice: String::new(),
+            invalid: false,
+        };
+        let first = chat.linear_draw_lines();
+        assert_eq!(first[0], "Agent chats in this Run:");
+        assert_eq!(first.len(), 4);
+        chat.shown = true;
+        // The armed redraw after the barrier, and later Event bursts, repeat nothing.
+        assert!(chat.linear_draw_lines().is_empty());
+        assert!(chat.linear_draw_lines().is_empty());
+    }
 
     #[test]
     fn agent_keys_switch_only_from_an_idle_composer_wrap_and_escape_returns() {
