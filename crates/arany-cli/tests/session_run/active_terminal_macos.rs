@@ -1176,6 +1176,8 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
                     .windows(b"\x1b[?25h\x1b[22;3H".len())
                     .any(|part| part == b"\x1b[?25h\x1b[22;3H")
             {
+                // Idle Classic takes only its content, so the composer border sits under history.
+                super::assert_history_above(&super::screen_rows(bytes, 80, 24), 20, "idle Classic");
                 from = bytes.len();
                 input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
                 stage = 1;
@@ -1260,7 +1262,8 @@ fn native_default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         output.stderr[..first_query].ends_with(b"\x1b[24;1H"),
         "Classic reserves rows below any existing shell output"
     );
-    super::assert_classic_owned_clear(&output.stderr[from..], 1);
+    // Exit clears from the owned top: a filled screen starts at row 1, the composer at its own top.
+    super::assert_classic_owned_clear(&output.stderr[from..], 1..=21);
     assert!(output.status.success());
     let text = String::from_utf8_lossy(&output.stderr);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {

@@ -53,8 +53,27 @@ fn reply_positioned_cursor_queries(
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
-    let mut grid = vec![vec![' '; columns]; rows];
+    terminal_grid(transcript, columns, rows).1
+}
+
+// Decodes cursor moves, clears, line feeds and scroll regions; rows leaving the top of
+// the screen enter the returned scrollback, as in an emulator.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn terminal_grid(transcript: &[u8], columns: usize, rows: usize) -> (Vec<String>, Vec<String>) {
+    let blank = || vec![' '; columns];
+    let mut grid = vec![blank(); rows];
+    let mut scrollback = Vec::new();
+    let (mut top, mut bottom) = (0, rows - 1);
     let (mut row, mut column) = (0, 0);
+    let mut scroll_up = |grid: &mut Vec<Vec<char>>, top: usize, bottom: usize, count: usize| {
+        for _ in 0..count {
+            let line = grid.remove(top);
+            if top == 0 {
+                scrollback.push(line);
+            }
+            grid.insert(bottom, blank());
+        }
+    };
     let text = String::from_utf8_lossy(transcript);
     let mut chars = text.chars().peekable();
     while let Some(character) = chars.next() {
@@ -88,10 +107,26 @@ fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
                         grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
                     }
                     Some('K') => grid[row][column..].fill(' '),
+                    Some('r') if !parameters.starts_with('?') => {
+                        top = first.max(1).min(rows) - 1;
+                        bottom = values.next().unwrap_or(rows).clamp(1, rows) - 1;
+                        if parameters.is_empty() || top >= bottom {
+                            (top, bottom) = (0, rows - 1);
+                        }
+                        (row, column) = (0, 0);
+                    }
+                    Some('S') => scroll_up(&mut grid, top, bottom, first.max(1)),
+                    Some('T') => {
+                        for _ in 0..first.max(1) {
+                            grid.remove(bottom);
+                            grid.insert(top, blank());
+                        }
+                    }
                     _ => {}
                 }
             }
             '\r' => column = 0,
+            '\n' if row == bottom => scroll_up(&mut grid, top, bottom, 1),
             '\n' => row = (row + 1).min(rows - 1),
             character if !character.is_control() && column < columns => {
                 grid[row][column] = character;
@@ -100,9 +135,29 @@ fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
             _ => {}
         }
     }
-    grid.into_iter()
-        .map(|line| line.into_iter().collect())
-        .collect()
+    let lines = |lines: Vec<Vec<char>>| {
+        lines
+            .into_iter()
+            .map(|line| line.into_iter().collect::<String>())
+            .collect::<Vec<_>>()
+    };
+    (lines(scrollback), lines(grid))
+}
+
+// Native history ends directly above the Classic composer: at most the message separator
+// row lies between them, never rows of an oversized viewport.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn assert_history_above(screen: &[String], composer_top: usize, context: &str) {
+    let above = &screen[..composer_top];
+    let gap = above
+        .iter()
+        .rev()
+        .take_while(|row| row.trim().is_empty())
+        .count();
+    assert!(
+        gap <= 1 && gap < above.len(),
+        "{context}: {gap} blank rows between history and the composer: {screen:?}"
+    );
 }
 
 // A selector takes keys only once armed: its finished frame shows the focused `› N.` row.
@@ -136,7 +191,7 @@ fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
     {
         let rest = &bytes[start + 2..];
         let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
-        if digits > 0 && rest[digits..].starts_with(b";1H\x1b[J") && rows.len() < 16 {
+        if digits > 0 && rest[digits..].starts_with(b";1H\x1b[J") && rows.len() < 256 {
             rows.push(
                 String::from_utf8_lossy(&rest[..digits])
                     .parse()
@@ -148,13 +203,12 @@ fn observed_clear_rows(bytes: &[u8]) -> Vec<usize> {
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
-fn assert_classic_owned_clear(bytes: &[u8], row: usize) {
-    let clear = format!("\x1b[{row};1H\x1b[J");
+fn assert_classic_owned_clear(bytes: &[u8], rows: std::ops::RangeInclusive<usize>) {
     assert!(
-        bytes
-            .windows(clear.len())
-            .any(|part| part == clear.as_bytes()),
-        "Classic must clear its previous owned area from row {row}; observed clears at rows {:?}; tail {:?}",
+        observed_clear_rows(bytes)
+            .iter()
+            .any(|row| rows.contains(row)),
+        "Classic must clear its previous owned area from a row in {rows:?}; observed clears at rows {:?}; tail {:?}",
         observed_clear_rows(bytes),
         String::from_utf8_lossy(&bytes[bytes.len().saturating_sub(400)..])
             .escape_debug()

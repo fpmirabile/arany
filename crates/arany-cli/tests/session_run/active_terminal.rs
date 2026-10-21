@@ -1184,6 +1184,163 @@ mod clipboard_copy;
 mod tmux;
 
 #[test]
+fn classic_dialog_takes_the_floor_and_closes_under_the_latest_history() {
+    use super::session_picker::{PtyResponses, pump, tail};
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let id = crate::seed_transcript_session(&state, &workspace);
+    let shell = "stty rows 50 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"";
+    let mut command = crate::isolation::account_isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .env("TERM", "xterm")
+        .env("SHELL", "/bin/sh")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = PtyResponses::default();
+    // The latest composer caret row (0-based) drawn after `from`, decoded with the screen.
+    let caret = |transcript: &[u8], from: usize| {
+        let marker = b"\x1b[?25h\x1b[";
+        let start = from
+            + transcript[from..]
+                .windows(marker.len())
+                .rposition(|part| part == marker)?
+            + marker.len();
+        let digits = transcript[start..]
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .count();
+        transcript[start + digits..].starts_with(b";3H").then(|| {
+            let row = String::from_utf8_lossy(&transcript[start..start + digits])
+                .parse::<usize>()
+                .unwrap();
+            (
+                row - 1,
+                crate::terminal_grid(&transcript[..start + digits + 3], 80, 50),
+            )
+        })
+    };
+    let objectives = |(scrollback, screen): &(Vec<String>, Vec<String>)| {
+        scrollback
+            .iter()
+            .chain(screen)
+            .filter(|row| row.contains("Synthetic objective"))
+            .count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (draft_row, idle) = loop {
+        if let Some(found) = caret(&transcript, 0) {
+            break found;
+        }
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "idle composer: {}",
+            tail(&transcript)
+        );
+        thread::yield_now();
+    };
+    let text = String::from_utf8_lossy(&transcript);
+    let pid = product_child_of(transcript_field(&text, "SHELL_PID:").parse().unwrap());
+    let _product = ProductGuard::new(pid, state.clone());
+    super::assert_history_above(&idle.1, draft_row - 1, "idle Classic at 50 rows");
+    let history = objectives(&idle);
+    assert!(history > 0, "seeded history visible or in scrollback");
+
+    let opened_at = transcript.len();
+    input.write_all(b"\x0b").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let dialog = loop {
+        if let Some(screen) = crate::armed_selector(&transcript, opened_at, 80, 50) {
+            break screen;
+        }
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "armed quick actions: {}",
+            tail(&transcript[opened_at..])
+        );
+        thread::yield_now();
+    };
+    let top = dialog
+        .iter()
+        .position(|row| row.starts_with("Quick actions"))
+        .expect("quick actions header");
+    // The dialog starts right under history and reserves the 30-row floor below it.
+    super::assert_history_above(&dialog, top, "open dialog");
+    assert!(50 - top >= 30, "floor reserved at row {top}: {dialog:?}");
+    assert!(
+        dialog[top + 6..top + 30]
+            .iter()
+            .all(|row| row.trim().is_empty()),
+        "spare floor rows stay below the dialog: {dialog:?}"
+    );
+
+    let closed_at = transcript.len();
+    input.write_all(b"\x1b").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let (draft_row, closed) = loop {
+        if let Some(found) = caret(&transcript, closed_at) {
+            break found;
+        }
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "composer after the dialog: {}",
+            tail(&transcript[closed_at..])
+        );
+        thread::yield_now();
+    };
+    // Closing shrinks to the composer at the dialog's top, still under the same history.
+    assert_eq!(
+        draft_row - 1,
+        top,
+        "composer keeps the dialog top: {:?}",
+        closed.1
+    );
+    super::assert_history_above(&closed.1, top, "closed dialog");
+    assert!(
+        closed.1[top + 4..].iter().all(|row| row.trim().is_empty()),
+        "no stale dialog rows below the composer: {:?}",
+        closed.1
+    );
+    assert_eq!(
+        objectives(&closed),
+        history,
+        "scrollback is intact and never duplicated"
+    );
+
+    input.write_all(b"/exit\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.child().try_wait().unwrap().is_none() {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "Classic exit: {}",
+            tail(&transcript)
+        );
+        thread::yield_now();
+    }
+    assert!(wait_product(child.take()).status.success());
+}
+
+#[test]
 fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     use super::session_picker::{PtyResponses, pump, tail};
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -1263,6 +1420,8 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
         transcript[..first_query].ends_with(b"\x1b[24;1H"),
         "Classic reserves rows below any existing shell output"
     );
+    // Idle Classic takes only its content, so the composer border (row 21) sits under history.
+    super::assert_history_above(&crate::screen_rows(&transcript, 80, 24), 20, "idle Classic");
     // The following transcript gesture is a reader-order barrier for both ignored page keys.
     let from = transcript.len();
     input.write_all(b"\x1b[5~\x1b[6~\x14").unwrap();
@@ -1382,7 +1541,8 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
     }
     assert!(wait_product(child.take()).status.success());
     pump(&mut output, &mut input, &mut transcript, &mut answered);
-    super::assert_classic_owned_clear(&transcript[exit_from..], 1);
+    // Exit clears from the owned top: a filled screen starts at row 1, the composer at its own top.
+    super::assert_classic_owned_clear(&transcript[exit_from..], 1..=21);
     let text = String::from_utf8_lossy(&transcript);
     for mode in [1049, 1000, 1002, 1003, 1006, 1007, 1015] {
         assert!(

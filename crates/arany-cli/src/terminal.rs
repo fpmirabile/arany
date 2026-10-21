@@ -375,6 +375,8 @@ pub struct AttachedTerminal {
     history: History,
     classic_history: History,
     dialog_armed: bool,
+    // The row above the Classic viewport holds history or shell output, not rows it vacated.
+    history_adjacent: bool,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
     mouse_capture: Option<MouseCapture>,
@@ -511,7 +513,7 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::permission_height(&lines, width, false, profile_start);
-        self.draw_frame(height, |frame| {
+        self.draw_frame(height, true, |frame| {
             if frame.area().width >= 16 && frame.area().height >= 8 {
                 progress = view::draw_permission_frame(
                     frame,
@@ -576,13 +578,13 @@ impl AttachedTerminal {
         }
         let screen = self.terminal.as_mut().expect("owned terminal").size()?;
         let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
-        self.prepare_frame_height(height)?;
+        self.prepare_frame_height(height, true)?;
         let palette = self.palette();
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let history = &mut self.history;
         let mut more = true;
         terminal.draw(|frame| {
-            let area = bottom_area(frame.area(), height);
+            let area = dialog_area(frame.area(), height, self.mode == TerminalMode::Classic);
             if self.mode == TerminalMode::Fullscreen {
                 draw_history_above(frame, history, session, area.y, palette);
             }
@@ -674,6 +676,7 @@ impl AttachedTerminal {
             history: History::default(),
             classic_history: History::default(),
             dialog_armed: false,
+            history_adjacent: true,
             input: Some(input),
             _raw_mode: raw_mode,
             mouse_capture: None,
@@ -821,6 +824,7 @@ impl AttachedTerminal {
         kind: history::MessageKind,
         text: &str,
     ) -> Result<(), TerminalError> {
+        self.history_adjacent = true;
         let palette = self.palette();
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let width = terminal.get_frame().area().width;
@@ -1219,14 +1223,22 @@ impl AttachedTerminal {
             .get_frame()
             .area()
             .height;
-        self.prepare_frame_height(height)
+        self.prepare_frame_height(height, false)
     }
 
-    fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
+    fn prepare_frame_height(&mut self, height: u16, dialog: bool) -> Result<(), TerminalError> {
         let terminal = self.terminal.as_mut().expect("owned terminal");
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
-            let resized = resize_classic(terminal, offset, height, || {
+            let before = terminal.get_frame().area();
+            let (height, keep_top) = classic_placement(
+                before,
+                terminal.size()?.height,
+                height,
+                dialog,
+                self.history_adjacent,
+            );
+            let resized = resize_classic(terminal, offset, height, keep_top, || {
                 let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
                 backend.detach();
                 backend
@@ -1236,6 +1248,8 @@ impl AttachedTerminal {
                 terminal.backend_mut().detach();
             }
             resized?;
+            // A bottom-anchored shrink leaves cleared rows above the composer.
+            self.history_adjacent &= terminal.get_frame().area().y <= before.y;
         } else {
             terminal.autoresize()?;
         }
@@ -1247,9 +1261,10 @@ impl AttachedTerminal {
     fn draw_frame(
         &mut self,
         height: u16,
+        dialog: bool,
         render: impl FnOnce(&mut ratatui::Frame<'_>),
     ) -> Result<(), TerminalError> {
-        self.prepare_frame_height(height)?;
+        self.prepare_frame_height(height, dialog)?;
         let terminal = self.terminal.as_mut().expect("owned terminal");
         terminal.draw(render)?;
         let area = terminal.get_frame().area();
@@ -1288,14 +1303,15 @@ impl AttachedTerminal {
         height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<Rect, TerminalError> {
-        self.prepare_frame_height(height)?;
+        self.prepare_frame_height(height, true)?;
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
         let history = &mut self.history;
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let mut area = Rect::default();
+        let classic = self.mode == TerminalMode::Classic;
         terminal.draw(|frame| {
-            area = bottom_area(frame.area(), height);
+            area = dialog_area(frame.area(), height, classic);
             if let Some(session) = session {
                 draw_history_above(frame, history, session, area.y, palette);
             }
@@ -1373,7 +1389,7 @@ impl AttachedTerminal {
         } else {
             screen.height
         };
-        self.prepare_frame_height(height)?;
+        self.prepare_frame_height(height, false)?;
         self.sync_native(view)?;
         if self.mode == TerminalMode::Classic
             && let Some(TerminalNotice::History(text)) = notice
@@ -1459,7 +1475,7 @@ impl AttachedTerminal {
             .map(TerminalNotice::text);
         let palette = self.palette();
         let armed = self.dialog_armed;
-        self.draw_frame(height, |frame| {
+        self.draw_frame(height, false, |frame| {
             draw_frame_with_history(
                 frame,
                 &model,
@@ -1564,7 +1580,7 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame| {
+        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame| {
             draw_setup_frame(
                 frame,
                 step,
@@ -1598,7 +1614,7 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame| {
+        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame| {
             draw_setup_text_frame(frame, title, instruction, draft, notice, palette)
         })?;
         Ok(())
@@ -1634,7 +1650,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(8, |frame| {
+        self.draw_frame(8, true, |frame| {
             draw_setup_choices_frame(
                 frame,
                 title,
@@ -1673,7 +1689,7 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::setup_warning_height(warning, width);
-        self.draw_frame(height, |frame| {
+        self.draw_frame(height, true, |frame| {
             visible = frame.area().width >= 16 && frame.area().height >= 8;
             has_more = draw_setup_warning_frame(
                 frame,
@@ -2249,6 +2265,16 @@ impl AttachedTerminal {
     }
 }
 
+// Classic dialogs start right under the history at the viewport top; the floor's spare rows
+// stay below them. Fullscreen dialogs sit at the bottom under live history.
+fn dialog_area(frame: Rect, height: u16, classic: bool) -> Rect {
+    if classic {
+        Rect::new(frame.x, frame.y, frame.width, height.min(frame.height))
+    } else {
+        bottom_area(frame, height)
+    }
+}
+
 // History keeps a rectangle disjoint from bottom-area chrome, so it cannot overwrite a dialog.
 fn draw_history_above(
     frame: &mut ratatui::Frame<'_>,
@@ -2263,19 +2289,39 @@ fn draw_history_above(
     view::draw_history_rows(frame, area, &history.visible(session), palette);
 }
 
+// Dialogs get the Classic floor; idle and streaming frames take only their content.
+// A shrink keeps the viewport top while history stays visible above it, so the composer
+// remains under the latest history; otherwise the viewport returns to the bottom row.
+fn classic_placement(
+    area: Rect,
+    screen_height: u16,
+    height: u16,
+    dialog: bool,
+    history_adjacent: bool,
+) -> (u16, bool) {
+    let height = if dialog {
+        height.max(view::classic_floor(screen_height))
+    } else {
+        height
+    };
+    (height, history_adjacent && area.y > 0)
+}
+
 fn resize_classic<B: Backend>(
     terminal: &mut Terminal<B>,
     cursor_offset: u16,
     height: u16,
+    keep_top: bool,
     detached: impl FnOnce() -> B,
 ) -> Result<(), B::Error> {
     let size = terminal.size()?;
     let area = terminal.get_frame().area();
-    let height = height
-        .max(view::classic_floor(size.height))
-        .max(1)
-        .min(size.height);
-    if area.width == size.width && area.height == height && area.bottom() == size.height {
+    let height = height.max(1).min(size.height);
+    if area.width == size.width
+        && area.height == height
+        && area.bottom() <= size.height
+        && (keep_top || area.bottom() == size.height)
+    {
         return Ok(());
     }
     // Width reflow moves the caret; recover the owned top before clearing transient rows.
@@ -2291,7 +2337,13 @@ fn resize_classic<B: Backend>(
     backend.set_cursor_position((0, top))?;
     backend.clear_region(ratatui::backend::ClearType::AfterCursor)?;
     backend.show_cursor()?;
-    backend.set_cursor_position((0, top.max(size.height.saturating_sub(height))))?;
+    // Growing from the top scrolls rows above into scrollback instead of overwriting them.
+    let start = if keep_top {
+        top
+    } else {
+        top.max(size.height.saturating_sub(height))
+    };
+    backend.set_cursor_position((0, start))?;
     let backend = std::mem::replace(backend, detached());
     let mut resized = Terminal::with_options(
         backend,
@@ -2350,7 +2402,7 @@ impl Drop for AttachedTerminal {
 
 #[cfg(test)]
 mod insert_rows_tests {
-    use super::{insert_rows_scrolling_screen, resize_classic};
+    use super::{classic_placement, insert_rows_scrolling_screen, resize_classic};
     use ratatui::{
         Terminal, TerminalOptions, Viewport,
         backend::{Backend, ClearType, CrosstermBackend, TestBackend, WindowSize},
@@ -2431,7 +2483,7 @@ mod insert_rows_tests {
             for (columns, height) in [(width, 25), (80, 24)] {
                 // TestBackend::resize reshapes its flat scrollback bytes instead of preserving rows.
                 *terminal.backend_mut() = fixture(columns, height, &answer).backend().clone();
-                resize_classic(&mut terminal, 2, 12, || TestBackend::new(1, 1)).unwrap();
+                resize_classic(&mut terminal, 2, 12, false, || TestBackend::new(1, 1)).unwrap();
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
@@ -2469,7 +2521,7 @@ mod insert_rows_tests {
             before, answer,
             "transcript survives backend 24-to-20 resize"
         );
-        resize_classic(&mut height_shrunk, 2, 12, || TestBackend::new(1, 1)).unwrap();
+        resize_classic(&mut height_shrunk, 2, 12, false, || TestBackend::new(1, 1)).unwrap();
         let rows = text_rows(height_shrunk.backend().scrollback())
             .into_iter()
             .chain(text_rows(height_shrunk.backend().buffer()))
@@ -2484,8 +2536,8 @@ mod insert_rows_tests {
         let mut short = fixture(80, 8, &answer);
         assert_eq!(short.get_frame().area().height, 8);
         short.backend_mut().resize(80, 24);
-        resize_classic(&mut short, 2, 12, || TestBackend::new(1, 1)).unwrap();
-        assert_eq!(short.get_frame().area().height, 24);
+        resize_classic(&mut short, 2, 12, false, || TestBackend::new(1, 1)).unwrap();
+        assert_eq!(short.get_frame().area().height, 12);
         let rows = text_rows(short.backend().scrollback())
             .into_iter()
             .chain(text_rows(short.backend().buffer()))
@@ -2502,9 +2554,10 @@ mod insert_rows_tests {
     }
 
     #[test]
-    fn classic_grow_and_shrink_clear_only_transient_rows() {
+    fn classic_dialogs_take_the_floor_and_closing_keeps_history_above_the_composer() {
         use ratatui::widgets::{Paragraph, Widget};
         for height in [8, 12, 24, 40, 50, 60] {
+            let floor = super::view::classic_floor(height);
             let mut backend = TestBackend::new(80, height);
             let mut settled = Buffer::empty(Rect::new(0, height - 5, 80, 1));
             Paragraph::new("settled history").render(settled.area, &mut settled);
@@ -2519,28 +2572,67 @@ mod insert_rows_tests {
                 },
             )
             .unwrap();
-            for needed in [4, height, 6, 4] {
-                resize_classic(&mut terminal, 0, needed, || TestBackend::new(1, 1)).unwrap();
+            let mut history_adjacent = true;
+            for (needed, dialog) in [
+                (4, false),
+                (6, true),
+                (4, false),
+                (5, false),
+                (height, true),
+                (4, false),
+            ] {
+                let before = terminal.get_frame().area();
+                let (rows, keep_top) =
+                    classic_placement(before, height, needed, dialog, history_adjacent);
+                resize_classic(&mut terminal, 0, rows, keep_top, || TestBackend::new(1, 1))
+                    .unwrap();
+                let adjacent_before = history_adjacent;
+                history_adjacent &= terminal.get_frame().area().y <= before.y;
                 terminal
                     .draw(|frame| {
                         let area = frame.area();
                         frame.render_widget(
-                            Paragraph::new(if needed > 4 { "dialog" } else { "composer" }),
+                            Paragraph::new(if dialog { "dialog" } else { "composer" }),
                             area,
                         );
                         frame.set_cursor_position((2, area.y));
                     })
                     .unwrap();
                 let area = terminal.get_frame().area();
-                let rows_needed = needed.max(super::view::classic_floor(height));
-                assert_eq!(area, Rect::new(0, height - rows_needed, 80, rows_needed));
+                let context = format!("{height} rows, {needed} needed, dialog {dialog}");
+                if dialog {
+                    assert_eq!(area.height, needed.max(floor).min(height), "{context}");
+                } else {
+                    assert_eq!(
+                        area.height, needed,
+                        "idle frames take only content: {context}"
+                    );
+                }
+                if area.height < before.height {
+                    if adjacent_before && before.y > 0 {
+                        assert_eq!(area.y, before.y, "a shrink keeps the top: {context}");
+                    } else {
+                        assert_eq!(
+                            area.bottom(),
+                            height,
+                            "a full viewport returns down: {context}"
+                        );
+                    }
+                }
                 let rows = text_rows(terminal.backend().buffer());
                 assert!(
                     rows[..usize::from(area.y)]
                         .iter()
                         .all(|row| row.is_empty() || row == "settled history"),
-                    "stale transient rows at {height}/{needed}: {rows:?}"
+                    "stale transient rows: {context}: {rows:?}"
                 );
+                // Visible history sits directly above the viewport, with no blank rows between.
+                if let Some(row) = rows[..usize::from(area.y)]
+                    .iter()
+                    .position(|row| row == "settled history")
+                {
+                    assert_eq!(row + 1, usize::from(area.y), "{context}: {rows:?}");
+                }
                 let all_rows = text_rows(terminal.backend().scrollback())
                     .into_iter()
                     .chain(rows)
@@ -2550,12 +2642,14 @@ mod insert_rows_tests {
                         .iter()
                         .filter(|row| row.as_str() == "settled history")
                         .count(),
-                    1
+                    1,
+                    "history is kept once, never duplicated: {context}"
                 );
                 assert!(
                     text_rows(terminal.backend().scrollback())
                         .iter()
-                        .all(|row| row.is_empty() || row == "settled history")
+                        .all(|row| row.is_empty() || row == "settled history"),
+                    "{context}"
                 );
             }
         }
@@ -2675,7 +2769,7 @@ mod insert_rows_tests {
             let viewport = terminal.get_frame().area();
             terminal.backend_mut().inner.resize(40, 24);
             terminal.backend_mut().failure = Some(failure);
-            let error = resize_classic(&mut terminal, 0, 12, || FailingResizeBackend {
+            let error = resize_classic(&mut terminal, 0, 12, false, || FailingResizeBackend {
                 inner: TestBackend::new(1, 1),
                 shown: Rc::new(StateCell::new(false)),
                 failure: None,
