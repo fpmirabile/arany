@@ -5,6 +5,7 @@ use cap_std::fs::{Dir, OpenOptions};
 use directories::ProjectDirs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+mod archive;
 mod build_cache;
 pub(crate) mod checkpoints;
 mod lock;

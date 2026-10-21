@@ -149,7 +149,7 @@ fn identity(dir: &Dir) -> Result<(u64, u64), Error> {
 }
 
 #[cfg(unix)]
-fn check_directory(dir: &Dir, leaf: bool) -> Result<(), Error> {
+pub(crate) fn check_directory(dir: &Dir, leaf: bool) -> Result<(), Error> {
     check_acl(dir, leaf)?;
     use cap_std::fs::MetadataExt;
     let metadata = dir.dir_metadata()?;
@@ -169,7 +169,7 @@ fn check_directory(dir: &Dir, leaf: bool) -> Result<(), Error> {
 }
 
 #[cfg(not(unix))]
-fn check_directory(_dir: &Dir, _leaf: bool) -> Result<(), Error> {
+pub(crate) fn check_directory(_dir: &Dir, _leaf: bool) -> Result<(), Error> {
     Err(Error::InvalidPath)
 }
 

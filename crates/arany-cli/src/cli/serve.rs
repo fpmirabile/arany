@@ -43,6 +43,7 @@ pub(crate) async fn run(
     let state_dir = super::state_dir(args.state_dir).map_err(str::to_owned)?;
     let state = StateRoot::admit(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
+    super::admit_headless_history(&state)?;
     arany::enable_development_diagnostics(&state);
     let mut signals = super::exec::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;

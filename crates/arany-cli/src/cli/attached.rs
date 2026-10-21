@@ -1902,23 +1902,27 @@ async fn admit_startup(
             result = selected.admit(&admission.state_dir, &admission.workspace) => { result?; }
         }
     }
-    match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
-        Ok(setup::HistoryAdmission::Ready) => {}
-        Ok(setup::HistoryAdmission::Reset) => {
-            admission.entry = EntryMode::New;
-            if admission.prompt.take().is_some() {
-                append_notice(
-                    setup_notice,
-                    "Initial task was not submitted; enter it again.",
-                );
-            }
-            append_notice(
-                setup_notice,
-                "Starting a new conversation; saved accounts and folder trust kept.",
-            );
-        }
-        Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
-        Err(error) => return Err(error.into()),
+    let archived =
+        match setup::admit_history(terminal, &admission.state_dir, &admission.workspace).await {
+            Ok(setup::HistoryAdmission::Ready) => return Ok(ControlFlow::Continue(())),
+            Ok(setup::HistoryAdmission::Reset) => None,
+            Ok(setup::HistoryAdmission::Archived(path)) => Some(path),
+            Ok(setup::HistoryAdmission::Exit) => return Ok(ControlFlow::Break(())),
+            Err(error) => return Err(error.into()),
+        };
+    admission.entry = EntryMode::New;
+    if admission.prompt.take().is_some() {
+        append_notice(
+            setup_notice,
+            "Initial task was not submitted; enter it again.",
+        );
+    }
+    append_notice(
+        setup_notice,
+        "Starting a new conversation; saved accounts and folder trust kept.",
+    );
+    if let Some(path) = archived {
+        append_notice(setup_notice, &super::archived_history_notice(&path));
     }
     Ok(ControlFlow::Continue(()))
 }

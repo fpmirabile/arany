@@ -124,6 +124,7 @@ impl ChatGptSetupAccount {
 pub(super) enum HistoryAdmission {
     Ready,
     Reset,
+    Archived(std::path::PathBuf),
     Exit,
 }
 
@@ -150,10 +151,14 @@ pub(super) async fn admit_history(
             }
             Err(error) => Err(error),
         };
-        let error = match root.and_then(Store::open) {
-            Ok(store) => {
+        let opened = root.and_then(|root| {
+            let archived = root.archive_incompatible_history()?;
+            Store::open(root).map(|store| (store, archived))
+        });
+        let error = match opened {
+            Ok((store, archived)) => {
                 store.close().await.map_err(|_| "store shutdown failed")?;
-                return Ok(ready(reset_attempted));
+                return Ok(archived.map_or(ready(reset_attempted), HistoryAdmission::Archived));
             }
             Err(error) => error,
         };
