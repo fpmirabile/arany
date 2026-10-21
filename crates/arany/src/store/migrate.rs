@@ -113,6 +113,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         glob_step!("GoalPlanContractRecorded", 6),
         glob_step!("AgentSpawned", 11),
         glob_step!("RunStarted", 17),
+        glob_step!("ProviderCallRecorded", 13),
     ],
 };
 

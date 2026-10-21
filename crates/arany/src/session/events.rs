@@ -145,7 +145,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 12),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 13),
+    ("ProviderCallRecorded", 14),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -1425,6 +1425,7 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "AgentSpawned" => again::<SpawnPayload>(payload),
         "RunStarted" => again::<RunStartedPayload>(payload),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
     (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
@@ -1433,7 +1434,7 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
 fn mentions_glob(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
-            (key == "operation" && field == "glob")
+            (key == "operation" && (field == "glob" || field == "arany_glob"))
                 || (key == "tools"
                     && field
                         .as_array()
