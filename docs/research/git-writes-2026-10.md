@@ -1,7 +1,7 @@
 # Git writes and remembered approvals
 
 - Question: how can Arany commit, branch, push and open pull requests with peer-like usability while preserving explicit authority and honest recovery?
-- Source-check date: 2026-10-21. Repository facts below were checked in this worktree; peer evidence is current official documentation, not a pinned peer release or peer implementation audit.
+- Source-check date: 2026-10-21. Repository facts below were checked in this worktree at origin/main 17c34159. Peer evidence is the official Claude Code and Codex CLI documentation as published on 2026-10-21; neither page exposes a stable document revision, so no version can be pinned, and the conclusions should be rechecked if those docs change. This is not a pinned peer release or implementation audit.
 - Conclusion: typed local writes can extend the neutralized-view approach, but need a new receipted publication path. Host push and PR creation require the separately approved isolation exception. Prefix matching must operate on a closed typed schema rather than authorize arbitrary Git options.
 - Scope: evidence, alternatives and conflicts. The [Git write workflow plan](../../planning/git-write-workflow/README.md) owns the 2026-10-21 owner decisions and implementation sequence; [Tools](../specs/tools.md) and [execution](../specs/execution.md) remain the current contracts. This report grants no capability and establishes no native or live support.
 
