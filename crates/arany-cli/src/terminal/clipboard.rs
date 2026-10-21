@@ -747,24 +747,32 @@ fn destinations(
     .collect()
 }
 
+type EnvVars<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
 // Names the emulator's own selection gesture; tmux and SSH hide the outer emulator.
-pub(super) fn native_selection_hint(var: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> String {
+pub(super) fn native_selection_gesture(var: EnvVars<'_>) -> &'static str {
     let set = |name: &str| var(name).is_some_and(|value| !value.is_empty());
-    let tmux = set("TMUX");
-    let remote = ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
-        .into_iter()
-        .any(set);
-    let program = var("TERM_PROGRAM");
-    let gesture = match program.as_ref().and_then(|value| value.to_str()) {
-        _ if tmux || remote => "Shift-drag (Option in iTerm2, Fn in Terminal.app) selects natively",
-        Some("Apple_Terminal") => "Fn-drag selects natively",
-        Some("iTerm.app") => "Option-drag selects natively",
-        _ => "Shift-drag selects natively",
-    };
-    if tmux {
-        format!("{gesture} · tmux wheel scrolling needs `set -g mouse on`")
+    let hidden = set("TMUX")
+        || ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+            .into_iter()
+            .any(set);
+    match var("TERM_PROGRAM")
+        .as_ref()
+        .and_then(|value| value.to_str())
+    {
+        _ if hidden => "Shift-drag (Option in iTerm2, Fn in Terminal.app)",
+        Some("Apple_Terminal") => "Fn-drag",
+        Some("iTerm.app") => "Option-drag",
+        _ => "Shift-drag",
+    }
+}
+
+pub(super) fn native_selection_hint(var: EnvVars<'_>) -> String {
+    let gesture = native_selection_gesture(var);
+    if var("TMUX").is_some_and(|value| !value.is_empty()) {
+        format!("{gesture} selects natively · tmux wheel scrolling needs `set -g mouse on`")
     } else {
-        gesture.to_owned()
+        format!("{gesture} selects natively")
     }
 }
 
@@ -1031,7 +1039,7 @@ fn write_process(
 }
 
 #[cfg(test)]
-mod cleanup_tests {
+pub(super) mod cleanup_tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
 

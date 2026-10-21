@@ -1416,6 +1416,38 @@ mod tests {
                     None => assert!(events.is_empty(), "split record {parts:?}"),
                 }
             }
+            for record in [&b"\x1b[<0;1;x1"[..], b"\x1b[<0;12;3"] {
+                let mut decoder = raw::Decoder::default();
+                assert!(record.iter().all(|&byte| decoder.feed(byte, now).is_none()));
+                assert!(
+                    decoder
+                        .expire(now + Duration::from_secs(9))
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    decoder
+                        .expire(now + Duration::from_secs(10))
+                        .unwrap()
+                        .is_none()
+                );
+                let later = b"7M"
+                    .iter()
+                    .filter_map(|&byte| decoder.feed(byte, now + Duration::from_secs(10)))
+                    .map(|event| match event {
+                        ReaderEvent::Event(event) => map_input(event),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    later,
+                    [
+                        Some(TerminalInput::Character('7')),
+                        Some(TerminalInput::Character('M'))
+                    ],
+                    "a dropped record leaves later input intact"
+                );
+            }
             let mut oversized = b"\x1b[".to_vec();
             oversized.extend([b'1'; 100]);
             oversized.extend_from_slice(b";5Dx");
@@ -1444,7 +1476,6 @@ mod tests {
                 b"\x1b[200~unfinished".as_slice(),
                 b"\x1b[201",
                 b"\x1b]unclosed",
-                b"\x1b[<0;1;x1",
                 b"\xf0\x9f",
             ] {
                 let mut decoder = raw::Decoder::default();

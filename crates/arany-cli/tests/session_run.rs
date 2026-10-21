@@ -642,7 +642,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
                     terminal
-                        .handle_history_input(TerminalInput::PageUp, &view, &draft)
+                        .handle_history_input(TerminalInput::PageUp, &view, &draft, false)
                         .await;
                     terminal
                         .set_mode(TerminalMode::Classic, draft.text().len())

@@ -727,7 +727,10 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         {
             continue;
         }
-        if terminal.handle_history_input(input, &view, &composer).await {
+        if terminal
+            .handle_history_input(input, &view, &composer, false)
+            .await
+        {
             continue;
         }
         if input != TerminalInput::Escape {
@@ -1250,7 +1253,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     break;
                 } else {
                     empty_interrupt = Some(Instant::now());
-                    notice = Some(Feedback::History(terminal.empty_interrupt_hint().into()));
+                    notice = Some(Feedback::History(terminal.empty_interrupt_hint()));
                 }
             }
             TerminalInput::EndOfInput if composer.is_empty() => break,

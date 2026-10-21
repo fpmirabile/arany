@@ -1088,16 +1088,21 @@ impl AttachedTerminal {
         }
     }
 
+    // `working` marks an active Run or compaction, where Ctrl+C always reaches cancellation.
     pub async fn handle_history_input(
         &mut self,
         input: TerminalInput,
         view: &SessionView,
         composer: &Composer,
+        working: bool,
     ) -> bool {
         if self.is_linear() || self.mode != TerminalMode::Fullscreen {
             return false;
         }
         self.selection_cue = None;
+        if working && input == TerminalInput::Interrupt {
+            return false;
+        }
         if let Some(handled) = self.pointer_input(input, view, composer).await {
             return handled;
         }
@@ -1229,14 +1234,17 @@ impl AttachedTerminal {
     }
 
     #[must_use]
-    pub fn empty_interrupt_hint(&self) -> &'static str {
+    pub fn empty_interrupt_hint(&self) -> String {
         if !self.is_linear()
             && self.mode == TerminalMode::Fullscreen
             && self.pointer.mouse.effective() == MouseMode::WheelAndClicks
         {
-            "Select text with the mouse to copy; Shift-drag for terminal selection.\nCtrl+C again exits"
+            format!(
+                "Select text with the mouse to copy; {} for terminal selection.\nCtrl+C again exits.",
+                clipboard::native_selection_gesture(&|name| std::env::var_os(name))
+            )
         } else {
-            "Ctrl+Shift+C copies. Ctrl+C again exits."
+            "Ctrl+Shift+C copies. Ctrl+C again exits.".to_owned()
         }
     }
 
@@ -2992,5 +3000,61 @@ mod insert_rows_tests {
         insert_rows_scrolling_screen(&mut terminal, 3, lines).expect("insert");
         let text = strip_csi(&sink.borrow());
         assert!(text.contains("コンab"), "{text:?}");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod pointer_tests {
+    use super::{Composer, TerminalInput, TerminalMode, TerminalNotice};
+
+    #[test]
+    fn ctrl_c_with_a_selection_reaches_cancellation_during_work() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let view = arany::SessionView {
+                    rewinds: Default::default(),
+                    id: arany::SessionId::new(),
+                    title: "Selection".into(),
+                    title_is_explicit: true,
+                    inherited_title: None,
+                    workspace_identity: None,
+                    defaults: Default::default(),
+                    created_sequence: 1,
+                    last_sequence: 1,
+                    lineage: None,
+                    runs: Vec::new(),
+                    compactions: Vec::new(),
+                    goals: Vec::new(),
+                };
+                let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+                terminal.mode = TerminalMode::Fullscreen;
+                terminal.history.sync(&view, 80, 20);
+                terminal
+                    .history
+                    .record_notice(TerminalNotice::History("selected notice"));
+                terminal.history.select_at(&view, 0, 0, 1);
+                terminal.history.extend_selection(&view, 1, 79);
+                assert!(terminal.history.has_selection());
+                let composer = Composer::default();
+                assert!(
+                    !terminal
+                        .handle_history_input(TerminalInput::Interrupt, &view, &composer, true)
+                        .await,
+                    "an active Run or compaction receives Ctrl+C"
+                );
+                assert!(terminal.history.has_selection(), "nothing was copied");
+                assert!(
+                    terminal
+                        .handle_history_input(TerminalInput::Escape, &view, &composer, true)
+                        .await
+                );
+                assert!(
+                    !terminal.history.has_selection(),
+                    "Escape clears the selection"
+                );
+            });
     }
 }

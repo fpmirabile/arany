@@ -222,6 +222,11 @@ impl Decoder {
             return Ok(key(KeyCode::Esc, KeyModifiers::NONE, KeyEventKind::Press));
         }
         if elapsed >= RECORD_DEADLINE {
+            // An unterminated mouse record is dropped whole; its bytes never reach the key path.
+            if matches!(self.mode, Mode::MouseRecord { .. }) {
+                self.reset();
+                return Ok(None);
+            }
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "unterminated terminal input record",
