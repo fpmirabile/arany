@@ -42,6 +42,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2157,6 +2158,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2275,6 +2277,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -2337,6 +2340,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         handover: None,
         definitions: Default::default(),
         permissions: None,
+        result_filter: None,
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
@@ -3447,4 +3451,182 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     assert_eq!(scanned.disposition, ToolDisposition::Limit);
     assert_eq!(scanned.limit_cause, Some(super::LimitCause::Resource));
     assert!(scanned.attestation.is_some());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    for (path, text) in [
+        ("a.rs", "foo\n"),
+        ("private/secret.rs", "foo deny-canary\n"),
+        ("private/deep/x.rs", "foo deny-canary\n"),
+        ("src/b.rs", "foo\n"),
+        ("src/c.KEY", "foo ask-canary\n"),
+        ("src/caf\u{e9}.rs", "foo unicode-canary\n"),
+        ("src/z.rs", "foo\n"),
+        ("vault/v.rs", "foo approved\n"),
+    ] {
+        std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+        std::fs::write(workspace.join(path), text).unwrap();
+    }
+    // Opening any of these fails, so a walk that touched one would fail instead of succeeding.
+    for path in ["private/secret.rs", "src/c.KEY", "private/deep"] {
+        std::fs::set_permissions(workspace.join(path), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+    }
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let settings = br#"{"permissions":{"deny":["Read(./private/**)"],"ask":["Read(**/*.key)","Read(./vault/**)"]}}"#;
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(super::permissions::PermissionConfig::parse(settings).unwrap()),
+        digest: digest(settings),
+    });
+    let paths = |page: &Value| {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_str().or(row["path"].as_str()).unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let visible = ["a.rs", "src/b.rs", "src/z.rs"];
+    let page = search_page(&runtime, search(".", "foo"), 64 * 1024).await;
+    assert_eq!(paths(&page), visible, "{page}");
+    for (offset, path, next) in [
+        (0, "a.rs", json!(1)),
+        (1, "src/b.rs", json!(2)),
+        (2, "src/z.rs", Value::Null),
+    ] {
+        let call = with_search(search(".", "foo"), |_, _, _, start, limit| {
+            (*start, *limit) = (offset, 1);
+        });
+        let page = search_page(&runtime, call, 64 * 1024).await;
+        assert_eq!(
+            (paths(&page), &page["next_offset"]),
+            (vec![path.to_owned()], &next)
+        );
+    }
+    // An approved ask covers the call's own path, so a search inside it shows its rows.
+    let approved = search_page(&runtime, search("vault", "foo"), 64 * 1024).await;
+    assert_eq!(paths(&approved), ["vault/v.rs"]);
+    let list = |path: &str| ToolCall::List { path: path.into() };
+    assert_eq!(
+        paths(&search_page(&runtime, list("."), 64 * 1024).await),
+        ["a.rs", "src/"]
+    );
+    assert_eq!(
+        paths(&search_page(&runtime, list("src"), 64 * 1024).await),
+        ["src/b.rs", "src/z.rs"]
+    );
+    let (found, truncated) =
+        glob_paths(&glob_result(&runtime, glob("**", ".", 100), 64 * 1024).await);
+    assert_eq!(
+        (found, truncated),
+        (visible.map(str::to_owned).to_vec(), false)
+    );
+    let (found, _) = glob_paths(&glob_result(&runtime, glob("**", ".", 1), 64 * 1024).await);
+    assert_eq!(found, ["a.rs"]);
+    for path in ["private/secret.rs", "src/c.KEY", "private/deep"] {
+        std::fs::set_permissions(workspace.join(path), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+}
+
+#[test]
+fn read_restrictions_cover_workspace_skill_files_and_catalog_previews() {
+    use super::permissions::{Decision, PermissionConfig};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    for (path, text) in [
+        (
+            ".agents/skills/x/SKILL.md",
+            "---\ndescription: shown x\n---\n",
+        ),
+        (".agents/skills/x/private/key", "DENY_CANARY\n"),
+        (
+            ".agents/skills/y/SKILL.md",
+            "---\ndescription: ASK_CANARY\n---\n",
+        ),
+    ] {
+        std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+        std::fs::write(workspace.join(path), text).unwrap();
+    }
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    runtime.config.discover_skills(&workspace).unwrap();
+    let settings = br#"{"permissions":{"deny":["Read(./.agents/skills/x/private/**)"],"ask":["Read(./.agents/skills/y/**)"]}}"#;
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(PermissionConfig::parse(settings).unwrap()),
+        digest: digest(settings),
+    });
+    let config = runtime.permissions().unwrap();
+    let skill = |name: &str, resource: Option<&str>| ToolCall::Skill {
+        name: name.into(),
+        resource: resource.map(str::to_owned),
+    };
+    let decide = |call: &ToolCall| {
+        let (decision, _, approval) =
+            config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref());
+        (decision, approval)
+    };
+    let unrestricted = config.evaluate(&skill("x", None));
+    assert_eq!(decide(&skill("x", None)), (unrestricted.0, unrestricted.2));
+    assert_eq!(
+        decide(&skill("x", Some("private/key"))),
+        (Decision::Deny, None)
+    );
+    assert_eq!(
+        decide(&skill("y", None)),
+        (Decision::Ask, Some(super::ApprovalMode::Request))
+    );
+    let catalog = runtime.context().unwrap().catalog;
+    assert!(
+        catalog.contains("shown x") && !catalog.contains("ASK_CANARY"),
+        "{catalog}"
+    );
+    assert!(!catalog.contains("\"y\""), "{catalog}");
+}
+
+#[test]
+fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
+    use super::permissions::PermissionConfig;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    runtime.config.skills.push(super::config::Skill {
+        disable_model_invocation: false,
+        name: "root".into(),
+        description: "root skill".into(),
+        directory: workspace.to_str().unwrap().to_owned(),
+        files: std::collections::BTreeMap::from([("SKILL.md".into(), "0".repeat(64))]),
+    });
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(PermissionConfig::parse(b"{}").unwrap()),
+        digest: digest(b"{}"),
+    });
+    let call = ToolCall::Skill {
+        name: "root".into(),
+        resource: None,
+    };
+    assert_eq!(
+        runtime.skill_workspace_path(&call).as_deref(),
+        Some("SKILL.md")
+    );
+    let config = runtime.permissions().unwrap();
+    assert_eq!(
+        config.evaluate_skill_file(&call, runtime.skill_workspace_path(&call).as_deref()),
+        config.evaluate(&call)
+    );
+    assert!(runtime.context().unwrap().catalog.contains("root skill"));
 }

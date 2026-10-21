@@ -2003,6 +2003,7 @@ done
             handover: None,
             definitions: Default::default(),
             permissions: None,
+            result_filter: None,
             unguarded_rules: None,
             context_limit_bytes: crate::tools::types::MAX_TOOL_CONTEXT_BYTES,
             queue_progress: None,
@@ -3483,6 +3484,7 @@ int main(int argc, char **argv) {
                     config: runtime.config.clone(),
                     cache: None,
                     hook_stdin: None,
+                    hidden: Default::default(),
                     intent: EffectIntent {
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),

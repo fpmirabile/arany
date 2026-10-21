@@ -426,13 +426,21 @@ impl View {
         })
     }
 
-    pub(crate) fn read(&self, intent: EffectIntent) -> ToolObservation {
+    pub(crate) fn read(
+        &self,
+        intent: EffectIntent,
+        permissions: Option<&super::permissions::PermissionConfig>,
+    ) -> ToolObservation {
         if self.check(&intent).is_err() {
             return denied(intent);
         }
+        let hidden = permissions
+            .map(|config| config.hidden_paths(&intent.call))
+            .unwrap_or_default();
         let result = inspect(
             &self.current,
             &intent.call,
+            &|path| hidden.covers(path),
             intent.limits.result_bytes as usize,
             std::time::Instant::now()
                 + std::time::Duration::from_millis(u64::from(intent.limits.runtime_ms)),
@@ -1105,6 +1113,7 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
 fn inspect(
     image: &Image,
     call: &ToolCall,
+    hidden: fs::Keep,
     result_bytes: usize,
     deadline: std::time::Instant,
 ) -> Result<String, ToolError> {
@@ -1145,6 +1154,7 @@ fn inspect(
                             .unwrap_or(name)
                             .split('/')
                             .any(fs::ignored_directory)
+                            && !hidden(name)
                     })
                     .filter_map(|(name, entry)| match entry {
                         Entry::File { content, .. } => Some((name.as_str(), content.len())),
@@ -1156,7 +1166,11 @@ fn inspect(
         }
         ToolCall::List { path } => {
             let mut rows = Vec::new();
-            for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
+            for (name, entry) in image
+                .entries
+                .iter()
+                .filter(|(p, _)| contains(path, p) && !hidden(p))
+            {
                 match entry {
                     Entry::Directory => rows.push(json!({"path":name,"kind":"directory"})),
                     Entry::File { content, .. } => {
@@ -1174,7 +1188,11 @@ fn inspect(
         ToolCall::Search { path, .. } => {
             let mut search = super::search::Search::new(call, deadline)?;
             // BTreeMap order is the Workspace's UTF-8 byte order, as in the Workspace search.
-            for (name, entry) in image.entries.iter().filter(|(p, _)| contains(path, p)) {
+            for (name, entry) in image
+                .entries
+                .iter()
+                .filter(|(p, _)| contains(path, p) && !hidden(p))
+            {
                 if let Entry::File { content, .. } = entry
                     && search.includes(name)
                     && search.scan(name, content)?
@@ -1648,6 +1666,74 @@ mod tests {
     }
 
     #[test]
+    fn private_target_results_omit_restricted_read_paths_like_the_workspace() {
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["owned/a", "owned/b.key", "owned/private/s", "owned/z"] {
+            std::fs::create_dir_all(dir.path().join(path).parent().unwrap()).unwrap();
+            std::fs::write(dir.path().join(path), b"original").unwrap();
+        }
+        let runtime = runtime(dir.path());
+        let view = View::capture(
+            &runtime,
+            crate::session::RunId::new(),
+            AgentRunId::new(),
+            grant(),
+            WORKER_DATA_BYTES as u32,
+        )
+        .unwrap();
+        let config = crate::tools::permissions::PermissionConfig::parse(
+            br#"{"permissions":{"deny":["Read(./owned/private/**)"],"ask":["Read(**/*.KEY)"]}}"#,
+        )
+        .unwrap();
+        let read = |call| {
+            let observed = view.read(intent(&runtime, &view, call), Some(&config));
+            assert_eq!(
+                observed.disposition,
+                ToolDisposition::Succeeded,
+                "{}",
+                observed.output
+            );
+            let value: serde_json::Value = serde_json::from_str(&observed.output).unwrap();
+            let paths: Vec<_> = value["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["path"].as_str().unwrap().to_owned())
+                .collect();
+            (paths, value["next_offset"].clone())
+        };
+        let search = |offset, limit| ToolCall::Search {
+            path: ".".into(),
+            query: "original".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset,
+            limit,
+        };
+        let visible = vec!["owned/a".to_owned(), "owned/z".to_owned()];
+        assert_eq!(
+            read(ToolCall::List {
+                path: "owned".into()
+            })
+            .0,
+            ["owned", "owned/a", "owned/z"]
+        );
+        assert_eq!(read(search(0, 100)).0, visible);
+        assert_eq!(read(search(0, 1)), (vec!["owned/a".to_owned()], json!(1)));
+        assert_eq!(
+            read(search(1, 1)),
+            (vec!["owned/z".to_owned()], json!(null))
+        );
+        let glob = ToolCall::Glob {
+            pattern: "**".into(),
+            path: ".".into(),
+            limit: 100,
+        };
+        assert_eq!(read(glob).0, visible);
+    }
+
+    #[test]
     fn private_target_reads_own_acknowledged_edits_and_keeps_siblings_and_workspace_isolated() {
         let (dir, runtime, mut view) = fixture();
         let sibling = View::capture(
@@ -1695,7 +1781,7 @@ mod tests {
                     limit: None,
                 },
             );
-            let observed = actor.read(read);
+            let observed = actor.read(read, None);
             assert!(observed.valid());
             assert_eq!(
                 serde_json::from_str::<serde_json::Value>(&observed.output).unwrap()["text"],
@@ -1722,13 +1808,16 @@ mod tests {
         data.first_sequence = next_sequence;
         data.seal_sequence = next_sequence + u64::from(data.chunks);
         view.acknowledge(candidate, data).unwrap();
-        let listing = view.read(intent(
-            &runtime,
-            &view,
-            ToolCall::List {
-                path: "owned".into(),
-            },
-        ));
+        let listing = view.read(
+            intent(
+                &runtime,
+                &view,
+                ToolCall::List {
+                    path: "owned".into(),
+                },
+            ),
+            None,
+        );
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&listing.output).unwrap()["may_be_truncated"],
             false
@@ -1750,6 +1839,7 @@ mod tests {
                 path: "owned".into(),
                 limit: 100,
             },
+            fs::NONE,
             64 * 1024,
             std::time::Instant::now() + std::time::Duration::from_secs(60),
         )
@@ -1761,15 +1851,18 @@ mod tests {
         );
         // Glob sees only this assignment's image, including its acknowledged edit.
         for (actor, bytes) in [(&view, 7), (&sibling, 8)] {
-            let found = actor.read(intent(
-                &runtime,
-                actor,
-                ToolCall::Glob {
-                    pattern: "**".into(),
-                    path: "owned".into(),
-                    limit: 100,
-                },
-            ));
+            let found = actor.read(
+                intent(
+                    &runtime,
+                    actor,
+                    ToolCall::Glob {
+                        pattern: "**".into(),
+                        path: "owned".into(),
+                        limit: 100,
+                    },
+                ),
+                None,
+            );
             assert!(found.valid());
             assert!(matches!(
                 found.attestation,
@@ -1781,19 +1874,22 @@ mod tests {
             );
         }
         let search = |query: &str, include: Option<&str>, case_sensitive: bool, offset: u32| {
-            view.read(intent(
-                &runtime,
-                &view,
-                ToolCall::Search {
-                    path: "owned".into(),
-                    query: query.into(),
-                    regex: true,
-                    include: include.map(str::to_owned),
-                    case_sensitive,
-                    offset,
-                    limit: 100,
-                },
-            ))
+            view.read(
+                intent(
+                    &runtime,
+                    &view,
+                    ToolCall::Search {
+                        path: "owned".into(),
+                        query: query.into(),
+                        regex: true,
+                        include: include.map(str::to_owned),
+                        case_sensitive,
+                        offset,
+                        limit: 100,
+                    },
+                ),
+                None,
+            )
         };
         let page = |observed: ToolObservation| {
             assert_eq!(observed.disposition, ToolDisposition::Succeeded);
@@ -1831,7 +1927,7 @@ mod tests {
             },
         );
         refused.limits.result_bytes = 128;
-        let refused = view.read(refused);
+        let refused = view.read(refused, None);
         assert_eq!(refused.disposition, ToolDisposition::Failed);
         assert!(refused.valid() && refused.output.contains("invalid or unsupported regex"));
         assert!(matches!(
@@ -2722,15 +2818,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(view.base.entries.get("owned/new"), Some(&Entry::Absent));
-        let absent = view.read(intent(
-            &runtime,
-            &view,
-            ToolCall::Glob {
-                pattern: "**".into(),
-                path: "owned/new".into(),
-                limit: 100,
-            },
-        ));
+        let absent = view.read(
+            intent(
+                &runtime,
+                &view,
+                ToolCall::Glob {
+                    pattern: "**".into(),
+                    path: "owned/new".into(),
+                    limit: 100,
+                },
+            ),
+            None,
+        );
         assert_eq!(absent.disposition, ToolDisposition::Failed);
         assert!(absent.output.contains("File or directory not found"));
         let mkdir = intent(
