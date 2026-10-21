@@ -287,7 +287,7 @@ Restore raw mode, cursor, wrapping, echo and every enabled mode, including mouse
 | Inline model selection | Below 16×8 only resize and close; initial unsafe or short geometry selects linear presentation |
 | Unterminated inline record | Ten-second deadline, then terminal ownership fails closed |
 
-Keyboard text selection (Shift+arrows) and an external-editor transcript export are unsupported; use `/copy`, Classic native selection, the transcript dump or `arany show`. Disabling alternate scroll on release can also disable an emulator's default, such as xterm's `alternateScroll`.
+Keyboard text selection (Shift+arrows) and an external-editor transcript export are unsupported; use `/copy` for the latest answer, or Classic native selection, the transcript dump or `arany show` for other text. Disabling alternate scroll on release can also disable an emulator's default, such as xterm's `alternateScroll`.
 
 Markdown, HTML, SVG, files, links and model output are inert by default, restricted to admitted formats and isolated from privileged APIs. A future browser Client requires CSP, safe templating, origin isolation and a new threat model before privileged operations; browser Clients remain [deferred](../architecture/system-overview.md#14-explicitly-deferred).
 
