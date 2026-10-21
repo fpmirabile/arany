@@ -1116,7 +1116,10 @@ pub(super) async fn compact_current(
             }),
             input = terminal.next_input() => {
                 let input = input.map_err(|error| error.to_string())?;
-                if terminal.handle_history_input(input, view, composer, true).await {
+                // The pager and a scrollback dump own their keys before the hidden composer.
+                if terminal.handle_transcript_input(input, view).map_err(|error| error.to_string())?
+                    || terminal.handle_history_input(input, view, composer, true).await
+                {
                     terminal.draw_busy(view, composer, None)
                         .map_err(|error| error.to_string())?;
                     continue;

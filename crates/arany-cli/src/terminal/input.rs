@@ -76,6 +76,7 @@ pub enum TerminalInput {
     Down,
     PageUp,
     PageDown,
+    HalfPageUp,
     Home,
     End,
     Tab,
@@ -725,6 +726,7 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
         return match key.code {
             KeyCode::Char('c' | 'C') => Some(TerminalInput::Interrupt),
             KeyCode::Char('d' | 'D') => Some(TerminalInput::EndOfInput),
+            KeyCode::Char('u' | 'U') => Some(TerminalInput::HalfPageUp),
             KeyCode::Char('k' | 'K') => Some(TerminalInput::QuickActions),
             KeyCode::Char('f' | 'F') => Some(TerminalInput::HistoryFind),
             KeyCode::Char('l' | 'L') => Some(TerminalInput::HistoryLive),
@@ -1011,6 +1013,10 @@ mod tests {
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
                 Some(TerminalInput::EndOfInput),
+            ),
+            (
+                Event::Key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL)),
+                Some(TerminalInput::HalfPageUp),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL)),

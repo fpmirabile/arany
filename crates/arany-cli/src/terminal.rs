@@ -417,6 +417,8 @@ pub struct AttachedTerminal {
     classic_pinned: bool,
     alternate: Option<AlternateScreen>,
     transcript_open: bool,
+    // The pager's `[` left the alternate screen and capture; Enter reacquires them.
+    scrollback_dump: bool,
     native: NativeTranscript,
     active_run: Option<arany::RunId>,
     history: History,
@@ -723,6 +725,7 @@ impl AttachedTerminal {
             classic_pinned: false,
             alternate,
             transcript_open: false,
+            scrollback_dump: false,
             native: NativeTranscript::default(),
             active_run: None,
             history: History::default(),
@@ -997,16 +1000,50 @@ impl AttachedTerminal {
                 .map_err(Into::into);
         }
         if self.mode == TerminalMode::Classic {
-            let mut text = Vec::new();
-            LinearState::new("classic").write_transcript(&mut text, view)?;
+            let text = bounded_transcript(view)?;
             self.prepare_frame()?;
-            return self.insert_native(
-                history::MessageKind::ToolDetails,
-                std::str::from_utf8(&text).expect("escaped transcript is UTF-8"),
-            );
+            return self.insert_native(history::MessageKind::ToolDetails, &text);
         }
         self.transcript_open = !self.transcript_open;
+        // Details change the rows a selection anchors to.
+        self.history.clear_selection();
         self.history.set_details(self.transcript_open);
+        Ok(())
+    }
+
+    // `[` in the pager: leave capture and the alternate screen, then append the bounded transcript.
+    fn dump_to_scrollback(&mut self, view: &SessionView) -> Result<(), TerminalError> {
+        let text = history::scrollback_transcript(view);
+        if let Some(mut modes) = self.pointer_modes.take() {
+            modes.release()?;
+        }
+        self.scrollback_dump = true;
+        if let Some(mut alternate) = self.alternate.take() {
+            alternate.release()?;
+        }
+        self.terminal
+            .as_mut()
+            .expect("owned terminal")
+            .show_cursor()?;
+        // Raw mode turns off output processing, so the text carries its own carriage returns.
+        let mut output = io::stderr().lock();
+        output.write_all(text.as_bytes())?;
+        output.flush()?;
+        Ok(())
+    }
+
+    fn end_scrollback_dump(&mut self) -> Result<(), TerminalError> {
+        if !self.scrollback_dump {
+            return Ok(());
+        }
+        self.alternate = Some(AlternateScreen::acquire()?);
+        self.scrollback_dump = false;
+        self.pointer_modes = pointer_modes(self.mode, false, self.pointer.mouse.effective())?;
+        // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
+        terminal.resize(area)?;
+        terminal.backend_mut().set_area(area);
         Ok(())
     }
 
@@ -1022,12 +1059,41 @@ impl AttachedTerminal {
         input: TerminalInput,
         view: &SessionView,
     ) -> Result<bool, TerminalError> {
+        let pager =
+            self.mode == TerminalMode::Fullscreen && self.transcript_open && !self.is_linear();
+        // The hidden composer must not change, so a paste or clipboard result is discarded.
+        if input == TerminalInput::Paste && (pager || self.scrollback_dump) {
+            let _ = self.take_paste();
+            return Ok(true);
+        }
+        if self.scrollback_dump {
+            return match input {
+                TerminalInput::Submit => self.end_scrollback_dump().map(|()| true),
+                // Ctrl+C returns to Arany so its cancellation or exit hint is visible.
+                TerminalInput::Interrupt => self.end_scrollback_dump().map(|()| false),
+                TerminalInput::Suspend | TerminalInput::Shutdown(_) => Ok(false),
+                _ => Ok(true),
+            };
+        }
+        if pager {
+            // Escape clears a selection before it closes the pager.
+            if input == TerminalInput::Escape
+                && self.history.has_selection()
+                && !self.history.find_open()
+            {
+                return Ok(false);
+            }
+            return match self.history.pager_input(input, view) {
+                history::Pager::Close => self.toggle_transcript(view).map(|()| true),
+                history::Pager::Dump => self.dump_to_scrollback(view).map(|()| true),
+                history::Pager::Handled => Ok(true),
+                history::Pager::Pass => Ok(false),
+            };
+        }
         if input == TerminalInput::Escape && self.history_mut().find_open() {
             return Ok(false);
         }
-        if input == TerminalInput::Transcript
-            || (self.transcript_open && input == TerminalInput::Escape)
-        {
+        if input == TerminalInput::Transcript {
             self.toggle_transcript(view)?;
             return Ok(true);
         }
@@ -1448,6 +1514,8 @@ impl AttachedTerminal {
     }
 
     fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
+        // A dialog such as a Tool approval needs the screen, so it ends a scrollback dump.
+        self.end_scrollback_dump()?;
         let terminal = self.terminal.as_mut().expect("owned terminal");
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
@@ -1545,6 +1613,13 @@ impl AttachedTerminal {
             crate::presentation::tool_capacity_notice(view, self.waiting_tool)
                 .map(TerminalNotice::Transient)
         });
+        // The primary screen shows the dump until Enter; the Run keeps going without redraws.
+        if self.scrollback_dump {
+            if let Some(notice) = notice {
+                self.history.record_notice(notice);
+            }
+            return Ok(());
+        }
         if let Some(selected) = self.help_selected {
             return self.draw_help(selected, view);
         }
@@ -1576,6 +1651,9 @@ impl AttachedTerminal {
             ratatui::layout::Position::ORIGIN,
             self.terminal.as_mut().expect("owned terminal").size()?,
         ));
+        if self.mode == TerminalMode::Fullscreen && self.transcript_open {
+            return self.draw_pager(view, notice, screen);
+        }
         let mut model = match state {
             SnapshotState::Preparing => PresentationModel::preparing(view, screen.width),
             _ => PresentationModel::from_session(view, screen.width),
@@ -1704,6 +1782,35 @@ impl AttachedTerminal {
             }
         })?;
         self.history_area = (self.mode == TerminalMode::Fullscreen).then_some(history_area);
+        Ok(())
+    }
+
+    // The transcript pager hides the composer and gives detailed History every row above its footer.
+    fn draw_pager(
+        &mut self,
+        view: &SessionView,
+        notice: Option<TerminalNotice<'_>>,
+        screen: Rect,
+    ) -> Result<(), TerminalError> {
+        self.history.sync(
+            view,
+            usize::from(screen.width),
+            usize::from(screen.height.saturating_sub(1)),
+        );
+        if let Some(notice) = notice {
+            self.history.record_notice(notice);
+        }
+        let rows = self.history.visible(view);
+        let footer = match notice {
+            Some(TerminalNotice::Transient(text)) => text.to_owned(),
+            _ => self.history.pager_status(),
+        };
+        let palette = self.palette();
+        let mut history_area = Rect::default();
+        self.draw_frame(screen.height, |frame| {
+            history_area = view::draw_pager_frame(frame, &rows, &footer, palette);
+        })?;
+        self.history_area = Some(history_area);
         Ok(())
     }
 
@@ -2409,8 +2516,12 @@ impl AttachedTerminal {
         }
         if let Some(mut terminal) = self.terminal.take() {
             for result in [
-                // Cleanup must not query input after stopping its reader.
-                terminal.backend_mut().clear_owned(),
+                // Cleanup must not query input after stopping its reader, nor clear a dump on the primary screen.
+                if std::mem::take(&mut self.scrollback_dump) {
+                    Ok(())
+                } else {
+                    terminal.backend_mut().clear_owned()
+                },
                 terminal.show_cursor(),
                 terminal.backend_mut().flush(),
             ] {
@@ -2463,6 +2574,13 @@ impl AttachedTerminal {
         self.shutdown_clipboard_on_drop = false;
         *self = replacement;
     }
+}
+
+// The escaped detail text bounded like `/transcript`: 16 Runs, 64 KiB and a limit cue.
+fn bounded_transcript(view: &SessionView) -> io::Result<String> {
+    let mut text = Vec::new();
+    LinearState::new("classic").write_transcript(&mut text, view)?;
+    Ok(String::from_utf8(text).expect("escaped transcript is UTF-8"))
 }
 
 // History keeps a rectangle disjoint from bottom-area chrome, so it cannot overwrite a dialog.
@@ -3005,7 +3123,51 @@ mod insert_rows_tests {
 
 #[cfg(all(test, unix))]
 mod pointer_tests {
-    use super::{Composer, TerminalInput, TerminalMode, TerminalNotice};
+    use super::{ClipboardContent, Composer, TerminalInput, TerminalMode, TerminalNotice};
+
+    #[test]
+    fn pager_and_scrollback_dump_consume_pastes_before_the_hidden_composer() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let view = arany::SessionView {
+                    rewinds: Default::default(),
+                    id: arany::SessionId::new(),
+                    title: "Pager".into(),
+                    title_is_explicit: true,
+                    inherited_title: None,
+                    workspace_identity: None,
+                    defaults: Default::default(),
+                    created_sequence: 1,
+                    last_sequence: 1,
+                    lineage: None,
+                    runs: Vec::new(),
+                    compactions: Vec::new(),
+                    goals: Vec::new(),
+                };
+                let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
+                terminal.mode = TerminalMode::Fullscreen;
+                // Handled input never reaches the composer, so the hidden draft cannot change.
+                for (pager, dump) in [(true, false), (false, true)] {
+                    terminal.transcript_open = pager;
+                    terminal.scrollback_dump = dump;
+                    terminal.clipboard_paste = Some(Ok(ClipboardContent::Text("pasted".into())));
+                    assert!(
+                        terminal
+                            .handle_transcript_input(TerminalInput::Paste, &view)
+                            .unwrap(),
+                        "pager {pager}, dump {dump}"
+                    );
+                    assert!(
+                        terminal.clipboard_paste.is_none(),
+                        "the payload is consumed"
+                    );
+                }
+                terminal.scrollback_dump = false;
+            });
+    }
 
     #[test]
     fn ctrl_c_with_a_selection_reaches_cancellation_during_work() {

@@ -201,3 +201,89 @@ pub(super) fn check_profile_with_binary(workspace: &Path, state: &Path, executab
     assert_eq!(result.stdout, b"Provider: local\nStatus: custom verified\n");
     assert_eq!(result.stderr, b"");
 }
+
+// Answers the provider check (calls 0-2), then streams the Run's call up to its text delta and
+// holds the rest until released.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) struct HeldStream {
+    pub(super) streaming: std::sync::mpsc::Receiver<()>,
+    pub(super) release: std::sync::mpsc::SyncSender<()>,
+    // The product read the whole stream and closed the connection.
+    pub(super) consumed: std::sync::mpsc::Receiver<()>,
+    pub(super) peer: std::thread::JoinHandle<()>,
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldStream {
+    use std::sync::mpsc::sync_channel;
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("loopback Provider");
+    write_profile(
+        state,
+        listener.local_addr().expect("Provider address").port(),
+    );
+    listener.set_nonblocking(true).expect("bounded accept");
+    let (streaming_sender, streaming) = sync_channel(1);
+    let (release, released) = sync_channel(1);
+    let (consumed_sender, consumed) = sync_channel(1);
+    let peer = std::thread::spawn(move || {
+        let accept = |context| {
+            super::process::accept_with_deadline(&listener, Duration::from_secs(30), context)
+        };
+        for index in 0..3 {
+            let mut stream = accept("provider check request");
+            read_request(&mut stream);
+            let text = match index {
+                0 => serde_json::json!("ok"),
+                1 => {
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
+                }
+                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+            };
+            send_response(&mut stream, index, text);
+        }
+        let mut stream = accept("held Run request");
+        let wire: serde_json::Value =
+            serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
+        assert_eq!(wire["stream"], true, "attached Runs stream");
+        let body = responses_stream(serde_json::json!({
+            "id": "resp_4",
+            "status": "completed",
+            "model": "model-1",
+            "output": arany::semantic::responses_output(&serde_json::json!(answer)),
+            "usage": {"input_tokens":20,"output_tokens":10}
+        }));
+        let split = body
+            .find("event: response.output_item.done")
+            .expect("SSE item completion");
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            &body[..split]
+        )
+        .expect("streamed delta");
+        stream.flush().expect("streamed delta flush");
+        streaming_sender.send(()).expect("streaming gate");
+        released
+            .recv_timeout(Duration::from_secs(30))
+            .expect("stream release");
+        stream
+            .write_all(&body.as_bytes()[split..])
+            .expect("stream completion");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .expect("close deadline");
+        assert_eq!(
+            stream.read(&mut [0]).expect("Provider stream closure"),
+            0,
+            "the Run reads the whole stream and closes it"
+        );
+        consumed_sender.send(()).expect("consumed gate");
+    });
+    HeldStream {
+        streaming,
+        release,
+        consumed,
+        peer,
+    }
+}
