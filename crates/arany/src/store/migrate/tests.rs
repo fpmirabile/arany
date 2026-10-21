@@ -445,6 +445,7 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
     // One fixed clock makes a retry reuse the same timestamp; the migration ID keeps names apart.
     CLOCK.with(|clock| clock.set(Some(SystemTime::UNIX_EPOCH)));
     let mut interrupted = 0;
+    let mut cleaning_checked = false;
     loop {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
@@ -475,8 +476,15 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
             let staged = path.join(DIR).join(STAGED);
             let changed = match marker.phase {
                 Phase::Preparing => vec![database.clone()],
-                // The outcome is decided, so nothing is pinned any more.
-                Phase::Cleaning { .. } => Vec::new(),
+                // After an upgrade the retained backup stays pinned; a rollback keeps nothing.
+                Phase::Cleaning { upgraded, .. } => {
+                    if upgraded {
+                        cleaning_checked = true;
+                        vec![path.join(DIR).join(&marker.backup)]
+                    } else {
+                        Vec::new()
+                    }
+                }
                 Phase::Ready { .. } => {
                     let mut changed = vec![database.clone(), path.join(DIR).join(&marker.backup)];
                     changed.extend(staged.exists().then_some(staged));
@@ -551,6 +559,10 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
     }
     CLOCK.with(|clock| clock.set(None));
     assert!(interrupted >= 16, "every durability step was interrupted");
+    assert!(
+        cleaning_checked,
+        "a backup changed after Cleaning was published fails closed"
+    );
 }
 
 #[test]

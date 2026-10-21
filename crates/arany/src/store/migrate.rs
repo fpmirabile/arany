@@ -233,6 +233,8 @@ enum Phase {
     // The outcome is decided; cleanup only removes redundant copies, so it restarts from any point.
     Cleaning {
         upgraded: bool,
+        backup: Identity,
+        backup_digest: [u8; 32],
     },
 }
 
@@ -302,7 +304,20 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             sync(&root.dir)?;
             return finish(&dir, marker, !original);
         }
-        Phase::Cleaning { upgraded } => return clean(&dir, &marker, *upgraded),
+        Phase::Cleaning {
+            upgraded,
+            backup,
+            backup_digest,
+        } => {
+            // After an upgrade the backup is the one kept; a changed one fails closed.
+            if *upgraded
+                && (identity_of(&dir, &marker.backup)? != Some(*backup)
+                    || digest(&dir, &marker.backup)? != Some(*backup_digest))
+            {
+                return Err(StoreError::MigrationConflict);
+            }
+            return clean(&dir, &marker, *upgraded);
+        }
     }
     sync(&root.dir)?;
     sync(&dir)?;
@@ -311,8 +326,16 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
     sync(&dir)
 }
 
+// Called once Ready is verified, so its backup digest describes the file being pinned.
 fn finish(dir: &Dir, mut marker: Marker, upgraded: bool) -> Result<(), StoreError> {
-    marker.phase = Phase::Cleaning { upgraded };
+    let Phase::Ready { backup_digest, .. } = marker.phase else {
+        return Err(StoreError::MigrationConflict);
+    };
+    marker.phase = Phase::Cleaning {
+        upgraded,
+        backup: identity_of(dir, &marker.backup)?.ok_or(StoreError::MigrationConflict)?,
+        backup_digest,
+    };
     write_marker(dir, &marker)?;
     clean(dir, &marker, upgraded)
 }
