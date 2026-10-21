@@ -9,7 +9,8 @@ use std::path::Path;
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 15] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 16] = [
+    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -46,6 +47,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 15] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
 ];
+const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
 const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
 const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
 const GLOB_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"succeeded","enforcement_cause":null,"limit_cause":null,"output":"{\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}","attestation":{"in_process":{"policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"workspace_device":1,"workspace_inode":2}},"cache_update":"not_applicable","checkpoint":null}"#;
@@ -1034,5 +1036,50 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             "SyntheticKind declares no migration floor",
             "schema 5 -> 6 has no step and fixture",
         ]
+    );
+}
+
+#[test]
+fn typed_prefix_verdict_migration_preserves_legacy_facts() {
+    let step = REGISTRY.event_step("ToolPermissionDecided", 4).unwrap();
+    assert_eq!(
+        (step.canonical)(VERDICT_V4).as_deref(),
+        Some(VERDICT_V4),
+        "a version-4 verdict hashes as the same text"
+    );
+    let upgraded = REGISTRY
+        .upgrade_payload("ToolPermissionDecided", 4, VERDICT_V4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&upgraded).unwrap(),
+        serde_json::from_str::<Value>(VERDICT_V4).unwrap(),
+        "no rule or approval evidence is manufactured"
+    );
+    let verdict = Event::decode(
+        "ToolPermissionDecided",
+        5,
+        &upgraded,
+        Some(RunId::new()),
+        Some(AgentRunId::new()),
+    )
+    .unwrap();
+    assert!(matches!(verdict, Event::ToolPermissionDecided { .. }));
+    for forged in [
+        VERDICT_V4.replace(r#""basis":"rule""#, r#""basis":"typed_prefix_rule""#),
+        VERDICT_V4.replace(r#""source":"rule""#, r#""source":"typed_prefix_rule""#),
+    ] {
+        assert_ne!(forged, VERDICT_V4);
+        assert!((step.canonical)(&forged).is_none());
+        assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+        assert!(matches!(
+            REGISTRY.upgrade_payload("ToolPermissionDecided", 4, &forged),
+            Err(StoreError::InvalidHistory)
+        ));
+    }
+    assert!(
+        REGISTRY
+            .upgrade_payload("ToolPermissionDecided", 3, VERDICT_V4)
+            .is_err()
     );
 }

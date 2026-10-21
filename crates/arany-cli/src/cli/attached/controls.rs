@@ -1120,7 +1120,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .is_some_and(|config| config.tool_policy.is_some())
             {
-                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. /permissions edits typed Git rules only when no Run is active; saved changes apply from the next Run. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }

@@ -168,7 +168,7 @@ Persist only SQLite schema 5, compaction compiler version 3 and one current payl
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 8 |
 | `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
-| `ToolPermissionDecided` | 4 |
+| `ToolPermissionDecided` | 5; the closed `source` and `basis` add `typed_prefix_rule`; migrated from 4 unchanged, and a version-4 payload naming it is forged and refuses |
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `ToolResultsCleared` | 1 |
 | `WorkerHandoverRecorded` | 2 |

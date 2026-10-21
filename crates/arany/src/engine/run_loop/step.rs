@@ -109,10 +109,17 @@ enum AskSite {
     Primary {
         unguarded_prompt: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
+        remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
     },
     Delegated {
         deadline: Instant,
     },
+}
+
+struct AskOptions {
+    unguarded_prompt: Option<UnguardedPrompt>,
+    allow_auto_edits: bool,
+    remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
 }
 
 struct Resolution {
@@ -199,7 +206,13 @@ impl Permission {
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
             && self.basis != PermissionSource::ExactCommandRule
-            && let Some(mode) = mode.filter(|mode| mode.asks(call))
+            && let Some(mode) = mode.filter(|mode| {
+                // A user-owned typed allow is the prompt-free path in Request and Auto-edits; Auto keeps its review.
+                mode.asks(call)
+                    && !(self.basis == PermissionSource::TypedPrefixRule
+                        && self.decision == Decision::Allow
+                        && *mode != ApprovalMode::Auto)
+            })
         {
             if self.decision == Decision::Allow {
                 self.basis = PermissionSource::Mode;
@@ -1129,6 +1142,12 @@ impl RunLoop<'_> {
             guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
             interactive: self.controls.approvals.is_some(),
         };
+        let remember_prefix = (matches!(grant, Grant::Primary { .. })
+            && permission.decision == Decision::Ask
+            && permission.basis == PermissionSource::Mode
+            && hooks.restriction.is_none())
+        .then(|| crate::tools::permissions::TypedGitPrefix::of_call(&intent.call))
+        .flatten();
         let approval = match facts.ask() {
             Some(mode) => Some(
                 Box::pin(self.ask(
@@ -1136,8 +1155,12 @@ impl RunLoop<'_> {
                     runtime,
                     &intent,
                     mode,
-                    facts.unguarded_prompt(),
-                    allow_auto_edits && hooks.restriction != Some(Decision::Ask),
+                    AskOptions {
+                        unguarded_prompt: facts.unguarded_prompt(),
+                        allow_auto_edits: allow_auto_edits
+                            && hooks.restriction != Some(Decision::Ask),
+                        remember_prefix,
+                    },
                 ))
                 .await?,
             ),
@@ -1173,6 +1196,7 @@ impl RunLoop<'_> {
         let agent_run_id = intent.agent_run_id;
         let digest = intent.digest();
         let unguarded = intent.call.is_unguarded();
+        let git_write = intent.call.is_git() && intent.call.facts().mutates;
         let verdict = match outcome {
             Ok(()) => Verdict::Dispatch {
                 intent,
@@ -1190,7 +1214,8 @@ impl RunLoop<'_> {
             }
         };
         let mode = effective_permission_mode(config, grant);
-        if mode.is_some() || unguarded {
+        let local_git_write = matches!(grant, Grant::Primary { .. }) && git_write;
+        if mode.is_some() || unguarded || local_git_write {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && decided.source == PermissionSource::AiReview {
@@ -1243,8 +1268,7 @@ impl RunLoop<'_> {
         runtime: &ToolRuntime,
         intent: &EffectIntent,
         mode: ApprovalMode,
-        unguarded_prompt: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
+        options: AskOptions,
     ) -> Result<Resolution, EngineError> {
         match grant {
             Grant::Primary {
@@ -1271,8 +1295,9 @@ impl RunLoop<'_> {
                     intent,
                     chain,
                     AskSite::Primary {
-                        unguarded_prompt,
-                        allow_auto_edits,
+                        unguarded_prompt: options.unguarded_prompt,
+                        allow_auto_edits: options.allow_auto_edits,
+                        remember_prefix: options.remember_prefix,
                     },
                 )
                 .await
@@ -1351,6 +1376,7 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         prompt: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
+        remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
     ) -> (ApprovalReply, bool) {
         let mut cancellation = self.controls.cancellation.clone();
         let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
@@ -1360,19 +1386,30 @@ impl RunLoop<'_> {
             result = tokio::time::timeout(Duration::from_millis(expires), async {
                 match prompt.clone() {
                     Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => ApprovalReply::from(
-                        approvals.ask_with_auto_edits(intent, allow_auto_edits).await,
-                    ),
+                    None => {
+                        approvals
+                            .ask_local(intent, allow_auto_edits, remember_prefix)
+                            .await
+                    }
                 }
             }) => result.unwrap_or(ApprovalReply::Deny),
         };
         // The rule is durable before the verdict, so a crash cannot leave a recorded approval without it.
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
-        let unsaved = reply == ApprovalReply::AllowAlwaysInProject
-            && remember
-            && runtime.record_exact_command_rule(&intent.call).is_err();
+        let unsaved = match (reply, remember_prefix) {
+            (ApprovalReply::AllowAlwaysInProject, _) if remember => {
+                runtime.record_exact_command_rule(&intent.call).is_err()
+            }
+            (ApprovalReply::AllowPrefixInFolder, Some(prefix)) => {
+                runtime.record_typed_prefix_rule(prefix).is_err()
+            }
+            _ => false,
+        };
         let reply = match reply {
             ApprovalReply::AllowAlwaysInProject if !remember => ApprovalReply::AllowOnce,
+            ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
+                ApprovalReply::AllowOnce
+            }
             reply => reply,
         };
         (reply, unsaved)
@@ -1748,6 +1785,7 @@ impl RunLoop<'_> {
                     AskSite::Primary {
                         unguarded_prompt,
                         allow_auto_edits,
+                        remember_prefix,
                     } => {
                         if !resolution.active_time_exhausted
                             && !self.pause_at_boundary()
@@ -1762,6 +1800,7 @@ impl RunLoop<'_> {
                                             intent,
                                             unguarded_prompt.clone(),
                                             *allow_auto_edits,
+                                            *remember_prefix,
                                         )
                                         .await;
                                     resolution.source = PermissionSource::Human;
@@ -2185,7 +2224,9 @@ impl<'a> DispatchFacts<'a> {
                 self.hooks.refusal(self.site)
             } else {
                 let reason = match basis {
-                    PermissionSource::Rule => NotDispatched::DenyRule,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
+                        NotDispatched::DenyRule
+                    }
                     PermissionSource::PinnedGrant => NotDispatched::OutsideGrant,
                     PermissionSource::Mode
                     | PermissionSource::Human
@@ -3043,6 +3084,46 @@ mod tests {
             let [paused, cancelled, deadline] = flags;
             assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
         }
+    }
+
+    #[test]
+    fn typed_prefix_allow_skips_request_and_auto_edits_prompts_but_keeps_auto_review() {
+        let commit = ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec!["src/lib.rs".into()],
+            staged: false,
+        };
+        let typed = allow(PermissionSource::TypedPrefixRule);
+        for (mode, asks) in [
+            (ApprovalMode::Request, false),
+            (ApprovalMode::AutoEdits, false),
+            (ApprovalMode::Auto, true),
+        ] {
+            let narrowed = typed.narrow_terminal(Some(mode), &commit);
+            assert_eq!(narrowed.decision == Decision::Ask, asks, "{mode:?}");
+            if asks {
+                assert_eq!(narrowed.approval, Some(ApprovalMode::Auto));
+                assert_eq!(narrowed.basis, PermissionSource::Mode);
+            } else {
+                assert_eq!(narrowed.basis, PermissionSource::TypedPrefixRule);
+            }
+        }
+        let ordinary =
+            allow(PermissionSource::Rule).narrow_terminal(Some(ApprovalMode::Request), &commit);
+        assert_eq!(ordinary.decision, Decision::Ask);
+        let ask = Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::TypedPrefixRule,
+            approval: Some(ApprovalMode::Request),
+        }
+        .narrow_terminal(Some(ApprovalMode::AutoEdits), &commit);
+        assert_eq!(
+            (ask.decision, ask.approval),
+            (Decision::Ask, Some(ApprovalMode::Request))
+        );
+        let deny = deny(PermissionSource::TypedPrefixRule)
+            .narrow_terminal(Some(ApprovalMode::Request), &commit);
+        assert_eq!(deny.decision, Decision::Deny);
     }
 
     fn allow(basis: PermissionSource) -> Permission {

@@ -1781,7 +1781,7 @@ mod payload_version_tests {
             ));
         }
         assert_eq!(payload_version("ToolStarted"), Some(15));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
     #[test]

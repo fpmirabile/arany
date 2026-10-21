@@ -48,6 +48,7 @@ pub enum ApprovalReply {
     Deny,
     AllowOnce,
     AllowAlwaysInProject,
+    AllowPrefixInFolder,
 }
 
 impl From<bool> for ApprovalReply {
@@ -68,6 +69,7 @@ pub struct ToolApproval {
     pub intent: EffectIntent,
     pub unguarded: Option<UnguardedPrompt>,
     pub allow_auto_edits: bool,
+    pub remember_prefix: Option<super::permissions::TypedGitPrefix>,
     reply: oneshot::Sender<ApprovalReply>,
 }
 
@@ -119,15 +121,17 @@ impl ToolApprovals {
     }
 
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
-        self.ask_with_auto_edits(intent, false).await
+        self.ask_local(intent, false, None).await != ApprovalReply::Deny
     }
 
-    pub(crate) async fn ask_with_auto_edits(
+    pub(crate) async fn ask_local(
         &self,
         intent: &EffectIntent,
         allow_auto_edits: bool,
-    ) -> bool {
-        self.request(intent, None, allow_auto_edits).await != ApprovalReply::Deny
+        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+    ) -> ApprovalReply {
+        self.request(intent, None, allow_auto_edits, remember_prefix)
+            .await
     }
 
     pub(crate) async fn ask_unguarded(
@@ -135,7 +139,7 @@ impl ToolApprovals {
         intent: &EffectIntent,
         prompt: UnguardedPrompt,
     ) -> ApprovalReply {
-        self.request(intent, Some(prompt), false).await
+        self.request(intent, Some(prompt), false, None).await
     }
 
     async fn request(
@@ -143,6 +147,7 @@ impl ToolApprovals {
         intent: &EffectIntent,
         unguarded: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
+        remember_prefix: Option<super::permissions::TypedGitPrefix>,
     ) -> ApprovalReply {
         let (reply, response) = oneshot::channel();
         if self
@@ -151,6 +156,7 @@ impl ToolApprovals {
                 intent: intent.clone(),
                 unguarded,
                 allow_auto_edits,
+                remember_prefix,
                 reply,
             })
             .await

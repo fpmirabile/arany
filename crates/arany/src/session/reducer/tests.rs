@@ -4769,7 +4769,7 @@ mod goal_replay_tests {
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    4,
+                    5,
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -6093,6 +6093,182 @@ mod goal_replay_tests {
         assert!(rejected(&pinned, exact(true)));
         assert!(!rejected(&view, ordinary.clone()));
         apply(&mut view, ordinary).expect("the ordinary verdict is admitted");
+    }
+
+    #[test]
+    fn typed_prefix_verdicts_require_primary_settings_pin_and_admitted_mode() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        let commit = ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec!["src/lib.rs".into()],
+            staged: false,
+        };
+        let started = |pinned: bool, call: ToolCall| {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            if pinned {
+                view.runs[0]
+                    .config
+                    .as_mut()
+                    .unwrap()
+                    .tool_policy
+                    .as_mut()
+                    .unwrap()
+                    .permissions_digest = Some([3; 32]);
+            }
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let intent = child_intent(run, agent, call);
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            (view, intent)
+        };
+        let typed = PermissionSource::TypedPrefixRule;
+        let (view, intent) = started(true, commit.clone());
+        let event = |mode, decision, basis, source, approved| {
+            verdict_event(&intent, mode, decision, basis, source, approved)
+        };
+        let allowed = |mode| event(mode, Decision::Allow, typed, typed, true);
+        for mode in [PermissionMode::Default, PermissionMode::DontAsk] {
+            assert!(!rejected(&view, allowed(Some(mode))), "{mode:?}");
+        }
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+        ] {
+            assert!(rejected(&view, allowed(Some(mode))), "{mode:?}");
+        }
+        assert!(rejected(&view, allowed(None)));
+        let default = Some(PermissionMode::Default);
+        assert!(rejected(
+            &view,
+            event(
+                default,
+                Decision::Allow,
+                PermissionSource::Rule,
+                typed,
+                true
+            )
+        ));
+        assert!(!rejected(
+            &view,
+            event(default, Decision::Deny, typed, typed, false)
+        ));
+        assert!(!rejected(
+            &view,
+            event(default, Decision::Ask, typed, PermissionSource::Human, true)
+        ));
+        assert!(!rejected(
+            &view,
+            event(
+                default,
+                Decision::Ask,
+                typed,
+                PermissionSource::UnavailableApproval,
+                false
+            )
+        ));
+        assert!(rejected(
+            &view,
+            event(
+                default,
+                Decision::Ask,
+                typed,
+                PermissionSource::AiReview,
+                true
+            )
+        ));
+        let mut once = view.clone();
+        apply(&mut once, allowed(default)).unwrap();
+        assert!(rejected(&once, allowed(default)));
+
+        let (read_view, read) = started(
+            true,
+            ToolCall::Read {
+                path: "a".into(),
+                offset: None,
+                limit: Some(1024),
+            },
+        );
+        assert!(rejected(
+            &read_view,
+            verdict_event(&read, default, Decision::Allow, typed, typed, true)
+        ));
+        let (unpinned, intent) = started(false, commit.clone());
+        for mode in [None, default] {
+            assert!(rejected(
+                &unpinned,
+                verdict_event(&intent, mode, Decision::Allow, typed, typed, true)
+            ));
+        }
+        let first_use = |basis, source, approved, decision| {
+            verdict_event(&intent, None, decision, basis, source, approved)
+        };
+        let mode = PermissionSource::Mode;
+        assert!(!rejected(
+            &unpinned,
+            first_use(mode, PermissionSource::Human, true, Decision::Ask)
+        ));
+        assert!(!rejected(
+            &unpinned,
+            first_use(
+                mode,
+                PermissionSource::UnavailableApproval,
+                false,
+                Decision::Ask
+            )
+        ));
+        for source in [
+            PermissionSource::Rule,
+            PermissionSource::ExactCommandRule,
+            PermissionSource::Hook,
+            typed,
+        ] {
+            assert!(rejected(
+                &unpinned,
+                first_use(mode, source, true, Decision::Ask)
+            ));
+        }
+        assert!(rejected(
+            &unpinned,
+            first_use(typed, PermissionSource::Human, true, Decision::Ask)
+        ));
+        let (read_unpinned, read) = started(
+            false,
+            ToolCall::Read {
+                path: "a".into(),
+                offset: None,
+                limit: Some(1024),
+            },
+        );
+        assert!(rejected(
+            &read_unpinned,
+            verdict_event(
+                &read,
+                None,
+                Decision::Ask,
+                mode,
+                PermissionSource::Human,
+                true
+            )
+        ));
+
+        let (mut child, goal, run, researcher) = research_session();
+        child.runs[0]
+            .config
+            .as_mut()
+            .unwrap()
+            .tool_policy
+            .as_mut()
+            .unwrap()
+            .permissions_digest = Some([3; 32]);
+        apply(&mut child, reserve_child_call(goal, run, researcher)).unwrap();
+        apply(
+            &mut child,
+            child_record(run, researcher, ProviderCallDisposition::ToolRequested),
+        )
+        .unwrap();
+        let intent = child_intent(run, researcher, commit);
+        assert!(rejected(&child, tool_started(run, researcher, &intent)));
     }
 
     fn tool_started(run: RunId, agent: AgentRunId, intent: &EffectIntent) -> Event {

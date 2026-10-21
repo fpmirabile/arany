@@ -108,7 +108,7 @@ record_kinds!(
 );
 
 impl RecordKind {
-    // User-authored kinds are read-only to the harness; only a record migration replaces them.
+    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit, and a record migration may replace any.
     const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
             Self::ToolsConfig => ("tools.json", "tools.pending", 64 * 1024, false),
@@ -130,7 +130,7 @@ impl RecordKind {
                 16 * 1024,
                 false,
             ),
-            Self::Permissions => ("permissions.json", "permissions.pending", 64 * 1024, false),
+            Self::Permissions => ("permissions.json", "permissions.pending", 64 * 1024, true),
             Self::UnguardedCommands => (
                 "unguarded-commands.json",
                 "unguarded-commands.pending",
@@ -848,7 +848,6 @@ mod tests {
             RecordKind::ProviderProfiles,
             RecordKind::ProviderRouting,
             RecordKind::ProviderRoster,
-            RecordKind::Permissions,
         ] {
             assert!(matches!(
                 state.record(kind).replace(b"synthetic"),

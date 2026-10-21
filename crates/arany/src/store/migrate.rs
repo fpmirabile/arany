@@ -140,6 +140,15 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         git_write_step!("HookFinished", 9),
         git_write_step!("GoalPlanContractRecorded", 7),
         git_write_step!("ProviderCallRecorded", 14),
+        EventStep {
+            kind: "ToolPermissionDecided",
+            from: 4,
+            transform: |value| {
+                crate::session::pre_typed_prefix_payload(&value.to_string())
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            },
+            canonical: crate::session::pre_typed_prefix_payload,
+        },
     ],
 };
 

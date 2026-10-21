@@ -40,25 +40,25 @@ pub(super) struct RawGroup {
     hooks: Vec<CommandHook>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HookConfig {
     groups: BTreeMap<HookEvent, Vec<HookGroup>>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct HookGroup {
     matcher: Matcher,
     hooks: Vec<CommandHook>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Matcher {
     All,
     Names(Vec<String>),
     Pattern(Regex),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CommandHook {
     #[serde(rename = "type")]
@@ -70,7 +70,7 @@ pub struct CommandHook {
     timeout: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "lowercase")]
 enum CommandType {
     Command,
