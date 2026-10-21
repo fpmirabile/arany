@@ -40,7 +40,7 @@ pub fn input(wire: &Value) -> Value {
         .join("\n\n");
     let instructions = wire["instructions"].as_str().unwrap_or(&system);
     let mut semantic = json!({
-        "objective": null, "history": [], "includes": [], "workspace_guidance": [],
+        "objective": null, "history": [], "includes": [], "workspace_guidance": null,
         "derived_context_summary": null, "child_results": [],
     });
     let mut notes = Vec::new();
@@ -51,10 +51,10 @@ pub fn input(wire: &Value) -> Value {
             .and_then(|(path, body)| Some((path, body.strip_suffix("\n</INSTRUCTIONS>")?)))
         {
             let guidance = json!({"path": path, "text": text});
-            semantic["workspace_guidance"]
-                .as_array_mut()
-                .unwrap()
-                .push(guidance);
+            match semantic["workspace_guidance"].as_array_mut() {
+                Some(files) => files.push(guidance),
+                None => semantic["workspace_guidance"] = json!([guidance]),
+            }
         } else if let Some((scope, data)) = scoped(&part) {
             match scope.split(" (").next().unwrap_or_default() {
                 "previous_run" => semantic["history"].as_array_mut().unwrap().push(data),
@@ -184,11 +184,13 @@ mod tests {
                 .map(|turn| json!({"user": turn.user, "assistant": turn.assistant}))
                 .collect::<Vec<_>>(),
             "includes": input.includes,
-            "workspace_guidance": input
-                .workspace_guidance
-                .iter()
-                .map(|guidance| json!({"path": guidance.path, "text": guidance.text}))
-                .collect::<Vec<_>>(),
+            "workspace_guidance": (!input.workspace_guidance.is_empty()).then(|| {
+                input
+                    .workspace_guidance
+                    .iter()
+                    .map(|guidance| json!({"path": guidance.path, "text": guidance.text}))
+                    .collect::<Vec<_>>()
+            }),
             "derived_context_summary": input.context_summary,
             "child_results": input
                 .child_results
