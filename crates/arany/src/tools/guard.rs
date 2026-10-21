@@ -44,6 +44,17 @@ mod profile;
 #[cfg(target_os = "linux")]
 pub(super) use landlock::spawn_confined;
 
+pub(super) fn git_writes_available() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        landlock::available()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]

@@ -32,6 +32,16 @@ struct PathBeneathAttr {
     parent_fd: i32,
 }
 
+pub(super) fn available() -> bool {
+    static AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // Probe once on a disposable thread so the caller keeps its filesystem access.
+    *AVAILABLE.get_or_init(|| {
+        std::thread::Builder::new()
+            .spawn(|| restrict_thread(&[Path::new("/dev/null")]))
+            .is_ok_and(|thread| thread.join().is_ok_and(|result| result.is_ok()))
+    })
+}
+
 // Landlock and seccomp bind the thread and its descendants, so the Guard thread keeps its access.
 pub(crate) fn spawn_confined(
     command: &mut tokio::process::Command,
@@ -179,6 +189,7 @@ mod tests {
             .wait_with_output()
             .await
             .unwrap();
+        assert!(available(), "enforced confinement must also be advertised");
         assert_eq!(output.stdout, b"kept\n", "reads stay available");
         assert!(scratch.join("allowed").exists());
         for denied in ["denied", ".git/denied", "dir"] {

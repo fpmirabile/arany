@@ -332,6 +332,28 @@ fn hostile_repository_configuration_never_executes_during_writes() {
 }
 
 #[test]
+fn switches_refuse_file_directory_transitions_without_reporting_local_changes() {
+    let mut repo = Repo::new();
+    repo.git(&["stash", "-q", "--include-untracked"]);
+    repo.git(&["checkout", "-q", "-b", "file"]);
+    repo.git(&["checkout", "-q", "-b", "directory"]);
+    repo.git(&["rm", "notes.md"]);
+    std::fs::create_dir(repo.workspace.join("notes.md")).unwrap();
+    std::fs::write(repo.workspace.join("notes.md/child.txt"), "child\n").unwrap();
+    repo.git(&["add", "notes.md/child.txt"]);
+    repo.git(&["commit", "-q", "-m", "directory"]);
+
+    for (current, target) in [("file", "directory"), ("directory", "file")] {
+        repo.git(&["checkout", "-q", current]);
+        assert_eq!(repo.git(&["status", "--porcelain=v1"]), "");
+        let before = tree(&repo.workspace);
+        let value = repo.write(switch(target)).unwrap();
+        assert_eq!(value["failed"], TYPE_CHANGE, "{current} to {target}");
+        assert_unchanged(&repo.workspace, &before);
+    }
+}
+
+#[test]
 fn refusals_leave_the_repository_and_workspace_unchanged() {
     type Setup = fn(&Repo);
     let symbolic: Setup = |repo| {

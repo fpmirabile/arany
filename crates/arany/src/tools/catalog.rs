@@ -289,14 +289,11 @@ pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
     by_name(call["properties"]["operation"]["enum"][0].as_str()?)
 }
 
-// Git writes need a child-only filesystem restriction; macOS has none yet, so it fails closed.
-pub(crate) const GIT_WRITES: bool = cfg!(target_os = "linux");
-
 pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
+    let write = write && super::guard::git_writes_available();
     ALL.iter()
         .filter(|facts| {
-            facts.family == Family::Git
-                && (write && GIT_WRITES || !facts.mutates || facts.name == "git_branch")
+            facts.family == Family::Git && (write || !facts.mutates || facts.name == "git_branch")
         })
         .map(|facts| facts.name)
         .collect()
@@ -364,6 +361,13 @@ pub(crate) fn call_schemas() -> Vec<Value> {
 }
 
 pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
+    let git_writes = catalog["write"] == true
+        && catalog["git"].is_object()
+        && super::guard::git_writes_available();
+    catalog_call_schemas_with_git_writes(catalog, git_writes)
+}
+
+fn catalog_call_schemas_with_git_writes(catalog: &Value, git_writes: bool) -> Vec<Value> {
     let mut calls = call_schemas();
     calls.retain_mut(|call| {
         let Some(facts) = facts_of(call) else {
@@ -388,10 +392,9 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                 let listed = catalog["git"]["operations"]
                     .as_array()
                     .is_some_and(|names| names.iter().any(|name| name == facts.name));
-                if !facts.mutates || catalog["write"] == true && listed {
+                if !facts.mutates || catalog["write"] == true && git_writes && listed {
                     return true;
                 }
-                // Without the write grant a listed `git_branch` stays offered as its read-only listing.
                 if facts.name == "git_branch" && listed {
                     call["properties"]["name"] = json!({"type":"null", "description":"null lists local branches; creating one needs the write grant."});
                     call["properties"]["start_point"] = json!({"type":"null"});
@@ -638,26 +641,39 @@ mod tests {
     }
 
     #[test]
-    fn mutating_git_operations_need_the_write_grant() {
-        let offered = |write: bool| -> Vec<String> {
-            catalog_call_schemas(&json!({
-                "write": write,
-                "git": {"operations": ["git_status", "git_commit", "git_branch", "git_switch"]}
-            }))
-            .iter()
-            .filter_map(|call| facts_of(call).map(|facts| facts.name.to_owned()))
-            .filter(|name| matches!(name.as_str(), "git_commit" | "git_branch" | "git_switch"))
-            .collect()
-        };
-        assert_eq!(offered(false), ["git_branch"], "listing stays offered");
-        let listing =
-            catalog_call_schemas(&json!({"write": false, "git": {"operations": ["git_branch"]}}))
-                .into_iter()
-                .find(|call| facts_of(call).is_some_and(|facts| facts.name == "git_branch"))
-                .unwrap();
-        assert_eq!(listing["properties"]["name"]["type"], "null");
-        assert_eq!(listing["properties"]["start_point"]["type"], "null");
-        assert_eq!(offered(true), ["git_commit", "git_branch", "git_switch"]);
+    fn mutating_git_operations_need_the_write_grant_and_available_enforcement() {
+        for write in [false, true] {
+            for git_writes in [false, true] {
+                let catalog = json!({
+                    "write": write,
+                    "git": {"operations": ["git_status", "git_commit", "git_branch", "git_switch"]}
+                });
+                let calls = catalog_call_schemas_with_git_writes(&catalog, git_writes);
+                let offered: Vec<_> = calls
+                    .iter()
+                    .filter_map(|call| facts_of(call).map(|facts| facts.name))
+                    .filter(|name| matches!(*name, "git_commit" | "git_branch" | "git_switch"))
+                    .collect();
+                let expected = if write && git_writes {
+                    vec!["git_commit", "git_branch", "git_switch"]
+                } else {
+                    vec!["git_branch"]
+                };
+                assert_eq!(offered, expected, "write={write}, git_writes={git_writes}");
+                let branch = calls
+                    .iter()
+                    .find(|call| facts_of(call).is_some_and(|facts| facts.name == "git_branch"))
+                    .unwrap();
+                let expected = if write && git_writes {
+                    json!(["string", "null"])
+                } else {
+                    json!("null")
+                };
+                for field in ["name", "start_point"] {
+                    assert_eq!(branch["properties"][field]["type"], expected);
+                }
+            }
+        }
     }
 
     #[test]

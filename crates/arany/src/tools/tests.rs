@@ -2199,12 +2199,33 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     );
     config.write = true;
     let mut operations = vec!["git_status", "git_diff", "git_log"];
-    if super::catalog::GIT_WRITES {
+    let git_writes = super::guard::git_writes_available();
+    assert_eq!(
+        config.allows(&ToolCall::GitBranch {
+            name: Some("topic".into()),
+            start_point: None,
+        }),
+        git_writes
+    );
+    if git_writes {
         operations.extend(["git_commit", "git_branch", "git_switch"]);
     } else {
         operations.push("git_branch");
     }
-    assert_eq!(catalog(config)["git"]["operations"], json!(operations));
+    let catalog = catalog(config);
+    assert_eq!(catalog["git"]["operations"], json!(operations));
+    let branch = catalog_call_schemas(&catalog)
+        .into_iter()
+        .find(|call| call["properties"]["operation"]["enum"][0] == "git_branch")
+        .unwrap();
+    let expected = if git_writes {
+        json!(["string", "null"])
+    } else {
+        json!("null")
+    };
+    for field in ["name", "start_point"] {
+        assert_eq!(branch["properties"][field]["type"], expected);
+    }
 }
 
 #[test]

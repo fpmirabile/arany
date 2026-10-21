@@ -49,6 +49,7 @@ const UNSUPPORTED_HEAD: &str =
     "HEAD points to a ref outside local branches; switch to a branch in your own terminal first.";
 const SYMBOLIC_START: &str = "The start point names a symbolic ref such as origin/HEAD; name the branch it points to instead.";
 const UNSUPPORTED_ENTRY: &str = "Switching would change a symbolic link or submodule entry, which typed Git writes do not support.";
+const TYPE_CHANGE: &str = "Switching would turn a file into a directory or a directory into a file; switch in your own terminal instead.";
 
 // What a write replaces, plus `holds`: refs it read and only locks so they cannot move meanwhile.
 #[derive(Default)]
@@ -677,6 +678,19 @@ fn changed_files<'a>(
                     continue;
                 }
             },
+            None if fields.as_chunks::<2>().0.iter().any(|removed| {
+                removed[0].split(|byte| *byte == b' ').nth(1) == Some(b"000000".as_slice())
+                    && (path
+                        .as_bytes()
+                        .strip_prefix(removed[1])
+                        .is_some_and(|rest| rest.starts_with(b"/"))
+                        || removed[1]
+                            .strip_prefix(path.as_bytes())
+                            .is_some_and(|rest| rest.starts_with(b"/")))
+            }) =>
+            {
+                return Ok(Err(failure(TYPE_CHANGE, &[], git.max_bytes, git.hidden)));
+            }
             // An untracked file or directory at an added path would be overwritten.
             None if root
                 .symlink_metadata(path)
