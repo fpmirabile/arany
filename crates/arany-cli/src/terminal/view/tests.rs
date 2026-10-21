@@ -10,7 +10,7 @@ fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 #[test]
-fn classic_dialog_content_stays_above_the_spare_floor_rows() {
+fn classic_dialogs_fill_their_content_sized_viewport() {
     for screen_height in [8, 24, 50] {
         for (panel, height) in [
             ("permission", 12),
@@ -22,8 +22,9 @@ fn classic_dialog_content_stays_above_the_spare_floor_rows() {
             ("rewind review", 12),
         ] {
             let mut terminal = Terminal::new(TestBackend::new(80, screen_height)).unwrap();
-            let floor = classic_floor(screen_height);
-            let full = Rect::new(0, screen_height - floor, 80, floor);
+            // As in Codex, the viewport is min(screen, the dialog's content height).
+            let rows = height.min(screen_height);
+            let full = Rect::new(0, screen_height - rows, 80, rows);
             let area = crate::terminal::dialog_area(full, height, true);
             let palette = Palette { color: false };
             let lines = vec!["Review this change".to_owned()];
@@ -116,12 +117,7 @@ fn classic_dialog_content_stays_above_the_spare_floor_rows() {
                 !rows[usize::from(area.bottom() - 1)].trim().is_empty(),
                 "{panel}: footer stays with content: {rows:?}"
             );
-            assert!(
-                rows[usize::from(area.bottom())..]
-                    .iter()
-                    .all(|row| row.trim().is_empty()),
-                "{panel}: spare rows below content: {rows:?}"
-            );
+            assert_eq!(area, full, "{panel}: no spare rows around the dialog");
         }
     }
 }
@@ -3127,6 +3123,71 @@ fn permission_frame_fills_the_terminal_like_chat() {
 }
 
 #[test]
+fn trust_dialog_takes_its_content_height_and_pages_beyond_the_screen() {
+    let state = |profile_start| PermissionFrameState {
+        choices: &["Continue read only", "Trust this folder"],
+        page: 0,
+        focus: 0,
+        profile_start,
+        profile_count: 0,
+        focused_profile: None,
+        profile_selection_enabled: None,
+        footer: None,
+        palette: Palette { color: false },
+        boxed: false,
+    };
+    let fitting =
+        crate::presentation::workspace_permission_lines(std::path::Path::new("/home/user/project"));
+    let mut long = profile_frame_lines();
+    let profile_start = long.len();
+    long.extend((3..20).map(|index| {
+        format!(
+            "    [ ] {index}. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
+        )
+    }));
+    for (lines, profile_start, pages) in
+        [(&fitting, None, false), (&long, Some(profile_start), true)]
+    {
+        // As in Codex, the Classic viewport is min(screen, the dialog's content height).
+        let content = permission_height(lines, 80, false, profile_start);
+        let height = content.min(24);
+        assert_eq!(content > 24, pages, "content of {} rows", content);
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        let area = Rect::new(0, 24 - height, 80, height);
+        let mut progress = None;
+        terminal
+            .draw(|frame| {
+                progress = Some(draw_permission_frame(
+                    frame,
+                    area,
+                    lines,
+                    state(profile_start),
+                ));
+            })
+            .unwrap();
+        let rows = (0..24)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect::<Vec<_>>();
+        assert_eq!(progress.unwrap().more, pages, "{rows:?}");
+        assert!(
+            rows[usize::from(area.y)].contains("Do you trust this folder?"),
+            "{rows:?}"
+        );
+        if pages {
+            assert!(rows.iter().any(|row| row.contains("Page 1/")), "{rows:?}");
+        } else {
+            // Every content row and both choices fit on the one page.
+            assert!(
+                rows.iter()
+                    .any(|row| row.contains("Every edit and command"))
+            );
+            assert!(rows.iter().any(|row| row.contains("› Continue read only")));
+            assert!(rows.iter().any(|row| row.contains("Trust this folder")));
+        }
+    }
+}
+
+#[test]
 fn wrap_cells_keeps_words_and_indents_continuations() {
     assert_eq!(wrap_cells("aaa bbb ccc", 7, 2), ["aaa bbb", "  ccc"]);
     assert_eq!(wrap_cells("abcdefghij", 4, 1), ["abcd", " efg", " hij"]);
@@ -3656,13 +3717,6 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             );
             assert_eq!(buffer_row(buffer, 3).trim_end(), "  ⎿ 2 lines");
         }
-    }
-}
-
-#[test]
-fn classic_floor_is_the_larger_of_24_rows_and_sixty_percent_within_the_screen() {
-    for (screen, floor) in [(8, 8), (12, 12), (24, 24), (40, 24), (60, 36), (100, 60)] {
-        assert_eq!(classic_floor(screen), floor, "{screen} rows");
     }
 }
 

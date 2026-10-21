@@ -563,7 +563,7 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::permission_height(&lines, width, false, profile_start);
-        self.draw_frame(height, true, |frame, area| {
+        self.draw_frame(height, |frame, area| {
             if area.width >= 16 && area.height >= 8 {
                 progress = view::draw_permission_frame(
                     frame,
@@ -629,7 +629,7 @@ impl AttachedTerminal {
         }
         let screen = self.terminal.as_mut().expect("owned terminal").size()?;
         let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
-        self.prepare_frame_height(height, true)?;
+        self.prepare_frame_height(height)?;
         let palette = self.palette();
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let history = &mut self.history;
@@ -1449,21 +1449,15 @@ impl AttachedTerminal {
             .get_frame()
             .area()
             .height;
-        self.prepare_frame_height(height, false)
+        self.prepare_frame_height(height)
     }
 
-    fn prepare_frame_height(&mut self, height: u16, dialog: bool) -> Result<(), TerminalError> {
+    fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
         let terminal = self.terminal.as_mut().expect("owned terminal");
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
             let before = terminal.get_frame().area();
-            let (height, keep_top) = classic_placement(
-                before,
-                terminal.size()?.height,
-                height,
-                dialog,
-                self.history_adjacent,
-            );
+            let keep_top = classic_keeps_top(before, self.history_adjacent);
             let resized = resize_classic(terminal, offset, height, keep_top, || {
                 let mut backend = TerminalBackend::new(TerminalMode::Classic, None);
                 backend.detach();
@@ -1487,20 +1481,11 @@ impl AttachedTerminal {
     fn draw_frame(
         &mut self,
         height: u16,
-        dialog: bool,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<(), TerminalError> {
-        self.prepare_frame_height(height, dialog)?;
+        self.prepare_frame_height(height)?;
         let terminal = self.terminal.as_mut().expect("owned terminal");
-        let classic = self.mode == TerminalMode::Classic;
-        terminal.draw(|frame| {
-            let area = if dialog && classic {
-                dialog_area(frame.area(), height, classic)
-            } else {
-                frame.area()
-            };
-            render(frame, area);
-        })?;
+        terminal.draw(|frame| render(frame, frame.area()))?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
         Ok(())
@@ -1537,7 +1522,7 @@ impl AttachedTerminal {
         height: u16,
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<Rect, TerminalError> {
-        self.prepare_frame_height(height, true)?;
+        self.prepare_frame_height(height)?;
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
         let history = &mut self.history;
@@ -1627,7 +1612,7 @@ impl AttachedTerminal {
         } else {
             screen.height
         };
-        self.prepare_frame_height(height, false)?;
+        self.prepare_frame_height(height)?;
         self.sync_native(view)?;
         if self.mode == TerminalMode::Classic
             && let Some(TerminalNotice::History(text)) = notice
@@ -1714,7 +1699,7 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.dialog_armed;
         let mut history_area = Rect::default();
-        self.draw_frame(height, false, |frame, _| {
+        self.draw_frame(height, |frame, _| {
             history_area = draw_frame_with_history(
                 frame,
                 &model,
@@ -1820,7 +1805,7 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame, area| {
+        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame, area| {
             draw_setup_frame(
                 frame,
                 area,
@@ -1855,7 +1840,7 @@ impl AttachedTerminal {
             .expect("owned terminal")
             .size()?
             .width;
-        self.draw_frame(if width < 20 { 8 } else { 7 }, true, |frame, area| {
+        self.draw_frame(if width < 20 { 8 } else { 7 }, |frame, area| {
             draw_setup_text_frame(frame, area, title, instruction, draft, notice, palette)
         })?;
         Ok(())
@@ -1891,7 +1876,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        self.draw_frame(8, true, |frame, area| {
+        self.draw_frame(8, |frame, area| {
             draw_setup_choices_frame(
                 frame,
                 area,
@@ -1931,7 +1916,7 @@ impl AttachedTerminal {
             .size()?
             .width;
         let height = view::setup_warning_height(warning, width);
-        self.draw_frame(height, true, |frame, area| {
+        self.draw_frame(height, |frame, area| {
             visible = area.width >= 16 && area.height >= 8;
             has_more = draw_setup_warning_frame(
                 frame,
@@ -2193,7 +2178,9 @@ impl AttachedTerminal {
     fn draw_help(&mut self, selected: usize, session: &SessionView) -> Result<(), TerminalError> {
         let palette = self.palette();
         let armed = self.dialog_armed;
-        self.draw_dialog(Some(session), 20, |frame, area| {
+        // Header, the capped command rows, the focused description and the key hint.
+        let height = u16::try_from(view::SELECTOR_ROWS + 3).unwrap_or(u16::MAX);
+        self.draw_dialog(Some(session), height, |frame, area| {
             draw_help_frame(frame, area, selected, armed, palette);
         })?;
         Ok(())
@@ -2493,11 +2480,11 @@ impl AttachedTerminal {
     }
 }
 
-// Classic dialogs start right under the history at the viewport top; the floor's spare rows
-// stay below them. Fullscreen dialogs sit at the bottom under live history.
+// A Classic viewport is exactly its dialog; Fullscreen dialogs sit at the bottom under live
+// history.
 fn dialog_area(frame: Rect, height: u16, classic: bool) -> Rect {
     if classic {
-        Rect::new(frame.x, frame.y, frame.width, height.min(frame.height))
+        frame
     } else {
         bottom_area(frame, height)
     }
@@ -2518,22 +2505,11 @@ fn draw_history_above(
     area
 }
 
-// Dialogs get the Classic floor; idle and streaming frames take only their content.
-// A shrink keeps the viewport top while history stays visible above it, so the composer
-// remains under the latest history; otherwise the viewport returns to the bottom row.
-fn classic_placement(
-    area: Rect,
-    screen_height: u16,
-    height: u16,
-    dialog: bool,
-    history_adjacent: bool,
-) -> (u16, bool) {
-    let height = if dialog {
-        height.max(view::classic_floor(screen_height))
-    } else {
-        height
-    };
-    (height, history_adjacent && area.y > 0)
+// Every Classic surface takes min(screen, its content height), as Codex's inline viewport
+// does. A shrink keeps the viewport top while history stays visible above it, so the
+// composer remains under the latest history; otherwise the viewport returns to the bottom.
+fn classic_keeps_top(area: Rect, history_adjacent: bool) -> bool {
+    history_adjacent && area.y > 0
 }
 
 fn resize_classic<B: Backend>(
@@ -2631,7 +2607,7 @@ impl Drop for AttachedTerminal {
 
 #[cfg(test)]
 mod insert_rows_tests {
-    use super::{classic_placement, insert_rows_scrolling_screen, resize_classic};
+    use super::{classic_keeps_top, insert_rows_scrolling_screen, resize_classic};
     use ratatui::{
         Terminal, TerminalOptions, Viewport,
         backend::{Backend, ClearType, CrosstermBackend, TestBackend, WindowSize},
@@ -2783,10 +2759,9 @@ mod insert_rows_tests {
     }
 
     #[test]
-    fn classic_dialogs_take_the_floor_and_closing_keeps_history_above_the_composer() {
+    fn classic_viewport_takes_its_content_and_keeps_history_above_the_composer() {
         use ratatui::widgets::{Paragraph, Widget};
         for height in [8, 12, 24, 40, 50, 60] {
-            let floor = super::view::classic_floor(height);
             let mut backend = TestBackend::new(80, height);
             let mut settled = Buffer::empty(Rect::new(0, height - 5, 80, 1));
             Paragraph::new("settled history").render(settled.area, &mut settled);
@@ -2811,10 +2786,11 @@ mod insert_rows_tests {
                 (4, false),
             ] {
                 let before = terminal.get_frame().area();
-                let (rows, keep_top) =
-                    classic_placement(before, height, needed, dialog, history_adjacent);
-                resize_classic(&mut terminal, 0, rows, keep_top, || TestBackend::new(1, 1))
-                    .unwrap();
+                let keep_top = classic_keeps_top(before, history_adjacent);
+                resize_classic(&mut terminal, 0, needed, keep_top, || {
+                    TestBackend::new(1, 1)
+                })
+                .unwrap();
                 let adjacent_before = history_adjacent;
                 history_adjacent &= terminal.get_frame().area().y <= before.y;
                 terminal
@@ -2829,14 +2805,8 @@ mod insert_rows_tests {
                     .unwrap();
                 let area = terminal.get_frame().area();
                 let context = format!("{height} rows, {needed} needed, dialog {dialog}");
-                if dialog {
-                    assert_eq!(area.height, needed.max(floor).min(height), "{context}");
-                } else {
-                    assert_eq!(
-                        area.height, needed,
-                        "idle frames take only content: {context}"
-                    );
-                }
+                // As in Codex, every surface takes min(screen, its content height).
+                assert_eq!(area.height, needed.min(height), "{context}");
                 if area.height < before.height {
                     if adjacent_before && before.y > 0 {
                         assert_eq!(area.y, before.y, "a shrink keeps the top: {context}");

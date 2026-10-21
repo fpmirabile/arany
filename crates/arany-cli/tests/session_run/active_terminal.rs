@@ -1184,7 +1184,7 @@ mod clipboard_copy;
 mod tmux;
 
 #[test]
-fn classic_dialog_takes_the_floor_and_closes_under_the_latest_history() {
+fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history() {
     use super::session_picker::{PtyResponses, pump, tail};
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
     let temp = tempfile::tempdir().unwrap();
@@ -1282,15 +1282,9 @@ fn classic_dialog_takes_the_floor_and_closes_under_the_latest_history() {
         .iter()
         .position(|row| row.starts_with("Quick actions"))
         .expect("quick actions header");
-    // The dialog starts right under history and reserves the 30-row floor below it.
+    // As in Codex, the six-row dialog takes only its content height, right under history.
     super::assert_history_above(&dialog, top, "open dialog");
-    assert!(50 - top >= 30, "floor reserved at row {top}: {dialog:?}");
-    assert!(
-        dialog[top + 6..top + 30]
-            .iter()
-            .all(|row| row.trim().is_empty()),
-        "spare floor rows stay below the dialog: {dialog:?}"
-    );
+    assert_eq!(top + 6, 50, "no reserved rows below the dialog: {dialog:?}");
 
     let closed_at = transcript.len();
     input.write_all(b"\x1b").unwrap();
@@ -1537,7 +1531,7 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             &mut answered,
             close_from,
         );
-        // The floored viewport keeps its height, so the frame diff repaints it without a clear.
+        // Closing shrinks the viewport by clearing only its own rows, never the whole screen.
         assert!(
             !transcript[close_from..]
                 .windows(4)

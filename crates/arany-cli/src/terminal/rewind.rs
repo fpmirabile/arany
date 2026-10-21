@@ -161,7 +161,7 @@ impl AttachedTerminal {
             } else {
                 let palette = self.palette();
                 let mut more = true;
-                self.draw_frame(12, true, |frame, area| {
+                self.draw_frame(12, |frame, area| {
                     more = draw_rewind_frame(
                         frame, area, title, &lines, &choices, selected, page, palette,
                     );

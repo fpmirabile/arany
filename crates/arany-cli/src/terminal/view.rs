@@ -320,12 +320,6 @@ pub(super) fn composer_height(composer: &Composer, area: Rect) -> u16 {
         .min(area.height.saturating_sub(1))
 }
 
-pub(super) const CLASSIC_FLOOR_ROWS: u16 = 24;
-
-pub(super) fn classic_floor(screen_height: u16) -> u16 {
-    screen_height.min(CLASSIC_FLOOR_ROWS.max(screen_height.saturating_mul(3) / 5))
-}
-
 pub(super) fn classic_height(
     model: &PresentationModel,
     composer: &Composer,
@@ -1783,13 +1777,17 @@ fn settings_stacked(rows: &[String], width: usize) -> bool {
         .any(|(index, row)| numbered_label(index, row, false).width() > width)
 }
 
+// Selector lists show at most this many rows and scroll inside, like Codex's
+// MAX_POPUP_ROWS; ten matches the page size of the linear pickers.
+pub(super) const SELECTOR_ROWS: usize = 10;
+
 pub(super) fn settings_height(rows: &[String], width: u16) -> u16 {
     let lines_per_row = if settings_stacked(rows, usize::from(width)) {
         2
     } else {
         1
     };
-    u16::try_from(rows.len() * lines_per_row + 2).unwrap_or(u16::MAX)
+    u16::try_from(rows.len().min(SELECTOR_ROWS) * lines_per_row + 2).unwrap_or(u16::MAX)
 }
 
 pub(super) fn draw_settings_frame(
