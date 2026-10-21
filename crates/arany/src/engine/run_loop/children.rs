@@ -2553,6 +2553,11 @@ fn restrict_catalog(
         ToolCall::Search {
             path: ".".into(),
             query: "x".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         },
         ToolCall::Skill {
             name: "skill".into(),

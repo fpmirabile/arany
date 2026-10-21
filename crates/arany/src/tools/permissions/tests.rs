@@ -291,6 +291,11 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
         ToolCall::Search {
             path: "private/a".into(),
             query: "x".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         },
         ToolCall::List {
             path: "private/a".into(),
@@ -308,6 +313,11 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
             ToolCall::Search {
                 path: "src/a".into(),
                 query: "x".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
             },
         ),
         ("Glob", ToolCall::List { path: "src".into() }),
@@ -1556,6 +1566,38 @@ fn updated_input_accepts_only_provable_narrowing() {
     let search = |path: &str, query: &str| ToolCall::Search {
         path: path.into(),
         query: query.into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
+    };
+    let page = |path: &str, offset: u32, limit: u32| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset,
+        limit,
+    };
+    let matching = |regex: bool, include: Option<&str>, case_sensitive: bool| ToolCall::Search {
+        path: "src".into(),
+        query: "x".into(),
+        regex,
+        include: include.map(str::to_owned),
+        case_sensitive,
+        offset: 0,
+        limit: 100,
+    };
+    let filtered = |path: &str, include: &str| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: Some(include.into()),
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
     };
     let glob_call = |pattern: &str, path: &str, limit| ToolCall::Glob {
         pattern: pattern.into(),
@@ -1673,6 +1715,70 @@ fn updated_input_accepts_only_provable_narrowing() {
             false,
         ),
         (glob_call("*.rs", "src", 10), list("src"), false),
+        (page("src", 10, 20), page("src", 10, 20), true),
+        (page("src", 10, 20), page("src", 15, 15), true),
+        (page("src", 10, 20), page("src", 29, 1), true),
+        (page("src", 10, 20), page("src", 15, 16), false),
+        (page("src", 10, 20), page("src", 9, 5), false),
+        (page("src", 10, 20), page("src", 30, 1), false),
+        (page("src", 10, 20), page("src", u32::MAX, 100), false),
+        (search("src", "x"), page("src/a", 0, 50), true),
+        (search("src", "x"), page("src/a", 5, 50), false),
+        (page("src", 5, 50), page("src/a", 0, 50), false),
+        (page("src", 0, 50), page("src/a", 0, 51), false),
+        (page("src/a", 0, 50), page("src", 0, 50), false),
+        (
+            matching(true, Some("**/*.rs"), false),
+            matching(true, Some("**/*.rs"), false),
+            true,
+        ),
+        (
+            matching(false, None, true),
+            matching(true, None, true),
+            false,
+        ),
+        (
+            matching(true, None, true),
+            matching(false, None, true),
+            false,
+        ),
+        (
+            matching(false, None, true),
+            matching(false, Some("*.rs"), true),
+            false,
+        ),
+        (
+            matching(false, Some("*.rs"), true),
+            matching(false, None, true),
+            false,
+        ),
+        (
+            matching(false, Some("*.rs"), true),
+            matching(false, Some("*.r?"), true),
+            false,
+        ),
+        (
+            matching(false, None, true),
+            matching(false, None, false),
+            false,
+        ),
+        (
+            matching(false, None, false),
+            matching(false, None, true),
+            false,
+        ),
+        // `*.rs` under `src` excludes `src/nested/a.rs`; rebased under `src/nested` it would match.
+        (
+            filtered("src", "*.rs"),
+            filtered("src/nested", "*.rs"),
+            false,
+        ),
+        (
+            filtered("src", "**/*.rs"),
+            filtered("src/nested", "**/*.rs"),
+            false,
+        ),
+        (filtered("src", "*.rs"), filtered("src", "*.rs"), true),
         (status("a"), status("a/b"), true),
         (status("a/b"), status("a"), false),
         (status("a"), status("a/../b"), false),

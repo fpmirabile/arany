@@ -1049,6 +1049,11 @@ async fn tool_request_refused_on_the_last_allowed_call_is_a_budget_close() {
         arany::ToolCall::Search {
             path: "notes/facts.txt".into(),
             query: "v".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         },
     )]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
@@ -4466,6 +4471,11 @@ async fn child_reads_stay_inside_the_plan_and_never_satisfy_the_goal_criterion()
         crate::tool_outcome(arany::ToolCall::Search {
             path: "notes/facts.txt".into(),
             query: "v".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
         }),
         ProviderOutcome::Delegate(Delegate {
             agent: None,

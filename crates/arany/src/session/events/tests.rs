@@ -199,6 +199,11 @@ mod goal_success_tests {
             ToolCall::Search {
                 path: "src".into(),
                 query: "main".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
             },
             ToolCall::McpList {
                 server: "local".into(),

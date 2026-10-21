@@ -55,7 +55,7 @@ pub(super) enum PatternError {
     Size,
 }
 
-// Discovery only: permission path rules keep their own semantics. Search's include filter should reuse this.
+// Shared by glob and Search include filters; permission path rules keep their own semantics.
 pub(super) fn matcher(pattern: &str) -> Result<Regex, PatternError> {
     RegexBuilder::new(&translate(pattern)?)
         .size_limit(128 * 1024)

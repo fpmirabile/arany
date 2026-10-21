@@ -857,13 +857,10 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests[0].id.as_str(), "call_test");
 
-            // Null path and limit arrive normalized to their defaults.
-            let mut normalized = row.clone();
-            if normalized["operation"] == "glob" {
-                normalized["path"] = json!(".");
-                normalized["limit"] = json!(100);
-            }
-            assert_eq!(serde_json::to_value(&requests[0].call).unwrap(), normalized);
+            assert_eq!(
+                requests[0].call,
+                serde_json::from_value::<crate::tools::ToolCall>(row.clone()).unwrap()
+            );
             assert_eq!(
                 decoded.turn.items("openai").unwrap().len(),
                 2,
@@ -1040,6 +1037,18 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
         (
             json!({"operation":"command","program":"/usr/bin/date","args":[],"cwd":""}),
             Stage::OutcomeToolProgram,
+        ),
+        (
+            json!({"operation":"search","path":"src","query":"x","regex":null,"include":"","case_sensitive":null,"offset":null,"limit":null}),
+            Stage::OutcomeToolTextSize,
+        ),
+        (
+            json!({"operation":"search","path":"src","query":"x","regex":true,"include":null,"case_sensitive":false,"offset":null,"limit":101}),
+            Stage::OutcomeToolArguments,
+        ),
+        (
+            json!({"operation":"search","path":"src","query":"x","regex":null,"include":null,"case_sensitive":null,"offset":33_554_433,"limit":null}),
+            Stage::OutcomeToolArguments,
         ),
         (
             json!({"operation":"write","path":"README.md","expected_digest":"0".repeat(64),"content":"x".repeat(400 * 1024 + 1)}),

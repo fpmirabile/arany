@@ -1,7 +1,7 @@
 [
   {"operation": "list", "path": "src"},
   {"operation": "read", "path": "src/main.rs", "offset": null, "limit": null},
-  {"operation": "search", "path": "src", "query": "fn main"},
+  {"operation": "search", "path": "src", "query": "fn main", "regex": null, "include": null, "case_sensitive": null, "offset": null, "limit": null},
   {"operation": "mkdir", "path": "src/generated"},
   {"operation": "write", "path": "src/new.rs", "expected_digest": null, "content": "fn new() {}\n"},
   {"operation": "edit", "path": "src/main.rs", "expected_digest": "0000000000000000000000000000000000000000000000000000000000000000", "old": "old", "new": "new"},
