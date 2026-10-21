@@ -142,8 +142,7 @@ impl AttachedTerminal {
         self.agent_chat.is_some()
     }
 
-    // After a burst of committed Events: whether the shown chat needs a frame. Siblings, the
-    // primary and a reload with the same facts leave a child view untouched.
+    // Siblings, the primary and an unchanged reload leave a shown child view untouched.
     pub async fn follow_agent_chat(
         &mut self,
         view: &SessionView,
@@ -532,8 +531,7 @@ impl AttachedTerminal {
         Ok(())
     }
 
-    // Classic appends whole new records below an unmistakable read-only boundary, never
-    // repainting rows already in scrollback.
+    // Classic appends whole records below a read-only boundary and never repaints scrollback.
     fn write_native_agent_chat(&mut self) -> Result<(), TerminalError> {
         let chat = self.agent_chat.as_mut().expect("open agent chat");
         let Some(label) = chat.transcript.as_ref().map(|t| t.label.clone()) else {
