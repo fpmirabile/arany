@@ -13,11 +13,11 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 
 - Create one kebab-case folder per initiative.
 - Put its main plan in `README.md`.
-- Keep the plan decision-oriented: goal, scope, current facts, constraints, chosen direction, risks, execution, and exit criteria.
+- Keep the plan decision-oriented: one feature, its research, constraints, chosen direction, risks, vertical slices, and exit criteria ([PLANNING.md](./PLANNING.md)).
 - Update the same plan as decisions change.
 - Resolve facts from code, configuration, research, and authoritative documentation. Promote the remaining material uncertainty to `Open questions`.
 - A plan is implementation-ready only when every material assumption is resolved or explicit.
-- Use one PR when the work is cohesive and reviewable. Split by concern only when one PR would become large, risky, or mixed.
+- Each vertical slice is one PR; a feature small enough for one reviewable PR is one slice.
 - When work starts or lands, update its status and next action.
 
 ## Conventions

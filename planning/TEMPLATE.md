@@ -12,11 +12,11 @@ affects a module boundary. Resolve relative links from the initiative's director
 
 ## Outcome and scope
 
-The result, the harness responsibility it serves and the work included; exclusions only when they clarify a real boundary.
+The single feature this plan delivers, the harness responsibility it serves and the work included; exclusions only when they clarify a real boundary. A second feature belongs in its own plan.
 
-## Current facts and owners
+## Research
 
-Links to the affected contract, editing rules, implementation and evidence owner, plus verified facts needed for the decision.
+Verified facts with citations: the affected contract, editing rules, implementation and evidence owner, and peer harness behavior read from source. Findings that outlive this plan go to `docs/research/` and are linked here.
 
 ## Contract and scenarios
 
@@ -40,12 +40,12 @@ Trust boundaries, attacker-controlled inputs, authorization, secrets, bounds/bac
 
 - Risk → mitigation:
 
-## Execution
+## Vertical slices
 
-1. First coherent step and its verification.
-2. Final integration, documentation and cleanup.
+1. Slice: the observable behavior it ships, the path it crosses end to end (input → Engine → journal → presentation, as applicable), its spec change, its tests and its PR boundary.
+2. Next slice, built on the previous one.
 
-For multiple slices, name each slice's dependencies, verification and PR boundary; keep only remaining work as execution progresses.
+Each slice is usable on its own. Keep only remaining slices as execution progresses.
 
 ## Open questions
 
