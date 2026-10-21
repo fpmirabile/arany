@@ -35,8 +35,7 @@ pub enum AgentChatFollow {
     Closed(&'static str),
 }
 
-// One selected read-only transcript that follows committed Events; the primary keeps its own
-// History, draft and anchors.
+// A read-only transcript fed by committed Events; the primary keeps its History, draft and anchors.
 pub(super) struct AgentChat {
     session: SessionId,
     run: RunId,
