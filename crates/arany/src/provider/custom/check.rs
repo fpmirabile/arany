@@ -266,16 +266,44 @@ mod tests {
     const CONTRACT_RESPONSE_BYTES: usize = 1024 * 1024;
 
     #[derive(Clone, Copy)]
+    struct MessagesCase {
+        base_path: &'static str,
+        model: &'static str,
+        auth: super::super::MessagesAuth,
+    }
+
+    const MESSAGES_CASES: [MessagesCase; 2] = [
+        MessagesCase {
+            base_path: "/anthropic",
+            model: "kimi-k3",
+            auth: super::super::MessagesAuth::Bearer,
+        },
+        MessagesCase {
+            base_path: "/coding/",
+            model: "k3-256k",
+            auth: super::super::MessagesAuth::ApiKey,
+        },
+    ];
+    const GENERIC_MESSAGES: MessagesCase = MessagesCase {
+        base_path: "/anthropic",
+        model: "model-1",
+        auth: super::super::MessagesAuth::ApiKey,
+    };
+
+    #[derive(Clone, Copy)]
     enum ProbeReply {
         Valid,
         ValidEfforts,
         CompactionRejected,
-        IgnoredFormat,
+        IgnoredFormat(usize),
         EffortCompactionRejected,
         ZeroUsage,
         AggregateJsonNodes,
         WrongModel,
         Redirect,
+        Unauthorized,
+        RateLimited,
+        QuotaExceeded,
         Oversize,
         ChunkedAtLimit,
         ChunkedOversize,
@@ -290,17 +318,16 @@ mod tests {
     async fn serve_probe(
         listener: TcpListener,
         reply: ProbeReply,
-        messages: Option<super::super::MessagesAuth>,
-    ) {
-        let count = if matches!(
+        messages: Option<MessagesCase>,
+    ) -> TcpListener {
+        let count = if let ProbeReply::IgnoredFormat(index) = reply {
+            index + 1
+        } else if matches!(
             reply,
             ProbeReply::ValidEfforts | ProbeReply::EffortCompactionRejected
         ) {
             7
-        } else if matches!(
-            reply,
-            ProbeReply::Valid | ProbeReply::CompactionRejected | ProbeReply::IgnoredFormat
-        ) {
+        } else if matches!(reply, ProbeReply::Valid | ProbeReply::CompactionRejected) {
             3
         } else {
             1
@@ -335,14 +362,14 @@ mod tests {
             };
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
             let header = header.to_ascii_lowercase();
-            assert!(header.starts_with(if messages.is_some() {
-                "post /anthropic/v1/messages http/1.1\r\n"
-            } else {
-                "post /v1/responses http/1.1\r\n"
-            }));
+            let path = messages.map_or_else(
+                || "/v1/responses".to_owned(),
+                |case| format!("{}/v1/messages", case.base_path.trim_end_matches('/')),
+            );
+            assert!(header.starts_with(&format!("post {path} http/1.1\r\n")));
             assert!(header.contains(concat!("user-agent: arany/", env!("CARGO_PKG_VERSION"))));
             assert!(!header.contains("anthropic-workspace-id"));
-            if messages == Some(super::super::MessagesAuth::ApiKey) {
+            if messages.is_some_and(|case| case.auth == super::super::MessagesAuth::ApiKey) {
                 assert!(header.contains("x-api-key: test-key\r\n"));
                 assert!(!header.contains("authorization:"));
             } else {
@@ -402,7 +429,7 @@ mod tests {
                     "the challenge occurs only in the schema, never in a prompt"
                 );
             }
-            assert_eq!(body["model"], "model-1");
+            assert_eq!(body["model"], messages.map_or("model-1", |case| case.model));
             if messages.is_some() {
                 assert!(body.get("thinking").is_none());
                 if compaction {
@@ -493,11 +520,17 @@ mod tests {
 
             let (status, response_body) = match reply {
                 ProbeReply::Redirect => ("302 Found", String::new()),
+                ProbeReply::Unauthorized => ("401 Unauthorized", String::new()),
+                ProbeReply::RateLimited => ("429 Too Many Requests", String::new()),
+                ProbeReply::QuotaExceeded => (
+                    "429 Too Many Requests",
+                    json!({"error":{"type":"insufficient_quota"}}).to_string(),
+                ),
                 ProbeReply::Oversize => ("200 OK", String::new()),
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
                 | ProbeReply::CompactionRejected
-                | ProbeReply::IgnoredFormat
+                | ProbeReply::IgnoredFormat(_)
                 | ProbeReply::EffortCompactionRejected
                 | ProbeReply::ZeroUsage
                 | ProbeReply::AggregateJsonNodes
@@ -510,7 +543,7 @@ mod tests {
                 | ProbeReply::InputAtLimit
                 | ProbeReply::InputAboveLimit => {
                     let text = match index {
-                        _ if compaction => json!(r#"{"summary":"synthetic summary"}"#),
+                        _ if compaction => json!(r#"{"summary":"plausible summary"}"#),
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
                             json!("test-key")
                         }
@@ -528,7 +561,7 @@ mod tests {
                         }
                         _ => json!(r#"{"summary":"synthetic summary"}"#),
                     };
-                    let text = if matches!(reply, ProbeReply::IgnoredFormat) {
+                    let text = if matches!(reply, ProbeReply::IgnoredFormat(at) if at == index) {
                         text
                     } else {
                         crate::provider::render::semantic::compaction_probe_reply(&body, text)
@@ -536,7 +569,7 @@ mod tests {
                     let model = if matches!(reply, ProbeReply::WrongModel) {
                         "drifted-model"
                     } else {
-                        "model-1"
+                        messages.map_or("model-1", |case| case.model)
                     };
                     let mut response = json!({
                         "id": format!("resp_{}", index + 1),
@@ -639,13 +672,13 @@ mod tests {
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",body.len()).as_bytes()).await.unwrap();
                 continue;
             }
-            if streaming && messages.is_some() && !response_body.is_empty() {
+            if status == "200 OK" && streaming && messages.is_some() && !response_body.is_empty() {
                 let response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
                 let body = crate::provider::render::semantic::messages_stream(&response);
                 stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
                 continue;
             }
-            if streaming && !response_body.is_empty() {
+            if status == "200 OK" && streaming && !response_body.is_empty() {
                 let mut response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
                 response["output"][0]["id"] = json!("msg_stream");
                 let item = response["output"][0].clone();
@@ -690,6 +723,7 @@ mod tests {
                 .await
                 .expect("probe response");
         }
+        listener
     }
 
     async fn run_case(reply: ProbeReply) -> Result<ProviderEvidenceRecord, CustomProfileError> {
@@ -698,7 +732,7 @@ mod tests {
 
     async fn run_case_protocol(
         reply: ProbeReply,
-        messages: Option<super::super::MessagesAuth>,
+        messages: Option<MessagesCase>,
     ) -> Result<ProviderEvidenceRecord, CustomProfileError> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -713,17 +747,26 @@ mod tests {
             capability_evidence_version: 2,
             efforts: if matches!(
                 reply,
-                ProbeReply::ValidEfforts | ProbeReply::EffortCompactionRejected
+                ProbeReply::ValidEfforts
+                    | ProbeReply::EffortCompactionRejected
+                    | ProbeReply::IgnoredFormat(4 | 6)
             ) {
                 vec![crate::provider::Effort::Low, crate::provider::Effort::High]
             } else {
                 Vec::new()
             },
         };
-        if let Some(auth) = messages {
-            let base_url = format!("http://127.0.0.1:{port}/anthropic");
+        if let Some(case) = messages {
+            let base_url = format!(
+                "http://127.0.0.1:{port}{}",
+                case.base_path.trim_end_matches('/')
+            );
             profile.endpoint = format!("{base_url}/v1/messages");
-            profile.protocol = super::super::Protocol::AnthropicMessages { base_url, auth };
+            profile.model = case.model.into();
+            profile.protocol = super::super::Protocol::AnthropicMessages {
+                base_url,
+                auth: case.auth,
+            };
         }
         assert_eq!(Url::parse(profile.endpoint()).unwrap().port(), Some(port));
         let destination = profile
@@ -731,8 +774,19 @@ mod tests {
             .await
             .expect("pinned loopback");
         let server = tokio::spawn(serve_probe(listener, reply, messages));
-        let result = probe(&profile, &destination, "test-key".into()).await;
-        server.await.expect("server completed");
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            probe(&profile, &destination, "test-key".into()),
+        )
+        .await
+        .expect("bounded probe");
+        let listener = server.await.expect("server completed");
+        assert!(
+            listener
+                .poll_accept(&mut std::task::Context::from_waker(std::task::Waker::noop()))
+                .is_pending(),
+            "checks must not retry or dispatch extra calls"
+        );
         result
     }
 
@@ -770,7 +824,7 @@ mod tests {
         let server = tokio::spawn(serve_probe(
             listener,
             reply,
-            messages.then_some(super::super::MessagesAuth::ApiKey),
+            messages.then_some(GENERIC_MESSAGES),
         ));
         let transport =
             CustomTransport::new(&profile, &destination, "test-key".into()).expect("transport");
@@ -1034,13 +1088,11 @@ mod tests {
 
     #[tokio::test]
     async fn custom_compaction_requires_schema_only_challenges_at_every_effort() {
-        for messages in [
-            None,
-            Some(super::super::MessagesAuth::Bearer),
-            Some(super::super::MessagesAuth::ApiKey),
-        ] {
+        for messages in [None, Some(MESSAGES_CASES[0]), Some(MESSAGES_CASES[1])] {
             for reply in [
-                ProbeReply::IgnoredFormat,
+                ProbeReply::IgnoredFormat(2),
+                ProbeReply::IgnoredFormat(4),
+                ProbeReply::IgnoredFormat(6),
                 ProbeReply::EffortCompactionRejected,
             ] {
                 assert!(matches!(
@@ -1053,12 +1105,9 @@ mod tests {
 
     #[tokio::test]
     async fn messages_compaction_rejection_clears_admission() {
-        for auth in [
-            super::super::MessagesAuth::Bearer,
-            super::super::MessagesAuth::ApiKey,
-        ] {
+        for case in MESSAGES_CASES {
             assert!(matches!(
-                run_case_protocol(ProbeReply::CompactionRejected, Some(auth)).await,
+                run_case_protocol(ProbeReply::CompactionRejected, Some(case)).await,
                 Err(CustomProfileError::ConformanceFailed)
             ));
         }
@@ -1066,12 +1115,9 @@ mod tests {
 
     #[tokio::test]
     async fn synthetic_conformance_checks_exact_wire_and_reopens_evidence() {
-        for auth in [
-            super::super::MessagesAuth::Bearer,
-            super::super::MessagesAuth::ApiKey,
-        ] {
+        for case in MESSAGES_CASES {
             for reply in [ProbeReply::Valid, ProbeReply::ValidEfforts] {
-                let record = run_case_protocol(reply, Some(auth))
+                let record = run_case_protocol(reply, Some(case))
                     .await
                     .expect("Messages conformance");
                 let temp = tempfile::tempdir().unwrap();
@@ -1096,12 +1142,15 @@ mod tests {
             for reply in [
                 ProbeReply::WrongModel,
                 ProbeReply::Redirect,
+                ProbeReply::Unauthorized,
+                ProbeReply::RateLimited,
+                ProbeReply::QuotaExceeded,
                 ProbeReply::EscapedCredential,
                 ProbeReply::MissingUsage,
                 ProbeReply::ZeroUsage,
             ] {
                 assert!(matches!(
-                    run_case_protocol(reply, Some(auth)).await,
+                    run_case_protocol(reply, Some(case)).await,
                     Err(CustomProfileError::ConformanceFailed)
                 ));
             }
