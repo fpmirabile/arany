@@ -578,7 +578,7 @@ impl RunLoop<'_> {
                 | ToolCall::Search { .. }
                 | ToolCall::Glob { .. }
         ) {
-            return Ok((view.read(intent), None));
+            return Ok((view.read(intent, runtime.permissions()), None));
         }
         let runtime = runtime.with_queue_accounting();
         let command = matches!(intent.call, ToolCall::Command { .. });

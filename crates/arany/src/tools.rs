@@ -157,6 +157,8 @@ pub(crate) struct ToolRuntime {
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
     permissions: Option<PermissionSnapshot>,
+    // A runtime rebuilt inside a Guard unit has no settings, only its Task's result filter.
+    result_filter: Option<permissions::HiddenPaths>,
     unguarded_rules: Option<unguarded_rules::ExactCommandRules>,
     workspace: PathBuf,
     // Set at admission; `None` only in a runtime rebuilt inside a Guard unit, which never reads in process.
@@ -718,6 +720,7 @@ impl ToolRuntime {
             worker: None,
             handover: None,
             permissions,
+            result_filter: None,
             unguarded_rules,
             queue_progress: None,
             queue_wait: None,
@@ -763,6 +766,31 @@ impl ToolRuntime {
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt.unguarded_rules_digest = self.exact_command_rules().map(|rules| rules.digest);
         receipt
+    }
+
+    pub(crate) fn hidden_paths(&self, call: &ToolCall) -> permissions::HiddenPaths {
+        match (&self.result_filter, self.permissions()) {
+            (Some(filter), _) => filter.clone(),
+            (None, Some(config)) => config.hidden_paths(call),
+            (None, None) => permissions::HiddenPaths::default(),
+        }
+    }
+
+    pub(crate) fn skill_workspace_path(&self, call: &ToolCall) -> Option<String> {
+        let ToolCall::Skill { name, resource } = call else {
+            return None;
+        };
+        self.skill_file_path(name, resource.as_deref().unwrap_or("SKILL.md"))
+    }
+
+    fn skill_file_path(&self, name: &str, file: &str) -> Option<String> {
+        let skill = self.config.skills.iter().find(|skill| skill.name == name)?;
+        Path::new(&skill.directory)
+            .strip_prefix(&self.workspace)
+            .ok()?
+            .join(file)
+            .to_str()
+            .map(str::to_owned)
     }
 
     pub(crate) fn permissions(&self) -> Option<&permissions::PermissionConfig> {
@@ -817,7 +845,8 @@ impl ToolRuntime {
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {
-        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
+        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation
+            && !self.skill_file_path(&skill.name, "SKILL.md").is_some_and(|path| self.permissions().is_some_and(|config| config.restricts_read(&path)))).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
     fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
@@ -1180,10 +1209,12 @@ impl ToolRuntime {
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
+            let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(
                 &root,
                 &read_intent.call,
                 &runtime.config,
+                &|path| hidden.covers(path),
                 read_intent.limits.result_bytes as usize,
                 std::time::Instant::now()
                     + Duration::from_millis(u64::from(read_intent.limits.runtime_ms)),

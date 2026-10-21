@@ -1,5 +1,6 @@
 use super::catalog::{Family, Site};
 use super::config::Config;
+use super::permissions::HiddenPaths;
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{Cancellation, ToolError, ToolRuntime};
@@ -105,6 +106,8 @@ struct Task {
     worker: Option<super::worker::Transfer>,
     #[serde(deserialize_with = "Option::deserialize")]
     handover: Option<super::worker::PublicationTransfer>,
+    #[serde(default, skip_serializing_if = "HiddenPaths::is_empty")]
+    hidden: HiddenPaths,
     #[cfg(target_os = "linux")]
     parent_namespaces: profile::Namespaces,
     #[cfg(target_os = "macos")]
@@ -654,6 +657,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
                 intent: intent.clone(),
                 cache: None,
                 hook_stdin: runtime.hook_stdin.as_deref().map(str::to_owned),
+                hidden: runtime.hidden_paths(&intent.call),
                 definition: None,
                 worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
                 handover: runtime
@@ -1387,6 +1391,7 @@ pub(super) struct GuardContext<'a> {
     pub(super) workspace: &'a Path,
     pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
+    pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
     pub(super) handover: Option<crate::session::worker::WorkerChangeset>,
     runtime_started: Option<std::time::Instant>,
@@ -1841,6 +1846,7 @@ pub(super) fn helper_main() -> ExitCode {
             workspace,
             skill,
             hook_stdin: task.hook_stdin.as_deref(),
+            hidden: &task.hidden,
             definition,
             handover,
             runtime_started,
@@ -2129,6 +2135,7 @@ mod tests {
             intent: intent(call),
             cache: None,
             hook_stdin: None,
+            hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             worker: None,
             handover: None,
@@ -2189,6 +2196,7 @@ mod tests {
             intent: intent(call.clone()),
             cache: None,
             hook_stdin: None,
+            hidden: Default::default(),
             definition: Some(base64::engine::general_purpose::STANDARD.encode(&raw)),
             worker: None,
             handover: None,
@@ -2223,6 +2231,7 @@ mod tests {
             }),
             cache: None,
             hook_stdin: None,
+            hidden: Default::default(),
             definition: None,
             worker: None,
             handover: None,
@@ -3525,6 +3534,7 @@ mod tests {
                 },
                 cache: None,
                 hook_stdin: None,
+                hidden: Default::default(),
                 #[cfg(target_os = "linux")]
                 parent_namespaces: profile::Namespaces::read().unwrap(),
                 #[cfg(target_os = "macos")]

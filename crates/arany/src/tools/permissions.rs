@@ -245,6 +245,69 @@ impl PermissionConfig {
         (decision, source, approval)
     }
 
+    // A restriction matching the call itself already denied it or had it approved, so only the others hide rows.
+    pub(crate) fn hidden_paths(&self, call: &ToolCall) -> HiddenPaths {
+        use ToolCall::{
+            GitBranch, GitCommit, GitDiff, GitLog, GitStatus, GitSwitch, Glob, List, Search,
+        };
+        if !matches!(
+            call,
+            List { .. }
+                | Search { .. }
+                | Glob { .. }
+                | GitStatus { .. }
+                | GitDiff { .. }
+                | GitLog { .. }
+                | GitCommit { .. }
+                | GitBranch { .. }
+                | GitSwitch { .. }
+        ) {
+            return HiddenPaths::default();
+        }
+        HiddenPaths(
+            self.rules
+                .iter()
+                .filter(|(decision, rule)| {
+                    *decision != Decision::Allow
+                        && rule.matches_tool(call, *decision)
+                        && !rule.matches_worker_paths(call, *decision, None)
+                })
+                .filter_map(|(_, rule)| rule.pattern.clone())
+                .collect(),
+        )
+    }
+
+    // A Skill file inside the Workspace is a file read, so Read restrictions on its path also apply.
+    pub(crate) fn evaluate_skill_file(
+        &self,
+        call: &ToolCall,
+        workspace_path: Option<&str>,
+    ) -> (Decision, PermissionSource, Option<ApprovalMode>) {
+        let verdict = self.evaluate(call);
+        let Some(path) = workspace_path else {
+            return verdict;
+        };
+        let read = self.evaluate(&ToolCall::Read {
+            path: path.to_owned(),
+            offset: None,
+            limit: None,
+        });
+        if verdict.0.narrow(read.0) == verdict.0 {
+            verdict
+        } else {
+            read
+        }
+    }
+
+    pub(crate) fn restricts_read(&self, path: &str) -> bool {
+        self.evaluate(&ToolCall::Read {
+            path: path.to_owned(),
+            offset: None,
+            limit: None,
+        })
+        .0 != Decision::Allow
+    }
+
     fn decision_with_source(&self, call: &ToolCall) -> (Decision, PermissionSource) {
         self.decision_with_worker_paths(call, None)
     }
@@ -303,6 +366,43 @@ impl PermissionConfig {
                 },
             )
         }
+    }
+}
+
+// Every pattern ends in `(?:/.*)?`, so walks may prune a covered directory unopened.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HiddenPaths(Vec<Regex>);
+
+impl HiddenPaths {
+    pub(crate) fn covers(&self, path: &str) -> bool {
+        self.0
+            .iter()
+            .any(|pattern| path_matches(pattern, path, Decision::Deny))
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+// The Guard receives the patterns as source text and recompiles them with the same bounds.
+impl Serialize for HiddenPaths {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.0.iter().map(Regex::as_str))
+    }
+}
+
+impl<'de> Deserialize<'de> for HiddenPaths {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let sources = Vec::<String>::deserialize(deserializer)?;
+        if sources.len() > MAX_RULES {
+            return Err(serde::de::Error::custom("too many hidden path patterns"));
+        }
+        sources
+            .iter()
+            .map(|source| compile(source).map_err(serde::de::Error::custom))
+            .collect::<Result<_, _>>()
+            .map(Self)
     }
 }
 
@@ -591,14 +691,9 @@ impl Rule {
         Ok(Self { tool, pattern })
     }
 
-    fn matches_worker_paths(
-        &self,
-        call: &ToolCall,
-        decision: Decision,
-        paths: Option<&[crate::session::worker::WorkerFileFact]>,
-    ) -> bool {
+    fn matches_tool(&self, call: &ToolCall, decision: Decision) -> bool {
         let facts = call.facts();
-        let matches_tool = match &self.tool {
+        match &self.tool {
             Tool::Bash => facts.family == Family::Process,
             Tool::Read => {
                 facts.family == Family::File && (!facts.mutates || decision == Decision::Deny)
@@ -640,8 +735,16 @@ impl Rule {
                         _ => false,
                     }
             }
-        };
-        if !matches_tool {
+        }
+    }
+
+    fn matches_worker_paths(
+        &self,
+        call: &ToolCall,
+        decision: Decision,
+        paths: Option<&[crate::session::worker::WorkerFileFact]>,
+    ) -> bool {
+        if !self.matches_tool(call, decision) {
             return false;
         }
         let Some(pattern) = &self.pattern else {

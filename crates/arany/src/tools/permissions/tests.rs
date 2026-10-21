@@ -1113,6 +1113,57 @@ fn read_restrictions_cover_git_paths_without_preapproving_git() {
 }
 
 #[test]
+fn restrictions_hide_result_paths_of_broader_calls_they_did_not_resolve() {
+    let parsed = config(json!({
+        "deny": ["Read(./private/**)", "Grep(./logs/**)"],
+        "ask": ["Read(**/*.key)"],
+        "allow": ["Read(./open/**)"],
+    }));
+    let search = |path: &str| ToolCall::Search {
+        path: path.into(),
+        query: "x".into(),
+        regex: false,
+        include: None,
+        case_sensitive: true,
+        offset: 0,
+        limit: 100,
+    };
+    let list = ToolCall::List { path: ".".into() };
+    let status = ToolCall::GitStatus { path: ".".into() };
+    for (call, path, hidden) in [
+        (&list, "private", true),
+        (&list, "Private/deep/x", true),
+        (&list, "src/a.KEY", true),
+        (&list, "src/caf\u{e9}.rs", true),
+        (&list, "open/a.rs", false),
+        (&list, "logs/a", false),
+        (&search("."), "logs/a", true),
+        (&search("."), "src/a.rs", false),
+        (&glob(""), "private/a.rs", true),
+        (&status, "private/a", true),
+        // A matching ask on the call's own path was approved before dispatch.
+        (&search("a.key"), "a.key", false),
+        (&search("vault"), "vault/b.key", true),
+    ] {
+        assert_eq!(
+            parsed.hidden_paths(call).covers(path),
+            hidden,
+            "{call:?} {path}"
+        );
+    }
+    assert!(
+        config(json!({"allow": ["Read(./open/**)"]}))
+            .hidden_paths(&list)
+            .is_empty()
+    );
+    assert!(
+        config(json!({"deny": ["Read"]}))
+            .hidden_paths(&list)
+            .is_empty()
+    );
+}
+
+#[test]
 fn bash_restrictions_cover_word_boundary_suffixes_without_expanding_allows() {
     for (program, args) in [
         ("timeout", vec!["30", "rm", "x"]),

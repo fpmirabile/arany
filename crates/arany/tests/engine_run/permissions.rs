@@ -343,3 +343,73 @@ async fn agent_definition_unsafe_sources_refuse_before_provider() {
         assert_eq!(count, 0);
     }
 }
+
+#[tokio::test]
+async fn a_read_denied_skill_resource_is_denied_before_any_guard_task() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+    let skill = workspace.join(".agents/skills/x");
+    std::fs::create_dir_all(skill.join("private")).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "---\ndescription: Guide\n---\n").unwrap();
+    std::fs::write(skill.join("private/key"), "DENY_CANARY\n").unwrap();
+    let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    private_file(
+        &state.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+    );
+    private_file(
+        &state.join("permissions.json"),
+        br#"{"permissions":{"deny":["Read(./.agents/skills/x/private/**)"]}}"#,
+    );
+    let engine = engine_support::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        tool_outcome(arany::ToolCall::Skill {
+            name: "x".into(),
+            resource: Some("private/key".into()),
+        }),
+        arany::test_support::goals::finish_with("done"),
+    ]));
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request(&workspace, "Use the Skill"),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    engine.close().await.unwrap();
+    let (events, _) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+    let verdict = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            Event::ToolPermissionDecided { verdict, .. } => Some(verdict),
+            _ => None,
+        })
+        .expect("Skill verdict");
+    assert_eq!(
+        (
+            format!("{:?}", verdict.decision),
+            format!("{:?}", verdict.basis)
+        ),
+        ("Deny".to_owned(), "Rule".to_owned())
+    );
+    let observation = outcome.run.tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+    assert!(observation.attestation.is_none(), "no Guard task ran");
+    let requests = provider.requests.lock().unwrap();
+    assert!(
+        !format!("{:?}", requests.last().unwrap().input).contains("DENY_CANARY"),
+        "the resource never reached the model"
+    );
+}

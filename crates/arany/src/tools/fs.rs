@@ -599,9 +599,9 @@ pub(super) fn snapshot_into(
     if let Some(target) = project {
         for path in &config.workspace_paths {
             if path == "." {
-                collect_root(workspace, "", &mut entries, &mut budget, &|_| true)?;
+                collect_root(workspace, "", &mut entries, &mut budget, ALL, NONE)?;
             } else {
-                collect(workspace, path, &mut entries, &mut budget, &|_| true)?;
+                collect(workspace, path, &mut entries, &mut budget, ALL, NONE)?;
             }
         }
         for entry in entries {
@@ -694,8 +694,10 @@ fn charge_runtime(total: &mut usize, count: usize) -> Result<(), ToolError> {
     Ok(())
 }
 
-// `keep` selects files before their content is read; directories are always traversed.
-type Keep<'a> = &'a dyn Fn(&str) -> bool;
+// `keep` selects files before their content is read; `hidden` drops any path, pruning a directory, before it is opened.
+pub(super) type Keep<'a> = &'a dyn Fn(&str) -> bool;
+const ALL: Keep<'static> = &|_| true;
+pub(super) const NONE: Keep<'static> = &|_| false;
 
 fn collect(
     root: &Dir,
@@ -703,12 +705,16 @@ fn collect(
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
     keep: Keep,
+    hidden: Keep,
 ) -> Result<(), ToolError> {
     if !valid_relative(path, false) || path.split('/').count() > 16 {
         return Err(ToolError::Path);
     }
+    if hidden(path) {
+        return Ok(());
+    }
     let file = open_file(root, path)?;
-    collect_open(root, path, file, output, budget, keep)
+    collect_open(root, path, file, output, budget, keep, hidden)
 }
 
 fn collect_open(
@@ -718,6 +724,7 @@ fn collect_open(
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
     keep: Keep,
+    hidden: Keep,
 ) -> Result<(), ToolError> {
     let metadata = file.metadata().map_err(|_| ToolError::Path)?;
     if metadata.is_dir() {
@@ -730,7 +737,7 @@ fn collect_open(
                 .file_name()
                 .into_string()
                 .map_err(|_| ToolError::Path)?;
-            if valid_relative(&name, false) {
+            if valid_relative(&name, false) && !hidden(&format!("{path}/{name}")) {
                 names.push(name);
             }
             if names.len() + output.len() > MAX_SNAPSHOT_FILES {
@@ -749,7 +756,14 @@ fn collect_open(
             });
         }
         for name in names {
-            collect(root, &format!("{path}/{name}"), output, budget, keep)?;
+            collect(
+                root,
+                &format!("{path}/{name}"),
+                output,
+                budget,
+                keep,
+                hidden,
+            )?;
         }
     } else if keep(path) {
         #[cfg(unix)]
@@ -786,16 +800,20 @@ fn collect_root(
     output: &mut Vec<Entry>,
     budget: &mut ScanBudget,
     keep: Keep,
+    hidden: Keep,
 ) -> Result<(), ToolError> {
     if !valid_relative(path, true) || path.split('/').count() > 16 {
         return Err(ToolError::Path);
+    }
+    if !path.is_empty() && hidden(path) {
+        return Ok(());
     }
     let directory = if path.is_empty() {
         root.try_clone().map_err(|_| ToolError::Path)?
     } else {
         let file = open_file(root, path)?;
         if !file.metadata().map_err(|_| ToolError::Path)?.is_dir() {
-            return collect_open(root, path, file, output, budget, keep);
+            return collect_open(root, path, file, output, budget, keep, hidden);
         }
         Dir::from_std_file(file)
     };
@@ -806,7 +824,14 @@ fn collect_root(
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !valid_relative(&name, false) || ignored_directory(&name) {
+        if !valid_relative(&name, false)
+            || ignored_directory(&name)
+            || hidden(&if path.is_empty() {
+                name.clone()
+            } else {
+                format!("{path}/{name}")
+            })
+        {
             continue;
         }
         let metadata = directory
@@ -839,9 +864,9 @@ fn collect_root(
                 return Err(ToolError::Limit);
             }
             let _ = open_file(root, &selected)?;
-            collect_root(root, &selected, output, budget, keep)?;
+            collect_root(root, &selected, output, budget, keep, hidden)?;
         } else {
-            collect(root, &selected, output, budget, keep)?;
+            collect(root, &selected, output, budget, keep, hidden)?;
         }
     }
     Ok(())
@@ -852,10 +877,10 @@ pub(crate) fn workspace_entries(
     folder: &str,
     prefix: &str,
 ) -> Result<Vec<String>, ToolError> {
-    entries(&open_directory(workspace)?, folder, prefix)
+    entries(&open_directory(workspace)?, folder, prefix, NONE)
 }
 
-fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolError> {
+fn entries(root: &Dir, folder: &str, prefix: &str, hidden: Keep) -> Result<Vec<String>, ToolError> {
     let folder = if folder == "." { "" } else { folder };
     if !valid_relative(folder, true)
         || folder.split('/').count() > 16
@@ -871,6 +896,7 @@ fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolEr
             &prefix.to_lowercase(),
             &mut ScanBudget::default(),
             &mut matches,
+            hidden,
         )?;
         return Ok(matches.into_iter().map(|(_, name)| name).collect());
     }
@@ -892,7 +918,12 @@ fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolEr
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !valid_relative(&name, false) || ignored_directory(&name) {
+        let relative = if folder.is_empty() {
+            name.clone()
+        } else {
+            format!("{folder}/{name}")
+        };
+        if !valid_relative(&name, false) || ignored_directory(&name) || hidden(&relative) {
             continue;
         }
         let metadata = directory
@@ -909,11 +940,6 @@ fn entries(root: &Dir, folder: &str, prefix: &str) -> Result<Vec<String>, ToolEr
             }
         }
         let suffix = if metadata.is_dir() { "/" } else { "" };
-        let relative = if folder.is_empty() {
-            name
-        } else {
-            format!("{folder}/{name}")
-        };
         if valid_relative(&relative, false) && relative.split('/').count() <= 16 {
             names.push(format!("{relative}{suffix}"));
         }
@@ -929,6 +955,7 @@ fn find_entries(
     query: &str,
     budget: &mut ScanBudget,
     matches: &mut Vec<(u8, String)>,
+    hidden: Keep,
 ) -> Result<(), ToolError> {
     let directory = if folder.is_empty() {
         root.try_clone().map_err(|_| ToolError::Path)?
@@ -952,6 +979,7 @@ fn find_entries(
         if !valid_relative(&relative, false)
             || relative.split('/').count() > 16
             || ignored_directory(&name)
+            || hidden(&relative)
         {
             continue;
         }
@@ -983,7 +1011,7 @@ fn find_entries(
             matches.truncate(64);
         }
         if is_dir && budget.entries < MAX_SNAPSHOT_FILES * 4 {
-            let _ = find_entries(root, &relative, query, budget, matches);
+            let _ = find_entries(root, &relative, query, budget, matches, hidden);
         }
     }
     Ok(())
@@ -1024,7 +1052,7 @@ pub(super) fn copy_seed() -> Result<(), ToolError> {
             .file_name()
             .into_string()
             .map_err(|_| ToolError::Path)?;
-        collect(&root, &name, &mut entries, &mut budget, &|_| true)?;
+        collect(&root, &name, &mut entries, &mut budget, ALL, NONE)?;
     }
     for entry in entries {
         put_entry(&target, entry)?;
@@ -1153,6 +1181,7 @@ pub(super) fn inspect(
     root: &Dir,
     call: &ToolCall,
     config: &Config,
+    hidden: Keep,
     result_bytes: usize,
     deadline: std::time::Instant,
 ) -> Result<String, ToolError> {
@@ -1179,11 +1208,11 @@ pub(super) fn inspect(
             }
             read_page(file, *offset, *limit, result_bytes)
         }
-        ToolCall::Glob { .. } => super::glob::inspect(root, call, config, result_bytes),
+        ToolCall::Glob { .. } => super::glob::inspect(root, call, config, hidden, result_bytes),
         ToolCall::List { path } => {
             let path = if path == "." { "" } else { path.as_str() };
             if config.workspace_paths == ["."] {
-                let rows = entries(root, path, "")?;
+                let rows = entries(root, path, "", hidden)?;
                 let truncated = rows.len() >= 64;
                 return fit_rows(
                     rows.into_iter().map(Value::from).collect(),
@@ -1192,7 +1221,7 @@ pub(super) fn inspect(
                 );
             }
             let mut rows = Vec::new();
-            for entry in selected(root, path, config, &|_| true)? {
+            for entry in selected(root, path, config, ALL, hidden)? {
                 rows.push(match entry.content {
                     None => json!({"path":entry.path,"kind":"directory"}),
                     Some(content) => json!({"path":entry.path,"bytes":content.len()}),
@@ -1207,7 +1236,7 @@ pub(super) fn inspect(
         ToolCall::Search { path, .. } => {
             let mut search = super::search::Search::new(call, deadline)?;
             let path = if path == "." { "" } else { path.as_str() };
-            let mut files = selected(root, path, config, &|file| search.includes(file))?;
+            let mut files = selected(root, path, config, &|file| search.includes(file), hidden)?;
             files.sort_by(|left, right| left.path.cmp(&right.path));
             files.dedup_by(|left, right| left.path == right.path);
             for entry in files {
@@ -1223,16 +1252,22 @@ pub(super) fn inspect(
     }
 }
 
-fn selected(root: &Dir, path: &str, config: &Config, keep: Keep) -> Result<Vec<Entry>, ToolError> {
+fn selected(
+    root: &Dir,
+    path: &str,
+    config: &Config,
+    keep: Keep,
+    hidden: Keep,
+) -> Result<Vec<Entry>, ToolError> {
     let mut files = Vec::new();
     let mut budget = ScanBudget::default();
     for selected in &config.workspace_paths {
         if selected == "." {
-            collect_root(root, path, &mut files, &mut budget, keep)?;
+            collect_root(root, path, &mut files, &mut budget, keep, hidden)?;
         } else if path.is_empty() || Path::new(selected).starts_with(path) {
-            collect(root, selected, &mut files, &mut budget, keep)?;
+            collect(root, selected, &mut files, &mut budget, keep, hidden)?;
         } else if Path::new(path).starts_with(selected) {
-            collect(root, path, &mut files, &mut budget, keep)?;
+            collect(root, path, &mut files, &mut budget, keep, hidden)?;
         }
     }
     Ok(files)

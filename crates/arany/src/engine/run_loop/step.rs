@@ -1031,7 +1031,7 @@ impl RunLoop<'_> {
                         .flatten()
                         .unwrap_or((Decision::Deny, PermissionSource::PinnedGrant, None))
                 } else {
-                    config.evaluate(call)
+                    config.evaluate_skill_file(call, runtime.skill_workspace_path(call).as_deref())
                 }
             },
         );

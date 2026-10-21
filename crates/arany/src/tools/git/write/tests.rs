@@ -60,6 +60,7 @@ struct Repo {
     home: PathBuf,
     runs: usize,
     intent: uuid::Uuid,
+    hidden: crate::tools::permissions::HiddenPaths,
 }
 
 impl Repo {
@@ -73,6 +74,7 @@ impl Repo {
             home,
             runs: 0,
             intent: uuid::Uuid::nil(),
+            hidden: Default::default(),
         }
     }
 
@@ -108,6 +110,7 @@ impl Repo {
                 &git,
                 &identity(),
                 &intent,
+                &self.hidden,
                 Duration::from_secs(30),
             ))
             .map(|output| serde_json::from_str(&output).unwrap())
@@ -918,4 +921,27 @@ fn directories_a_lock_created_go_when_a_later_step_fails() {
         Err(ToolError::Conflict)
     ));
     assert!(!repo.workspace.join(".git/refs/heads/other").exists());
+}
+
+#[test]
+fn a_switch_refusal_never_names_paths_a_read_rule_hides() {
+    let mut repo = Repo::new();
+    {
+        let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+        git(&["stash", "-q"]);
+        git(&["checkout", "-q", "-b", "other"]);
+        std::fs::write(repo.workspace.join("src/a.txt"), "other\n").unwrap();
+        git(&["commit", "-q", "-am", "other"]);
+        git(&["checkout", "-q", "main"]);
+        git(&["stash", "pop", "-q"]);
+    }
+    repo.hidden = crate::tools::permissions::PermissionConfig::parse(
+        br#"{"permissions":{"deny":["Read(./src/**)"]}}"#,
+    )
+    .unwrap()
+    .hidden_paths(&ToolCall::GitStatus { path: ".".into() });
+    let value = repo.write(switch("other")).unwrap();
+    let failed = value["failed"].as_str().unwrap();
+    assert!(failed.contains("in 1 path(s): ."), "{failed}");
+    assert!(!failed.contains("src/"), "{failed}");
 }

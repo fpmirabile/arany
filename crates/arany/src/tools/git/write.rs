@@ -1,5 +1,6 @@
 use super::super::ToolError;
 use super::super::config::{GitIdentity, Program};
+use super::super::permissions::HiddenPaths;
 use super::super::types::{
     EffectIntent, FileChange, FileVersion, MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES,
     ToolCall, hex_digest, valid_relative,
@@ -111,6 +112,7 @@ struct Git<'a> {
     env: Vec<(&'static str, std::ffi::OsString)>,
     workspace: &'a Path,
     scratch: &'a Path,
+    hidden: &'a HiddenPaths,
     view: Dir,
     deadline: tokio::time::Instant,
     max_bytes: usize,
@@ -148,16 +150,17 @@ impl Git<'_> {
                 "git output exceeded its bound",
                 &[],
                 self.max_bytes,
+                self.hidden,
             ))
         } else if captured.status != Some(0) {
-            Err(status_failure(&captured, self.max_bytes))
+            Err(status_failure(&captured, self.max_bytes, self.hidden))
         } else {
             Ok(captured)
         })
     }
 }
 
-fn status_failure(captured: &Captured, max_bytes: usize) -> String {
+fn status_failure(captured: &Captured, max_bytes: usize, hidden: &HiddenPaths) -> String {
     let message = captured.status.map_or_else(
         || "git terminated by a signal".to_owned(),
         |code| format!("git exited with status {code}"),
@@ -168,7 +171,7 @@ fn status_failure(captured: &Captured, max_bytes: usize) -> String {
     } else {
         &captured.stderr
     };
-    failure(&message, detail, max_bytes)
+    failure(&message, detail, max_bytes, hidden)
 }
 
 pub(super) async fn execute(
@@ -177,6 +180,7 @@ pub(super) async fn execute(
     git: &Program,
     identity: &GitIdentity,
     intent: &EffectIntent,
+    hidden: &HiddenPaths,
     runtime: Duration,
 ) -> Result<String, ToolError> {
     let (call, max_bytes) = (&intent.call, intent.limits.result_bytes as usize);
@@ -187,19 +191,19 @@ pub(super) async fn execute(
     verify_pin(git)?;
     let repository = match inspect(workspace)? {
         Ok(repository) => repository,
-        Err(message) => return Ok(failure(message, &[], max_bytes)),
+        Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
     };
     if !matches!(call, ToolCall::GitBranch { .. })
         && IN_PROGRESS
             .iter()
             .any(|name| repository.git_dir.symlink_metadata(name).is_ok())
     {
-        return Ok(failure(IN_PROGRESS_MESSAGE, &[], max_bytes));
+        return Ok(failure(IN_PROGRESS_MESSAGE, &[], max_bytes, hidden));
     }
     let view = scratch.join(VIEW);
     let snapshot = match prepare(&repository, workspace, &view)? {
         Ok(snapshot) => snapshot,
-        Err(message) => return Ok(failure(message, &[], max_bytes)),
+        Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
     };
     #[cfg(all(test, target_os = "linux"))]
     tests::race(workspace, tests::Stage::Snapshot);
@@ -217,6 +221,7 @@ pub(super) async fn execute(
         env,
         workspace,
         scratch,
+        hidden,
         view: Dir::open_ambient_dir(&view, cap_std::ambient_authority())
             .map_err(|_| ToolError::Operation)?,
         deadline,
@@ -250,7 +255,7 @@ pub(super) async fn execute(
         intent.id,
     )? {
         Ok(receipt) => receipt,
-        Err(message) => return Ok(failure(message, &[], max_bytes)),
+        Err(message) => return Ok(failure(message, &[], max_bytes, hidden)),
     };
     let text = result.to_string();
     if text.len() > max_bytes {
@@ -377,7 +382,7 @@ async fn commit(
     staged: bool,
 ) -> Result<Planned, ToolError> {
     let Some(branch) = branch_of(&repository.head) else {
-        return Ok(Err(failure(DETACHED, &[], git.max_bytes)));
+        return Ok(Err(failure(DETACHED, &[], git.max_bytes, git.hidden)));
     };
     let name = format!("refs/heads/{branch}");
     // The parent is the snapshot's value; publication requires the live ref to still hold it.
@@ -440,20 +445,26 @@ async fn branch(
             "A branch with that name already exists.",
             &[],
             git.max_bytes,
+            git.hidden,
         )));
     }
     let existing = snapshot.names();
     if existing.iter().any(|other| case_alias(&name, other)) {
-        return Ok(Err(failure(REF_CASE_ALIAS, &[], git.max_bytes)));
+        return Ok(Err(failure(REF_CASE_ALIAS, &[], git.max_bytes, git.hidden)));
     }
     // A symbolic HEAD outside local branches has a referent no lock would hold.
     if repository.head.starts_with(b"ref:") && branch_of(&repository.head).is_none() {
-        return Ok(Err(failure(UNSUPPORTED_HEAD, &[], git.max_bytes)));
+        return Ok(Err(failure(
+            UNSUPPORTED_HEAD,
+            &[],
+            git.max_bytes,
+            git.hidden,
+        )));
     }
     let starts = start_refs(&existing, &repository.head, start_point);
     // A symbolic ref's referent is not held, so only a direct ref or HEAD may name the start.
     if starts.iter().any(|start| snapshot.symbolic(start)) {
-        return Ok(Err(failure(SYMBOLIC_START, &[], git.max_bytes)));
+        return Ok(Err(failure(SYMBOLIC_START, &[], git.max_bytes, git.hidden)));
     }
     let mut argv = vec!["branch", "--no-track", "--end-of-options", branch];
     argv.extend(start_point);
@@ -520,12 +531,18 @@ async fn switch(
             "No local branch has that name.",
             &[],
             git.max_bytes,
+            git.hidden,
         )));
     };
     let head = format!("ref: {name}\n").into_bytes();
     // No reflog is written, so commits reachable only from a detached HEAD would be lost.
     if branch_of(&repository.head).is_none() {
-        return Ok(Err(failure(DETACHED_SWITCH, &[], git.max_bytes)));
+        return Ok(Err(failure(
+            DETACHED_SWITCH,
+            &[],
+            git.max_bytes,
+            git.hidden,
+        )));
     }
     if repository.head == head {
         return Ok(Ok((
@@ -538,7 +555,7 @@ async fn switch(
         .run(&["update-index", "-q", "--refresh"], None, CAPTURE_BYTES)
         .await?;
     if !matches!(refresh.status, Some(0 | 1)) {
-        return Ok(Err(status_failure(&refresh, git.max_bytes)));
+        return Ok(Err(status_failure(&refresh, git.max_bytes, git.hidden)));
     }
     let dirty = step!(
         git.checked(&[
@@ -637,10 +654,15 @@ fn changed_files<'a>(
             .ok()
             .filter(|path| valid_relative(path, false) && path.split('/').count() <= 16)
         else {
-            return Ok(Err(failure(PROTECTED, &[], git.max_bytes)));
+            return Ok(Err(failure(PROTECTED, &[], git.max_bytes, git.hidden)));
         };
         let (Some(old), Some(new)) = (entry_mode(old_mode), entry_mode(new_mode)) else {
-            return Ok(Err(failure(UNSUPPORTED_ENTRY, &[], git.max_bytes)));
+            return Ok(Err(failure(
+                UNSUPPORTED_ENTRY,
+                &[],
+                git.max_bytes,
+                git.hidden,
+            )));
         };
         if dirty.contains(path.as_bytes()) {
             conflicts.push(path);
@@ -677,8 +699,10 @@ fn changed_files<'a>(
         });
     }
     if !conflicts.is_empty() {
+        // Paths a Read rule hides are counted but never named.
         let listed = conflicts
             .iter()
+            .filter(|path| !git.hidden.covers(path))
             .take(MAX_LISTED_CONFLICTS)
             .copied()
             .collect::<Vec<_>>()
@@ -690,6 +714,7 @@ fn changed_files<'a>(
             ),
             &[],
             git.max_bytes,
+            git.hidden,
         )));
     }
     // Paths or parent directories differing only by ASCII case would alias each other on a
@@ -703,7 +728,7 @@ fn changed_files<'a>(
                 .or_insert(prefix)
                 != prefix
             {
-                return Ok(Err(failure(CASE_ALIAS, &[], git.max_bytes)));
+                return Ok(Err(failure(CASE_ALIAS, &[], git.max_bytes, git.hidden)));
             }
         }
     }
