@@ -240,6 +240,16 @@ exact validated changesets, and its Git operations require a neutralized private
 view. [The Tool contract](../specs/tools.md#checkpoints-and-rewind) owns capture
 behavior, retention and storage limits.
 
+### D-22 — Pre-beta history below the migration floor
+
+The owner accepted archiving pre-floor history during pre-beta on 2026-10-21.
+Some past format changes introduced facts that cannot be reconstructed honestly;
+preserving that history intact in an archive avoids fabricating replay facts.
+[The research constraints](./state-migrations-2026-10.md#3-arany-constraints)
+explain the risk; [the migration plan](../../planning/state-migrations/README.md#chosen-direction)
+owns the floor and implementation direction. This decision does not establish
+that migration or archive behavior has shipped.
+
 ## 3. Expansion decisions
 
 Reconsider a boundary only for its named constraint. Subject reports retain
