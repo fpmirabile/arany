@@ -625,7 +625,7 @@ pub(super) async fn submit_objective(
                 };
                 let notice = match follow {
                     AgentChatFollow::Closed(text) => Some(TerminalNotice::History(text)),
-                    _ => notice,
+                    AgentChatFollow::Unchanged | AgentChatFollow::Redraw => notice,
                 };
                 if pending.is_none()
                     && (follow != AgentChatFollow::Unchanged || notice.is_some())
