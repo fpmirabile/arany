@@ -704,6 +704,7 @@ async fn native_file_journey_helper() {
             objective: "Complete the synthetic native file journey".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
@@ -743,7 +744,7 @@ async fn native_file_journey_helper() {
                 "Complete the synthetic native file journey"
             );
             assert!(
-                request.input.workspace_guidance.is_none()
+                request.input.workspace_guidance.is_empty()
                     && request.input.includes.is_empty()
                     && request.input.history.is_empty()
                     && request.input.context_summary.is_none()
@@ -901,6 +902,7 @@ async fn native_file_journey_helper() {
             objective: "Verify a fresh native command snapshot".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
@@ -1358,6 +1360,7 @@ async fn run_offline_build_case(
             objective: objective.into(),
             images: Vec::new(),
             workspace: workspace.to_path_buf(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: build_goal_request(),
@@ -1638,6 +1641,7 @@ async fn native_runtime_mount_journey_helper() {
             objective: "Check runtime mount topology".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::new(
@@ -1768,6 +1772,7 @@ async fn native_runtime_mount_journey_helper() {
             objective: "Seed a bounded private cache archive".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
@@ -1926,6 +1931,7 @@ async fn native_runtime_mount_journey_helper() {
                 objective: "The unsupported resource values must not be dispatched".into(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal,
@@ -1948,6 +1954,7 @@ async fn native_runtime_mount_journey_helper() {
                     .into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: build_goal_request(),
@@ -2197,6 +2204,7 @@ async fn native_runtime_mount_journey_helper() {
             objective: "Verify the previous private cache survived a rejected update".into(),
             images: Vec::new(),
             workspace: workspace.clone(),
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: arany::GoalRequest::default(),
@@ -2379,6 +2387,7 @@ int main(void) {
                         objective: "Stop this synthetic native command".into(),
                         images: Vec::new(),
                         workspace: workspace.into(),
+                        launch_directory: None,
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
                         goal: arany::GoalRequest::default(),
@@ -2823,6 +2832,7 @@ async fn native_approval_rows_helper() {
                         objective: "Review the proposed native edit".into(),
                         images: Vec::new(),
                         workspace: workspace.clone(),
+                        launch_directory: None,
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
                         goal: arany::GoalRequest::default(),

@@ -67,12 +67,12 @@ pub use session::{
     CollaborationPolicy, CompactionFailure, CompactionRecord, CompactionStatus, CompactionView,
     ContextUsage, DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget,
     GoalId, GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding,
-    GoalStatus, GoalSuccessCriterion, GoalView, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS,
-    MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS,
-    ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition, ProviderCallRecord,
-    ReplayError, RunConfig, RunDisposition, RunFailure, RunId, RunStatus, RunStop, RunView,
-    SessionDefaults, SessionId, SessionListItem, SessionPage, SessionView, ToolView,
-    WorkspaceIdentity,
+    GoalStatus, GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource,
+    MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
+    MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause,
+    ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
+    RunFailure, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId, SessionListItem,
+    SessionPage, SessionView, ToolView, WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};

@@ -21,9 +21,10 @@ pub(crate) use goal::{GoalSuccessState, GoalUsage, STORE_ACTION_OVERHEAD_MS};
 pub use records::{
     AgentDisposition, AgentRole, ChildGrant, CollaborationPolicy, CompactionFailure,
     CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS, MAX_DISPLAY_COMMENTARY_ITEMS,
-    MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
-    ProviderCallRecord, RunConfig, RunDisposition, RunFailure, SessionDefaults,
+    DisplayChunk, InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
+    MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, ProposalRefusal, ProposalRefusalCause,
+    ProviderCallDisposition, ProviderCallRecord, RunConfig, RunDisposition, RunFailure,
+    SessionDefaults,
 };
 use validate::bounded;
 
@@ -166,7 +167,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("HookStarted", 5),
     ("HookFinished", 10),
     ("ToolFinished", 21),
-    ("RunStarted", 18),
+    ("RunStarted", 19),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
@@ -1443,11 +1444,57 @@ fn before_operations(
         "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "AgentSpawned" => again::<SpawnPayload>(payload),
-        "RunStarted" => again::<RunStartedPayload>(payload),
+        "RunStarted" => run_started_v18_payload(payload),
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
     (!mentions(&serde_json::from_str(&text).ok()?, operations, worker_label)).then_some(text)
+}
+
+// Checked before the Goal and Message facts that precede RunStarted commit.
+pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
+    serialize(&RunStartedPayload {
+        config: config.clone(),
+        active_deadline_ms: Some(u64::MAX),
+    })
+    .is_ok_and(|payload| payload.len() <= crate::store::MAX_EVENT_BYTES)
+}
+
+// Version 18 read only the root, so its digest becomes the root source with an unknown name.
+pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(mut payload) = value else {
+        return None;
+    };
+    let serde_json::Value::Object(config) = payload.get_mut("config")? else {
+        return None;
+    };
+    let sources = match config.remove("instruction_digest")? {
+        serde_json::Value::Null => serde_json::json!([]),
+        digest => serde_json::json!([{"directory": "", "file": null, "digest": digest}]),
+    };
+    if config.contains_key("instruction_sources") || config.contains_key("launch_directory") {
+        return None;
+    }
+    config.insert("instruction_sources".into(), sources);
+    config.insert("launch_directory".into(), serde_json::json!(""));
+    Some(serde_json::Value::Object(payload))
+}
+
+// Version 18's hashed text: the current text with the sources written back as one digest.
+pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
+    let value = run_started_v18_to_v19(serde_json::from_str(payload).ok()?)?;
+    let typed = parse::<RunStartedPayload>(&value.to_string()).ok()?;
+    let text = serialize(&typed).ok()?;
+    let sources = &typed.config.instruction_sources;
+    let current = format!(
+        r#""instruction_sources":{},"launch_directory":"""#,
+        serialize(sources).ok()?
+    );
+    let legacy = format!(
+        r#""instruction_digest":{}"#,
+        serialize(&sources.first().map(|source| source.digest)).ok()?
+    );
+    (text.matches(&current).count() == 1).then(|| text.replacen(&current, &legacy, 1))
 }
 
 fn mentions(value: &serde_json::Value, operations: &[&str], worker_label: Option<&str>) -> bool {

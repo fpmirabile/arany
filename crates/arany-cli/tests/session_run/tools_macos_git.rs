@@ -234,6 +234,7 @@ async fn native_git_journey_helper() {
                 objective: "Inspect Git state".into(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),

@@ -125,6 +125,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         glob_step!("GoalPlanContractRecorded", 6),
         glob_step!("AgentSpawned", 11),
         glob_step!("RunStarted", 17),
+        EventStep {
+            kind: "RunStarted",
+            from: 18,
+            transform: crate::session::run_started_v18_to_v19,
+            canonical: crate::session::run_started_v18_payload,
+        },
         glob_step!("ProviderCallRecorded", 13),
         git_write_step!("ToolStarted", 14),
         git_write_step!("ToolFinished", 20),

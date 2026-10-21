@@ -273,6 +273,7 @@ done
                         objective: "Research native facts without mutation".into(),
                         images: Vec::new(),
                         workspace: workspace.clone(),
+                        launch_directory: None,
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Team {
                             max_active_children: 1,

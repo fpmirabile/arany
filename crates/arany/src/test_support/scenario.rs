@@ -398,6 +398,7 @@ pub fn request(workspace: &Path, objective: &str) -> RunRequest {
         objective: objective.into(),
         images: Vec::new(),
         workspace: workspace.to_path_buf(),
+        launch_directory: None,
         include_paths: vec!["notes/facts.txt".into()],
         policy: CollaborationPolicy::Single,
         goal: crate::GoalRequest::default(),
@@ -473,7 +474,7 @@ pub fn assert_test_call(
     assert!(actual.input.objective == objective, "call objective");
     assert!(actual.input.images.is_empty(), "call images");
     assert!(
-        actual.input.workspace_guidance.is_none(),
+        actual.input.workspace_guidance.is_empty(),
         "call instructions"
     );
     assert!(

@@ -2279,11 +2279,12 @@ impl RunLoop<'_> {
                         + root_request
                             .input
                             .workspace_guidance
-                            .as_ref()
-                            .map_or(0, |guidance| {
+                            .iter()
+                            .map(|guidance| {
                                 crate::provider::instructions_text(&guidance.path, &guidance.text)
                                     .len()
                             })
+                            .sum::<usize>()
                         + context.as_ref().map_or(0, String::len)
                         + CHILD_INTENT_RESERVE_BYTES,
                     crate::tools::ToolRuntime::step_context_reserve(

@@ -9,7 +9,7 @@ use std::path::Path;
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 14] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 15] = [
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -38,6 +38,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 14] = [
     ),
     ("AgentSpawned", 11, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("RunStarted", 17, GLOB_RUNSTARTED, GLOB_RUNSTARTED),
+    ("RunStarted", 18, ROOT_RUNSTARTED, NESTED_RUNSTARTED),
     (
         "ProviderCallRecorded",
         13,
@@ -53,6 +54,9 @@ const GLOB_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation":{"in
 const GLOB_GOALPLANCONTRACTRECORDED: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","contract":{"mission":"Plan","paths":["src/lib.rs"],"commands":[],"resource_class":"default","command_timeout_ms":null,"skills":[],"mcp_tools":[],"success_criterion":{"kind":"workspace_file_content","path":"src/lib.rs","content":"ok"},"budget":{"max_provider_calls":64,"max_tokens":1000,"max_active_ms":1800000,"max_runs":16}}}"#;
 const GLOB_AGENTSPAWNED: &str = r#"{"profile":null,"assignment":null,"definition":null,"role":"primary","ordinal":0,"objective":null,"grant":null}"#;
 const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
+// Version 18 pinned only the root file's digest; version 19 names it as the root's source.
+const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
+const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
 // Synthetic test-only edge: a version-5 SessionStarted stored `name` where version 6 stores `title`.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -991,6 +995,19 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     assert_ne!(forged_git, GLOB_TOOLSTARTED);
     assert!((git_step.canonical)(&forged_git).is_none());
     assert!((git_step.transform)(serde_json::from_str(&forged_git).unwrap()).is_none());
+    // A version-18 row that already pins nested sources is forged; one without instructions pins none.
+    let step = REGISTRY.event_step("RunStarted", 18).unwrap();
+    let forged = ROOT_RUNSTARTED.replace(
+        r#""include_digests""#,
+        r#""launch_directory":"","include_digests""#,
+    );
+    assert!((step.canonical)(&forged).is_none());
+    assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let upgraded = (step.transform)(serde_json::from_str(GLOB_RUNSTARTED).unwrap()).unwrap();
+    assert_eq!(
+        upgraded["config"]["instruction_sources"],
+        serde_json::json!([])
+    );
     let floor = started_floor();
     assert_eq!(
         uncovered(

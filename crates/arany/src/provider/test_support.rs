@@ -54,10 +54,10 @@ pub(crate) fn read_only_request(model: &str) -> ProviderRequest {
         model,
         AgentPhase::RootSynthesis,
         RunInput {
-            workspace_guidance: Some(super::WorkspaceGuidance {
+            workspace_guidance: vec![super::WorkspaceGuidance {
                 path: "AGENTS.md".into(),
                 text: "workspace guidance canary".into(),
-            }),
+            }],
             includes: vec!["include canary".into()],
             history: vec![HistoryTurn {
                 user: "previous user canary".into(),

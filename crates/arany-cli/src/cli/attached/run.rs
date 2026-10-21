@@ -1389,6 +1389,7 @@ mod tests {
                         objective: "hola hola".into(),
                         images: Vec::new(),
                         workspace: workspace.clone(),
+                        launch_directory: None,
                         include_paths: Vec::new(),
                         policy: CollaborationPolicy::Single,
                         goal: arany::GoalRequest::default(),
@@ -1420,7 +1421,7 @@ mod tests {
                             && request.input.tools.is_some() == permissions.is_some()
                             && request.collaboration == CollaborationPolicy::Single
                             && request.model == "synthetic-model"
-                            && request.input.workspace_guidance.is_none()
+                            && request.input.workspace_guidance.is_empty()
                             && request.input.includes.is_empty()
                             && request.input.images.is_empty()
                             && request.input.child_results.is_empty()
@@ -1464,6 +1465,7 @@ mod tests {
                     objective: "explicit Tools".into(),
                     images: Vec::new(),
                     workspace: workspace.clone(),
+                    launch_directory: None,
                     include_paths: Vec::new(),
                     policy: CollaborationPolicy::Single,
                     goal: arany::GoalRequest::default(),

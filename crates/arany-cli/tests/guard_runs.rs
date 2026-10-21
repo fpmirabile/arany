@@ -238,8 +238,12 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 .config
                 .as_ref()
                 .expect("pinned config")
-                .instruction_digest,
-            Some(instruction_digest)
+                .instruction_sources,
+            [arany::InstructionSource {
+                directory: String::new(),
+                file: Some(arany::InstructionFile::Agents),
+                digest: instruction_digest
+            }]
         );
         assert_eq!(
             first
@@ -289,8 +293,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(call.agent_run_id, run.agents[0].id);
             }
             assert_eq!(
-                requests[0].input.workspace_guidance.as_ref().map(|guidance| guidance.text.as_str()),
-                Some("Primary instruction")
+                requests[0].input.workspace_guidance.iter().map(|guidance| guidance.text.as_str()).collect::<Vec<_>>(),
+                ["Primary instruction"]
             );
             assert_eq!(requests[0].input.includes, [include_data("notes/facts.txt", "Fact one")]);
             assert_eq!(requests[0].input.images, vec![ProviderImage {
@@ -298,8 +302,8 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             }]);
             assert!(requests[0].input.history.is_empty());
             assert_eq!(
-                requests[1].input.workspace_guidance.as_ref().map(|guidance| guidance.text.as_str()),
-                Some("Changed instruction")
+                requests[1].input.workspace_guidance.iter().map(|guidance| guidance.text.as_str()).collect::<Vec<_>>(),
+                ["Changed instruction"]
             );
             assert_eq!(requests[1].input.includes, [include_data("notes/facts.txt", "Fact two")]);
             assert_eq!(requests[1].input.history.len(), 1);
@@ -447,7 +451,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             ] {
                 let mut actual = calls[index].clone();
                 let facts = actual.input.goal_context_facts.take();
-                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: Some(arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }), includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
+                assert_eq!(actual, ProviderRequest { session_id: if index == 5 { fork_id } else { first.session_id }, run_id: calls[index].run_id, agent_run_id: calls[index].agent_run_id, phase, collaboration: if index == 0 || index == 2 { CollaborationPolicy::Team { max_active_children: 1 } } else { CollaborationPolicy::Single }, model: "test-model".into(), max_output_tokens: 4096, input: RunInput { images: expected_images, goal_budget: None, workspace_guidance: vec![arany::WorkspaceGuidance { path: "AGENTS.md".into(), text: "Changed instruction".into() }], includes: vec![include_data("notes/facts.txt", "Fact two")], history: expected_history, context_summary: (index == 4).then(|| "Image conversation summary".into()), child_results, ..RunInput::new(PromptRole::ReadOnly, objective.into()) } }, "image request {index}");
                 if phase == AgentPhase::ChildWork {
                     assert!(facts.is_none(), "child calls do not receive primary Goal state");
                 } else {

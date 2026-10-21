@@ -49,8 +49,7 @@ pub struct RunInput {
     pub goal_plan_contract: Option<GoalPlanContract>,
     /// Facts of the first call, or of a call whose steps were all compacted away.
     pub goal_context_facts: Option<GoalContextFacts>,
-    /// The Workspace instruction file, followed for behavior; it never carries authority.
-    pub workspace_guidance: Option<WorkspaceGuidance>,
+    pub workspace_guidance: Vec<WorkspaceGuidance>,
     /// A child's agent definition, worker assignment and source facts; rendered as data.
     pub assignment_context: Option<String>,
     pub includes: Vec<String>,
@@ -92,7 +91,7 @@ impl RunInput {
             pinned_budget: GoalBudget::default(),
             goal_plan_contract: None,
             goal_context_facts: None,
-            workspace_guidance: None,
+            workspace_guidance: Vec::new(),
             assignment_context: None,
             includes: Vec::new(),
             history: Vec::new(),
