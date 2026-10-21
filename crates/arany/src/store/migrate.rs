@@ -230,6 +230,10 @@ enum Phase {
         staged: Identity,
         staged_digest: [u8; 32],
     },
+    // The outcome is decided; cleanup only removes redundant copies, so it restarts from any point.
+    Cleaning {
+        upgraded: bool,
+    },
 }
 
 pub(super) fn pending(root: &StateRoot) -> Result<bool, StoreError> {
@@ -245,6 +249,8 @@ pub(super) fn lease_after_recovery(
     root: &StateRoot,
     writable: bool,
 ) -> Result<super::state::HistoryLock, StoreError> {
+    #[cfg(test)]
+    tests::before_lease(root);
     for _ in 0..3 {
         let shared = root.lock_history(false)?;
         if !writable || !pending(root)? {
@@ -293,22 +299,37 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             if !matches || digest(&dir, &marker.backup)? != Some(*backup_digest) {
                 return Err(StoreError::MigrationConflict);
             }
-            // The original stays live, so this attempt's copies are discarded; a retry makes its own.
-            if original {
-                discard(&dir, STAGED)?;
-                discard(&dir, &marker.backup)?;
-            }
+            sync(&root.dir)?;
+            return finish(&dir, marker, !original);
         }
+        Phase::Cleaning { upgraded } => return clean(&dir, &marker, *upgraded),
     }
     sync(&root.dir)?;
     sync(&dir)?;
     step()?;
     dir.remove_file(MARKER)?;
-    sync(&dir)?;
-    if matches!(marker.phase, Phase::Ready { .. }) && current != Some(marker.source) {
-        keep_only(&dir, &marker.backup)?;
+    sync(&dir)
+}
+
+fn finish(dir: &Dir, mut marker: Marker, upgraded: bool) -> Result<(), StoreError> {
+    marker.phase = Phase::Cleaning { upgraded };
+    write_marker(dir, &marker)?;
+    clean(dir, &marker, upgraded)
+}
+
+// With the original live this attempt's copies go and a retry makes its own; after an upgrade
+// only its backup stays.
+fn clean(dir: &Dir, marker: &Marker, upgraded: bool) -> Result<(), StoreError> {
+    discard(dir, STAGED)?;
+    if upgraded {
+        keep_only(dir, &marker.backup)?;
+    } else {
+        discard(dir, &marker.backup)?;
     }
-    Ok(())
+    sync(dir)?;
+    step()?;
+    dir.remove_file(MARKER)?;
+    sync(dir)
 }
 
 // An interrupted copy can leave a rollback journal; it goes before its database.
@@ -330,7 +351,7 @@ fn keep_only(dir: &Dir, backup: &str) -> Result<(), StoreError> {
     for name in &older {
         remove_if_present(dir, name)?;
     }
-    sync(dir)
+    Ok(())
 }
 
 // The caller holds the exclusive history lock and has found the history incompatible.
@@ -383,10 +404,7 @@ pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool,
         let _ = recover(root);
         return Err(storage(error));
     }
-    step()?;
-    dir.remove_file(MARKER)?;
-    sync(&dir)?;
-    keep_only(&dir, &marker.backup)?;
+    finish(&dir, marker, true)?;
     Ok(true)
 }
 

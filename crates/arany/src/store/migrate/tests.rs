@@ -456,6 +456,7 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let database = path.join(DATABASE_FILE);
         let original = std::fs::read(&database).unwrap();
         let original_rows = stored_rows(&Connection::open(&database).unwrap());
+        seed_older_backup(&path);
 
         fail_after(Some(interrupted));
         let first = root.archive_incompatible_history();
@@ -474,6 +475,8 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
             let staged = path.join(DIR).join(STAGED);
             let changed = match marker.phase {
                 Phase::Preparing => vec![database.clone()],
+                // The outcome is decided, so nothing is pinned any more.
+                Phase::Cleaning { .. } => Vec::new(),
                 Phase::Ready { .. } => {
                     let mut changed = vec![database.clone(), path.join(DIR).join(&marker.backup)];
                     changed.extend(staged.exists().then_some(staged));
@@ -512,10 +515,26 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
             }
         }
 
-        assert!(
-            root.archive_incompatible_history().unwrap().is_none(),
-            "step {interrupted}"
-        );
+        // Recovery itself is interrupted at every step and restarts until it completes.
+        let mut recovery = 0;
+        loop {
+            fail_after(Some(recovery));
+            let resumed = root.archive_incompatible_history();
+            fail_after(None);
+            match resumed {
+                Ok(None) => break,
+                Err(StoreError::Io(_)) => assert!(
+                    std::fs::read(&database).unwrap() == original || facts(&path).len() == 1,
+                    "step {interrupted}.{recovery}"
+                ),
+                other => panic!("step {interrupted}.{recovery}: {other:?}"),
+            }
+            recovery += 1;
+            assert!(
+                recovery < 64,
+                "step {interrupted}: recovery never completes"
+            );
+        }
         let [fact] = facts(&path).try_into().unwrap();
         assert_eq!((fact.1, fact.2), (4, SCHEMA_VERSION), "step {interrupted}");
         replays(&root, &sessions);
@@ -557,6 +576,88 @@ fn a_later_migration_keeps_only_its_own_backup() {
 
     let [backup] = entries(&path.join(DIR)).try_into().unwrap();
     assert_ne!(backup, first, "the older backup is replaced");
+    replays(&root, &sessions);
+}
+
+fn seed_older_backup(path: &Path) {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(path.join(DIR))
+        .unwrap();
+    let older = path.join(DIR).join(format!(
+        "history-19691231T000000.000Z-{}.sqlite3",
+        uuid::Uuid::now_v7()
+    ));
+    std::fs::write(&older, b"older backup").unwrap();
+    std::fs::set_permissions(&older, std::fs::Permissions::from_mode(0o600)).unwrap();
+}
+
+type Gate = (
+    std::path::PathBuf,
+    std::sync::mpsc::SyncSender<()>,
+    std::sync::mpsc::Receiver<()>,
+);
+static LEASE_GATE: std::sync::Mutex<Option<Gate>> = std::sync::Mutex::new(None);
+
+// Parks a gated Store open before it takes its history lease.
+pub(super) fn before_lease(root: &StateRoot) {
+    let gate = {
+        let mut gate = LEASE_GATE.lock().unwrap();
+        if gate.as_ref().is_some_and(|gate| gate.0 == root.path()) {
+            gate.take()
+        } else {
+            None
+        }
+    };
+    if let Some((_, entered, release)) = gate {
+        entered.send(()).unwrap();
+        release.recv().unwrap();
+    }
+}
+
+#[test]
+fn a_writable_open_racing_an_interrupted_migration_recovers_before_admission() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    let database = path.join(DATABASE_FILE);
+    Connection::open(&database)
+        .unwrap()
+        .execute_batch("DROP TABLE migrations; PRAGMA user_version=4;")
+        .unwrap();
+    let original = std::fs::read(&database).unwrap();
+    let (entered_sender, entered) = std::sync::mpsc::sync_channel(0);
+    let (release, release_receiver) = std::sync::mpsc::sync_channel(0);
+    *LEASE_GATE.lock().unwrap() =
+        Some((root.path().to_path_buf(), entered_sender, release_receiver));
+    let opener = {
+        let root = root.try_clone().unwrap();
+        std::thread::spawn(move || crate::Store::open(root))
+    };
+    entered.recv().unwrap();
+
+    // While the opener waits for its lease, another startup swaps in the upgrade and crashes.
+    fail_after(Some(12));
+    assert!(matches!(
+        root.archive_incompatible_history(),
+        Err(StoreError::Io(_))
+    ));
+    fail_after(None);
+    assert!(std::fs::read(&database).unwrap() != original && pending(&root).unwrap());
+    release.send(()).unwrap();
+    let store = opener.join().unwrap().unwrap();
+
+    assert!(
+        !pending(&root).unwrap(),
+        "recovery precedes writable admission"
+    );
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(store.close())
+        .unwrap();
+    let [_fact] = facts(&path).try_into().unwrap();
     replays(&root, &sessions);
 }
 
