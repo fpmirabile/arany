@@ -1015,6 +1015,7 @@ mod cleanup_tests {
             active_run: None,
             history: Default::default(),
             classic_history: Default::default(),
+            dialog_armed: false,
             input: None,
             _raw_mode: None,
             mouse_capture: None,

@@ -692,6 +692,7 @@ async fn browse_inline(
     };
     let mut filter = String::new();
     let (mut visible, mut selected) = matching_models(items, &filter, &anchor);
+    terminal.begin_dialog();
     loop {
         let rows = visible
             .iter()
@@ -716,6 +717,13 @@ async fn browse_inline(
                 },
             )
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         let at_input_boundary = terminal.input_boundary_ready();
         let input = tokio::select! {
             result = &mut refresh, if catalog_state == ModelCatalogState::Refreshing && at_input_boundary => {
@@ -860,6 +868,7 @@ async fn browse_linear(
     } else {
         ModelCatalogState::Current
     };
+    terminal.begin_dialog();
     loop {
         terminal
             .draw_models(
@@ -876,6 +885,13 @@ async fn browse_linear(
                 },
             )
             .map_err(|error| error.to_string())?;
+        if terminal
+            .arm_dialog()
+            .await
+            .map_err(|error| error.to_string())?
+        {
+            continue;
+        }
         invalid = false;
         let at_input_boundary = terminal.input_boundary_ready();
         let next = tokio::select! {

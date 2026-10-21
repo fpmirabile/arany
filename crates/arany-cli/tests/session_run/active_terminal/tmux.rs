@@ -448,7 +448,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 if let Some(screen) = capture_pane(&server)
-                    && String::from_utf8_lossy(&screen).contains("Up/Dn Enter Esc")
+                    && String::from_utf8_lossy(&screen).contains("1-4 Enter Esc")
                 {
                     break;
                 }
@@ -477,7 +477,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
                         if screen.contains("Commands 1/21")
-                            && screen.contains("> /help")
+                            && screen.contains("1. /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
                             break;
@@ -493,7 +493,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
                         if screen.contains("Commands 21/21")
-                            && screen.contains("> /exit")
+                            && screen.contains("21. /exit")
                             && screen.contains("Exit Session")
                         {
                             break;
@@ -1317,8 +1317,8 @@ fn active_shelf_stays_above_retained_draft_in_tmux() {
     loop {
         if capture_pane(&server).is_some_and(|screen| {
             let text = String::from_utf8_lossy(&screen);
-            text.contains("Commands · 20 local controls")
-                && text.contains("> /help")
+            text.contains("Commands · 21 local controls")
+                && text.contains("1. /help")
                 && text.contains("Enter/Esc close")
         }) {
             break;

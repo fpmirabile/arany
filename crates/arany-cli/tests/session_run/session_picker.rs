@@ -22,58 +22,7 @@ pub(super) fn tail(bytes: &[u8]) -> String {
         .collect()
 }
 
-pub(super) fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
-    let mut grid = vec![vec![' '; columns]; rows];
-    let (mut row, mut column) = (0, 0);
-    let text = String::from_utf8_lossy(transcript);
-    let mut chars = text.chars().peekable();
-    while let Some(character) = chars.next() {
-        match character {
-            '\x1b' if chars.peek() == Some(&'[') => {
-                chars.next();
-                let mut parameters = String::new();
-                let mut command = None;
-                for next in chars.by_ref() {
-                    if ('@'..='~').contains(&next) {
-                        command = Some(next);
-                        break;
-                    }
-                    parameters.push(next);
-                }
-                let mut values = parameters
-                    .trim_start_matches('?')
-                    .split(';')
-                    .map(|value| value.parse::<usize>().unwrap_or(0));
-                let first = values.next().unwrap_or(0);
-                match command {
-                    Some('H') => {
-                        row = first.max(1).min(rows) - 1;
-                        column = values.next().unwrap_or(1).max(1).min(columns) - 1;
-                    }
-                    Some('J') if first == 2 || first == 3 => {
-                        grid.iter_mut().for_each(|line| line.fill(' '));
-                    }
-                    Some('J') => {
-                        grid[row][column..].fill(' ');
-                        grid[row + 1..].iter_mut().for_each(|line| line.fill(' '));
-                    }
-                    Some('K') => grid[row][column..].fill(' '),
-                    _ => {}
-                }
-            }
-            '\r' => column = 0,
-            '\n' => row = (row + 1).min(rows - 1),
-            character if !character.is_control() && column < columns => {
-                grid[row][column] = character;
-                column += 1;
-            }
-            _ => {}
-        }
-    }
-    grid.into_iter()
-        .map(|line| line.into_iter().collect())
-        .collect()
-}
+pub(super) use crate::screen_rows;
 
 pub(super) fn screen_contains(
     transcript: &[u8],
@@ -154,17 +103,40 @@ pub(super) fn pump(
     }
 }
 
+fn mouse_modes_enabled(bytes: &[u8]) -> Vec<u32> {
+    [1000, 1002, 1003, 1006, 1015]
+        .into_iter()
+        .filter(|mode| {
+            let enable = format!("\x1b[?{mode}h");
+            bytes
+                .windows(enable.len())
+                .any(|part| part == enable.as_bytes())
+        })
+        .collect()
+}
+
+fn count(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .filter(|part| *part == needle)
+        .count()
+}
+
 fn run_picker_case(
     name: &str,
     width: u16,
     selection: &[u8],
     older_selected: bool,
     stale_activation: bool,
+    fullscreen: bool,
 ) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    if fullscreen {
+        crate::seed_fullscreen(&state);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");
@@ -190,8 +162,9 @@ fn run_picker_case(
     } else {
         ""
     };
+    let classic = if fullscreen { "" } else { "--classic " };
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {classic}{no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached = crate::isolation::isolated_script(temp.path());
     attached
@@ -214,14 +187,14 @@ fn run_picker_case(
     let mut transcript = Vec::new();
     let mut answered = crate::session_picker::PtyResponses::default();
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_rows(&transcript, width.into(), 24)
-        .iter()
-        .any(|line| line.contains("Newer"))
+    // Keys reach the picker only after its armed frame; earlier input is discarded.
+    while !crate::armed_selector(&transcript, 0, width.into(), 24)
+        .is_some_and(|screen| screen.iter().any(|line| line.contains("Newer")))
     {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
-            "picker not visible in {name}: {}",
+            "armed picker not visible in {name}: {}",
             tail(&transcript)
         );
         thread::yield_now();
@@ -253,6 +226,19 @@ fn run_picker_case(
             thread::yield_now();
         }
     }
+    if fullscreen {
+        // Rows only respond once the picker has enabled its transient capture.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while count(&transcript, b"\x1b[?1000h") == 0 {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "picker capture missing in {name}: {}",
+                tail(&transcript)
+            );
+            thread::yield_now();
+        }
+    }
     let selected_at = transcript.len();
     input.write_all(selection).expect("picker selection");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -267,6 +253,19 @@ fn run_picker_case(
             tail(&transcript)
         );
         thread::yield_now();
+    }
+    if fullscreen {
+        let selected = &transcript[selected_at..];
+        let returned = selected
+            .windows(b"\x1b[?25h".len())
+            .position(|part| part == b"\x1b[?25h")
+            .expect("composer returned");
+        assert_eq!(
+            count(&selected[..returned], b"\x1b[?1000l"),
+            1,
+            "capture released before selection returns in {name}: {}",
+            tail(selected)
+        );
     }
     if stale_activation {
         let original_mode = std::fs::metadata(&state)
@@ -309,14 +308,13 @@ fn run_picker_case(
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
-            let recent = &transcript[open_at..];
-            if recent.windows(6).any(|part| part == b"\x1b[?25l") {
+            if crate::armed_selector(&transcript, open_at, width.into(), 24).is_some() {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
                 "attached picker: {}",
-                tail(recent)
+                tail(&transcript[open_at..])
             );
             thread::yield_now();
         }
@@ -400,8 +398,17 @@ fn run_picker_case(
         .expect("restored terminal settings")
         .trim_end_matches('\r');
     assert_eq!(before, after, "terminal restored after {name}");
-    assert!(!output_text.contains("\x1b[?1000h"));
-    assert!(!output_text.contains("\x1b[?1049h"));
+    if fullscreen {
+        assert_eq!(count(output_text.as_bytes(), b"\x1b[?1000h"), 1, "{name}");
+        assert_eq!(count(output_text.as_bytes(), b"\x1b[?1000l"), 1, "{name}");
+    } else {
+        assert_eq!(
+            mouse_modes_enabled(output_text.as_bytes()),
+            Vec::<u32>::new(),
+            "Classic picker enabled mouse reporting in {name}"
+        );
+        assert!(!output_text.contains("\x1b[?1049h"));
+    }
 
     let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
         .expect("read-only Store");
@@ -424,10 +431,30 @@ fn run_picker_case(
 
 #[test]
 fn session_picker_selects_rows_by_keyboard_without_mouse_capture() {
-    run_picker_case("keyboard and stale activation", 80, b"\x1b[B\r", true, true);
-    run_picker_case("keyboard", 80, b"\x1b[B\r", true, false);
-    run_picker_case("newest", 80, b"\r", false, false);
-    run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false);
+    run_picker_case(
+        "keyboard and stale activation",
+        80,
+        b"\x1b[B\r",
+        true,
+        true,
+        false,
+    );
+    run_picker_case("keyboard", 80, b"\x1b[B\r", true, false, false);
+    run_picker_case("newest", 80, b"\r", false, false, false);
+    run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false, false);
+}
+
+#[test]
+fn fullscreen_session_picker_mouse_selects_the_row_under_the_pointer() {
+    // Two Sessions in 24 rows: the 8-row picker starts at row 17, so Newer is row 18 and Older 19.
+    run_picker_case(
+        "fullscreen mouse",
+        80,
+        b"\x1b[<65;3;18M\x1b[<64;3;18M\x1b[<35;3;19M\x1b[<0;3;19M",
+        true,
+        false,
+        true,
+    );
 }
 
 fn screen_reader_entry(

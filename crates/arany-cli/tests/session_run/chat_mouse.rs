@@ -64,6 +64,27 @@ fn wait_for(
     }
 }
 
+// A picker takes keys only once its armed frame is drawn.
+fn wait_armed(
+    output: &mut impl std::io::Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+    from: usize,
+    label: &str,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::armed_selector(transcript, from, 80, 24).is_none() {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "{label}: {}",
+            tail(&transcript[from..])
+        );
+        thread::yield_now();
+    }
+}
+
 fn checkpoint(
     output: &mut impl std::io::Read,
     input: &mut impl Write,
@@ -136,6 +157,14 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         &[b"\x1b[?1000h", b"\x1b[?1049h"],
         "fullscreen picker",
     );
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        0,
+        "armed fullscreen picker",
+    );
     let shell_pid = String::from_utf8_lossy(&transcript)
         .lines()
         .find_map(|line| line.trim_end_matches('\r').strip_prefix("SHELL_PID:"))
@@ -184,6 +213,14 @@ fn fullscreen_chat_keeps_mouse_reporting_off_at_every_returned_checkpoint() {
         from,
         &[b"\x1b[?1000h"],
         "picker rows capture transiently",
+    );
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        from,
+        "armed reopened picker",
     );
     let mut active = mouse_modes_on(&transcript);
     active.sort_unstable();

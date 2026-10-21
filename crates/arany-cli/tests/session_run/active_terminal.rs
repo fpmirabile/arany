@@ -1342,14 +1342,18 @@ fn default_classic_uses_native_scrollback_and_dumps_bounded_details() {
             from,
             needle,
         );
-        wait(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            from,
-            b"\x1b[?25l",
-        );
+        // A selector takes keys only once its armed frame is drawn.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::armed_selector(&transcript, from, 80, 24).is_none() {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "armed {}: {}",
+                String::from_utf8_lossy(command).escape_debug(),
+                tail(&transcript[from..])
+            );
+            thread::yield_now();
+        }
         let close_from = transcript.len();
         input.write_all(b"\x1b").unwrap();
         wait(

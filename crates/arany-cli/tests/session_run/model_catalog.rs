@@ -402,9 +402,8 @@ fn inline_model_catalog_at_width(width: u16) {
         .write_all(b"note\x0b")
         .expect("draft and quick actions");
     let deadline = Instant::now() + Duration::from_secs(10);
-    while frame_marker_end(&transcript[before_menu..], b"Quick actions").is_none()
-        || frame_marker_end(&transcript[before_menu..], b"\x1b[?25l").is_none()
-    {
+    // Selectors take keys only once their armed frame is drawn.
+    while crate::armed_selector(&transcript, before_menu, width.into(), 24).is_none() {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -416,7 +415,7 @@ fn inline_model_catalog_at_width(width: u16) {
     let before_catalog = transcript.len();
     input.write_all(b"\r").expect("open catalog");
     let model_label: &[u8] = if width < 20 {
-        "mo…l-1".as_bytes()
+        "mo…-1".as_bytes()
     } else {
         b"model-1"
     };
@@ -425,12 +424,8 @@ fn inline_model_catalog_at_width(width: u16) {
         let catalog = &transcript[before_catalog..];
         let complete = catalog
             .windows(model_label.len())
-            .position(|part| part == model_label)
-            .is_some_and(|position| {
-                catalog[position + model_label.len()..]
-                    .windows(b"\x1b[?25l".len())
-                    .any(|part| part == b"\x1b[?25l")
-            });
+            .any(|part| part == model_label)
+            && crate::armed_selector(&transcript, before_catalog, width.into(), 24).is_some();
         if complete {
             break;
         }
@@ -529,6 +524,30 @@ fn inline_model_catalog_at_width(width: u16) {
         product_child_of(shell)
     });
     let _native_guard = native_pid.map(|pid| ProductGuard::new(pid, state.clone()));
+    // A digit sent with Ctrl+K arrives before the selector arms and is discarded.
+    for (keys, focused, label) in [
+        (
+            &b"\x1b[D\x0b1"[..],
+            "› 1. Models",
+            "pre-frame digit discarded",
+        ),
+        (b"\x1b[B", "› 2. Agents", "armed selector takes later keys"),
+    ] {
+        let start = transcript.len();
+        input.write_all(keys).expect(label);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !crate::armed_selector(&transcript, start, width.into(), 24)
+            .is_some_and(|screen| screen.iter().any(|row| row.starts_with(focused)))
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "{label} at {width} columns: {}",
+                tail(&transcript[start..])
+            );
+            thread::yield_now();
+        }
+    }
     {
         let mut transition = |keys: &[u8], marker: &[u8], hide_cursor: bool, label: &str| {
             let start = transcript.len();
@@ -556,10 +575,10 @@ fn inline_model_catalog_at_width(width: u16) {
         };
         for (keys, marker, hide_cursor, label) in [
             (
-                &b"\x1b[D\x0b\r"[..],
+                &b"1"[..],
                 &b"<low>"[..],
                 true,
-                "picker with mid-draft caret",
+                "armed digit 1 opens the picker with a mid-draft caret",
             ),
             (
                 &b"\x1b[C"[..],

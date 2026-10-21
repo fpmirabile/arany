@@ -418,6 +418,7 @@ fn inline_inspector(
         0,
         b"Ask Arany",
     );
+    let opened_at = transcript.len();
     input.write_all(b"/agents\r").expect("open inspector");
     wait_for_pty(
         &mut output,
@@ -427,6 +428,17 @@ fn inline_inspector(
         0,
         b"current",
     );
+    // The inspector takes keys only once its armed frame is drawn.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::armed_selector(&transcript, opened_at, width.into(), 24).is_none() {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "armed inspector missing: {}",
+            tail(&transcript[opened_at..])
+        );
+        thread::yield_now();
+    }
     let checkpoint = transcript.len();
     input.write_all(b"\x1b[B").expect("select prior AgentRun");
     wait_for_pty(

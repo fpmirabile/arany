@@ -80,6 +80,58 @@ fn wait_for_after(
     }
 }
 
+// A selector takes keys only once its armed frame shows `screen_ready`.
+#[track_caller]
+fn wait_for_frame(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    (from, columns, rows): (usize, usize, usize),
+    screen_ready: impl Fn(&[String]) -> bool,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !transcript[from..]
+        .windows(6)
+        .rposition(|part| part == b"\x1b[?25l")
+        .is_some_and(|end| {
+            screen_ready(&crate::session_picker::screen_rows(
+                &transcript[..from + end + 6],
+                columns,
+                rows,
+            ))
+        })
+    {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "selector frame missing: {}",
+            tail(&transcript[from..])
+        );
+        thread::yield_now();
+    }
+}
+
+#[track_caller]
+fn wait_armed(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+    from: usize,
+) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crate::armed_selector(transcript, from, 40, 24).is_none() {
+        pump(output, input, transcript, answered);
+        assert!(
+            Instant::now() < deadline,
+            "armed selector missing: {}",
+            tail(&transcript[from..])
+        );
+        thread::yield_now();
+    }
+}
+
 #[track_caller]
 fn wait_for_caret(
     output: &mut impl Read,
@@ -248,23 +300,49 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"Current menu: tabs (tabs|combined); view: fullscreen (fullscreen|classic).\r\nSettings: calls=64 tokens=unlimited active-ms=1800000 default-timeout-ms=120000 max-timeout-ms=600000 build-memory-bytes=4294967296 build-processes=256 build-project-bytes=1073741824 build-cache-bytes=8589934592.\r\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.\r\nInput:\r\n",
+        b"Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
+          Choice 1: Slash menu: tabs (tabs|combined)\r\n\
+          Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
+          Choice 3: Goal provider calls: 64 (number or unlimited)\r\n\
+          Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
+          Choice 5: Goal active milliseconds: 1800000 (number or unlimited)\r\n\
+          Choice 6: Default command timeout ms: 120000\r\n\
+          Choice 7: Maximum command timeout ms: 600000\r\n\
+          Choice 8: Build memory bytes: 4294967296\r\n\
+          Choice 9: Build processes/threads: 256\r\n\
+          Choice 10: Build writable project bytes: 1073741824\r\n\
+          Choice 11: Build cache bytes: 8589934592\r\n\
+          Input:\r\n",
     );
-    let invalid_at = transcript.len();
+    for rejected in [&b"combined\r"[..], b"12 combined\r", b"1 classic\r"] {
+        let invalid_at = transcript.len();
+        input
+            .write_all(rejected)
+            .expect("reject invalid NUMBER VALUE");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            invalid_at,
+            b"Notice: Type NUMBER VALUE from the list; q cancels\r\nInput:\r\n",
+        );
+    }
+    let selected_at = transcript.len();
     input
-        .write_all(b"other\r")
-        .expect("reject unknown linear choice");
+        .write_all(b"1 combined\r")
+        .expect("linear combined selection");
     wait_for_after(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        invalid_at,
-        b"Notice: Type a valid setting and value; q cancels\r\nInput:\r\n",
+        selected_at,
+        b"Choice 1: Slash menu: combined (tabs|combined)\r\n",
     );
     let selected_at = transcript.len();
     input
-        .write_all(b"combined\r\r")
+        .write_all(b"\r")
         .expect("linear combined selection saved by empty Enter");
     wait_for_after(
         &mut output,
@@ -734,16 +812,17 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
         .to_owned();
     let ready = transcript.len();
     input.write_all(b"/help\r").expect("open help");
-    for cue in [b"Commands".as_slice(), b"Up/Dn Enter Esc", b"\x1b[?25l"] {
-        wait_for_after(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            ready,
-            cue,
-        );
-    }
+    wait_for_frame(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (ready, 16, 8),
+        |screen| {
+            screen.iter().any(|row| row.contains("Commands"))
+                && screen.iter().any(|row| row.contains("Up/Dn Enter Esc"))
+        },
+    );
     assert_ne!(tty_settings(product_pid), before, "help owns raw mode");
     kill_process(product_pid, Signal::TERM).expect("terminate open help");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1003,13 +1082,12 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     input
         .write_all(b"/settings\r")
         .expect("open display settings");
-    wait_for_after(
+    wait_armed(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
         settings_at,
-        b"> Slash",
     );
     let saved_at = transcript.len();
     input.write_all(b"\x1b[C\r").expect("save combined menu");
@@ -1061,6 +1139,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut answered,
         picker_at,
         b"Resume",
+    );
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        picker_at,
     );
     let closed_at = transcript.len();
     input.write_all(b"\x1b").expect("dismiss resume picker");
@@ -1342,7 +1427,17 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::os::unix::fs::symlink(&outside, &pending).unwrap();
     let rejected_at = transcript.len();
     input
-        .write_all(b"/settings\r\x1b[C\r")
+        .write_all(b"/settings\r")
+        .expect("open settings for the unsafe replacement");
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        rejected_at,
+    );
+    input
+        .write_all(b"\x1b[C\r")
         .expect("unsafe replacement must retain current display");
     wait_for_caret(
         &mut output,
@@ -1397,7 +1492,17 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     std::fs::remove_file(pending).unwrap();
     let tabs_at = transcript.len();
     input
-        .write_all(b"/settings\r\x1b[C\r")
+        .write_all(b"/settings\r")
+        .expect("open settings for tabs");
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        tabs_at,
+    );
+    input
+        .write_all(b"\x1b[C\r")
         .expect("tabs selected with Right in the settings window");
     wait_for_caret(
         &mut output,
@@ -1421,7 +1526,17 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         fresh_capture(&mut transcript, &mut answered);
         let chosen_at = transcript.len();
         input
-            .write_all(b"/settings\r\x1b[B\x1b[C\r")
+            .write_all(b"/settings\r")
+            .expect("open settings for the chat view");
+        wait_armed(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            chosen_at,
+        );
+        input
+            .write_all(b"\x1b[B\x1b[C\r")
             .expect("chat view selected with Down and Right");
         wait_for_after(
             &mut output,
@@ -1506,7 +1621,17 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     fresh_capture(&mut transcript, &mut answered);
     let switched_at = transcript.len();
     input
-        .write_all(b"/settings\r\x1b[B\x1b[C\r")
+        .write_all(b"/settings\r")
+        .expect("open settings for the live switch");
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        switched_at,
+    );
+    input
+        .write_all(b"\x1b[B\x1b[C\r")
         .expect("saved fullscreen switches the live view");
     wait_for_after(
         &mut output,
@@ -1689,15 +1814,16 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             &mut answered,
             b"Ask Arany",
         );
+        let selector_at = transcript.len();
         input
             .write_all("a🙂b\x1b[D\x0b".as_bytes())
             .expect("draft and selector");
-        wait_for(
+        wait_armed(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Quick actions",
+            selector_at,
         );
         let after_menu = transcript.len();
         input
@@ -1719,15 +1845,28 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             &mut answered,
             b"Xb",
         );
-        input
-            .write_all(b"\x0b\x1b[B\r")
-            .expect("open Agent inspector");
-        wait_for(
+        let selector_at = transcript.len();
+        input.write_all(b"\x0b").expect("open quick selector");
+        wait_armed(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"No Runs yet",
+            selector_at,
+        );
+        let inspector_at = transcript.len();
+        input.write_all(b"\x1b[B\r").expect("open Agent inspector");
+        // With no Runs the inspector has no rows; its key hint is the arming cue.
+        wait_for_frame(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (inspector_at, 40, 24),
+            |screen| {
+                screen.iter().any(|row| row.contains("No Runs yet"))
+                    && screen.iter().any(|row| row.contains("Esc close"))
+            },
         );
         let after_inspector = transcript.len();
         input.write_all(b"\x1b").expect("close inspector");
@@ -1749,13 +1888,12 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         );
         let after_inspection = transcript.len();
         input.write_all(b"\x0b").expect("reopen quick selector");
-        wait_for_after(
+        wait_armed(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             after_inspection,
-            b"return",
         );
         input
             .write_all(b"\x1b[B\x1b[B\r")
@@ -1925,13 +2063,12 @@ fn session_picker_close_case(quick: bool) {
     let mut before_picker = transcript.len();
     if quick {
         input.write_all(b"\x0b").expect("quick actions");
-        wait_for_after(
+        wait_armed(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
             before_picker,
-            b"return",
         );
         before_picker = transcript.len();
         input.write_all(b"\x1b[B\x1b[B\r").expect("Session action");
@@ -1958,6 +2095,13 @@ fn session_picker_close_case(quick: bool) {
         &mut answered,
         picker_header,
         b"\x1b[?25l",
+    );
+    wait_armed(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        before_picker,
     );
     let before_close = transcript.len();
     input.write_all(b"\x1b").expect("close picker");
