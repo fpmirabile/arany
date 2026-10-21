@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Position, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Clear, HighlightSpacing, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Clear, Paragraph, Wrap},
 };
 use std::io;
 use unicode_segmentation::UnicodeSegmentation;
@@ -384,25 +384,54 @@ fn tool_approval_controls(
         .map(Line::raw)
         .collect::<Vec<_>>();
     for (index, choice) in choices.iter().enumerate() {
-        let focused = focus == Some(index);
-        let label = format!(
-            "{} {}. {}",
-            if focused { "›" } else { " " },
-            index + 1,
-            choice.label()
-        );
-        let style = match focus {
-            None => Style::default().add_modifier(Modifier::DIM),
-            Some(_) if focused => Style::default().add_modifier(Modifier::REVERSED),
-            Some(_) => Style::default(),
-        };
+        let style = choice_style(focus, index);
         rows.extend(
-            wrap_cells(&label, width, 5)
-                .into_iter()
-                .map(|row| Line::styled(row, style)),
+            wrap_cells(
+                &numbered_label(index, choice.label(), focus == Some(index)),
+                width,
+                5,
+            )
+            .into_iter()
+            .map(|row| Line::styled(row, style)),
         );
     }
     rows
+}
+
+fn numbered_label(index: usize, label: &str, focused: bool) -> String {
+    format!("{} {}. {label}", if focused { "›" } else { " " }, index + 1)
+}
+
+fn choice_style(focus: Option<usize>, index: usize) -> Style {
+    match focus {
+        None => Style::default().add_modifier(Modifier::DIM),
+        Some(focused) if focused == index => Style::default().add_modifier(Modifier::REVERSED),
+        Some(_) => Style::default(),
+    }
+}
+
+fn numbered_line(index: usize, label: &str, selected: usize, width: u16) -> Line<'static> {
+    Line::styled(
+        safe_truncate(
+            &numbered_label(index, label, index == selected),
+            usize::from(width),
+        ),
+        choice_style(Some(selected), index),
+    )
+}
+
+// Fullscreen dialogs keep the latest history rows visible above their bottom area.
+pub(super) fn draw_backdrop(frame: &mut Frame, bottom: u16, rows: &[HistoryRow], palette: Palette) {
+    let full = frame.area();
+    let top = full.y + history_top_padding(bottom.saturating_sub(full.y));
+    let height = bottom.saturating_sub(top);
+    let skip = rows.len().saturating_sub(usize::from(height));
+    draw_history_rows(
+        frame,
+        Rect::new(full.x, top, full.width, height),
+        &rows[skip..],
+        palette,
+    );
 }
 
 pub(super) fn draw_tool_approval_frame(
@@ -1342,14 +1371,15 @@ pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Lin
 
 pub(super) fn draw_session_picker_frame(
     frame: &mut Frame,
+    area: Rect,
     items: &[SessionListItem],
     selected: usize,
     palette: Palette,
 ) {
-    let area = bottom_area(frame.area(), 12);
     if area.width == 0 || area.height == 0 {
         return;
     }
+    frame.render_widget(Clear, area);
     let header = format!("Resume · {} in this Workspace", items.len());
     frame.render_widget(
         Paragraph::new(safe_truncate(&header, usize::from(area.width))).style(palette.selection()),
@@ -1357,19 +1387,10 @@ pub(super) fn draw_session_picker_frame(
     );
     let rows = usize::from(area.height.saturating_sub(6));
     let start = session_picker_start(selected, rows);
-    for (row, item) in items.iter().skip(start).take(rows).enumerate() {
-        let marker = if start + row == selected { "> " } else { "  " };
-        let title = safe_truncate(&item.title, usize::from(area.width).saturating_sub(2));
-        let line = format!("{marker}{title}");
+    for (row, item) in items.iter().enumerate().skip(start).take(rows) {
         frame.render_widget(
-            Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(
-                if start + row == selected {
-                    palette.selection()
-                } else {
-                    Style::default()
-                },
-            ),
-            Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
+            Paragraph::new(numbered_line(row, &item.title, selected, area.width)),
+            Rect::new(area.x, area.y + 1 + (row - start) as u16, area.width, 1),
         );
     }
     if area.height >= 6
@@ -1658,93 +1679,71 @@ fn draw_composer(
 
 pub(super) fn draw_quick_actions_frame(
     frame: &mut Frame,
+    area: Rect,
     selected: usize,
     has_draft: bool,
     palette: Palette,
 ) {
-    let area = bottom_area(frame.area(), 6);
     if area.width == 0 || area.height == 0 {
         return;
     }
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new("Quick actions").style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let narrow = area.width < 40;
-    let sessions = if has_draft && area.width < 20 {
-        "Resume draft"
-    } else if has_draft && area.width < 24 {
-        "Resume · draft"
-    } else if has_draft && narrow {
-        "Resume · draft first"
-    } else if has_draft {
-        "Resume · finish draft first"
-    } else if area.width < 20 {
-        "Resume: list"
-    } else if narrow {
-        "Resume · choose"
+    let labels = if area.width < 24 {
+        ["Models", "Agents", "Resume", "Setup"]
+    } else if area.width < 40 {
+        [
+            "Models · choose",
+            "Agents · inspect",
+            if has_draft {
+                "Resume · draft"
+            } else {
+                "Resume · choose"
+            },
+            "Setup · account",
+        ]
     } else {
-        "Resume · conversation"
+        [
+            "Models · choose a model",
+            "Agents · inspect work",
+            if has_draft {
+                "Resume · finish draft first"
+            } else {
+                "Resume · conversation"
+            },
+            "Setup · connect an account",
+        ]
     };
-    let models = if area.width < 20 {
-        "Models: choose"
-    } else if area.width < 24 {
-        "Models · choose"
-    } else {
-        "Models · choose a model"
-    };
-    let agents = if area.width < 20 {
-        "Agents: view"
-    } else if area.width < 24 {
-        "Agents · inspect"
-    } else {
-        "Agents · inspect work"
-    };
-    let setup = if area.width < 24 {
-        "Setup: account"
-    } else {
-        "Setup · connect an account"
-    };
-    let labels = [models, agents, sessions, setup];
     let visible = usize::from(area.height.saturating_sub(2));
     let first = selected
         .saturating_sub(visible.saturating_sub(1))
         .min(labels.len().saturating_sub(visible));
-    let items = labels.into_iter().map(|label| {
-        ListItem::new(safe_truncate(
-            label,
-            usize::from(area.width.saturating_sub(2)),
-        ))
-    });
-    let list = List::new(items)
-        .highlight_symbol("> ")
-        .highlight_spacing(HighlightSpacing::Always)
-        .highlight_style(palette.selection());
-    let mut state = ListState::default()
-        .with_offset(first)
-        .with_selected(Some(selected));
-    frame.render_stateful_widget(
-        list,
-        Rect::new(area.x, area.y + 1, area.width, visible as u16),
-        &mut state,
-    );
+    for (index, label) in labels.into_iter().enumerate().skip(first).take(visible) {
+        frame.render_widget(
+            Paragraph::new(numbered_line(index, label, selected, area.width)),
+            Rect::new(area.x, area.y + 1 + (index - first) as u16, area.width, 1),
+        );
+    }
     if area.height >= 2 {
         let hint = if selected == 2 && has_draft {
             if area.width < 20 {
                 "Draft first Esc"
             } else if area.width < 24 {
                 "Submit draft · Esc"
-            } else if narrow {
+            } else if area.width < 40 {
                 "Submit draft · Esc back"
             } else {
                 "Submit or clear draft · Esc return"
             }
         } else if area.width < 20 {
-            "Up/Dn Enter Esc"
-        } else if narrow {
-            "Up/Dn Enter:open Esc"
+            "1-4 Enter Esc"
+        } else if area.width < 40 {
+            "1-4 Enter:open Esc"
         } else {
-            "Up/Down · Enter open · Esc return"
+            "1-4 or Up/Down · Enter open · Esc return"
         };
         frame.render_widget(
             Paragraph::new(safe_truncate(hint, usize::from(area.width))),
@@ -1753,11 +1752,51 @@ pub(super) fn draw_quick_actions_frame(
     }
 }
 
-pub(super) fn draw_help_frame(frame: &mut Frame, selected: usize, palette: Palette) {
-    let area = bottom_area(frame.area(), 20);
+pub(super) fn draw_settings_frame(
+    frame: &mut Frame,
+    area: Rect,
+    rows: &[String],
+    selected: usize,
+    notice: Option<&str>,
+    palette: Palette,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new("Settings").style(palette.selection()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = session_picker_start(selected, visible);
+    for (index, row) in rows.iter().enumerate().skip(start).take(visible) {
+        frame.render_widget(
+            Paragraph::new(numbered_line(index, row, selected, area.width)),
+            Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
+        );
+    }
+    if area.height >= 2 {
+        let (footer, style) = match notice {
+            Some(notice) => (notice, palette.attention()),
+            None if area.width < 50 => ("↑↓ ←→ Enter Esc", Style::default()),
+            None => (
+                "1-9 or ↑↓ select · ←→ change · Enter saves · Esc",
+                Style::default(),
+            ),
+        };
+        frame.render_widget(
+            Paragraph::new(safe_truncate(footer, usize::from(area.width))).style(style),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+}
+
+pub(super) fn draw_help_frame(frame: &mut Frame, area: Rect, selected: usize, palette: Palette) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    frame.render_widget(Clear, area);
     let count = help_len();
     let header = if area.width < 24 {
         format!("Commands {}/{}", selected + 1, count)
@@ -1775,12 +1814,11 @@ pub(super) fn draw_help_frame(frame: &mut Frame, selected: usize, palette: Palet
         let Some(entry) = help_entry(index) else {
             break;
         };
-        let marker = if index == selected { "> " } else { "  " };
         let command = if area.width < 24 {
-            format!("{marker}/{}", entry.name)
+            format!("/{}", entry.name)
         } else {
             format!(
-                "{marker}/{}{}",
+                "/{}{}",
                 entry.name,
                 entry
                     .argument
@@ -1793,13 +1831,7 @@ pub(super) fn draw_help_frame(frame: &mut Frame, selected: usize, palette: Palet
             command
         };
         frame.render_widget(
-            Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(
-                if index == selected {
-                    palette.selection()
-                } else {
-                    Style::default()
-                },
-            ),
+            Paragraph::new(numbered_line(index, &line, selected, area.width)),
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
     }
@@ -1921,7 +1953,7 @@ pub(super) fn draw_model_catalog_frame(
     for (row, item) in picker.items.iter().skip(start).take(rows).enumerate() {
         let index = start + row;
         let focused = index == selected;
-        let prefix = format!("{}{} ", if focused { "> " } else { "  " }, index + 1);
+        let prefix = numbered_label(index, "", focused).width();
         let suffix = if focused {
             format!(
                 " <{}>",
@@ -1935,15 +1967,15 @@ pub(super) fn draw_model_catalog_frame(
         };
         let id = model_id_preview(
             &item.id,
-            usize::from(area.width).saturating_sub(prefix.len() + suffix.len()),
+            usize::from(area.width).saturating_sub(prefix + suffix.len()),
         );
-        let line = format!("{prefix}{id}{suffix}");
         frame.render_widget(
-            Paragraph::new(safe_truncate(&line, usize::from(area.width))).style(if focused {
-                palette.selection()
-            } else {
-                Style::default()
-            }),
+            Paragraph::new(numbered_line(
+                index,
+                &format!("{id}{suffix}"),
+                selected,
+                area.width,
+            )),
             Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
         );
     }
@@ -2013,33 +2045,25 @@ pub(super) fn agent_detail_lines(model: &AgentInspectorModel, width: u16) -> Vec
 
 pub(super) fn draw_agent_inspector_frame(
     frame: &mut Frame,
+    area: Rect,
     model: &AgentInspectorModel,
     scroll: usize,
     palette: Palette,
 ) {
-    let area = bottom_area(frame.area(), 14);
     if area.width == 0 || area.height == 0 {
         return;
     }
+    frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(model.lines[0].as_str()).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
     let choices = agent_choice_rows(area.height, model.choices.len());
     let start = model.selected.saturating_sub(choices.saturating_sub(1));
-    for (row, choice) in model.choices.iter().skip(start).take(choices).enumerate() {
-        let marker = if start + row == model.selected {
-            "> "
-        } else {
-            "  "
-        };
+    for (index, choice) in model.choices.iter().enumerate().skip(start).take(choices) {
         frame.render_widget(
-            Paragraph::new(format!("{marker}{choice}")).style(if start + row == model.selected {
-                palette.selection()
-            } else {
-                Style::default()
-            }),
-            Rect::new(area.x, area.y + 1 + row as u16, area.width, 1),
+            Paragraph::new(numbered_line(index, choice, model.selected, area.width)),
+            Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
         );
     }
     let detail_y = area

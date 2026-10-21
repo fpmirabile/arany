@@ -49,8 +49,8 @@ use view::{
     Palette, agent_detail_lines, agent_detail_rows, agent_picker_index, bottom_area,
     completion_height, composer_height, draw_agent_inspector_frame, draw_frame_with_history,
     draw_help_frame, draw_model_catalog_frame, draw_quick_actions_frame, draw_session_picker_frame,
-    draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame, draw_setup_warning_frame,
-    history_top_padding, screen_terminal, session_picker_index,
+    draw_settings_frame, draw_setup_choices_frame, draw_setup_frame, draw_setup_text_frame,
+    draw_setup_warning_frame, history_top_padding, screen_terminal, session_picker_index,
 };
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
@@ -374,6 +374,7 @@ pub struct AttachedTerminal {
     active_run: Option<arany::RunId>,
     history: History,
     classic_history: History,
+    backdrop: Vec<history::HistoryRow>,
     input: Option<TerminalReader>,
     _raw_mode: Option<RawMode>,
     mouse_capture: Option<MouseCapture>,
@@ -684,6 +685,7 @@ impl AttachedTerminal {
             active_run: None,
             history: History::default(),
             classic_history: History::default(),
+            backdrop: Vec::new(),
             input: Some(input),
             _raw_mode: raw_mode,
             mouse_capture: None,
@@ -1267,6 +1269,28 @@ impl AttachedTerminal {
         Ok(())
     }
 
+    fn draw_dialog(
+        &mut self,
+        height: u16,
+        render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
+    ) -> Result<Rect, TerminalError> {
+        self.prepare_frame_height(height)?;
+        let palette = self.palette();
+        let backdrop = (self.mode == TerminalMode::Fullscreen).then_some(self.backdrop.as_slice());
+        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let mut area = Rect::default();
+        terminal.draw(|frame| {
+            area = bottom_area(frame.area(), height);
+            if let Some(rows) = backdrop {
+                view::draw_backdrop(frame, area.y, rows, palette);
+            }
+            render(frame, area);
+        })?;
+        let full = terminal.get_frame().area();
+        terminal.backend_mut().set_area(full);
+        Ok(area)
+    }
+
     fn draw_snapshot(
         &mut self,
         view: &SessionView,
@@ -1388,7 +1412,8 @@ impl AttachedTerminal {
             self.history_mut().record_notice(notice);
         }
         let history_rows = if self.mode == TerminalMode::Fullscreen {
-            self.history_mut().visible(view)
+            self.backdrop = self.history_mut().visible(view);
+            self.backdrop.clone()
         } else {
             self.classic_history.live_rows(view)
         };
@@ -1787,24 +1812,41 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        let result = self.draw_frame(
+        let result = self.draw_dialog(
             u16::try_from(items.len().saturating_add(6))
                 .unwrap_or(u16::MAX)
                 .min(12),
-            |frame| draw_session_picker_frame(frame, items, selected, palette),
+            |frame, area| draw_session_picker_frame(frame, area, items, selected, palette),
         );
-        if let Err(error) = result {
-            let _ = self.close_sessions();
-            return Err(error);
+        match result {
+            Ok(area) => {
+                self.session_picker_area = Some(area);
+                Ok(())
+            }
+            Err(error) => {
+                let _ = self.close_sessions();
+                Err(error)
+            }
         }
-        self.session_picker_area = Some(bottom_area(
-            self.terminal
-                .as_mut()
-                .expect("inline terminal")
-                .get_frame()
-                .area(),
-            12,
-        ));
+    }
+
+    pub fn draw_settings(
+        &mut self,
+        rows: &[String],
+        selected: usize,
+        notice: Option<&str>,
+    ) -> Result<(), TerminalError> {
+        self.cancel_clipboard_paste();
+        if let Some(linear) = &mut self.linear {
+            return linear
+                .draw_settings(rows, notice)
+                .map_err(TerminalError::Io);
+        }
+        let palette = self.palette();
+        self.draw_dialog(
+            u16::try_from(rows.len().saturating_add(2)).unwrap_or(u16::MAX),
+            |frame, area| draw_settings_frame(frame, area, rows, selected, notice, palette),
+        )?;
         Ok(())
     }
 
@@ -1815,8 +1857,8 @@ impl AttachedTerminal {
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
         let palette = self.palette();
-        self.draw_frame(6, |frame| {
-            draw_quick_actions_frame(frame, selected, has_draft, palette)
+        self.draw_dialog(6, |frame, area| {
+            draw_quick_actions_frame(frame, area, selected, has_draft, palette);
         })?;
         Ok(())
     }
@@ -1862,7 +1904,9 @@ impl AttachedTerminal {
 
     fn draw_help(&mut self, selected: usize) -> Result<(), TerminalError> {
         let palette = self.palette();
-        self.draw_frame(20, |frame| draw_help_frame(frame, selected, palette))?;
+        self.draw_dialog(20, |frame, area| {
+            draw_help_frame(frame, area, selected, palette);
+        })?;
         Ok(())
     }
 
@@ -2071,17 +2115,10 @@ impl AttachedTerminal {
             self.mouse_capture = Some(MouseCapture::acquire()?);
         }
         let palette = self.palette();
-        self.draw_frame(height, |frame| {
-            draw_agent_inspector_frame(frame, &model, scroll, palette)
+        let area = self.draw_dialog(height, |frame, area| {
+            draw_agent_inspector_frame(frame, area, &model, scroll, palette);
         })?;
-        self.agent_picker_area = Some(bottom_area(
-            self.terminal
-                .as_mut()
-                .expect("inline terminal")
-                .get_frame()
-                .area(),
-            14,
-        ));
+        self.agent_picker_area = Some(area);
         Ok(())
     }
 
@@ -2147,6 +2184,7 @@ impl AttachedTerminal {
     fn replace_released(&mut self, mut replacement: Self) {
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
+        replacement.backdrop = std::mem::take(&mut self.backdrop);
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {

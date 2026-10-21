@@ -488,6 +488,56 @@ impl LinearState {
         writer.flush()
     }
 
+    pub(super) fn draw_settings(
+        &mut self,
+        rows: &[String],
+        notice: Option<&str>,
+    ) -> io::Result<()> {
+        self.write_settings(&mut io::stderr(), rows, notice)
+    }
+
+    fn write_settings(
+        &mut self,
+        writer: &mut impl Write,
+        rows: &[String],
+        notice: Option<&str>,
+    ) -> io::Result<()> {
+        let listing = rows.join("\n");
+        let unchanged = self
+            .last_setup
+            .as_ref()
+            .is_some_and(|(step, title, previous)| {
+                *step == 0 && title == "Settings" && *previous == listing
+            });
+        if unchanged && notice.is_none() {
+            return Ok(());
+        }
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+            self.newline_pending = false;
+            self.line_open = false;
+        }
+        if !unchanged {
+            writeln!(
+                writer,
+                "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels"
+            )?;
+            for (index, row) in rows.iter().enumerate() {
+                writeln!(writer, "Choice {}: {}", index + 1, safe_truncate(row, 240))?;
+            }
+            self.last_setup = Some((0, "Settings".into(), listing));
+        }
+        if let Some(notice) = notice {
+            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+        }
+        if self.prompt_needed {
+            writeln!(writer, "Input:")?;
+            self.prompt_needed = false;
+            self.line_open = true;
+        }
+        writer.flush()
+    }
+
     pub(super) fn draw_sessions(
         &mut self,
         items: &[SessionListItem],
@@ -693,6 +743,47 @@ mod tests {
                 format!("Tool approval\nRead src/file\nDo you want to proceed?\n{expected}")
             );
         }
+    }
+
+    #[test]
+    fn linear_settings_number_rows_and_reprint_only_after_a_change() {
+        let mut state = LinearState::new("screen-reader");
+        let mut output = Vec::new();
+        let rows = vec![
+            "Slash menu: tabs (tabs|combined)".to_owned(),
+            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+        ];
+        state.write_settings(&mut output, &rows, None).unwrap();
+        state.write_settings(&mut output, &rows, None).unwrap();
+        state.prompt_needed = true;
+        state.line_open = false;
+        state
+            .write_settings(
+                &mut output,
+                &rows,
+                Some("Type NUMBER VALUE from the list; q cancels"),
+            )
+            .unwrap();
+        state.prompt_needed = true;
+        state.line_open = false;
+        let changed = vec![
+            "Slash menu: combined (tabs|combined)".to_owned(),
+            "Goal tokens: unlimited (number or unlimited)".to_owned(),
+        ];
+        state.write_settings(&mut output, &changed, None).unwrap();
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+             Choice 1: Slash menu: tabs (tabs|combined)\n\
+             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Input:\n\
+             Notice: Type NUMBER VALUE from the list; q cancels\n\
+             Input:\n\
+             Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\n\
+             Choice 1: Slash menu: combined (tabs|combined)\n\
+             Choice 2: Goal tokens: unlimited (number or unlimited)\n\
+             Input:\n"
+        );
     }
 
     #[test]

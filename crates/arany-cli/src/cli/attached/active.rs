@@ -647,7 +647,7 @@ pub(super) async fn submit_objective(
                         TerminalInput::Character(character) if terminal.is_linear() => { approval_answer.apply(TerminalInput::Character(character)); }
                         TerminalInput::Backspace if terminal.is_linear() => { approval_answer.apply(TerminalInput::Backspace); }
                         TerminalInput::Character(character) if character.is_ascii_digit() => {
-                            if let Some(choice) = character.to_digit(10).and_then(|digit| digit.checked_sub(1)).and_then(|index| choices.get(index as usize)).copied() {
+                            if let Some(choice) = input.choice_index(choices.len()).map(|index| choices[index]) {
                                 if approval_more && choice != crate::presentation::ToolApprovalChoice::No {
                                     approval_review_notice = true;
                                 } else { selected = Some(choice); }

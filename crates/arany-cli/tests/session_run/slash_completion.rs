@@ -248,23 +248,49 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         settings_at,
-        b"Current menu: tabs (tabs|combined); view: fullscreen (fullscreen|classic).\r\nSettings: calls=64 tokens=unlimited active-ms=1800000 default-timeout-ms=120000 max-timeout-ms=600000 build-memory-bytes=4294967296 build-processes=256 build-project-bytes=1073741824 build-cache-bytes=8589934592.\r\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.\r\nInput:\r\n",
+        b"Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
+          Choice 1: Slash menu: tabs (tabs|combined)\r\n\
+          Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
+          Choice 3: Goal provider calls: 64 (number or unlimited)\r\n\
+          Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
+          Choice 5: Goal active milliseconds: 1800000 (number or unlimited)\r\n\
+          Choice 6: Default command timeout ms: 120000\r\n\
+          Choice 7: Maximum command timeout ms: 600000\r\n\
+          Choice 8: Build memory bytes: 4294967296\r\n\
+          Choice 9: Build processes/threads: 256\r\n\
+          Choice 10: Build writable project bytes: 1073741824\r\n\
+          Choice 11: Build cache bytes: 8589934592\r\n\
+          Input:\r\n",
     );
-    let invalid_at = transcript.len();
+    for rejected in [&b"combined\r"[..], b"12 combined\r", b"1 classic\r"] {
+        let invalid_at = transcript.len();
+        input
+            .write_all(rejected)
+            .expect("reject invalid NUMBER VALUE");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            invalid_at,
+            b"Notice: Type NUMBER VALUE from the list; q cancels\r\nInput:\r\n",
+        );
+    }
+    let selected_at = transcript.len();
     input
-        .write_all(b"other\r")
-        .expect("reject unknown linear choice");
+        .write_all(b"1 combined\r")
+        .expect("linear combined selection");
     wait_for_after(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        invalid_at,
-        b"Notice: Type a valid setting and value; q cancels\r\nInput:\r\n",
+        selected_at,
+        b"Choice 1: Slash menu: combined (tabs|combined)\r\n",
     );
     let selected_at = transcript.len();
     input
-        .write_all(b"combined\r\r")
+        .write_all(b"\r")
         .expect("linear combined selection saved by empty Enter");
     wait_for_after(
         &mut output,
@@ -1009,7 +1035,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         settings_at,
-        b"> Slash",
+        b"menu:",
     );
     let saved_at = transcript.len();
     input.write_all(b"\x1b[C\r").expect("save combined menu");

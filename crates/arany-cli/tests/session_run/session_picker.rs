@@ -154,17 +154,40 @@ pub(super) fn pump(
     }
 }
 
+fn mouse_modes_enabled(bytes: &[u8]) -> Vec<u32> {
+    [1000, 1002, 1003, 1006, 1015]
+        .into_iter()
+        .filter(|mode| {
+            let enable = format!("\x1b[?{mode}h");
+            bytes
+                .windows(enable.len())
+                .any(|part| part == enable.as_bytes())
+        })
+        .collect()
+}
+
+fn count(bytes: &[u8], needle: &[u8]) -> usize {
+    bytes
+        .windows(needle.len())
+        .filter(|part| *part == needle)
+        .count()
+}
+
 fn run_picker_case(
     name: &str,
     width: u16,
     selection: &[u8],
     older_selected: bool,
     stale_activation: bool,
+    fullscreen: bool,
 ) {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("Workspace");
     let state = temp.path().join("state");
+    if fullscreen {
+        crate::seed_fullscreen(&state);
+    }
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("Session runtime");
@@ -190,8 +213,9 @@ fn run_picker_case(
     } else {
         ""
     };
+    let classic = if fullscreen { "" } else { "--classic " };
     let command = format!(
-        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic {no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
+        "stty rows 24 cols {width}; printf 'SHELL_PID:%s\\n' \"$$\"; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {classic}{no_color}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
     );
     let mut attached = crate::isolation::isolated_script(temp.path());
     attached
@@ -253,6 +277,19 @@ fn run_picker_case(
             thread::yield_now();
         }
     }
+    if fullscreen {
+        // Rows only respond once the picker has enabled its transient capture.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while count(&transcript, b"\x1b[?1000h") == 0 {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(
+                Instant::now() < deadline,
+                "picker capture missing in {name}: {}",
+                tail(&transcript)
+            );
+            thread::yield_now();
+        }
+    }
     let selected_at = transcript.len();
     input.write_all(selection).expect("picker selection");
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -267,6 +304,19 @@ fn run_picker_case(
             tail(&transcript)
         );
         thread::yield_now();
+    }
+    if fullscreen {
+        let selected = &transcript[selected_at..];
+        let returned = selected
+            .windows(b"\x1b[?25h".len())
+            .position(|part| part == b"\x1b[?25h")
+            .expect("composer returned");
+        assert_eq!(
+            count(&selected[..returned], b"\x1b[?1000l"),
+            1,
+            "capture released before selection returns in {name}: {}",
+            tail(selected)
+        );
     }
     if stale_activation {
         let original_mode = std::fs::metadata(&state)
@@ -400,8 +450,17 @@ fn run_picker_case(
         .expect("restored terminal settings")
         .trim_end_matches('\r');
     assert_eq!(before, after, "terminal restored after {name}");
-    assert!(!output_text.contains("\x1b[?1000h"));
-    assert!(!output_text.contains("\x1b[?1049h"));
+    if fullscreen {
+        assert_eq!(count(output_text.as_bytes(), b"\x1b[?1000h"), 1, "{name}");
+        assert_eq!(count(output_text.as_bytes(), b"\x1b[?1000l"), 1, "{name}");
+    } else {
+        assert_eq!(
+            mouse_modes_enabled(output_text.as_bytes()),
+            Vec::<u32>::new(),
+            "Classic picker enabled mouse reporting in {name}"
+        );
+        assert!(!output_text.contains("\x1b[?1049h"));
+    }
 
     let store = Store::open_read_only(StateRoot::open_existing(&state).expect("state reopen"))
         .expect("read-only Store");
@@ -424,10 +483,30 @@ fn run_picker_case(
 
 #[test]
 fn session_picker_selects_rows_by_keyboard_without_mouse_capture() {
-    run_picker_case("keyboard and stale activation", 80, b"\x1b[B\r", true, true);
-    run_picker_case("keyboard", 80, b"\x1b[B\r", true, false);
-    run_picker_case("newest", 80, b"\r", false, false);
-    run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false);
+    run_picker_case(
+        "keyboard and stale activation",
+        80,
+        b"\x1b[B\r",
+        true,
+        true,
+        false,
+    );
+    run_picker_case("keyboard", 80, b"\x1b[B\r", true, false, false);
+    run_picker_case("newest", 80, b"\r", false, false, false);
+    run_picker_case("16-column keyboard", 16, b"\x1b[B\r", true, false, false);
+}
+
+#[test]
+fn fullscreen_session_picker_mouse_selects_the_row_under_the_pointer() {
+    // Two Sessions in 24 rows: the 8-row picker starts at row 17, so Newer is row 18 and Older 19.
+    run_picker_case(
+        "fullscreen mouse",
+        80,
+        b"\x1b[<65;3;18M\x1b[<64;3;18M\x1b[<35;3;19M\x1b[<0;3;19M",
+        true,
+        false,
+        true,
+    );
 }
 
 fn screen_reader_entry(

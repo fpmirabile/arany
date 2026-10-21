@@ -34,77 +34,61 @@ pub(super) struct Preferences {
     pub resources: arany::ToolResourceSettings,
 }
 
+// Linear rows take `NUMBER VALUE`, numbered as `setting_rows` lists them.
 fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+    let Some((number, raw)) = value.split_once(' ') else {
+        return false;
+    };
+    let raw = raw.trim();
     let original = *preferences;
-    let completion = preferences.completion;
-    let view = preferences.view;
-    if let Some(completion) = [completion, completion.toggled()]
-        .into_iter()
-        .find(|completion| completion.label() == value)
-    {
-        preferences.completion = completion;
-    } else if let Some(view) = [view, view.toggled()]
-        .into_iter()
-        .find(|view| view.label() == value)
-    {
-        preferences.view = view;
-    } else if let Some((name, raw)) = value.split_once('=') {
-        let parsed = match name {
-            "calls" => raw
-                .parse::<u32>()
-                .ok()
-                .map(|limit| preferences.goal_budget.max_provider_calls = Some(limit))
-                .or_else(|| {
-                    (raw == "unlimited").then(|| {
-                        preferences.goal_budget.max_provider_calls = None;
-                    })
-                }),
-            "tokens" => raw
-                .parse::<u64>()
-                .ok()
-                .map(|limit| preferences.goal_budget.max_tokens = Some(limit))
-                .or_else(|| {
-                    (raw == "unlimited").then(|| {
-                        preferences.goal_budget.max_tokens = None;
-                    })
-                }),
-            "active-ms" => raw
-                .parse::<u64>()
-                .ok()
-                .map(|limit| preferences.goal_budget.max_active_ms = Some(limit))
-                .or_else(|| {
-                    (raw == "unlimited").then(|| {
-                        preferences.goal_budget.max_active_ms = None;
-                    })
-                }),
-            "default-timeout-ms" => raw.parse::<u32>().ok().map(|limit| {
-                preferences.resources.default_command_timeout_ms = limit;
-            }),
-            "max-timeout-ms" => raw.parse::<u32>().ok().map(|limit| {
-                preferences.resources.max_command_timeout_ms = limit;
-            }),
-            "build-memory-bytes" => raw.parse::<u64>().ok().map(|limit| {
-                preferences.resources.build_memory_bytes = limit;
-            }),
-            "build-processes" => raw.parse::<u32>().ok().map(|limit| {
-                preferences.resources.build_processes = limit;
-            }),
-            "build-project-bytes" => raw.parse::<u64>().ok().map(|limit| {
-                preferences.resources.build_project_bytes = limit;
-            }),
-            "build-cache-bytes" => raw.parse::<u64>().ok().map(|limit| {
-                preferences.resources.build_cache_bytes = limit;
-            }),
-            _ => None,
-        };
-        if parsed.is_none()
-            || preferences.goal_budget.validate().is_err()
-            || !preferences.resources.valid()
-        {
-            *preferences = original;
-            return false;
+    let limit = |raw: &str| {
+        if raw == "unlimited" {
+            Some(None)
+        } else {
+            raw.parse::<u64>().ok().map(Some)
         }
-    } else {
+    };
+    let parsed = match number.parse::<usize>() {
+        Ok(1) => [CompletionLayout::Tabs, CompletionLayout::Combined]
+            .into_iter()
+            .find(|completion| completion.label() == raw)
+            .map(|completion| preferences.completion = completion),
+        Ok(2) => [TerminalMode::Fullscreen, TerminalMode::Classic]
+            .into_iter()
+            .find(|view| view.label() == raw)
+            .map(|view| preferences.view = view),
+        Ok(3) => limit(raw).and_then(|limit| {
+            preferences.goal_budget.max_provider_calls =
+                limit.map(u32::try_from).transpose().ok()?;
+            Some(())
+        }),
+        Ok(4) => limit(raw).map(|limit| preferences.goal_budget.max_tokens = limit),
+        Ok(5) => limit(raw).map(|limit| preferences.goal_budget.max_active_ms = limit),
+        Ok(6) => raw.parse().ok().map(|limit| {
+            preferences.resources.default_command_timeout_ms = limit;
+        }),
+        Ok(7) => raw.parse().ok().map(|limit| {
+            preferences.resources.max_command_timeout_ms = limit;
+        }),
+        Ok(8) => raw.parse().ok().map(|limit| {
+            preferences.resources.build_memory_bytes = limit;
+        }),
+        Ok(9) => raw.parse().ok().map(|limit| {
+            preferences.resources.build_processes = limit;
+        }),
+        Ok(10) => raw.parse().ok().map(|limit| {
+            preferences.resources.build_project_bytes = limit;
+        }),
+        Ok(11) => raw.parse().ok().map(|limit| {
+            preferences.resources.build_cache_bytes = limit;
+        }),
+        _ => None,
+    };
+    if parsed.is_none()
+        || preferences.goal_budget.validate().is_err()
+        || !preferences.resources.valid()
+    {
+        *preferences = original;
         return false;
     }
     true
@@ -152,30 +136,14 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
     ]
 }
 
-fn linear_settings_instruction(preferences: Preferences) -> String {
-    format!(
-        "Current menu: {} (tabs|combined); view: {} (fullscreen|classic).\nSettings: calls={} tokens={} active-ms={} default-timeout-ms={} max-timeout-ms={} build-memory-bytes={} build-processes={} build-project-bytes={} build-cache-bytes={}.\nSet a listed key=value or exact menu/view choice; Enter saves; q cancels.",
-        preferences.completion.label(),
-        preferences.view.label(),
-        preferences
-            .goal_budget
-            .max_provider_calls
-            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
-        preferences
-            .goal_budget
-            .max_tokens
-            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
-        preferences
-            .goal_budget
-            .max_active_ms
-            .map_or_else(|| "unlimited".into(), |value| value.to_string()),
-        preferences.resources.default_command_timeout_ms,
-        preferences.resources.max_command_timeout_ms,
-        preferences.resources.build_memory_bytes,
-        preferences.resources.build_processes,
-        preferences.resources.build_project_bytes,
-        preferences.resources.build_cache_bytes,
-    )
+fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
+    let mut rows = setting_rows(preferences);
+    rows[0].push_str(" (tabs|combined)");
+    rows[1].push_str(" (fullscreen|classic)");
+    for row in &mut rows[2..5] {
+        row.push_str(" (number or unlimited)");
+    }
+    rows
 }
 
 fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
@@ -355,41 +323,32 @@ async fn choose_settings(
     let mut answer = Composer::default();
     let mut invalid = false;
     loop {
-        let rows = setting_rows(chosen);
-        if linear {
-            let instruction = linear_settings_instruction(chosen);
-            terminal.draw_setup_text_input(
-                "Settings",
-                &instruction,
-                &answer,
-                invalid.then_some("Type a valid setting and value; q cancels"),
-            )
+        let notice = std::mem::take(&mut invalid).then_some(if linear {
+            "Type NUMBER VALUE from the list; q cancels"
         } else {
-            let choices: Vec<_> = rows
-                .iter()
-                .enumerate()
-                .map(|(index, row)| (u8::try_from(index + 1).unwrap_or(u8::MAX), row.as_str()))
-                .collect();
-            terminal.draw_setup_choices(
-                0,
-                "Settings",
-                "↑↓ selects a setting; ←→ changes it; Enter saves",
-                &choices,
-                selected_row,
-                invalid.then_some("The selected settings could not be saved"),
-            )
-        }
-        .map_err(|error| error.to_string())?;
-        match terminal
+            "The selected settings could not be saved"
+        });
+        let rows = if linear {
+            linear_setting_rows(chosen)
+        } else {
+            setting_rows(chosen)
+        };
+        terminal
+            .draw_settings(&rows, selected_row, notice)
+            .map_err(|error| error.to_string())?;
+        let input = terminal
             .next_input()
             .await
-            .map_err(|error| error.to_string())?
-        {
+            .map_err(|error| error.to_string())?;
+        match input {
             TerminalInput::Up if !linear => selected_row = selected_row.saturating_sub(1),
             TerminalInput::Down if !linear => selected_row = (selected_row + 1).min(rows.len() - 1),
             TerminalInput::Left if !linear => cycle_setting(&mut chosen, selected_row, false),
             TerminalInput::Right if !linear => cycle_setting(&mut chosen, selected_row, true),
-            TerminalInput::Character(character) if linear => {
+            TerminalInput::Character(_) if !linear => {
+                selected_row = input.choice_index(rows.len()).unwrap_or(selected_row);
+            }
+            TerminalInput::Character(character) => {
                 answer.apply(TerminalInput::Character(character));
             }
             TerminalInput::Backspace if linear => {
@@ -1453,23 +1412,35 @@ mod tests {
     }
 
     #[test]
-    fn invalid_linear_settings_leave_the_draft_unchanged() {
+    fn linear_settings_take_number_value_and_reject_invalid_rows_unchanged() {
         let mut preferences = Preferences::default();
         let original = preferences;
         for value in [
-            "calls=0",
-            "tokens=0",
-            "active-ms=0",
-            "default-timeout-ms=600001",
-            "max-timeout-ms=119999",
-            "build-memory-bytes=0",
-            "build-processes=257",
-            "build-project-bytes=1073741825",
-            "build-project-bytes=1",
-            "build-project-bytes=1073741823",
-            "build-cache-bytes=8589934593",
-            "build-cache-bytes=1",
-            "build-cache-bytes=8589934591",
+            "",
+            "3",
+            "3 ",
+            "0 64",
+            "12 64",
+            "x 64",
+            "calls=64",
+            "combined",
+            "1 fullscreen",
+            "2 tabs",
+            "3 0",
+            "3 4294967296",
+            "4 0",
+            "5 0",
+            "6 600001",
+            "7 119999",
+            "6 unlimited",
+            "8 0",
+            "9 257",
+            "10 1073741825",
+            "10 1",
+            "10 1073741823",
+            "11 8589934593",
+            "11 1",
+            "11 8589934591",
         ] {
             assert!(!apply_setting(&mut preferences, value), "{value}");
             assert_eq!(
@@ -1477,8 +1448,21 @@ mod tests {
                 "invalid value changed draft: {value}"
             );
         }
-        assert!(apply_setting(&mut preferences, "calls=unlimited"));
+        let rows = linear_setting_rows(preferences);
+        assert_eq!(rows.len(), 11);
+        assert_eq!(rows[0], "Slash menu: tabs (tabs|combined)");
+        assert_eq!(rows[2], "Goal provider calls: 64 (number or unlimited)");
+        assert_eq!(rows[10], "Build cache bytes: 8589934592");
+        assert!(apply_setting(&mut preferences, "1 combined"));
+        assert!(apply_setting(&mut preferences, "2  fullscreen"));
+        assert!(apply_setting(&mut preferences, "3 unlimited"));
+        assert!(apply_setting(&mut preferences, "4 100000"));
+        assert!(apply_setting(&mut preferences, "7 300000"));
+        assert_eq!(preferences.completion, CompletionLayout::Combined);
+        assert_eq!(preferences.view, TerminalMode::Fullscreen);
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
+        assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
+        assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
     }
 
     #[test]

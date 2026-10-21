@@ -1945,7 +1945,7 @@ fn unconfigured_inline_composer_shows_draft_and_setup_selection_at_narrow_widths
             &mut transcript,
             &mut answered,
             quick_at,
-            b"> Setup",
+            b"4. Setup",
         );
         let quick_setup_at = transcript.len();
         input.write_all(b"\r").expect("open focused setup action");

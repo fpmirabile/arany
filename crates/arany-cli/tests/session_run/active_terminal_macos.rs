@@ -71,16 +71,20 @@ fn wait_stderr_disconnection(mut probe: std::fs::File, context: &str) {
 
 #[test]
 fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
-    for (signal, suspend, columns, rows) in [
-        (Signal::TERM, false, 80, 24),
-        (Signal::HUP, false, 80, 24),
-        (Signal::TERM, true, 80, 24),
-        (Signal::TERM, false, 16, 8),
+    for (signal, suspend, columns, rows, fullscreen) in [
+        (Signal::TERM, false, 80, 24, true),
+        (Signal::HUP, false, 80, 24, true),
+        (Signal::TERM, true, 80, 24, true),
+        (Signal::TERM, false, 16, 8, true),
+        (Signal::TERM, false, 80, 24, false),
+        (Signal::TERM, true, 80, 24, false),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         let state = temp.path().join("state");
-        crate::seed_fullscreen(&state);
+        if fullscreen {
+            crate::seed_fullscreen(&state);
+        }
         std::fs::create_dir(&workspace).unwrap();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -130,13 +134,21 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         let mut suspended = false;
         let mut continued = false;
         let mut resumed_at = 0;
+        let mut queries = 0;
+        // Fullscreen picker rows capture the mouse transiently; Classic never enables it.
+        let captures = usize::from(fullscreen);
         let output = crate::process::capture_terminal(
             child.child(),
             master,
             Duration::from_secs(20),
             64 * 1024,
             |bytes| {
-                assert!(!bytes.windows(4).any(|part| part == b"\x1b[6n"));
+                if fullscreen {
+                    assert!(!bytes.windows(4).any(|part| part == b"\x1b[6n"));
+                } else {
+                    assert!(bytes.windows(4).filter(|part| *part == b"\x1b[6n").count() <= 128);
+                    super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
+                }
                 crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
                 let enabled = bytes
                     .windows(8)
@@ -145,7 +157,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                 let frame_complete = [b"Stable".as_slice(), b"Esc", b"\x1b[?25l"]
                     .iter()
                     .all(|cue| bytes.windows(cue.len()).any(|part| part == *cue));
-                if !signalled && enabled == 1 && frame_complete {
+                if !signalled && enabled == captures && frame_complete {
                     assert_ne!(crate::process::terminal_settings(&probe), before);
                     kill_process(pid, if suspend { Signal::TSTP } else { signal }).unwrap();
                     signalled = true;
@@ -165,20 +177,24 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                         .windows(8)
                         .filter(|part| *part == b"\x1b[?1000l")
                         .count();
-                    if disabled == 0 {
+                    if disabled < captures {
                         return;
                     }
-                    assert_eq!(disabled, 1);
+                    assert_eq!(disabled, captures);
                     resumed_at = bytes.len();
                     kill_process(pid, Signal::CONT).unwrap();
                     suspended = true;
                 }
                 if suspended
                     && !continued
-                    && enabled == 2
+                    && enabled == 2 * captures
                     && bytes[resumed_at..]
                         .windows(6)
                         .any(|part| part == b"\x1b[?25l")
+                    && (fullscreen
+                        || bytes[resumed_at..]
+                            .windows(b"Stable".len())
+                            .any(|part| part == b"Stable"))
                 {
                     assert_ne!(crate::process::terminal_settings(&probe), before);
                     kill_process(pid, signal).unwrap();
@@ -188,14 +204,14 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         );
         assert!(
             declined && signalled,
-            "native picker admission at {columns}x{rows}"
+            "native picker admission at {columns}x{rows}, fullscreen {fullscreen}"
         );
         assert_eq!(suspended, suspend);
         assert_eq!(continued, suspend);
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         restored(&probe, &before);
-        let count = if suspend { 2 } else { 1 };
+        let count = if suspend { 2 * captures } else { captures };
         for sequence in [b"\x1b[?1000h", b"\x1b[?1000l"] {
             assert_eq!(
                 output
@@ -203,8 +219,18 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                     .windows(8)
                     .filter(|part| *part == sequence)
                     .count(),
-                count
+                count,
+                "fullscreen {fullscreen}"
             );
+        }
+        if !fullscreen {
+            let text = String::from_utf8_lossy(&output.stderr);
+            for mode in [1049, 1000, 1002, 1003, 1006, 1015] {
+                assert!(
+                    !text.contains(&format!("\x1b[?{mode}h")),
+                    "Classic picker enabled {mode}"
+                );
+            }
         }
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();

@@ -99,6 +99,18 @@ pub enum TerminalInput {
     LineContinued,
 }
 
+impl TerminalInput {
+    // A digit picks the matching 1-based row of a numbered dialog.
+    #[must_use]
+    pub fn choice_index(self, count: usize) -> Option<usize> {
+        let Self::Character(character) = self else {
+            return None;
+        };
+        let index = usize::try_from(character.to_digit(10)?.checked_sub(1)?).ok()?;
+        (index < count).then_some(index)
+    }
+}
+
 pub(super) enum TerminalReader {
     Keys(InputReader),
     #[cfg(unix)]

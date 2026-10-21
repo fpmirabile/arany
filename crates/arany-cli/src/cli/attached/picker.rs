@@ -22,29 +22,30 @@ pub(super) async fn pick_quick_action(
     composer: &Composer,
     setup_required: bool,
 ) -> Result<QuickChoice, String> {
+    let action = |index| match index {
+        0 => Selector::Models,
+        1 => Selector::Agents,
+        2 => Selector::Resume,
+        _ => Selector::Setup,
+    };
     let mut selected = if setup_required { 3 } else { 0 };
     loop {
         terminal
             .draw_quick_actions(selected, !composer.is_empty())
             .map_err(|error| error.to_string())?;
-        match terminal
+        let input = terminal
             .next_input()
             .await
-            .map_err(|error| error.to_string())?
-        {
+            .map_err(|error| error.to_string())?;
+        if let Some(index) = input.choice_index(4) {
+            return Ok(QuickChoice::Selected(action(index)));
+        }
+        match input {
             TerminalInput::Up => selected = selected.saturating_sub(1),
             TerminalInput::Down => selected = (selected + 1).min(3),
             TerminalInput::Home => selected = 0,
             TerminalInput::End => selected = 3,
-            TerminalInput::Submit => {
-                let action = match selected {
-                    0 => Selector::Models,
-                    1 => Selector::Agents,
-                    2 => Selector::Resume,
-                    _ => Selector::Setup,
-                };
-                return Ok(QuickChoice::Selected(action));
-            }
+            TerminalInput::Submit => return Ok(QuickChoice::Selected(action(selected))),
             TerminalInput::Suspend => terminal
                 .suspend_and_resume(composer.text().len())
                 .map_err(|error| error.to_string())?,

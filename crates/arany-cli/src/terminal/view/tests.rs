@@ -166,7 +166,14 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
             (help_len() - 1, "/exit", "Exit Session"),
         ] {
             terminal
-                .draw(|frame| draw_help_frame(frame, selected, Palette { color: false }))
+                .draw(|frame| {
+                    draw_help_frame(
+                        frame,
+                        bottom_area(frame.area(), 20),
+                        selected,
+                        Palette { color: false },
+                    )
+                })
                 .expect("help frame");
             let buffer = terminal.backend().buffer();
             let rows = (0..height)
@@ -195,7 +202,14 @@ fn help_keeps_every_registered_command_reachable_at_narrow_widths() {
     for index in 0..help_len() {
         let entry = help_entry(index).expect("registered command");
         terminal
-            .draw(|frame| draw_help_frame(frame, index, Palette { color: false }))
+            .draw(|frame| {
+                draw_help_frame(
+                    frame,
+                    bottom_area(frame.area(), 20),
+                    index,
+                    Palette { color: false },
+                )
+            })
             .expect("help frame");
         let buffer = terminal.backend().buffer();
         let visible = (0..24)
@@ -2229,12 +2243,20 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
         let backend = TestBackend::new(width, 12);
         let mut terminal = Terminal::new(backend).expect("test terminal");
         terminal
-            .draw(|frame| draw_session_picker_frame(frame, &items, 14, Palette { color: false }))
+            .draw(|frame| {
+                draw_session_picker_frame(
+                    frame,
+                    bottom_area(frame.area(), 12),
+                    &items,
+                    14,
+                    Palette { color: false },
+                )
+            })
             .expect("picker frame");
         let buffer = terminal.backend().buffer();
         let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("Resume · 15"));
-        assert!(row(6).starts_with("> Hostile"));
+        assert!(row(6).starts_with("› 15. Hostile"), "{width}: {}", row(6));
         if width == 80 {
             assert!(row(6).contains("\\u{202e}"));
         }
@@ -2263,13 +2285,133 @@ fn session_picker_keeps_selection_visible_and_titles_inert() {
         assert_eq!(session_picker_index(area, width, 10, 14, 15), None);
         assert_eq!(session_picker_index(area, 0, 2, 0, 1), None);
         assert_eq!(buffer[(0, 6)].fg, Color::Reset);
-        assert!(buffer[(0, 6)].modifier.contains(Modifier::BOLD));
+        assert!(buffer[(0, 6)].modifier.contains(Modifier::REVERSED));
+        assert!(!buffer[(0, 5)].modifier.contains(Modifier::REVERSED));
+        assert!(row(5).starts_with("  14. Session 13"));
         terminal
-            .draw(|frame| draw_session_picker_frame(frame, &items, 14, Palette { color: true }))
+            .draw(|frame| {
+                draw_session_picker_frame(
+                    frame,
+                    bottom_area(frame.area(), 12),
+                    &items,
+                    14,
+                    Palette { color: true },
+                )
+            })
             .expect("colored picker frame");
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer[(0, 6)].fg, Color::Cyan);
+        assert_eq!(buffer[(0, 0)].fg, Color::Cyan);
+        assert!(buffer[(0, 6)].modifier.contains(Modifier::REVERSED));
         assert_eq!(buffer[(0, 9)].fg, Color::Reset);
+    }
+}
+
+#[test]
+fn inline_dialogs_number_rows_below_the_latest_history_at_every_geometry() {
+    let backdrop = (0..30)
+        .map(|index| HistoryRow {
+            text: format!("history {index}"),
+            speaker: MessageKind::Assistant,
+            heading: false,
+            matched: false,
+        })
+        .collect::<Vec<_>>();
+    let items = ["First", "Second", "Third"]
+        .into_iter()
+        .map(|title| SessionListItem {
+            id: arany::SessionId::new(),
+            title: title.into(),
+            last_sequence: 1,
+            created_at: "2026-10-06 12:00:00".into(),
+            last_activity_at: "2026-10-06 12:05:00".into(),
+            defaults: arany::SessionDefaults::default(),
+        })
+        .collect::<Vec<_>>();
+    let settings = (1..=11)
+        .map(|row| format!("Setting {row}: value"))
+        .collect::<Vec<_>>();
+    let agents = AgentInspectorModel {
+        selected: 1,
+        choices: vec![
+            "Run 1: primary; finished".into(),
+            "Run 1: child 1; Failed".into(),
+        ],
+        lines: vec![
+            "Last Run: 2 agents; children: 1".into(),
+            "Agent 2/2: child 1; Failed".into(),
+        ],
+    };
+    for width in [80, 50, 16] {
+        for height in [8, 24] {
+            let cases: [(&str, u16, &str); 5] = [
+                ("quick actions", 6, "› 2. "),
+                ("resume", 9, "› 1. "),
+                ("help", 20, "› 1. /help"),
+                ("settings", 13, "› 11. "),
+                ("agents", 8, "› 2. "),
+            ];
+            for (name, dialog_height, focused) in cases {
+                let mut terminal =
+                    Terminal::new(TestBackend::new(width, height)).expect("dialog terminal");
+                let mut area = Rect::default();
+                terminal
+                    .draw(|frame| {
+                        area = bottom_area(frame.area(), dialog_height);
+                        draw_backdrop(frame, area.y, &backdrop, Palette { color: false });
+                        let palette = Palette { color: false };
+                        match name {
+                            "quick actions" => {
+                                draw_quick_actions_frame(frame, area, 1, false, palette);
+                            }
+                            "resume" => draw_session_picker_frame(frame, area, &items, 0, palette),
+                            "help" => draw_help_frame(frame, area, 0, palette),
+                            "settings" => {
+                                draw_settings_frame(frame, area, &settings, 10, None, palette);
+                            }
+                            _ => draw_agent_inspector_frame(frame, area, &agents, 0, palette),
+                        }
+                    })
+                    .expect("dialog frame");
+                let buffer = terminal.backend().buffer();
+                let rows = (0..height)
+                    .map(|y| buffer_row(buffer, y))
+                    .collect::<Vec<_>>();
+                let context = format!("{name} at {width}x{height}: {rows:?}");
+                assert_eq!(area.bottom(), height, "{context}");
+                assert!(rows[usize::from(height - 1)].contains("Esc"), "{context}");
+                let focus = (area.y..height)
+                    .find(|y| rows[usize::from(*y)].starts_with(focused))
+                    .unwrap_or_else(|| panic!("focused row missing in {context}"));
+                assert!(
+                    buffer[(0, focus)].modifier.contains(Modifier::REVERSED),
+                    "{context}"
+                );
+                assert!(
+                    rows[usize::from(area.y)..]
+                        .iter()
+                        .any(|row| row.starts_with("  ") && row.contains(". ")),
+                    "unfocused numbered row in {context}"
+                );
+                assert!(
+                    rows[usize::from(area.y)..]
+                        .iter()
+                        .all(|row| !row.contains("history")),
+                    "{context}"
+                );
+                if area.y > 0 {
+                    assert!(
+                        rows[usize::from(area.y - 1)].starts_with("history 29"),
+                        "{context}"
+                    );
+                }
+                assert!(
+                    buffer
+                        .content()
+                        .iter()
+                        .all(|cell| cell.fg == Color::Reset && cell.bg == Color::Reset)
+                );
+            }
+        }
     }
 }
 
@@ -2287,6 +2429,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                             .draw(|frame| {
                                 draw_quick_actions_frame(
                                     frame,
+                                    bottom_area(frame.area(), 6),
                                     selected,
                                     has_draft,
                                     Palette { color },
@@ -2299,7 +2442,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                             .collect::<Vec<_>>();
                         let row = rows
                             .iter()
-                            .position(|row| row.starts_with(&format!("> {name}")))
+                            .position(|row| row.starts_with(&format!("› {}. {name}", selected + 1)))
                             .expect("focused action visible");
                         let footer = rows.last().expect("footer");
                         assert!(footer.contains("Esc"));
@@ -2311,7 +2454,11 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                         } else {
                             assert!(footer.contains("Enter"));
                         }
-                        assert!(buffer[(0, row as u16)].modifier.contains(Modifier::BOLD));
+                        assert!(
+                            buffer[(0, row as u16)]
+                                .modifier
+                                .contains(Modifier::REVERSED)
+                        );
                         assert!(!rows.iter().any(|row| row.contains("Effort")));
                         if !color {
                             assert!(
@@ -2407,7 +2554,7 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                         .collect::<Vec<_>>();
                     let focused = rows
                         .iter()
-                        .find(|row| row.starts_with("> 4096 "))
+                        .find(|row| row.starts_with("› 4096. "))
                         .expect("focused last row");
                     assert!(focused.contains("<low>"), "{width}x{height}: {rows:?}");
                     assert!(!focused.contains('\u{1b}') && !focused.contains('\u{202e}'));
@@ -2546,13 +2693,22 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
             ],
         };
         terminal
-            .draw(|frame| draw_agent_inspector_frame(frame, &model, 0, Palette { color: false }))
+            .draw(|frame| {
+                draw_agent_inspector_frame(
+                    frame,
+                    bottom_area(frame.area(), 14),
+                    &model,
+                    0,
+                    Palette { color: false },
+                )
+            })
             .expect("agent frame");
         let buffer = terminal.backend().buffer();
         let row = |y| buffer_row(buffer, y);
         assert!(row(0).contains("Last Run: 2 agents; children: 1"));
         assert!(row(1).contains("primary; finished"));
-        assert!(row(2).starts_with("> Run 1: child 1; Failed"));
+        assert!(row(1).starts_with("  1. Run 1: primary; finished"));
+        assert!(row(2).starts_with("› 2. Run 1: child 1; Failed"));
         assert!(row(5).contains("child 1; Failed"));
         assert!(row(6).contains("hostile\\u{001b}[31m"));
         assert!(row(13).contains("Esc close"));
@@ -2581,7 +2737,15 @@ fn agent_inspector_keeps_details_and_keyboard_help_in_viewport() {
         ],
     };
     terminal
-        .draw(|frame| draw_agent_inspector_frame(frame, &model, 0, Palette { color: false }))
+        .draw(|frame| {
+            draw_agent_inspector_frame(
+                frame,
+                bottom_area(frame.area(), 14),
+                &model,
+                0,
+                Palette { color: false },
+            )
+        })
         .expect("narrow agent frame");
     let footer = (0..16)
         .map(|x| terminal.backend().buffer()[(x, 13)].symbol())
@@ -3129,7 +3293,13 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
             for scroll in 0..count {
                 terminal
                     .draw(|frame| {
-                        draw_agent_inspector_frame(frame, &inspector, scroll, Palette { color })
+                        draw_agent_inspector_frame(
+                            frame,
+                            bottom_area(frame.area(), 14),
+                            &inspector,
+                            scroll,
+                            Palette { color },
+                        )
                     })
                     .unwrap();
                 let buffer = terminal.backend().buffer();

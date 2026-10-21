@@ -416,7 +416,7 @@ fn inline_model_catalog_at_width(width: u16) {
     let before_catalog = transcript.len();
     input.write_all(b"\r").expect("open catalog");
     let model_label: &[u8] = if width < 20 {
-        "mo…l-1".as_bytes()
+        "mo…-1".as_bytes()
     } else {
         b"model-1"
     };
@@ -556,10 +556,10 @@ fn inline_model_catalog_at_width(width: u16) {
         };
         for (keys, marker, hide_cursor, label) in [
             (
-                &b"\x1b[D\x0b\r"[..],
+                &b"\x1b[D\x0b1"[..],
                 &b"<low>"[..],
                 true,
-                "picker with mid-draft caret",
+                "digit 1 opens the picker with a mid-draft caret",
             ),
             (
                 &b"\x1b[C"[..],
