@@ -130,50 +130,55 @@ impl FromStr for GoalId {
     }
 }
 
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+    ("SessionStarted", 6),
+    ("SessionDefaultChanged", 6),
+    ("SessionForked", 6),
+    ("SessionRenamed", 6),
+    ("GoalRunLinked", 6),
+    ("GoalResumed", 6),
+    ("GoalPlanContractRecorded", 6),
+    ("GoalContextCompacted", 6),
+    ("GoalSteeringNoteRecorded", 6),
+    ("AssistantDisplayRecorded", 6),
+    ("MessageCommitted", 6),
+    ("MessageAccepted", 7),
+    ("AgentSpawned", 11),
+    ("AgentFinished", 10),
+    ("ProviderCallRecorded", 13),
+    ("WorkerDataChunk", 1),
+    ("WorkerDataSealed", 1),
+    ("WorkerStopObserved", 1),
+    ("WorkerIntegrationRecorded", 1),
+    ("WorkerHandoverDiscarded", 1),
+    ("WorkerLeaseReleased", 1),
+    ("WorkerVerificationRecorded", 1),
+    ("WorkerHandoverRecorded", 2),
+    ("ToolResultsCleared", 1),
+    ("GoalStarted", 7),
+    ("GoalFinished", 7),
+    ("SupervisorVerdictRecorded", 1),
+    ("WorkspaceRewindStarted", 1),
+    ("WorkspaceRewindFinished", 1),
+    ("ProviderFallbackUsed", 1),
+    ("ProviderRetryScheduled", 1),
+    ("ToolPermissionDecided", 4),
+    ("HookStarted", 3),
+    ("HookFinished", 8),
+    ("ToolFinished", 19),
+    ("RunStarted", 17),
+    ("RunFinished", 9),
+    ("GoalProviderCallReserved", 7),
+    ("GoalCompactionCallReserved", 7),
+    ("ToolStarted", 13),
+    ("ContextCompacted", 7),
+];
+
 pub(crate) fn payload_version(kind: &str) -> Option<i64> {
-    match kind {
-        "SessionStarted"
-        | "SessionDefaultChanged"
-        | "SessionForked"
-        | "SessionRenamed"
-        | "GoalRunLinked"
-        | "GoalResumed"
-        | "GoalPlanContractRecorded"
-        | "GoalContextCompacted"
-        | "GoalSteeringNoteRecorded"
-        | "AssistantDisplayRecorded"
-        | "MessageCommitted" => Some(6),
-        "MessageAccepted" => Some(7),
-        "AgentSpawned" => Some(11),
-        "AgentFinished" => Some(10),
-        "ProviderCallRecorded" => Some(13),
-        "WorkerDataChunk"
-        | "WorkerDataSealed"
-        | "WorkerStopObserved"
-        | "WorkerIntegrationRecorded"
-        | "WorkerHandoverDiscarded"
-        | "WorkerLeaseReleased"
-        | "WorkerVerificationRecorded" => Some(1),
-        "WorkerHandoverRecorded" => Some(2),
-        "ToolResultsCleared" => Some(1),
-        "GoalStarted" | "GoalFinished" => Some(7),
-        "SupervisorVerdictRecorded" => Some(1),
-        "WorkspaceRewindStarted"
-        | "WorkspaceRewindFinished"
-        | "ProviderFallbackUsed"
-        | "ProviderRetryScheduled" => Some(1),
-        "ToolPermissionDecided" => Some(4),
-        "HookStarted" => Some(3),
-        "HookFinished" => Some(8),
-        "ToolFinished" => Some(19),
-        "RunStarted" => Some(17),
-        "RunFinished" => Some(9),
-        "GoalProviderCallReserved" => Some(7),
-        "GoalCompactionCallReserved" => Some(7),
-        "ToolStarted" => Some(13),
-        "ContextCompacted" => Some(7),
-        _ => None,
-    }
+    PAYLOAD_VERSIONS
+        .iter()
+        .find(|(name, _)| *name == kind)
+        .map(|(_, version)| *version)
 }
 pub(crate) const MAX_CHILD_TOOL_CALLS: usize = 16;
 // Every model Tool call takes one inference turn, plus the final report.

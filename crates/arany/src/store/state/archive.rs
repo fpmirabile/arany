@@ -1,3 +1,4 @@
+use super::super::migrate;
 use super::{
     HISTORY_FILES, StateRoot, StoreError, check_private_record_file, checkpoints, nonblocking,
     prepare_database_file,
@@ -15,7 +16,7 @@ const PLAN_TEMP: &str = "pending.tmp";
 const MANIFEST: &str = "manifest.json";
 const MAX_PLAN_BYTES: usize = 4096;
 
-type Identity = (u64, u64, u64);
+pub(in crate::store) type Identity = (u64, u64, u64);
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -50,7 +51,14 @@ impl ArchivedHistory {
 
 impl StateRoot {
     pub fn archive_incompatible_history(&self) -> Result<Option<ArchivedHistory>, StoreError> {
-        if self.archive_plan()?.is_none() {
+        self.upgrade_or_archive_history(&migrate::REGISTRY)
+    }
+
+    pub(in crate::store) fn upgrade_or_archive_history(
+        &self,
+        registry: &migrate::Registry<'_>,
+    ) -> Result<Option<ArchivedHistory>, StoreError> {
+        if self.archive_plan()?.is_none() && !migrate::pending(self)? {
             let _shared = self.lock_history(false)?;
             match check_history(self) {
                 Err(StoreError::InvalidHistory) => {}
@@ -66,9 +74,13 @@ impl StateRoot {
         let plan = match self.archive_plan()? {
             Some(plan) => plan,
             None => {
+                migrate::recover(self)?;
                 match check_history(self) {
                     Err(StoreError::InvalidHistory) => {}
                     result => return result.map(|()| None),
+                }
+                if migrate::upgrade(self, registry)? {
+                    return Ok(None);
                 }
                 self.write_archive_plan()?
             }
@@ -146,24 +158,38 @@ impl StateRoot {
         if identity_of(&archive, &plan.name)?.is_some() {
             return Err(StoreError::HistoryChanged);
         }
-        let mut options = OpenOptions::new();
-        options
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .follow(FollowSymlinks::No);
-        #[cfg(unix)]
-        cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
-        nonblocking(&mut options);
-        let mut file = archive.open_with(PLAN_TEMP, &options)?;
-        check_private_record_file(&file, usize::MAX)?;
-        file.write_all(&serde_json::to_vec(&plan).map_err(|_| StoreError::ArchiveConflict)?)?;
-        step()?;
-        file.sync_all()?;
-        rename(&archive, PLAN_TEMP, &archive, PLAN)?;
-        sync(&archive)?;
+        publish(
+            &archive,
+            PLAN_TEMP,
+            PLAN,
+            &serde_json::to_vec(&plan).map_err(|_| StoreError::ArchiveConflict)?,
+        )?;
         Ok(plan)
     }
+}
+
+pub(in crate::store) fn publish(
+    dir: &Dir,
+    temp: &str,
+    name: &str,
+    bytes: &[u8],
+) -> Result<(), StoreError> {
+    let mut options = OpenOptions::new();
+    options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .follow(FollowSymlinks::No);
+    #[cfg(unix)]
+    cap_std::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    nonblocking(&mut options);
+    let mut file = dir.open_with(temp, &options)?;
+    check_private_record_file(&file, usize::MAX)?;
+    file.write_all(bytes)?;
+    step()?;
+    file.sync_all()?;
+    rename(dir, temp, dir, name)?;
+    sync(dir)
 }
 
 fn check_history(root: &StateRoot) -> Result<(), StoreError> {
@@ -171,7 +197,7 @@ fn check_history(root: &StateRoot) -> Result<(), StoreError> {
     super::super::replay::validate_history(&connection)
 }
 
-fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
+pub(in crate::store) fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     cap_std::fs::DirBuilderExt::mode(&mut builder, 0o700);
@@ -185,7 +211,7 @@ fn private_subdirectory(parent: &Dir, name: &str) -> Result<Dir, StoreError> {
     Ok(dir)
 }
 
-fn identity_of(dir: &Dir, name: &str) -> Result<Option<Identity>, StoreError> {
+pub(in crate::store) fn identity_of(dir: &Dir, name: &str) -> Result<Option<Identity>, StoreError> {
     match dir.symlink_metadata(name) {
         Ok(metadata) => Ok(Some((metadata.dev(), metadata.ino(), metadata.len()))),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
@@ -193,12 +219,17 @@ fn identity_of(dir: &Dir, name: &str) -> Result<Option<Identity>, StoreError> {
     }
 }
 
-fn rename(from_dir: &Dir, from: &str, to_dir: &Dir, to: &str) -> Result<(), StoreError> {
+pub(in crate::store) fn rename(
+    from_dir: &Dir,
+    from: &str,
+    to_dir: &Dir,
+    to: &str,
+) -> Result<(), StoreError> {
     step()?;
     Ok(from_dir.rename(from, to_dir, to)?)
 }
 
-fn sync(dir: &Dir) -> Result<(), StoreError> {
+pub(in crate::store) fn sync(dir: &Dir) -> Result<(), StoreError> {
     step()?;
     dir.open_with(".", OpenOptions::new().read(true))?
         .sync_all()?;
@@ -206,17 +237,17 @@ fn sync(dir: &Dir) -> Result<(), StoreError> {
 }
 
 #[cfg(not(test))]
-fn step() -> io::Result<()> {
+pub(in crate::store) fn step() -> io::Result<()> {
     Ok(())
 }
 
 #[cfg(test)]
 thread_local! {
-    static FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    pub(in crate::store) static FAIL_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
-fn step() -> io::Result<()> {
+pub(in crate::store) fn step() -> io::Result<()> {
     FAIL_AT.with(|fail| match fail.get() {
         Some(0) => Err(io::Error::other("injected durability failure")),
         remaining => {
@@ -226,7 +257,7 @@ fn step() -> io::Result<()> {
     })
 }
 
-fn valid_archive_name(name: &str) -> bool {
+pub(in crate::store) fn valid_archive_name(name: &str) -> bool {
     name.len() == 28
         && name.starts_with("history-")
         && name.ends_with('Z')
@@ -235,7 +266,7 @@ fn valid_archive_name(name: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || b"-.".contains(&byte))
 }
 
-fn archive_name(now: SystemTime) -> String {
+pub(in crate::store) fn archive_name(now: SystemTime) -> String {
     let millis = now
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_millis());
@@ -351,6 +382,10 @@ mod tests {
             );
         }
         assert!(!path.join("checkpoints.sqlite").exists());
+        assert!(
+            !path.join("migrations").exists(),
+            "history below the floor is never copied"
+        );
         assert_eq!(
             state.record(RecordKind::UiPreferences).read().unwrap(),
             Some(b"ui".to_vec())
