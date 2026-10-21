@@ -230,6 +230,20 @@ pub(super) fn discover() -> Option<Program> {
 
 const USER_CONFIG_BYTES: u64 = 64 * 1024;
 
+fn read_user_config(path: &Path) -> Option<Vec<u8>> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+        .open(path)
+        .ok()
+        .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))?;
+    let mut bytes = Vec::new();
+    file.take(USER_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() as u64 <= USER_CONFIG_BYTES).then_some(bytes)
+}
+
 // Parsed as data only: includes and every key except user.name/user.email are ignored.
 pub(super) fn user_identity() -> Option<GitIdentity> {
     let home = directories::BaseDirs::new()?.home_dir().to_owned();
@@ -240,21 +254,7 @@ pub(super) fn user_identity() -> Option<GitIdentity> {
     // Git reads the XDG file first, so ~/.gitconfig wins for each key.
     let (mut name, mut email) = (None, None);
     for path in [xdg.join("git/config"), home.join(".gitconfig")] {
-        let Some(bytes) = std::fs::OpenOptions::new()
-            .read(true)
-            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
-            .open(&path)
-            .ok()
-            .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
-            .and_then(|file| {
-                let mut bytes = Vec::new();
-                file.take(USER_CONFIG_BYTES + 1)
-                    .read_to_end(&mut bytes)
-                    .ok()
-                    .filter(|_| bytes.len() as u64 <= USER_CONFIG_BYTES)
-                    .map(|_| bytes)
-            })
-        else {
+        let Some(bytes) = read_user_config(&path) else {
             continue;
         };
         let (found_name, found_email) = user_section(&String::from_utf8_lossy(&bytes));
@@ -2244,6 +2244,23 @@ pub(super) mod tests {
                 .valid()
             );
         }
+    }
+
+    #[test]
+    fn user_config_fifo_without_a_writer_is_refused_promptly() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("config");
+        nix::unistd::mkfifo(
+            &fifo,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || sender.send(read_user_config(&fifo)).ok());
+        let read = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("FIFO open must not block");
+        assert!(read.is_none());
     }
 
     fn private_hidden() -> HiddenPaths {
