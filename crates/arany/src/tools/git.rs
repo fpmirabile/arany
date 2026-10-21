@@ -356,7 +356,6 @@ fn invocations(call: &ToolCall, filtered: bool) -> Result<Vec<Vec<String>>, Tool
                 "--no-show-signature",
             ]);
             if filtered {
-                // Changed paths are the per-commit evidence; the requested count is kept after filtering.
                 // Rename detection reports only the destination, which would hide a visible source.
                 argv.extend(owned(&[
                     "--name-only",
@@ -746,7 +745,10 @@ fn diff_output(
 fn visible_patch<'a>(patch: &'a str, hidden: &'a HiddenPaths) -> impl Iterator<Item = &'a str> {
     let mut hiding = true;
     patch.split_inclusive('\n').filter(move |line| {
-        let text = line.strip_suffix('\n').unwrap_or(line);
+        // A capture cut mid-line could shorten a header's path past the filter.
+        let Some(text) = line.strip_suffix('\n') else {
+            return false;
+        };
         if let Some(header) = text.strip_prefix("diff ") {
             hiding = section_path(header).is_none_or(|path| !shown(path, hidden));
         } else if let Some(path) = text.strip_prefix("* Unmerged path ") {
@@ -757,8 +759,7 @@ fn visible_patch<'a>(patch: &'a str, hidden: &'a HiddenPaths) -> impl Iterator<I
     })
 }
 
-// Without renames a two-way header is `--git a/P b/P`; a conflict's combined header is `--cc P`.
-// Quoted names start with `"` and stay hidden.
+// Without renames a two-way header is `a/P b/P`; quoted names stay hidden.
 fn section_path(header: &str) -> Option<&str> {
     if let Some(names) = header.strip_prefix("--git ") {
         let path = names.get(2..2 + names.len().checked_sub(5)? / 2)?;
@@ -782,8 +783,7 @@ fn object_id(bytes: &[u8]) -> Result<&str, ToolError> {
         .ok_or(ToolError::Operation)
 }
 
-// A filtered log carries `--name-only` path lines after each commit; a commit is kept only when one names
-// a shown path, so commits touching only hidden paths, or with no evidence, are dropped before any limit.
+// A commit is kept only when one of its `--name-only` lines names a shown path.
 fn log_output(
     raw: &[u8],
     overflow: bool,
@@ -1916,7 +1916,7 @@ mod tests {
         // An overflow made only of hidden rows neither displaces visible rows nor marks truncation.
         let status: String = (0..300)
             .map(|n| format!("? private/f{n}\0"))
-            .chain(["? src/a\0".to_owned()])
+            .chain(["? private/\0".to_owned(), "? src/a\0".to_owned()])
             .collect();
         let value = status_output(status.as_bytes(), false, 4096, &hidden).unwrap();
         assert_eq!(value["entries"], json!([{"path": "src/a", "state": "??"}]));
@@ -1934,6 +1934,7 @@ mod tests {
             "diff --cc src/b\n++both\n",
             "* Unmerged path private/u\n",
             "* Unmerged path src/u\n",
+            "diff --cc priv",
         ]
         .concat();
         let value =
@@ -2048,8 +2049,14 @@ mod tests {
             "{filtered}"
         );
         assert!(filtered.contains("+edited"), "{filtered}");
+        // Git collapses an untracked directory to `private/fresh/`, which the rule still covers.
+        std::fs::create_dir_all(workspace.join("private/fresh")).unwrap();
+        std::fs::write(workspace.join("private/fresh/f"), "DENY_CANARY\n").unwrap();
         let (plain, filtered) = run(1, ToolCall::GitStatus { path: ".".into() });
-        assert!(plain.contains("private/c"));
+        assert!(
+            plain.contains("private/c") && plain.contains("private/fresh/"),
+            "{plain}"
+        );
         assert!(
             !filtered.contains("private") && filtered.contains("\"a\""),
             "{filtered}"

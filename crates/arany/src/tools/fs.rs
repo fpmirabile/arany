@@ -896,6 +896,7 @@ fn entries(root: &Dir, folder: &str, prefix: &str, hidden: Keep) -> Result<Vec<S
             &prefix.to_lowercase(),
             &mut ScanBudget::default(),
             &mut matches,
+            hidden,
         )?;
         return Ok(matches.into_iter().map(|(_, name)| name).collect());
     }
@@ -954,6 +955,7 @@ fn find_entries(
     query: &str,
     budget: &mut ScanBudget,
     matches: &mut Vec<(u8, String)>,
+    hidden: Keep,
 ) -> Result<(), ToolError> {
     let directory = if folder.is_empty() {
         root.try_clone().map_err(|_| ToolError::Path)?
@@ -977,6 +979,7 @@ fn find_entries(
         if !valid_relative(&relative, false)
             || relative.split('/').count() > 16
             || ignored_directory(&name)
+            || hidden(&relative)
         {
             continue;
         }
@@ -1008,7 +1011,7 @@ fn find_entries(
             matches.truncate(64);
         }
         if is_dir && budget.entries < MAX_SNAPSHOT_FILES * 4 {
-            let _ = find_entries(root, &relative, query, budget, matches);
+            let _ = find_entries(root, &relative, query, budget, matches, hidden);
         }
     }
     Ok(())
