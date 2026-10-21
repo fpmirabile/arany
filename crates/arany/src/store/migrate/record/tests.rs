@@ -171,6 +171,32 @@ fn an_interrupted_upgrade_keeps_the_original_and_finishes_on_the_next_read() {
 }
 
 #[test]
+fn a_refused_behind_record_is_read_unchanged_without_taking_the_writer_lock() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let (state, path) = root(temp.path());
+    let original = br#"{"version":1,"name":7}"#.to_vec();
+    plant(&path, FORMAT.kind, &original);
+
+    assert_eq!(state.read_current(&FORMAT).unwrap(), Some(original.clone()));
+    assert!(!path.join("account-credentials.lock").exists());
+    state
+        .with_account_replacement_lock(&workspace, || {
+            std::thread::scope(|scope| {
+                let other = scope.spawn(|| {
+                    StateRoot::open_existing(&path)
+                        .unwrap()
+                        .read_current(&FORMAT)
+                });
+                assert_eq!(other.join().unwrap().unwrap(), Some(original.clone()));
+            });
+        })
+        .unwrap();
+    assert_eq!(on_disk(&path, FORMAT.kind), (original, false));
+}
+
+#[test]
 fn upgrades_hold_the_record_writer_lock_and_errors_never_carry_record_content() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

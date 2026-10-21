@@ -70,7 +70,7 @@ impl StateRoot {
     pub fn read_current(&self, format: &RecordFormat) -> Result<Option<Vec<u8>>, StoreError> {
         let record = self.record(format.kind);
         match record.read()? {
-            Some(bytes) if format.behind(&bytes).is_some() => {}
+            Some(bytes) if format.upgrade(&bytes).is_some() => {}
             bytes => return Ok(bytes),
         }
         self.with_record_upgrade_lock(|| {
