@@ -129,8 +129,7 @@ struct Summary {
     source_bytes: u32,
 }
 
-// The primary request keeps carrying every block, so the summarizer gets paths alone when the
-// escaped texts would take over half of the compaction input bound.
+// Paths alone past half the input bound; the primary request still carries every block.
 fn project_instructions(request: &ProviderRequest) -> Vec<serde_json::Value> {
     let full: Vec<_> = request
         .input
