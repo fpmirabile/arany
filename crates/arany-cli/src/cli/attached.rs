@@ -337,7 +337,8 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
     let mut admission = args.admit(telemetry)?;
     let goal_resume = admission.resume_goal;
     let restored_settings = controls::restore_settings(&admission).await;
-    let mut saved_view = restored_settings.as_ref().copied().unwrap_or_default().view;
+    let restored = restored_settings.as_ref().copied().unwrap_or_default();
+    let mut saved_view = restored.view;
     let mut terminal = AttachedTerminal::acquire_with_mode(
         admission.screen_reader,
         if admission.classic {
@@ -345,6 +346,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         } else {
             saved_view
         },
+        restored.pointer(),
     )
     .map_err(|error| error.to_string())?;
     if admission.classic {
@@ -706,7 +708,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 .next_input()
                 .await
                 .map_err(|error| error.to_string())?;
-            if !terminal.help_open() && terminal.ignores_page_key(input) {
+            if !terminal.help_open()
+                && (terminal.ignores_page_key(input) || terminal.ignores_pointer(input))
+            {
                 continue;
             }
             break input;
@@ -723,7 +727,10 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         {
             continue;
         }
-        if terminal.handle_history_input(input, &view) {
+        if terminal
+            .handle_history_input(input, &view, &composer, false)
+            .await
+        {
             continue;
         }
         if input != TerminalInput::Escape {
@@ -1246,9 +1253,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     break;
                 } else {
                     empty_interrupt = Some(Instant::now());
-                    notice = Some(Feedback::History(
-                        "Ctrl+Shift+C copies. Ctrl+C again exits.".into(),
-                    ));
+                    notice = Some(Feedback::History(terminal.empty_interrupt_hint()));
                 }
             }
             TerminalInput::EndOfInput if composer.is_empty() => break,

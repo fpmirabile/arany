@@ -415,11 +415,13 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
     let state = root.path().join("state");
-    let preferences = json!({"version":3,"preferences":{
+    let preferences = json!({"version":4,"preferences":{
         "completion":"tabs",
         "view":"classic",
         "goal_budget":arany::GoalBudget{max_provider_calls:Some(1),..Default::default()},
         "resources":arany::ToolResourceSettings::default(),
+        "mouse":"wheel_and_clicks",
+        "copy_on_select":true,
     }});
     arany::StateRoot::admit(&state)
         .unwrap()

@@ -312,6 +312,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 9: Build processes/threads: 256\r\n\
           Choice 10: Build writable project bytes: 1073741824\r\n\
           Choice 11: Build cache bytes: 8589934592\r\n\
+          Choice 12: Mouse: wheel and clicks (wheel and clicks|wheel only|off)\r\n\
+          Choice 13: Copy on select: on (on|off)\r\n\
           Input:\r\n",
     );
     for rejected in [&b"combined\r"[..], b"12 combined\r", b"1 classic\r"] {

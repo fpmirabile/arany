@@ -372,6 +372,11 @@ impl Composer {
         }
     }
 
+    #[must_use]
+    pub fn recall_pending(&self) -> bool {
+        self.recalled_draft.is_some()
+    }
+
     pub fn has_open_menu(&self) -> bool {
         self.file_menu().is_some() || self.completion_menu().is_some()
     }

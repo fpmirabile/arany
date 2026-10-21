@@ -721,7 +721,7 @@ pub(super) async fn submit_objective(
                     Ok(false) => {}
                     Err(_) => break "terminal rendering failed".to_owned(),
                 }
-                if terminal.handle_history_input(input, view) {
+                if terminal.handle_history_input(input, view, composer, true).await {
                     if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
                         break "terminal rendering failed".to_owned();
                     }
@@ -1116,7 +1116,7 @@ pub(super) async fn compact_current(
             }),
             input = terminal.next_input() => {
                 let input = input.map_err(|error| error.to_string())?;
-                if terminal.handle_history_input(input, view) {
+                if terminal.handle_history_input(input, view, composer, true).await {
                     terminal.draw_busy(view, composer, None)
                         .map_err(|error| error.to_string())?;
                     continue;

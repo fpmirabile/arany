@@ -91,8 +91,11 @@ pub enum TerminalInput {
     Suspend,
     Shutdown(ShutdownSignal),
     Resize,
+    CopySelection,
     PointerMove { column: u16, row: u16 },
-    PointerClick { column: u16, row: u16 },
+    PointerClick { column: u16, row: u16, clicks: u8 },
+    PointerDrag { column: u16, row: u16 },
+    PointerRelease { column: u16, row: u16 },
     PointerScrollUp { column: u16, row: u16 },
     PointerScrollDown { column: u16, row: u16 },
     LineRejected,
@@ -484,6 +487,8 @@ fn validate_segment(bytes: Vec<u8>, draft_bytes: usize) -> Option<String> {
 
 enum ReaderEvent {
     Event(Event),
+    #[cfg(unix)]
+    Pointer(TerminalInput),
     Paste(Result<String, &'static str>),
     #[cfg(unix)]
     CursorPosition(u16, u16),
@@ -656,6 +661,10 @@ impl InputReader {
                         return Ok(input);
                     }
                 }
+                #[cfg(unix)]
+                ReaderEvent::Pointer(_) if stale => continue,
+                #[cfg(unix)]
+                ReaderEvent::Pointer(input) => return Ok(input),
                 ReaderEvent::Paste(_) if stale => continue,
                 ReaderEvent::Paste(text) => {
                     self.paste = Some(text);
@@ -678,27 +687,26 @@ fn map_input(event: Event) -> Option<TerminalInput> {
     match event {
         Event::Resize(_, _) => Some(TerminalInput::Resize),
         Event::Key(key) if key.kind == KeyEventKind::Press => map_key(key),
-        Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::Moved => Some(TerminalInput::PointerMove {
-                column: mouse.column,
-                row: mouse.row,
-            }),
-            MouseEventKind::Down(MouseButton::Left) => Some(TerminalInput::PointerClick {
-                column: mouse.column,
-                row: mouse.row,
-            }),
-            MouseEventKind::ScrollUp => Some(TerminalInput::PointerScrollUp {
-                column: mouse.column,
-                row: mouse.row,
-            }),
-            MouseEventKind::ScrollDown => Some(TerminalInput::PointerScrollDown {
-                column: mouse.column,
-                row: mouse.row,
-            }),
-            _ => None,
-        },
+        Event::Mouse(mouse) => pointer_input(mouse.kind, mouse.column, mouse.row, 1),
         _ => None,
     }
+}
+
+// Only the left button selects; other buttons and unowned motion are ignored.
+fn pointer_input(kind: MouseEventKind, column: u16, row: u16, clicks: u8) -> Option<TerminalInput> {
+    Some(match kind {
+        MouseEventKind::Moved => TerminalInput::PointerMove { column, row },
+        MouseEventKind::Down(MouseButton::Left) => TerminalInput::PointerClick {
+            column,
+            row,
+            clicks,
+        },
+        MouseEventKind::Drag(MouseButton::Left) => TerminalInput::PointerDrag { column, row },
+        MouseEventKind::Up(MouseButton::Left) => TerminalInput::PointerRelease { column, row },
+        MouseEventKind::ScrollUp => TerminalInput::PointerScrollUp { column, row },
+        MouseEventKind::ScrollDown => TerminalInput::PointerScrollDown { column, row },
+        _ => return None,
+    })
 }
 
 fn map_key(key: KeyEvent) -> Option<TerminalInput> {
@@ -707,6 +715,11 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             || key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT)
     {
         return Some(TerminalInput::ClipboardPaste);
+    }
+    if matches!(key.code, KeyCode::Char('c' | 'C'))
+        && key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT
+    {
+        return Some(TerminalInput::CopySelection);
     }
     if key.modifiers == KeyModifiers::CONTROL {
         return match key.code {
@@ -986,6 +999,13 @@ mod tests {
                     KeyCode::Char('C'),
                     KeyModifiers::CONTROL | KeyModifiers::SHIFT,
                 )),
+                Some(TerminalInput::CopySelection),
+            ),
+            (
+                Event::Key(KeyEvent::new(
+                    KeyCode::Char('c'),
+                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                )),
                 None,
             ),
             (
@@ -1106,7 +1126,38 @@ mod tests {
                     row: 9,
                     modifiers: KeyModifiers::NONE,
                 }),
-                Some(TerminalInput::PointerClick { column: 7, row: 9 }),
+                Some(TerminalInput::PointerClick {
+                    column: 7,
+                    row: 9,
+                    clicks: 1,
+                }),
+            ),
+            (
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Left),
+                    column: 7,
+                    row: 9,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                Some(TerminalInput::PointerDrag { column: 7, row: 9 }),
+            ),
+            (
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Up(MouseButton::Left),
+                    column: 7,
+                    row: 9,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                Some(TerminalInput::PointerRelease { column: 7, row: 9 }),
+            ),
+            (
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind: MouseEventKind::Drag(MouseButton::Right),
+                    column: 7,
+                    row: 9,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                None,
             ),
             (
                 Event::Mouse(crossterm::event::MouseEvent {
@@ -1136,6 +1187,11 @@ mod tests {
         {
             use std::time::Instant;
             let now = Instant::now();
+            let click = |column, row, clicks| TerminalInput::PointerClick {
+                column,
+                row,
+                clicks,
+            };
             let decode = |bytes: &[u8]| {
                 let mut decoder = raw::Decoder::default();
                 bytes
@@ -1206,18 +1262,66 @@ mod tests {
                     b"\x1b[<35;8;10M\x1b[<0;8;10M\x1b[<64;8;10M\x1b[<65;8;10M".as_slice(),
                     vec![
                         TerminalInput::PointerMove { column: 7, row: 9 },
-                        TerminalInput::PointerClick { column: 7, row: 9 },
+                        click(7, 9, 1),
                         TerminalInput::PointerScrollUp { column: 7, row: 9 },
                         TerminalInput::PointerScrollDown { column: 7, row: 9 },
                     ],
                 ),
+                (b"\x1b[M (*".as_slice(), vec![click(7, 9, 1)]),
                 (
-                    b"\x1b[M (*".as_slice(),
-                    vec![TerminalInput::PointerClick { column: 7, row: 9 }],
+                    b"\x1b[<0;8;10M\x1b[<32;9;10M\x1b[<36;9;11M\x1b[<0;9;11m".as_slice(),
+                    vec![
+                        click(7, 9, 1),
+                        TerminalInput::PointerDrag { column: 8, row: 9 },
+                        TerminalInput::PointerDrag { column: 8, row: 10 },
+                        TerminalInput::PointerRelease { column: 8, row: 10 },
+                    ],
                 ),
                 (
-                    b"\x1b[<0;0;10M\x1b[<0;65536;10M\x1b[<0;8;10m\x1b[<2;8;10M".as_slice(),
+                    b"\x1b[<0;8;10M\x1b[<0;8;10m\x1b[<0;8;10M\x1b[<0;8;10M\x1b[<0;8;10M\x1b[<0;9;10M\x1b[<0;8;10M"
+                        .as_slice(),
+                    vec![
+                        click(7, 9, 1),
+                        TerminalInput::PointerRelease { column: 7, row: 9 },
+                        click(7, 9, 2),
+                        click(7, 9, 3),
+                        click(7, 9, 1),
+                        click(8, 9, 1),
+                        click(7, 9, 1),
+                    ],
+                ),
+                (
+                    b"\x1b[<0;65535;65535M\x1b[<64;1;1M".as_slice(),
+                    vec![
+                        click(65534, 65534, 1),
+                        TerminalInput::PointerScrollUp { column: 0, row: 0 },
+                    ],
+                ),
+                (
+                    b"\x1b[<0;0;10M\x1b[<0;8;0M\x1b[<0;65536;10M\x1b[<2;8;10M\x1b[<2;8;10m\x1b[<1;8;10M\x1b[<34;8;10M\x1b[<32;8;10m\x1b[<64;8;10m\x1b[<66;8;10M\x1b[<128;8;10M\x1b[<0;8M\x1b[<0;8;10;1M"
+                        .as_slice(),
                     vec![],
+                ),
+                (
+                    b"\x1b[99;6u\x1b[27;6;99~\x1b[67;6u".as_slice(),
+                    vec![TerminalInput::CopySelection; 3],
+                ),
+                // A malformed record is consumed through its terminator; its digits never become keys.
+                (
+                    b"\x1b[<0;1;x1M\x1b[<0;1;1;2M\x1b[<0;-1;1M\x1b[<0;1;1~1M\x1b[<0;1;1\x031m\x1b[<0;1;1\x1b[A2M"
+                        .as_slice(),
+                    vec![],
+                ),
+                (
+                    b"a\x1b[<0;2;3Mb\x1b[<0;1;x9mc\x1b[<64;1;1M1".as_slice(),
+                    vec![
+                        TerminalInput::Character('a'),
+                        click(1, 2, 1),
+                        TerminalInput::Character('b'),
+                        TerminalInput::Character('c'),
+                        TerminalInput::PointerScrollUp { column: 0, row: 0 },
+                        TerminalInput::Character('1'),
+                    ],
                 ),
                 (
                     b"\x1b]52;c;/exit\r\x07\x1bP/quit\r\x1b\\x".as_slice(),
@@ -1228,6 +1332,7 @@ mod tests {
                     .into_iter()
                     .map(|event| match event {
                         ReaderEvent::Event(event) => map_input(event).expect("admitted raw key"),
+                        ReaderEvent::Pointer(input) => input,
                         ReaderEvent::Paste(_) => panic!("ordinary sequence became a paste"),
                         ReaderEvent::CursorPosition(_, _) => {
                             panic!("ordinary sequence became a cursor response")
@@ -1261,6 +1366,87 @@ mod tests {
                     panic!("complete paste became a key");
                 };
                 assert!(result == &expected, "whole-record paste validation");
+            }
+            let mut decoder = raw::Decoder::default();
+            for (offset, clicks) in [(0, 1), (500, 2), (1001, 1)] {
+                let at = now + Duration::from_millis(offset);
+                let events = b"\x1b[<0;8;10M"
+                    .iter()
+                    .filter_map(|&byte| decoder.feed(byte, at))
+                    .collect::<Vec<_>>();
+                assert!(
+                    matches!(events.as_slice(), [ReaderEvent::Pointer(input)] if *input == click(7, 9, clicks)),
+                    "multi-click window at {offset} ms"
+                );
+            }
+            let mut oversized_record = b"\x1b[<0;".to_vec();
+            oversized_record.extend([b'1'; 40]);
+            oversized_record.extend_from_slice(b";1;1M\x1b[<0;1;");
+            oversized_record.extend([b'2'; 40]);
+            oversized_record.extend_from_slice(b"mz");
+            assert!(matches!(
+                decode(&oversized_record).as_slice(),
+                [ReaderEvent::Event(Event::Key(KeyEvent {
+                    code: KeyCode::Char('z'),
+                    ..
+                }))]
+            ));
+            // Records split across reads complete or stay discarded as a whole.
+            for (parts, expected) in [
+                ([&b"\x1b[<0;5"[..], b";7M"], Some(click(4, 6, 1))),
+                ([&b"\x1b[<0;1;x"[..], b"1M"], None),
+                ([&b"\x1b[<"[..], b"0;1;1"], None),
+            ] {
+                let mut decoder = raw::Decoder::default();
+                let events = parts
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(read, part)| {
+                        let at = now + Duration::from_millis(50 * read as u64);
+                        part.iter()
+                            .filter_map(|&byte| decoder.feed(byte, at))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                match expected {
+                    Some(input) => assert!(
+                        matches!(events.as_slice(), [ReaderEvent::Pointer(event)] if *event == input),
+                        "split record {parts:?}"
+                    ),
+                    None => assert!(events.is_empty(), "split record {parts:?}"),
+                }
+            }
+            for record in [&b"\x1b[<0;1;x1"[..], b"\x1b[<0;12;3"] {
+                let mut decoder = raw::Decoder::default();
+                assert!(record.iter().all(|&byte| decoder.feed(byte, now).is_none()));
+                assert!(
+                    decoder
+                        .expire(now + Duration::from_secs(9))
+                        .unwrap()
+                        .is_none()
+                );
+                assert!(
+                    decoder
+                        .expire(now + Duration::from_secs(10))
+                        .unwrap()
+                        .is_none()
+                );
+                let later = b"7M"
+                    .iter()
+                    .filter_map(|&byte| decoder.feed(byte, now + Duration::from_secs(10)))
+                    .map(|event| match event {
+                        ReaderEvent::Event(event) => map_input(event),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    later,
+                    [
+                        Some(TerminalInput::Character('7')),
+                        Some(TerminalInput::Character('M'))
+                    ],
+                    "a dropped record leaves later input intact"
+                );
             }
             let mut oversized = b"\x1b[".to_vec();
             oversized.extend([b'1'; 100]);

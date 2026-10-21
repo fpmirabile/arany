@@ -650,9 +650,32 @@ fn run_process(
 }
 
 pub(super) const MAX_COPY_BYTES: usize = 100_000;
-const COPY_TOO_LARGE: &str = "Copy exceeds 100 KB; use arany show";
+pub(super) const COPY_TOO_LARGE: &str = "Copy exceeds 100 KB; use arany show";
 
-pub(super) struct CopyRequest(String);
+// The escaped display text and what it names in the copy cue.
+pub(super) struct CopyRequest(String, &'static str);
+
+// Bytes of `display_text(text)`, counted without materializing it.
+pub(super) fn display_bytes(text: &str) -> usize {
+    use crate::presentation::escaped_terminal_bytes;
+    text.split(['\n', '\t'])
+        .map(|part| escaped_terminal_bytes(part) + 1)
+        .sum::<usize>()
+        - 1
+}
+
+pub(super) fn display_text(text: &str) -> String {
+    use crate::presentation::escape_terminal;
+    text.split('\n')
+        .map(|line| {
+            line.split('\t')
+                .map(escape_terminal)
+                .collect::<Vec<_>>()
+                .join("\t")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 impl CopyRequest {
     pub(super) fn latest_answer(view: &arany::SessionView) -> Result<Self, &'static str> {
@@ -666,31 +689,19 @@ impl CopyRequest {
     }
 
     fn answer(answer: &str) -> Result<Self, &'static str> {
-        use crate::presentation::{escape_terminal, escaped_terminal_bytes};
         // Refuse before materializing an escaped copy larger than the limit.
-        let escaped = answer
-            .split(['\n', '\t'])
-            .map(|part| escaped_terminal_bytes(part) + 1)
-            .sum::<usize>()
-            - 1;
-        if escaped > MAX_COPY_BYTES {
+        if display_bytes(answer) > MAX_COPY_BYTES {
             return Err(COPY_TOO_LARGE);
         }
-        Self::from_display(
-            answer
-                .split('\n')
-                .map(|line| {
-                    line.split('\t')
-                        .map(escape_terminal)
-                        .collect::<Vec<_>>()
-                        .join("\t")
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-        )
+        Self::from_display(display_text(answer), "answer")
     }
 
-    fn from_display(text: String) -> Result<Self, &'static str> {
+    // Selection text is already escaped and bounded by its History owner.
+    pub(super) fn selection(text: String) -> Result<Self, &'static str> {
+        Self::from_display(text, "selection")
+    }
+
+    fn from_display(text: String, label: &'static str) -> Result<Self, &'static str> {
         let text: String = text
             .chars()
             .filter(|character| !character.is_control() || matches!(character, '\n' | '\t'))
@@ -698,7 +709,7 @@ impl CopyRequest {
         if text.len() > MAX_COPY_BYTES {
             return Err(COPY_TOO_LARGE);
         }
-        Ok(Self(text))
+        Ok(Self(text, label))
     }
 
     fn osc52(&self) -> Vec<u8> {
@@ -736,11 +747,41 @@ fn destinations(
     .collect()
 }
 
+type EnvVars<'a> = &'a dyn Fn(&str) -> Option<std::ffi::OsString>;
+
+// Names the emulator's own selection gesture; tmux and SSH hide the outer emulator.
+pub(super) fn native_selection_gesture(var: EnvVars<'_>) -> &'static str {
+    let set = |name: &str| var(name).is_some_and(|value| !value.is_empty());
+    let hidden = set("TMUX")
+        || ["SSH_CONNECTION", "SSH_CLIENT", "SSH_TTY"]
+            .into_iter()
+            .any(set);
+    match var("TERM_PROGRAM")
+        .as_ref()
+        .and_then(|value| value.to_str())
+    {
+        _ if hidden => "Shift-drag (Option in iTerm2, Fn in Terminal.app)",
+        Some("Apple_Terminal") => "Fn-drag",
+        Some("iTerm.app") => "Option-drag",
+        _ => "Shift-drag",
+    }
+}
+
+pub(super) fn native_selection_hint(var: EnvVars<'_>) -> String {
+    let gesture = native_selection_gesture(var);
+    if var("TMUX").is_some_and(|value| !value.is_empty()) {
+        format!("{gesture} selects natively · tmux wheel scrolling needs `set -g mouse on`")
+    } else {
+        format!("{gesture} selects natively")
+    }
+}
+
 // `terminal` is the owner's non-linear stderr; OSC 52 is never written without it.
 pub(super) async fn copy(
     request: CopyRequest,
     terminal: Option<&mut dyn std::io::Write>,
 ) -> Result<String, String> {
+    let label = request.1;
     let plan = destinations(&|name| std::env::var_os(name), terminal.is_some());
     let local: Vec<_> = plan
         .iter()
@@ -756,7 +797,7 @@ pub(super) async fn copy(
             Err(error) => Err(error),
         };
         match outcome {
-            Ok(destination) => return Ok(format!("Copied answer to {destination}")),
+            Ok(destination) => return Ok(format!("Copied {label} to {destination}")),
             Err(CLEANUP_UNCONFIRMED) => {
                 return Err(format!("Copy unavailable: {CLEANUP_UNCONFIRMED}"));
             }
@@ -773,7 +814,9 @@ pub(super) async fn copy(
         .write_all(&request.osc52())
         .and_then(|()| output.flush())
         .map_err(|_| "Copy unavailable: terminal output failed".to_owned())?;
-    Ok("Copied answer: sent to terminal (OSC 52); it may be ignored".into())
+    Ok(format!(
+        "Copied {label}: sent to terminal (OSC 52); it may be ignored"
+    ))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -996,7 +1039,7 @@ fn write_process(
 }
 
 #[cfg(test)]
-mod cleanup_tests {
+pub(super) mod cleanup_tests {
     use super::*;
     use std::{sync::mpsc, time::Duration};
 
@@ -1018,7 +1061,10 @@ mod cleanup_tests {
             dialog_armed: false,
             input: None,
             _raw_mode: None,
-            mouse_capture: None,
+            pointer: Default::default(),
+            pointer_modes: None,
+            history_area: None,
+            selection_cue: None,
             bracketed_paste: None,
             session_picker_area: None,
             agent_picker_area: None,
@@ -1543,13 +1589,13 @@ mod copy_tests {
             assert_eq!(CopyRequest::answer(answer).unwrap().0, answer);
         }
         assert_eq!(
-            CopyRequest::from_display("a\u{1b}b\u{9b}c\u{7}\r\n\td\u{7f}".into())
+            CopyRequest::selection("a\u{1b}b\u{9b}c\u{7}\r\n\td\u{7f}".into())
                 .unwrap()
                 .0,
             "abc\n\td"
         );
         assert_eq!(
-            CopyRequest("hé\n".into()).osc52(),
+            CopyRequest("hé\n".into(), "answer").osc52(),
             b"\x1b]52;c;aMOpCg==\x07"
         );
         let x = |count| "x".repeat(count);
@@ -1570,9 +1616,39 @@ mod copy_tests {
             }
         }
         assert_eq!(
-            CopyRequest::from_display(x(MAX_COPY_BYTES + 1)).err(),
+            CopyRequest::selection(x(MAX_COPY_BYTES + 1)).err(),
             Some(COPY_TOO_LARGE)
         );
+    }
+
+    #[test]
+    fn native_selection_hint_follows_the_emulator_and_names_tmux_mouse() {
+        let cases: [(Vars, &str); 6] = [
+            (
+                &[("TERM_PROGRAM", "Apple_Terminal")],
+                "Fn-drag selects natively",
+            ),
+            (
+                &[("TERM_PROGRAM", "iTerm.app")],
+                "Option-drag selects natively",
+            ),
+            (&[("TERM_PROGRAM", "vscode")], "Shift-drag selects natively"),
+            (&[], "Shift-drag selects natively"),
+            (
+                &[
+                    ("TERM_PROGRAM", "iTerm.app"),
+                    ("SSH_CONNECTION", "10.0.0.1 1 10.0.0.2 22"),
+                ],
+                "Shift-drag (Option in iTerm2, Fn in Terminal.app) selects natively",
+            ),
+            (
+                &[("TERM_PROGRAM", "tmux"), ("TMUX", "/t/default,1,0")],
+                "Shift-drag (Option in iTerm2, Fn in Terminal.app) selects natively · tmux wheel scrolling needs `set -g mouse on`",
+            ),
+        ];
+        for (vars, expected) in cases {
+            assert_eq!(native_selection_hint(&env(vars)), expected, "{vars:?}");
+        }
     }
 
     #[cfg(target_os = "linux")]
