@@ -409,7 +409,8 @@ fn inline_inspector(
         &mut transcript,
         &mut answered,
         (opened_at, width.into(), 24),
-        "current",
+        // The newest Run's details name its objective; 16 columns keep this prefix.
+        "Objective: curr",
     );
     // The inspector takes keys only once its armed frame is drawn.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -437,7 +438,7 @@ fn inline_inspector(
         &mut transcript,
         &mut answered,
         (checkpoint, width.into(), 24),
-        "prior",
+        "Objective: prior",
     );
     capture_from = checkpoint_screen(
         &mut transcript,

@@ -45,7 +45,13 @@ pub(super) fn wait_for_screen(
     needle: &str,
 ) {
     let deadline = Instant::now() + Duration::from_secs(10);
-    while transcript.len() == from || !screen_contains(transcript, columns, rows, needle) {
+    // A stale screen that already shows `needle` is not the action's result: require a
+    // changed decoded screen, while still accepting a needle that was visible before.
+    let before = screen_rows(&transcript[..from], columns, rows);
+    while transcript.len() == from
+        || screen_rows(transcript, columns, rows) == before
+        || !screen_contains(transcript, columns, rows, needle)
+    {
         pump(output, input, transcript, answered);
         assert!(
             Instant::now() < deadline,

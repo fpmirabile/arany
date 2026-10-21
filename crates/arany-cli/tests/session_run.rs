@@ -105,6 +105,44 @@ fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
         .collect()
 }
 
+// The latest Classic composer caret after `from`, located on the decoded screen by the
+// composer border instead of a fixed row, since the content-sized viewport moves.
+// Returns the 1-based caret column and the decoded screen.
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn composer_caret(
+    bytes: &[u8],
+    from: usize,
+    columns: usize,
+    rows: usize,
+) -> Option<(usize, Vec<String>)> {
+    let marker = b"\x1b[?25h\x1b[";
+    let start = from
+        + bytes[from..]
+            .windows(marker.len())
+            .rposition(|part| part == marker)?
+        + marker.len();
+    let rest = &bytes[start..];
+    let row_digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    let rest = rest[row_digits..].strip_prefix(b";")?;
+    let column_digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+    if rest.get(column_digits) != Some(&b'H') {
+        return None;
+    }
+    let row = String::from_utf8_lossy(&bytes[start..start + row_digits])
+        .parse::<usize>()
+        .ok()?;
+    let column = String::from_utf8_lossy(&rest[..column_digits])
+        .parse::<usize>()
+        .ok()?;
+    let end = start + row_digits + 1 + column_digits + 1;
+    let screen = screen_rows(&bytes[..end], columns, rows);
+    let border = screen
+        .iter()
+        .rposition(|line| line.starts_with("─ Ask Arany"))?;
+    // The caret sits on a draft row between the composer's top and bottom borders.
+    (row > border + 1 && row <= border + 1 + 4).then_some((column, screen))
+}
+
 // A selector takes keys only once armed: its finished frame shows the focused `› N.` row.
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn armed_selector(bytes: &[u8], from: usize, columns: usize, rows: usize) -> Option<Vec<String>> {

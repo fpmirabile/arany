@@ -1,6 +1,8 @@
 use super::active_terminal::{ProductGuard, tty_settings};
 use super::loopback::{ChildGuard, write_profile};
-use super::session_picker::{checkpoint_screen, pump, screen_contains, tail};
+use super::session_picker::{
+    checkpoint_screen, pump, screen_contains, screen_rows, tail, wait_for_screen,
+};
 use arany::{SessionId, StateRoot, Store, create_session, list_sessions};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal, kill_process};
@@ -460,17 +462,16 @@ fn inline_model_catalog_at_width(width: u16) {
         24,
         "Models · exact"
     ));
+    let filtered_at = capture_from;
     input.write_all(b"z").expect("filter model catalog");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_contains(&transcript, width.into(), 24, "No matches") {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "empty filter missing: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (filtered_at, width.into(), 24),
+        "No matches",
+    );
     capture_from = checkpoint_screen(
         &mut transcript,
         &mut answered,
@@ -478,19 +479,18 @@ fn inline_model_catalog_at_width(width: u16) {
         (width.into(), 24),
         capture_from,
     );
+    let restored_at = capture_from;
     input
         .write_all(b"\r\x7f")
         .expect("no-match Enter and Backspace filter");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while !screen_contains(&transcript, width.into(), 24, model_label) {
-        pump(&mut output, &mut input, &mut transcript, &mut answered);
-        assert!(
-            Instant::now() < deadline,
-            "filter did not restore model: {}",
-            tail(&transcript)
-        );
-        thread::yield_now();
-    }
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (restored_at, width.into(), 24),
+        model_label,
+    );
     capture_from = checkpoint_screen(
         &mut transcript,
         &mut answered,
@@ -522,13 +522,15 @@ fn inline_model_catalog_at_width(width: u16) {
     );
     let before_edit = capture_from;
     input.write_all(b"X").expect("edit returned draft");
+    // The composer is found by its border on the decoded screen and its caret column proves
+    // draft restoration, wherever the Classic viewport places the composer row.
+    let composer_ready = |transcript: &[u8], from: usize, draft: &str, column: usize| {
+        crate::composer_caret(transcript, from, width.into(), 24).is_some_and(|(caret, screen)| {
+            caret == column && screen.iter().any(|row| row.starts_with(draft))
+        })
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
-    // The Classic viewport row follows the cursor reply; the caret column proves draft restoration.
-    while !transcript[before_edit..]
-        .windows(b";7H".len())
-        .any(|part| part == b";7H")
-        || !screen_contains(&transcript, width.into(), 24, "> noteX")
-    {
+    while !composer_ready(&transcript, before_edit, "> noteX", 8) {
         pump(&mut output, &mut input, &mut transcript, &mut answered);
         assert!(
             Instant::now() < deadline,
@@ -537,17 +539,6 @@ fn inline_model_catalog_at_width(width: u16) {
         );
         thread::yield_now();
     }
-    let edit = &transcript[before_edit..];
-    let caret = edit
-        .windows(b";7H".len())
-        .position(|part| part == b";7H")
-        .expect("restored caret");
-    let row = edit[..caret]
-        .windows(2)
-        .rposition(|part| part == b"\x1b[")
-        .expect("caret row");
-    let composer_caret = [&edit[row..caret], b";7H"].concat();
-    let composer_edit = [&edit[row..caret], b";8H"].concat();
 
     let native_pid = (width == 40).then(|| {
         let text = String::from_utf8_lossy(&history);
@@ -594,7 +585,7 @@ fn inline_model_catalog_at_width(width: u16) {
     }
     {
         let mut transition =
-            |keys: &[u8], text: &str, control: &[u8], hide_cursor: bool, label: &str| {
+            |keys: &[u8], text: &str, caret: Option<usize>, hide_cursor: bool, label: &str| {
                 capture_from = checkpoint_screen(
                     &mut transcript,
                     &mut answered,
@@ -605,18 +596,21 @@ fn inline_model_catalog_at_width(width: u16) {
                 let start = capture_from;
                 input.write_all(keys).expect(label);
                 let deadline = Instant::now() + Duration::from_secs(10);
+                let before = screen_rows(&transcript[..start], width.into(), 24);
                 loop {
-                    let text_ready = if hide_cursor {
+                    // Each check needs a frame drawn after the keys, never the stale screen.
+                    let complete = if hide_cursor {
                         crate::armed_selector(&transcript, start, width.into(), 24)
                             .is_some_and(|screen| screen.iter().any(|row| row.contains(text)))
+                    } else if let Some(column) = caret {
+                        composer_ready(&transcript, start, text, column)
                     } else {
-                        screen_contains(&transcript, width.into(), 24, text)
+                        // Selection notices are inserted into native scrollback above the
+                        // viewport, so they are read from the bytes drawn after the keys.
+                        screen_rows(&transcript, width.into(), 24) != before
+                            && crate::composer_caret(&transcript, start, width.into(), 24).is_some()
+                            && visible_text_contains(&transcript[start..], text)
                     };
-                    let control_ready = control.is_empty()
-                        || transcript[start..]
-                            .windows(control.len())
-                            .any(|part| part == control);
-                    let complete = text_ready && control_ready;
                     if complete {
                         break;
                     }
@@ -629,106 +623,88 @@ fn inline_model_catalog_at_width(width: u16) {
                     thread::yield_now();
                 }
             };
-        for (keys, text, control, hide_cursor, label) in [
+        for (keys, text, caret, hide_cursor, label) in [
             (
                 &b"1"[..],
                 "<low>",
-                &b""[..],
+                None,
                 true,
                 "armed digit 1 opens the picker with a mid-draft caret",
             ),
             (
                 &b"\x1b[C"[..],
                 "high",
-                &b""[..],
+                None,
                 true,
                 "right changes focused reasoning",
             ),
             (
                 &b"\x1b"[..],
                 "> noteX",
-                composer_caret.as_slice(),
+                Some(7),
                 false,
                 "cancel returns draft",
             ),
             (
                 &b"Y"[..],
                 "> noteYX",
-                composer_edit.as_slice(),
+                Some(8),
                 false,
                 "cancel restores caret",
             ),
             (
                 &b"\x1b[F\x7f\x7f\x7f\x7f\x7f\x7f/model\r"[..],
                 "<low>",
-                &b""[..],
+                None,
                 true,
                 "slash model picker",
             ),
             (
                 &b"\x1b[C\r"[..],
-                "",
-                &b"\x1b[?25h"[..],
+                "> ",
+                Some(3),
                 false,
                 "atomic model and reasoning selection",
             ),
             (
                 &b"/model\r"[..],
                 "<high>",
-                &b""[..],
+                None,
                 true,
                 "reopen with current reasoning",
             ),
-            (
-                &b"\r"[..],
-                "",
-                &b"\x1b[?25h"[..],
-                false,
-                "current tuple remains",
-            ),
-            (
-                &b"/model\r"[..],
-                "<high>",
-                &b""[..],
-                true,
-                "reopen for cancel",
-            ),
-            (
-                &b"\x1b"[..],
-                "",
-                &b"\x1b[?25h"[..],
-                false,
-                "cancel keeps defaults",
-            ),
+            (&b"\r"[..], "> ", Some(3), false, "current tuple remains"),
+            (&b"/model\r"[..], "<high>", None, true, "reopen for cancel"),
+            (&b"\x1b"[..], "> ", Some(3), false, "cancel keeps defaults"),
         ] {
-            transition(keys, text, control, hide_cursor, label);
+            transition(keys, text, caret, hide_cursor, label);
         }
         if native_pid.is_some() {
             transition(
                 b"/provider openai\r",
-                "set /model",
-                b"",
+                "Provider: openai",
+                None,
                 false,
                 "select synthetic native source",
             );
             transition(
                 b"/model gpt-choice-guard high\r",
                 "Model: gpt-choice-guard",
-                b"",
+                None,
                 false,
                 "unknown tuple selects without probes",
             );
             transition(
                 b"/provider custom:local\r",
-                "set /model",
-                b"",
+                "Provider: custom:local",
+                None,
                 false,
                 "restore exact profile",
             );
             transition(
                 b"/model model-1 high\r",
                 "Model: model-1",
-                b"",
+                None,
                 false,
                 "restore exact tuple",
             );
@@ -1037,4 +1013,27 @@ fn run_model_catalog_cancel_then_sigterm_case(columns: u16, rows: u16) {
             "cancelled model navigation saves no empty conversation"
         );
     });
+}
+
+// Whether `text` was drawn in `frame`, ignoring cursor controls and the blank cells a
+// diffed frame skips between words.
+fn visible_text_contains(frame: &[u8], text: &str) -> bool {
+    let mut visible = Vec::new();
+    let mut cursor = 0;
+    while cursor < frame.len() {
+        if frame[cursor..].starts_with(b"\x1b[") {
+            cursor += 2;
+            while cursor < frame.len() && !(0x40..=0x7e).contains(&frame[cursor]) {
+                cursor += 1;
+            }
+        } else if !frame[cursor].is_ascii_whitespace() {
+            visible.push(frame[cursor]);
+        }
+        cursor += 1;
+    }
+    let text = text
+        .bytes()
+        .filter(|byte| !byte.is_ascii_whitespace())
+        .collect::<Vec<_>>();
+    visible.windows(text.len()).any(|part| part == text)
 }
