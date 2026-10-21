@@ -185,6 +185,7 @@ impl Repo {
     fn saved_rules(&self) -> Vec<arany::permissions::TypedPrefixEntry> {
         arany::permissions::PermissionSettings::load(
             &StateRoot::open_existing(&self.state).unwrap(),
+            &self.workspace,
         )
         .unwrap()
         .typed_prefixes()
@@ -192,14 +193,10 @@ impl Repo {
 
     fn edit(&self, edit: arany::permissions::TypedPrefixEdit) {
         let state = StateRoot::open_existing(&self.state).unwrap();
-        let current = arany::permissions::PermissionSettings::load(&state).unwrap();
-        arany::permissions::PermissionSettings::save_edit(
-            &state,
-            &self.workspace,
-            current.digest(),
-            edit,
-        )
-        .unwrap();
+        arany::permissions::PermissionSettings::load(&state, &self.workspace)
+            .unwrap()
+            .save_edit(&state, &self.workspace, edit)
+            .unwrap();
     }
 
     fn change(&self, text: &str) {
@@ -550,8 +547,8 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
 }
 
 #[tokio::test]
-async fn first_remembered_prefix_creates_settings_and_journals_a_null_mode_verdict() {
-    use arany::permissions::{PermissionSource, TypedGitPrefix};
+async fn remembering_is_not_offered_without_settings_and_never_activates_them() {
+    use arany::permissions::PermissionSource;
     let repo = Repo::new();
     std::fs::remove_file(repo.state.join("permissions.json")).unwrap();
     let (outcome, asked, _, engine) = repo
@@ -559,8 +556,8 @@ async fn first_remembered_prefix_creates_settings_and_journals_a_null_mode_verdi
             vec![tool_outcome(commit("third")), answer()],
             false,
             |approval| {
-                assert_eq!(approval.remember_prefix, Some(TypedGitPrefix::Commit));
-                arany::ApprovalReply::AllowPrefixInFolder
+                assert_eq!(approval.remember_prefix, None);
+                arany::ApprovalReply::AllowOnce
             },
         )
         .await;
@@ -576,32 +573,48 @@ async fn first_remembered_prefix_creates_settings_and_journals_a_null_mode_verdi
             .as_ref()
             .unwrap()
             .permissions_digest
-            .is_none(),
-        "the admitted Run keeps its pins"
+            .is_none()
     );
     let verdict = verdict_of(&view, 0);
     assert_eq!(
         (verdict.mode, verdict.source, verdict.approved),
         (None, PermissionSource::Human, true)
     );
-    assert_eq!(repo.saved_rules().len(), 1);
-    let text = std::fs::read_to_string(repo.state.join("permissions.json")).unwrap();
-    assert!(text.contains(r#""defaultMode":"default""#), "{text}");
+    assert!(!repo.state.join("permissions.json").exists());
+}
 
-    repo.change("echo\n");
+#[tokio::test]
+async fn a_failed_rule_save_after_the_verdict_dispatches_nothing_and_replays() {
+    use arany::permissions::PermissionSource;
+    let repo = Repo::new();
+    let elsewhere = repo._temp.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"keep").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.state.join("permissions.pending")).unwrap();
+    let head = repo.git(&["rev-parse", "HEAD"]);
     let (outcome, asked, _, engine) = repo
-        .run_replying(
-            vec![tool_outcome(commit("fourth")), answer()],
-            false,
-            |_| panic!("the saved rule applies to the next Run"),
-        )
+        .run_replying(vec![tool_outcome(commit("third")), answer()], false, |_| {
+            arany::ApprovalReply::AllowPrefixInFolder
+        })
         .await;
-    let second = outcome.unwrap();
-    assert_eq!(asked, 0);
-    let (_, view) = repo.reopen(engine, second.session_id).await;
+    let outcome = outcome.unwrap();
+    assert_eq!(asked, 1);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head, "nothing dispatched");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
+    assert!(repo.saved_rules().is_empty());
+    let (_, view) = repo.reopen(engine, outcome.session_id).await;
+    let verdict = verdict_of(&view, 0);
     assert_eq!(
-        verdict_of(&view, 0).source,
-        PermissionSource::TypedPrefixRule
+        (verdict.source, verdict.approved),
+        (PermissionSource::Human, true),
+        "the human decision is journaled before the save"
+    );
+    assert_eq!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        ToolDisposition::Denied
     );
 }
 

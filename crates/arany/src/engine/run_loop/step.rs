@@ -127,6 +127,7 @@ struct Resolution {
     source: PermissionSource,
     active_time_exhausted: bool,
     unsaved_rule: bool,
+    save_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
 }
 
 #[derive(Clone, Copy)]
@@ -1142,12 +1143,8 @@ impl RunLoop<'_> {
             guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
             interactive: self.controls.approvals.is_some(),
         };
-        let remember_prefix = (matches!(grant, Grant::Primary { .. })
-            && permission.decision == Decision::Ask
-            && permission.basis == PermissionSource::Mode
-            && hooks.restriction.is_none())
-        .then(|| crate::tools::permissions::TypedGitPrefix::of_call(&intent.call))
-        .flatten();
+        let remember_prefix =
+            remember_candidate(grant, config.is_some(), permission, &hooks, &intent.call);
         let approval = match facts.ask() {
             Some(mode) => Some(
                 Box::pin(self.ask(
@@ -1166,6 +1163,9 @@ impl RunLoop<'_> {
             ),
             None => None,
         };
+        let save_prefix = approval
+            .as_ref()
+            .and_then(|resolution| resolution.save_prefix);
         let decided = decide_dispatch(
             &facts,
             &AfterAsk {
@@ -1240,7 +1240,40 @@ impl RunLoop<'_> {
             })
             .await?;
         }
+        let verdict = self.save_remembered_rule(runtime, site, verdict, save_prefix)?;
         Ok(verdict)
+    }
+
+    // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
+    fn save_remembered_rule(
+        &self,
+        runtime: &ToolRuntime,
+        site: DispatchSite,
+        verdict: Verdict,
+        save_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
+    ) -> Result<Verdict, EngineError> {
+        Ok(match (verdict, save_prefix) {
+            (
+                Verdict::Dispatch {
+                    intent,
+                    queue_pause,
+                },
+                Some(prefix),
+            ) => {
+                if runtime.record_typed_prefix_rule(prefix).is_ok() {
+                    Verdict::Dispatch {
+                        intent,
+                        queue_pause,
+                    }
+                } else {
+                    if let Some(pause) = queue_pause {
+                        self.settle_active_pause(pause, None)?;
+                    }
+                    self.refused(site, intent, refuse(NotDispatched::UnsavedRule, None))
+                }
+            }
+            (verdict, _) => verdict,
+        })
     }
 
     fn unguarded(
@@ -1399,9 +1432,6 @@ impl RunLoop<'_> {
         let unsaved = match (reply, remember_prefix) {
             (ApprovalReply::AllowAlwaysInProject, _) if remember => {
                 runtime.record_exact_command_rule(&intent.call).is_err()
-            }
-            (ApprovalReply::AllowPrefixInFolder, Some(prefix)) => {
-                runtime.record_typed_prefix_rule(prefix).is_err()
             }
             _ => false,
         };
@@ -1711,6 +1741,7 @@ impl RunLoop<'_> {
             source: PermissionSource::UnavailableApproval,
             active_time_exhausted: false,
             unsaved_rule: false,
+            save_prefix: None,
         };
         for resolver in chain {
             match resolver {
@@ -1806,6 +1837,11 @@ impl RunLoop<'_> {
                                     resolution.source = PermissionSource::Human;
                                     resolution.approved = reply != ApprovalReply::Deny && !unsaved;
                                     resolution.unsaved_rule = unsaved;
+                                    // The rule is saved only after this human verdict is committed.
+                                    resolution.save_prefix = (resolution.approved
+                                        && reply == ApprovalReply::AllowPrefixInFolder)
+                                        .then_some(*remember_prefix)
+                                        .flatten();
                                     let resume_at = resolution.approved.then(Instant::now);
                                     self.settle_active_pause(pause, resume_at)?;
                                 }
@@ -2198,6 +2234,22 @@ struct AfterAsk {
     can_start_provider_call: bool,
     cancelled: bool,
     deadline_reached: bool,
+}
+
+fn remember_candidate(
+    grant: &Grant<'_>,
+    configured: bool,
+    permission: Permission,
+    hooks: &HookFold,
+    call: &ToolCall,
+) -> Option<crate::tools::permissions::TypedGitPrefix> {
+    (matches!(grant, Grant::Primary { .. })
+        && configured
+        && permission.decision == Decision::Ask
+        && permission.basis == PermissionSource::Mode
+        && hooks.restriction.is_none())
+    .then(|| crate::tools::permissions::TypedGitPrefix::of_call(call))
+    .flatten()
 }
 
 fn refuse<'a>(reason: NotDispatched, stop: Option<StopCause>) -> Refusal<'a> {
@@ -3166,6 +3218,7 @@ mod tests {
             source,
             active_time_exhausted: false,
             unsaved_rule: false,
+            save_prefix: None,
         }
     }
 

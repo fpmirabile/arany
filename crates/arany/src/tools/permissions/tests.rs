@@ -2308,3 +2308,27 @@ fn typed_prefix_rules_obey_modes_and_restrictive_precedence() {
         (Deny, PermissionSource::Rule)
     );
 }
+
+#[test]
+fn a_typed_allow_keeps_its_provenance_when_an_ordinary_allow_also_matches() {
+    let parsed = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {
+            "allow": ["git_commit"],
+            "typedPrefixes": [typed(&["git", "commit"], "allow", Value::Null)],
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.decision_with_source(&commit_call()),
+        (Decision::Allow, PermissionSource::TypedPrefixRule)
+    );
+    let ordinary_only = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {"allow": ["git_commit"]}})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ordinary_only.decision_with_source(&commit_call()),
+        (Decision::Allow, PermissionSource::Rule)
+    );
+}

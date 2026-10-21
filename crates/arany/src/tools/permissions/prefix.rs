@@ -210,14 +210,20 @@ pub struct TypedPrefixEntry {
 pub struct PermissionSettings {
     entries: Vec<TypedRule>,
     digest: Option<[u8; 32]>,
+    folder: crate::session::WorkspaceIdentity,
 }
 
 impl PermissionSettings {
-    pub fn load(state: &StateRoot) -> Result<Self, SettingsError> {
-        Self::from_bytes(read(state)?.as_deref())
+    pub fn load(state: &StateRoot, workspace: &Path) -> Result<Self, SettingsError> {
+        let folder =
+            crate::tools::workspace_identity(workspace).map_err(|_| SettingsError::Folder)?;
+        Self::from_bytes(read(state)?.as_deref(), folder)
     }
 
-    fn from_bytes(bytes: Option<&[u8]>) -> Result<Self, SettingsError> {
+    fn from_bytes(
+        bytes: Option<&[u8]>,
+        folder: crate::session::WorkspaceIdentity,
+    ) -> Result<Self, SettingsError> {
         let entries = match bytes {
             None => Vec::new(),
             Some(bytes) => {
@@ -229,6 +235,7 @@ impl PermissionSettings {
         Ok(Self {
             entries,
             digest: bytes.map(digest),
+            folder,
         })
     }
 
@@ -251,24 +258,36 @@ impl PermissionSettings {
             .collect()
     }
 
+    // The folder identity captured by `load` binds the edit; a replaced directory refuses.
     pub fn save_edit(
+        &self,
         state: &StateRoot,
         workspace: &Path,
-        expected_digest: Option<[u8; 32]>,
         edit: TypedPrefixEdit,
     ) -> Result<Self, SettingsError> {
-        save(state, workspace, Some(expected_digest), edit)
+        save(
+            state,
+            workspace,
+            self.folder,
+            Some(self.digest),
+            false,
+            edit,
+        )
     }
 
+    // Only extends an existing file, so remembering never activates settings for other Tools.
     pub(crate) fn remember(
         state: &StateRoot,
         workspace: &Path,
+        admitted: crate::session::WorkspaceIdentity,
         prefix: TypedGitPrefix,
     ) -> Result<(), SettingsError> {
         save(
             state,
             workspace,
+            admitted,
             None,
+            true,
             TypedPrefixEdit::Insert {
                 prefix,
                 decision: Decision::Allow,
@@ -289,11 +308,11 @@ fn read(state: &StateRoot) -> Result<Option<Vec<u8>>, SettingsError> {
 fn save(
     state: &StateRoot,
     workspace: &Path,
+    identity: crate::session::WorkspaceIdentity,
     expected: Option<Option<[u8; 32]>>,
+    existing_only: bool,
     edit: TypedPrefixEdit,
 ) -> Result<PermissionSettings, SettingsError> {
-    let identity =
-        crate::tools::workspace_identity(workspace).map_err(|_| SettingsError::Folder)?;
     state
         .with_account_replacement_lock(workspace, || {
             if crate::tools::workspace_identity(workspace).map_err(|_| SettingsError::Folder)?
@@ -302,10 +321,13 @@ fn save(
                 return Err(SettingsError::Folder);
             }
             let bytes = read(state)?;
+            if existing_only && bytes.is_none() {
+                return Err(SettingsError::Conflict);
+            }
             if expected.is_some_and(|expected| expected != bytes.as_deref().map(digest)) {
                 return Err(SettingsError::Conflict);
             }
-            let current = PermissionSettings::from_bytes(bytes.as_deref())?;
+            let current = PermissionSettings::from_bytes(bytes.as_deref(), identity)?;
             let mut entries = current.entries;
             match edit {
                 TypedPrefixEdit::Insert {
@@ -376,7 +398,7 @@ fn save(
             if updated.len() > MAX_CONFIG_BYTES {
                 return Err(SettingsError::Invalid);
             }
-            let parsed = PermissionSettings::from_bytes(Some(&updated))?;
+            let parsed = PermissionSettings::from_bytes(Some(&updated), identity)?;
             if parsed.entries != entries {
                 return Err(SettingsError::Invalid);
             }
@@ -423,6 +445,20 @@ mod tests {
         (temp, state, workspace.canonicalize().unwrap())
     }
 
+    fn save_with(
+        state: &StateRoot,
+        workspace: &Path,
+        digest: Option<[u8; 32]>,
+        edit: TypedPrefixEdit,
+    ) -> Result<PermissionSettings, SettingsError> {
+        PermissionSettings {
+            entries: Vec::new(),
+            digest,
+            folder: crate::tools::workspace_identity(workspace).unwrap(),
+        }
+        .save_edit(state, workspace, edit)
+    }
+
     fn commit() -> ToolCall {
         ToolCall::GitCommit {
             message: "m".into(),
@@ -442,10 +478,10 @@ mod tests {
     #[test]
     fn typed_prefix_edits_are_atomic_identity_bound_and_conflict_checked() {
         let (temp, state, workspace) = setup();
-        let loaded = PermissionSettings::load(&state).unwrap();
+        let loaded = PermissionSettings::load(&state, &workspace).unwrap();
         assert!(!loaded.exists() && loaded.typed_prefixes().is_empty());
 
-        let saved = PermissionSettings::save_edit(
+        let saved = save_with(
             &state,
             &workspace,
             loaded.digest(),
@@ -465,7 +501,7 @@ mod tests {
         assert_eq!(config.decision(&commit()), Decision::Allow);
 
         let stale = saved.digest();
-        let fresh = PermissionSettings::save_edit(
+        let fresh = save_with(
             &state,
             &workspace,
             stale,
@@ -473,7 +509,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 stale,
@@ -482,7 +518,7 @@ mod tests {
             Err(SettingsError::Conflict)
         ));
         assert!(matches!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 None,
@@ -491,14 +527,14 @@ mod tests {
             Err(SettingsError::Conflict)
         ));
         assert_eq!(
-            PermissionSettings::load(&state)
+            PermissionSettings::load(&state, &workspace)
                 .unwrap()
                 .typed_prefixes()
                 .len(),
             2
         );
 
-        let replaced = PermissionSettings::save_edit(
+        let replaced = save_with(
             &state,
             &workspace,
             fresh.digest(),
@@ -510,7 +546,7 @@ mod tests {
         .unwrap();
         assert_eq!(replaced.typed_prefixes()[1].decision, Decision::Deny);
         assert!(matches!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 replaced.digest(),
@@ -518,17 +554,17 @@ mod tests {
             ),
             Err(SettingsError::Missing)
         ));
-        let removed = PermissionSettings::save_edit(
+        let removed = save_with(
             &state,
             &workspace,
             replaced.digest(),
             TypedPrefixEdit::Remove { index: 0 },
         )
         .unwrap();
-        let reopened = PermissionSettings::load(&state).unwrap();
+        let reopened = PermissionSettings::load(&state, &workspace).unwrap();
         assert_eq!(reopened.typed_prefixes(), removed.typed_prefixes());
         assert_eq!(reopened.typed_prefixes()[0].prefix, TypedGitPrefix::Switch);
-        let emptied = PermissionSettings::save_edit(
+        let emptied = save_with(
             &state,
             &workspace,
             reopened.digest(),
@@ -551,8 +587,8 @@ mod tests {
         std::fs::write(&file, original).unwrap();
         std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
-        let loaded = PermissionSettings::load(&state).unwrap();
-        PermissionSettings::save_edit(
+        let loaded = PermissionSettings::load(&state, &workspace).unwrap();
+        save_with(
             &state,
             &workspace,
             loaded.digest(),
@@ -566,9 +602,9 @@ mod tests {
         assert_eq!(value["hooks"], json!({}));
 
         std::fs::write(&file, b"{not json").unwrap();
-        assert!(PermissionSettings::load(&state).is_err());
+        assert!(PermissionSettings::load(&state, &workspace).is_err());
         assert!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 None,
@@ -583,7 +619,7 @@ mod tests {
         std::fs::write(&target, b"keep").unwrap();
         std::os::unix::fs::symlink(&target, temp.path().join("state/permissions.pending")).unwrap();
         assert!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 None,
@@ -610,9 +646,9 @@ mod tests {
         std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))
             .unwrap();
         let before = std::fs::read(&file).unwrap();
-        let loaded = PermissionSettings::load(&state).unwrap();
+        let loaded = PermissionSettings::load(&state, &workspace).unwrap();
         assert!(
-            PermissionSettings::save_edit(
+            save_with(
                 &state,
                 &workspace,
                 loaded.digest(),
@@ -621,5 +657,47 @@ mod tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn typed_prefix_edits_refuse_a_workspace_replaced_after_load() {
+        let (_temp, state, workspace) = setup();
+        let loaded = PermissionSettings::load(&state, &workspace).unwrap();
+        let moved = workspace.with_file_name("moved");
+        std::fs::rename(&workspace, &moved).unwrap();
+        std::fs::create_dir(&workspace).unwrap();
+        assert!(matches!(
+            loaded.save_edit(
+                &state,
+                &workspace,
+                insert(TypedGitPrefix::Commit, Decision::Allow, true),
+            ),
+            Err(SettingsError::Folder)
+        ));
+        assert!(
+            !PermissionSettings::load(&state, &workspace)
+                .unwrap()
+                .exists()
+        );
+        assert!(matches!(
+            PermissionSettings::remember(
+                &state,
+                &workspace,
+                crate::tools::workspace_identity(&moved).unwrap(),
+                TypedGitPrefix::Commit,
+            ),
+            Err(SettingsError::Folder)
+        ));
+    }
+
+    #[test]
+    fn remembering_extends_only_an_existing_file() {
+        let (temp, state, workspace) = setup();
+        let identity = crate::tools::workspace_identity(&workspace).unwrap();
+        assert!(
+            PermissionSettings::remember(&state, &workspace, identity, TypedGitPrefix::Commit)
+                .is_err()
+        );
+        assert!(!temp.path().join("state/permissions.json").exists());
     }
 }

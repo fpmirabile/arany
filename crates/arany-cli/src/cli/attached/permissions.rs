@@ -179,7 +179,9 @@ pub(super) async fn manage_rules(
     loop {
         let loaded = StateRoot::open_existing(state_dir)
             .map_err(|_| SettingsError::Invalid)
-            .and_then(|state| PermissionSettings::load(&state).map(|settings| (state, settings)));
+            .and_then(|state| {
+                PermissionSettings::load(&state, workspace).map(|settings| (state, settings))
+            });
         let (state, settings) = match loaded {
             Ok(loaded) => loaded,
             Err(error) => return Ok(format!("Error: {error}; permissions unchanged")),
@@ -235,7 +237,7 @@ pub(super) async fn manage_rules(
             }
         };
         let Some(edit) = edit else { continue };
-        match PermissionSettings::save_edit(&state, workspace, settings.digest(), edit) {
+        match settings.save_edit(&state, workspace, edit) {
             Ok(_) => {
                 saved = true;
                 notice = Some("Saved.".into());

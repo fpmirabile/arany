@@ -848,11 +848,15 @@ impl ToolRuntime {
             .cache_state
             .as_deref()
             .ok_or(ToolError::Configuration)?;
-        permissions::PermissionSettings::remember(state, &self.workspace, prefix).map_err(|error| {
-            match error {
-                permissions::SettingsError::Busy => ToolError::AccountBusy,
-                _ => ToolError::Configuration,
-            }
+        permissions::PermissionSettings::remember(
+            state,
+            &self.workspace,
+            self.workspace_identity,
+            prefix,
+        )
+        .map_err(|error| match error {
+            permissions::SettingsError::Busy => ToolError::AccountBusy,
+            _ => ToolError::Configuration,
         })
     }
 

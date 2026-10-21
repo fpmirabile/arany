@@ -387,7 +387,11 @@ impl PermissionConfig {
         let (matched, typed_wins) = match (matched, typed) {
             (Some(rule), Some(typed)) => {
                 let narrowed = rule.narrow(typed);
-                (Some(narrowed), narrowed != rule)
+                // On an allow tie the user-owned typed rule keeps the provenance and its prompt exemption.
+                (
+                    Some(narrowed),
+                    narrowed != rule || (rule == Decision::Allow && typed == Decision::Allow),
+                )
             }
             (None, Some(typed)) => (Some(typed), true),
             (matched, None) => (matched, false),

@@ -1746,7 +1746,7 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
     assert!(status.success());
     let reopened = arany::StateRoot::open_existing(&state).unwrap();
     assert!(
-        arany::permissions::PermissionSettings::load(&reopened)
+        arany::permissions::PermissionSettings::load(&reopened, &workspace)
             .unwrap()
             .typed_prefixes()
             .is_empty()

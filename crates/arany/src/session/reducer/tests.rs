@@ -6177,6 +6177,34 @@ mod goal_replay_tests {
                 true
             )
         ));
+        // A later plan, budget or pause gate may refuse dispatch of an allowed call.
+        assert!(!rejected(
+            &view,
+            event(default, Decision::Allow, typed, typed, false)
+        ));
+        assert!(!rejected(
+            &view,
+            event(
+                Some(PermissionMode::DontAsk),
+                Decision::Allow,
+                typed,
+                typed,
+                false
+            )
+        ));
+        for mode in [
+            PermissionMode::Plan,
+            PermissionMode::AcceptEdits,
+            PermissionMode::Auto,
+        ] {
+            assert!(
+                rejected(
+                    &view,
+                    event(Some(mode), Decision::Allow, typed, typed, false)
+                ),
+                "{mode:?}"
+            );
+        }
         let mut once = view.clone();
         apply(&mut once, allowed(default)).unwrap();
         assert!(rejected(&once, allowed(default)));
