@@ -233,8 +233,7 @@ fn non_spawning_program() -> Result<BpfProgram, ToolError> {
     compile(rules, SeccompAction::Errno(libc::EPERM as u32))
 }
 
-// Metadata changes Landlock does not mediate: modes, owners, times, extended attributes and
-// inode flags. A typed Git write's child needs none of them in its private view.
+// Landlock does not mediate these metadata changes, and a Git write's child needs none of them.
 fn metadata_program() -> Result<BpfProgram, ToolError> {
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     {

@@ -635,7 +635,10 @@ async fn report_stale_git_locks(
     }
     crate::tools::worker::recover_private(&git_writes).await?;
     for id in git_writes {
-        crate::tools::report_git_locks(workspace, id)?;
+        let workspace = workspace.to_owned();
+        tokio::task::spawn_blocking(move || crate::tools::report_git_locks(&workspace, id))
+            .await
+            .map_err(|_| crate::tools::ToolError::Operation)??;
     }
     Ok(())
 }

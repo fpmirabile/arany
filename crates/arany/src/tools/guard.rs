@@ -711,8 +711,7 @@ pub(super) async fn execute(
     .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
-    // The unit is confirmed stopped unless process cleanup failed; locks its Git write left
-    // behind are then reported to the owner, never moved.
+    // Unless cleanup failed the unit is stopped, so leftover Git locks are reported, never moved.
     let stale = if dispatched
         && intent.call.is_git()
         && intent.call.mutates()
@@ -741,14 +740,26 @@ pub(super) async fn execute(
     let Some(report) = stale else {
         return result;
     };
-    let observation = result.unwrap_or_else(|error| {
-        super::uncertain_observation(
+    let cache = super::guard_error_cache_update(&intent.call, runtime.cache_state.is_some());
+    Ok(report_stale_locks(
+        uncertain_after_stale(intent, result, cache),
+        &report,
+    ))
+}
+
+fn uncertain_after_stale(
+    intent: &EffectIntent,
+    result: Result<ToolObservation, ToolError>,
+    cache: CacheUpdate,
+) -> ToolObservation {
+    match result {
+        Ok(observation) if observation.disposition == ToolDisposition::Uncertain => observation,
+        other => super::uncertain_observation(
             intent.clone(),
-            error,
-            super::guard_error_cache_update(&intent.call, runtime.cache_state.is_some()),
-        )
-    });
-    Ok(report_stale_locks(observation, &report))
+            other.err().unwrap_or(ToolError::Uncertain),
+            cache,
+        ),
+    }
 }
 
 // The owner removes these by hand, so the report leads the journaled observation.
@@ -3501,6 +3512,23 @@ mod tests {
             observation.output
         );
         assert!(observation.output.contains("Do not retry automatically"));
+    }
+
+    #[test]
+    fn stale_locks_turn_a_failed_observation_uncertain() {
+        let commit = intent(ToolCall::GitCommit {
+            message: "m".into(),
+            paths: vec![".".into()],
+            staged: false,
+        });
+        let mut failed = super::super::uncertain_observation(
+            commit.clone(),
+            ToolError::Uncertain,
+            CacheUpdate::NotApplicable,
+        );
+        failed.disposition = ToolDisposition::Failed;
+        let settled = uncertain_after_stale(&commit, Ok(failed), CacheUpdate::NotApplicable);
+        assert_eq!(settled.disposition, ToolDisposition::Uncertain);
     }
 
     #[test]

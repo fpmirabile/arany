@@ -16,6 +16,7 @@ use cap_std::fs::Dir;
 use serde_json::{Value, json};
 use std::ffi::OsString;
 use std::io::Read;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -239,7 +240,10 @@ pub(super) fn user_identity() -> Option<GitIdentity> {
     // Git reads the XDG file first, so ~/.gitconfig wins for each key.
     let (mut name, mut email) = (None, None);
     for path in [xdg.join("git/config"), home.join(".gitconfig")] {
-        let Some(bytes) = std::fs::File::open(&path)
+        let Some(bytes) = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_CLOEXEC)
+            .open(&path)
             .ok()
             .filter(|file| file.metadata().is_ok_and(|metadata| metadata.is_file()))
             .and_then(|file| {

@@ -18,8 +18,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
-// Objects go to a private directory that borrows the real store as an alternate; Git never writes
-// an alternate, so nothing reaches the real `.git` before publication.
+// Git never writes an alternate, so nothing reaches the real `.git` before publication.
 const WRITE_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n\tlogAllRefUpdates = false\n[commit]\n\tgpgSign = false\n[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n";
 const MAX_REF_ENTRIES: usize = 4096;
 const REF_BYTES: usize = 1024;
@@ -496,8 +495,7 @@ fn case_alias(name: &str, other: &str) -> bool {
         .any(|(left, right)| left != right)
 }
 
-// The loose refs a start point can name under Git's lookup order, held while the branch publishes;
-// HEAD (held by every write) stands for its own referent.
+// HEAD, held by every write, stands for its own referent.
 fn start_refs(existing: &BTreeSet<String>, head: &[u8], start_point: Option<&str>) -> Vec<String> {
     let start = start_point.unwrap_or("HEAD");
     let name = &start[..start.find(['~', '^']).unwrap_or(start.len())];
@@ -731,8 +729,7 @@ fn changed_files<'a>(
             git.hidden,
         )));
     }
-    // Paths or parent directories differing only by ASCII case would alias each other on a
-    // case-insensitive volume.
+    // ASCII-case aliases collide on case-insensitive volumes.
     let mut prefixes = std::collections::BTreeMap::new();
     for file in &files {
         for (end, _) in file.path.match_indices('/').chain([(file.path.len(), "")]) {
@@ -1053,8 +1050,7 @@ fn remove_created(created: &[(Dir, String)]) {
     }
 }
 
-// Exact-case admission: a name that differs from an existing entry only by ASCII case would
-// alias it on case-insensitive storage.
+// An ASCII-case variant of an existing entry would alias it on case-insensitive storage.
 fn exact_case(directory: &Dir, name: &str) -> Result<(), ToolError> {
     for (count, entry) in directory
         .entries()
@@ -1148,8 +1144,7 @@ impl Drop for Ledger<'_> {
     }
 }
 
-// Only the ref-name alphabet typed writes create, so a planted record cannot carry controls or
-// bidirectional overrides into the cleanup report.
+// A planted record must not carry controls or bidirectional overrides into the report.
 fn valid_lock_path(path: &str) -> bool {
     matches!(path, "HEAD.lock" | "index.lock" | "packed-refs.lock")
         || path.len() <= 512
@@ -1226,9 +1221,7 @@ fn sync_directory(directory: &Dir) -> Result<(), ToolError> {
         .map_err(|_| ToolError::Uncertain)
 }
 
-// Locks every replaced or depended-on target, then requires the live refs, HEAD and index to equal
-// the snapshot Git worked from, and publishes files, objects, the ref, the index and HEAD in that
-// order. After the first effect any failure is Uncertain.
+// After the first effect any failure is Uncertain.
 fn publish(
     workspace: &Path,
     view: &Dir,
