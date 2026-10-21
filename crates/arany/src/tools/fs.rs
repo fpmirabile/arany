@@ -33,7 +33,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             content,
         } => {
             valid_relative(path, false)
-                && content.len() <= 8 * 1024
+                && content.len() <= MAX_EDIT_CONTENT_BYTES
                 && expected_digest
                     .as_ref()
                     .is_none_or(|digest| valid_digest(digest))
@@ -47,7 +47,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             valid_relative(path, false)
                 && valid_digest(expected_digest)
                 && !old.is_empty()
-                && old.len() + new.len() <= 8 * 1024
+                && old.len() + new.len() <= MAX_EDIT_CONTENT_BYTES
         }
         ToolCall::ApplyChangeset { source } => source.valid(),
         _ => false,
@@ -70,7 +70,14 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
         ],
         "search" => vec![path, ("query", string())],
-        "write" => vec![path, ("expected_digest", nullable()), ("content", string())],
+        "write" => vec![
+            path,
+            ("expected_digest", nullable()),
+            (
+                "content",
+                json!({"type":"string", "description":format!("Complete UTF-8 file content, at most {MAX_EDIT_CONTENT_BYTES} bytes.")}),
+            ),
+        ],
         "edit" => vec![
             path,
             (
@@ -83,7 +90,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             (
                 "new",
-                json!({"type":"string", "description":"Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes."}),
+                json!({"type":"string", "description":format!("Replacement literal text. Combined old and new UTF-8 size must be at most {MAX_EDIT_CONTENT_BYTES} bytes.")}),
             ),
         ],
         _ => return None,

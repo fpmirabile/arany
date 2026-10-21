@@ -304,6 +304,7 @@
         "additionalProperties": false,
         "properties": {
           "content": {
+            "description": "Complete UTF-8 file content, at most 65536 bytes.",
             "type": "string"
           },
           "expected_digest": {
@@ -337,7 +338,7 @@
             "type": "string"
           },
           "new": {
-            "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes.",
+            "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
             "type": "string"
           },
           "old": {
@@ -631,6 +632,7 @@
                         "additionalProperties": false,
                         "properties": {
                           "content": {
+                            "description": "Complete UTF-8 file content, at most 65536 bytes.",
                             "type": "string"
                           },
                           "expected_digest": {
@@ -665,7 +667,7 @@
                             "type": "string"
                           },
                           "new": {
-                            "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 8192 bytes.",
+                            "description": "Replacement literal text. Combined old and new UTF-8 size must be at most 65536 bytes.",
                             "type": "string"
                           },
                           "old": {

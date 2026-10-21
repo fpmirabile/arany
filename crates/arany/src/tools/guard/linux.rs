@@ -67,6 +67,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
     bytes.extend_from_slice(&(HARDENED_THREADS_CAP as u64).to_le_bytes());
     bytes.extend_from_slice(&(STATUS_BYTES_CAP as u64).to_le_bytes());
+    bytes.extend_from_slice(&(super::TASK_BYTES_CAP as u64).to_le_bytes());
     Ok(digest(&bytes))
 }
 

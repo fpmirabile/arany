@@ -11,7 +11,7 @@ enum Fault {
     Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
     CheckpointStall(SessionId),
     SupervisorOff(SessionId),
-    WorkerReceipt(uuid::Uuid),
+    GuardReceipt(uuid::Uuid),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
         SessionId,
@@ -168,11 +168,11 @@ impl FaultPlan {
     }
 
     pub fn lose_guard_receipt(intent: uuid::Uuid) {
-        plan().push(Fault::WorkerReceipt(intent));
+        plan().push(Fault::GuardReceipt(intent));
     }
 
-    pub(crate) fn worker_receipt_lost(intent: uuid::Uuid) -> bool {
-        take(|fault| matches!(fault, Fault::WorkerReceipt(id) if *id == intent)).is_some()
+    pub(crate) fn guard_receipt_lost(intent: uuid::Uuid) -> bool {
+        take(|fault| matches!(fault, Fault::GuardReceipt(id) if *id == intent)).is_some()
     }
 
     pub(crate) fn append_fails(session_id: SessionId, event: &Event) -> bool {

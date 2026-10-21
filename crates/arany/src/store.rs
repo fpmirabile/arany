@@ -44,6 +44,9 @@ const MAX_GOAL_STARTED_BYTES: usize = MAX_ESCAPED_OBJECTIVE_BYTES + 16 * 1024;
 const MAX_MESSAGE_ACCEPTED_BYTES: usize =
     MAX_ESCAPED_OBJECTIVE_BYTES + crate::provider::MAX_IMAGE_BYTES.div_ceil(3) * 4 + 16 * 1024;
 const MAX_TOOL_FINISHED_BYTES: usize = crate::tools::types::MAX_TOOL_OBSERVATION_BYTES + 512;
+// The complete intent: Tool arguments plus bounded metadata; Tool admission reserves it as an observation slot.
+const MAX_TOOL_STARTED_BYTES: usize = 512 * 1024;
+const _: () = assert!(MAX_TOOL_STARTED_BYTES <= MAX_TOOL_FINISHED_BYTES);
 // Run start needs extra headroom because GoalStarted and MessageAccepted exceed the ordinary Event bound.
 const RUN_START_EXTRA_BYTES: usize =
     MAX_GOAL_STARTED_BYTES + MAX_MESSAGE_ACCEPTED_BYTES - 2 * MAX_EVENT_BYTES;
@@ -54,6 +57,7 @@ fn event_payload_limit(kind: &str, version: i64) -> usize {
         }
         "MessageAccepted" if payload_version(kind) == Some(version) => MAX_MESSAGE_ACCEPTED_BYTES,
         "GoalStarted" if payload_version(kind) == Some(version) => MAX_GOAL_STARTED_BYTES,
+        "ToolStarted" if payload_version(kind) == Some(version) => MAX_TOOL_STARTED_BYTES,
         "ToolFinished" if payload_version(kind) == Some(version) => MAX_TOOL_FINISHED_BYTES,
         "HookFinished" if payload_version(kind) == Some(version) => {
             crate::tools::types::MAX_TOOL_OBSERVATION_BYTES
