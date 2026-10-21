@@ -883,9 +883,7 @@ impl<'a> RunLoop<'a> {
         if !self.model_may_propose(call) {
             return Err(NotOffered);
         }
-        if !serde_json::to_vec(call)
-            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
-        {
+        if !serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() <= call.argument_limit()) {
             return Err(ArgumentBytes);
         }
         if !call.valid() {
@@ -920,7 +918,7 @@ impl<'a> RunLoop<'a> {
         let cause = if self.controls.tools.is_none() {
             Some(NotOffered)
         } else if !serde_json::to_vec(contract)
-            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_TOOL_ARGUMENT_BYTES)
+            .is_ok_and(|bytes| bytes.len() <= crate::tools::types::MAX_ORDINARY_TOOL_ARGUMENT_BYTES)
         {
             Some(ArgumentBytes)
         } else if existing.is_some() || contract.validate().is_err() {

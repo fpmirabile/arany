@@ -14,6 +14,8 @@ must be read before using an old recommendation as implementation guidance.
 
 | Report | Investigation area |
 |---|---|
+| [Git writes and remembered approvals](./git-writes-2026-10.md) | Peer permission evidence, neutralized Git publication, typed prefix authorization and host write isolation conflicts |
+| [Agent chat switching](./agent-switching-2026-10.md) | Codex and Claude Code navigation, journaled Arany child history, input barriers, read-only authority and OS evidence limits |
 | [Automatic state migrations](./state-migrations-2026-10.md) | Persisted-format inventory, commit churn, digest and storage constraints, and peer evidence |
 | [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership |
 | [Harness effect-loop comparisons](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership |
