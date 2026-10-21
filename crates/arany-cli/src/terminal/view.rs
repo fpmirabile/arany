@@ -2215,7 +2215,7 @@ pub(super) fn draw_agent_inspector_frame(
         let hint = match area.width {
             70.. => "Enter open · Esc close · Up/Down agent · type to search · PgUp/PgDn",
             40.. => "Enter open · Esc close · type to search",
-            20.. => "Enter Esc Up/Dn Pg",
+            20.. => "Type Enter Esc Up/Dn",
             _ => "Esc Up/Dn Pg",
         };
         frame.render_widget(
