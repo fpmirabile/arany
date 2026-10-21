@@ -26,7 +26,7 @@ pub(crate) use build_cache::{
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
-pub(crate) use lock::{SessionRunLock, WorkspaceRunLock};
+pub(crate) use lock::{HistoryLock, SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",

@@ -1,36 +1,10 @@
 use super::*;
 use crate::session::{AgentRunId, CompactionRecord, PAYLOAD_VERSIONS, RunId};
 use crate::store::journal::{append, fork_session, open_connection};
+use crate::store::replay::resolve_open_view;
 use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-
-// The frozen schema 4 that the 4 -> 5 step upgrades.
-const SCHEMA_4_SQL: &str = "CREATE TABLE events (
-        sequence INTEGER PRIMARY KEY,
-        session_id TEXT NOT NULL,
-        run_id TEXT,
-        agent_run_id TEXT,
-        kind TEXT NOT NULL,
-        event_version INTEGER NOT NULL CHECK (event_version >= 1),
-        payload TEXT NOT NULL CHECK (json_valid(payload)),
-        created_at_ms INTEGER NOT NULL
-    ) STRICT;
-    CREATE INDEX events_by_session ON events (session_id, sequence);
-    CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
-    CREATE TABLE provider_evidence (
-        profile_name TEXT PRIMARY KEY,
-        profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
-        addresses TEXT NOT NULL CHECK(json_valid(addresses)),
-        checked_at_ms INTEGER NOT NULL,
-        expires_at_ms INTEGER NOT NULL
-    ) STRICT;
-    CREATE TABLE native_provider_evidence (
-        fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
-        checked_at_ms INTEGER NOT NULL,
-        expires_at_ms INTEGER NOT NULL
-    ) STRICT;";
-const SCHEMA_FIXTURES: [(i64, &str); 1] = [(4, SCHEMA_4_SQL)];
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // Production registers no Event step yet; each future step adds its (kind, from, input, expected) row.
@@ -124,15 +98,27 @@ struct History {
     sessions: [SessionId; 3],
 }
 
-// A source with a finished Run, a rewind and a compaction over it, a child fork and a grandchild fork.
 fn forked_history(path: &Path) -> History {
+    history(path, false, 0)
+}
+
+// A source with a finished Run (optionally Goal-compacted), a rewind and a compaction over it,
+// `renames` idle renames, a child fork and a grandchild fork.
+fn history(path: &Path, goal_compacted: bool, renames: usize) -> History {
     let root = StateRoot::admit(path).unwrap();
-    let fixture = crate::session::worker_protocol_fixture();
+    let fixture = crate::session::worker_compacted_fixture(goal_compacted);
     let source = fixture.session;
     let mut connection = open_connection(&root, false).unwrap();
     let mut hot = None;
     for event in &fixture.events {
-        append(&mut connection, &mut hot, source, event.clone()).unwrap();
+        let mut event = event.clone();
+        // The fixture pins its digest over zero timestamps; the journal stamps real ones.
+        if let Event::GoalContextCompacted { record, .. } = &mut event {
+            let (events, _) = resolve_open_view(&connection, source, &mut 0).unwrap();
+            record.source_digest =
+                crate::session::prefix_digest(&events, record.covered_sequence).unwrap();
+        }
+        append(&mut connection, &mut hot, source, event).unwrap();
     }
     let view = |connection: &Connection| resolve_view(connection, source, 0, &mut 0).unwrap();
     let current = view(&connection).1.unwrap();
@@ -156,6 +142,23 @@ fn forked_history(path: &Path) -> History {
         active_ms: None,
     };
     append(&mut connection, &mut hot, source, compacted).unwrap();
+    let rename = Event::SessionRenamed { title: "x".into() };
+    let transaction = connection.transaction().unwrap();
+    for _ in 0..renames {
+        transaction
+            .execute(
+                "INSERT INTO events (sequence, session_id, kind, event_version, payload, created_at_ms)
+                 VALUES ((SELECT MAX(sequence) + 1 FROM events), ?1, ?2, ?3, ?4, 0)",
+                rusqlite::params![
+                    source.to_string(),
+                    rename.kind(),
+                    rename.version(),
+                    rename.payload().unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
     let child = fork_session(&mut connection, source, "Child".into()).unwrap();
     let grandchild = fork_session(&mut connection, child, "Grandchild".into()).unwrap();
     History {
@@ -193,6 +196,11 @@ fn stored_prefix(row: &RawRow) -> PrefixRow<'_> {
     }
 }
 
+fn decode_row(row: &RawRow) -> Event {
+    let run = row.run_id.as_deref().map(|id| id.parse::<RunId>().unwrap());
+    Event::decode(&row.kind, row.version, &row.payload, run, None).unwrap()
+}
+
 // Rewrites SessionStarted to the synthetic version 5 and re-pins every prefix reference over the
 // stored bytes. With canonical text this is what a version-5 build wrote; noncanonical text pins
 // digests that version-5 replay rejected.
@@ -221,10 +229,12 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
         let lane = lanes.entry(row.session_id.clone()).or_default();
         if matches!(
             row.kind.as_str(),
-            "SessionForked" | "ContextCompacted" | "WorkspaceRewindStarted"
+            "SessionForked"
+                | "ContextCompacted"
+                | "GoalContextCompacted"
+                | "WorkspaceRewindStarted"
         ) {
-            let mut event =
-                Event::decode(&row.kind, row.version, &row.payload, None, None).unwrap();
+            let mut event = decode_row(&row);
             match &mut event {
                 Event::SessionForked {
                     source_session_id,
@@ -232,7 +242,8 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
                     prefix_digest,
                     ..
                 } => *prefix_digest = points[&(source_session_id.to_string(), *source_sequence)],
-                Event::ContextCompacted { record, .. } => {
+                Event::ContextCompacted { record, .. }
+                | Event::GoalContextCompacted { record, .. } => {
                     record.source_digest =
                         points[&(row.session_id.clone(), record.covered_sequence)];
                 }
@@ -255,26 +266,28 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
     }
 }
 
+fn first_of(connection: &Connection, kind: &str) -> RawRow {
+    rows(connection)
+        .into_iter()
+        .find(|row| row.kind == kind)
+        .unwrap()
+}
+
 fn forge(connection: &Connection, kind: &str) {
-    let (sequence, payload): (i64, String) = connection
-        .query_row(
-            "SELECT sequence, payload FROM events WHERE kind=?1 ORDER BY sequence LIMIT 1",
-            [kind],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    let version = payload_version(kind).unwrap();
-    let mut event = Event::decode(kind, version, &payload, None, None).unwrap();
+    let row = first_of(connection, kind);
+    let mut event = decode_row(&row);
     match &mut event {
         Event::SessionForked { prefix_digest, .. } => prefix_digest[0] ^= 1,
-        Event::ContextCompacted { record, .. } => record.source_digest[0] ^= 1,
+        Event::ContextCompacted { record, .. } | Event::GoalContextCompacted { record, .. } => {
+            record.source_digest[0] ^= 1;
+        }
         Event::WorkspaceRewindStarted { record } => record.prefix_digest[0] ^= 1,
         _ => unreachable!(),
     }
     connection
         .execute(
             "UPDATE events SET payload=?1 WHERE sequence=?2",
-            rusqlite::params![event.payload().unwrap(), sequence],
+            rusqlite::params![event.payload().unwrap(), row.sequence],
         )
         .unwrap();
 }
@@ -342,10 +355,17 @@ fn replays(root: &StateRoot, sessions: &[SessionId]) {
 
 #[test]
 fn a_migratable_history_upgrades_in_a_validated_copy_with_recomputed_prefix_digests() {
+    // The Goal compaction adds one more re-pinned digest.
+    for (goal_compacted, rewritten) in [(false, 5), (true, 6)] {
+        upgrades_with_recomputed_digests(goal_compacted, rewritten);
+    }
+}
+
+fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
     let temp = tempfile::tempdir().unwrap();
     let built = temp.path().join("built");
     let path = temp.path().join("state");
-    let History { sessions, .. } = forked_history(&built);
+    let History { sessions, .. } = history(&built, goal_compacted, 0);
     let writer = Connection::open(built.join(DATABASE_FILE)).unwrap();
     writer
         .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
@@ -365,7 +385,8 @@ fn a_migratable_history_upgrades_in_a_validated_copy_with_recomputed_prefix_dige
     assert!(
         root.upgrade_or_archive_history(&synthetic(&floor, &STARTED_STEP))
             .unwrap()
-            .is_none()
+            .is_none(),
+        "goal compacted: {goal_compacted}"
     );
 
     assert!(!path.join("archive").exists());
@@ -396,8 +417,8 @@ fn a_migratable_history_upgrades_in_a_validated_copy_with_recomputed_prefix_dige
     );
     assert_eq!(
         (fact.1, fact.2, fact.3, fact.4),
-        (SCHEMA_VERSION, SCHEMA_VERSION, 5, names[0].clone()),
-        "SessionStarted, the rewind, the compaction and two forks are rewritten"
+        (SCHEMA_VERSION, SCHEMA_VERSION, rewritten, names[0].clone()),
+        "SessionStarted, every compaction, the rewind and two forks are rewritten"
     );
     replays(&root, &sessions);
     let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
@@ -410,17 +431,18 @@ fn a_migratable_history_upgrades_in_a_validated_copy_with_recomputed_prefix_dige
             .all(|(new, old)| new != old),
         "every fork digest covers the rewritten prefix"
     );
-    let started = stored_rows(&upgraded)
-        .into_iter()
-        .find(|row| row.1 == "SessionStarted")
-        .unwrap();
-    assert_eq!(started.2, 6);
-    assert!(started.3.starts_with(r#"{"title":"#), "{}", started.3);
+    let started = first_of(&upgraded, "SessionStarted");
+    assert_eq!(started.version, 6);
+    assert!(
+        started.payload.starts_with(r#"{"title":"#),
+        "{}",
+        started.payload
+    );
 }
 
 #[test]
 fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
-    // One fixed clock makes a retry after a kept backup reuse the same timestamp.
+    // One fixed clock makes a retry reuse the same timestamp; the migration ID keeps names apart.
     CLOCK.with(|clock| clock.set(Some(SystemTime::UNIX_EPOCH)));
     let mut interrupted = 0;
     loop {
@@ -447,34 +469,47 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         if current != original {
             assert_eq!(facts(&path).len(), 1, "step {interrupted}");
         }
-        let mut kept_backup = false;
         if let Some((_, marker)) = read_marker(&root).unwrap() {
-            // A changed artifact fails closed before any cleanup.
-            let before = entries(&path.join(DIR));
+            // Every changed pinned artifact fails closed before any cleanup.
+            let staged = path.join(DIR).join(STAGED);
             let changed = match marker.phase {
-                Phase::Preparing => database.clone(),
+                Phase::Preparing => vec![database.clone()],
                 Phase::Ready { .. } => {
-                    kept_backup = current == original;
-                    path.join(DIR).join(&marker.backup)
+                    let mut changed = vec![database.clone(), path.join(DIR).join(&marker.backup)];
+                    changed.extend(staged.exists().then_some(staged));
+                    changed
                 }
             };
-            let saved = std::fs::read(&changed).unwrap();
-            std::fs::write(&changed, b"changed").unwrap();
-            assert!(
-                matches!(
-                    root.archive_incompatible_history(),
-                    Err(StoreError::MigrationConflict)
-                ),
-                "step {interrupted}"
-            );
-            assert_eq!(entries(&path.join(DIR)), before, "step {interrupted}");
-            assert!(!path.join("archive").exists(), "step {interrupted}");
-            std::fs::write(&changed, saved).unwrap();
+            for file in changed {
+                let before = entries(&path.join(DIR));
+                let saved = std::fs::read(&file).unwrap();
+                std::fs::write(&file, b"changed").unwrap();
+                assert!(
+                    matches!(
+                        root.archive_incompatible_history(),
+                        Err(StoreError::MigrationConflict)
+                    ),
+                    "step {interrupted}: {file:?}"
+                );
+                assert_eq!(entries(&path.join(DIR)), before, "step {interrupted}");
+                assert!(!path.join("archive").exists(), "step {interrupted}");
+                std::fs::write(&file, saved).unwrap();
+            }
             assert_eq!(
                 std::fs::read(&database).unwrap(),
                 current,
                 "step {interrupted}"
             );
+            if current != original {
+                // A writable open recovers the pending upgrade under its own lease.
+                let store = crate::Store::open(root.try_clone().unwrap()).unwrap();
+                tokio::runtime::Builder::new_current_thread()
+                    .build()
+                    .unwrap()
+                    .block_on(store.close())
+                    .unwrap();
+                assert!(!pending(&root).unwrap(), "step {interrupted}");
+            }
         }
 
         assert!(
@@ -484,22 +519,61 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let [fact] = facts(&path).try_into().unwrap();
         assert_eq!((fact.1, fact.2), (4, SCHEMA_VERSION), "step {interrupted}");
         replays(&root, &sessions);
-        let backups = entries(&path.join(DIR));
-        assert_eq!(
-            backups.len(),
-            if kept_backup { 2 } else { 1 },
-            "step {interrupted}: {backups:?}"
+        let [backup] = entries(&path.join(DIR)).try_into().unwrap();
+        assert_eq!(backup, fact.4, "step {interrupted}: only the latest backup");
+        assert!(
+            backup.starts_with("history-19700101T000000.000Z-"),
+            "{backup}"
         );
-        for name in backups {
-            assert!(name.starts_with("history-19700101T000000.000Z-"), "{name}");
-            let backup = Connection::open(path.join(DIR).join(name)).unwrap();
-            assert_eq!(user_version(&backup), 4, "step {interrupted}");
-            assert_eq!(stored_rows(&backup), original_rows, "step {interrupted}");
-        }
+        let backup = Connection::open(path.join(DIR).join(backup)).unwrap();
+        assert_eq!(user_version(&backup), 4, "step {interrupted}");
+        assert_eq!(stored_rows(&backup), original_rows, "step {interrupted}");
         interrupted += 1;
     }
     CLOCK.with(|clock| clock.set(None));
     assert!(interrupted >= 16, "every durability step was interrupted");
+}
+
+#[test]
+fn a_later_migration_keeps_only_its_own_backup() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    let database = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    database
+        .execute_batch("DROP TABLE migrations; PRAGMA user_version=4;")
+        .unwrap();
+    drop(database);
+    assert!(root.archive_incompatible_history().unwrap().is_none());
+    let [first] = entries(&path.join(DIR)).try_into().unwrap();
+    downgrade_started(&Connection::open(path.join(DATABASE_FILE)).unwrap(), true);
+    let floor = started_floor();
+
+    assert!(
+        root.upgrade_or_archive_history(&synthetic(&floor, &STARTED_STEP))
+            .unwrap()
+            .is_none()
+    );
+
+    let [backup] = entries(&path.join(DIR)).try_into().unwrap();
+    assert_ne!(backup, first, "the older backup is replaced");
+    replays(&root, &sessions);
+}
+
+// A trigger that restores the honest fork row once row 1 is rewritten, after the first batch was read.
+fn trigger_repairs_a_later_forgery(connection: &Connection) {
+    downgrade_started(connection, true);
+    let honest = first_of(connection, "SessionForked");
+    assert!(honest.sequence > 256, "the forged row is in a later batch");
+    forge(connection, "SessionForked");
+    connection
+        .execute_batch(&format!(
+            "CREATE TRIGGER repair AFTER UPDATE ON events WHEN new.sequence = 1 BEGIN
+             UPDATE events SET payload = '{}' WHERE sequence = {}; END;",
+            honest.payload.replace('\'', "''"),
+            honest.sequence
+        ))
+        .unwrap();
 }
 
 #[test]
@@ -509,40 +583,59 @@ fn unsupported_refused_or_forged_history_is_archived_intact() {
         synthetic(&floor, &REFUSING_STEP),
         synthetic(&floor, &STARTED_STEP),
     );
-    type Case<'a> = (&'a str, &'a Registry<'a>, fn(&Connection));
-    let cases: [Case<'_>; 6] = [
-        ("schema below the floor", &REGISTRY, |connection| {
-            connection
-                .execute_batch("DROP TABLE migrations; PRAGMA user_version=3;")
-                .unwrap();
-        }),
-        ("refused step", &refusing, |connection| {
-            downgrade_started(connection, true);
-        }),
+    type Case<'a> = (&'a str, &'a Registry<'a>, bool, usize, fn(&Connection));
+    let cases: [Case<'_>; 8] = [
         (
-            "digests pinned over noncanonical bytes",
-            &upgrading,
+            "schema below the floor",
+            &REGISTRY,
+            false,
+            0,
             |connection| {
-                downgrade_started(connection, false);
+                connection
+                    .execute_batch("DROP TABLE migrations; PRAGMA user_version=3;")
+                    .unwrap();
             },
         ),
-        ("forged fork digest", &upgrading, |connection| {
+        ("refused step", &refusing, false, 0, |connection| {
+            downgrade_started(connection, true);
+        }),
+        ("noncanonical pins", &upgrading, false, 0, |connection| {
+            downgrade_started(connection, false);
+        }),
+        ("forged fork", &upgrading, false, 0, |connection| {
             downgrade_started(connection, true);
             forge(connection, "SessionForked");
         }),
-        ("forged rewind prefix", &upgrading, |connection| {
+        ("forged rewind", &upgrading, false, 0, |connection| {
             downgrade_started(connection, true);
             forge(connection, "WorkspaceRewindStarted");
         }),
-        ("forged compaction digest", &upgrading, |connection| {
+        ("forged compaction", &upgrading, false, 0, |connection| {
             downgrade_started(connection, true);
             forge(connection, "ContextCompacted");
         }),
+        (
+            "forged Goal compaction",
+            &upgrading,
+            true,
+            0,
+            |connection| {
+                downgrade_started(connection, true);
+                forge(connection, "GoalContextCompacted");
+            },
+        ),
+        (
+            "trigger beyond the first batch",
+            &upgrading,
+            false,
+            300,
+            trigger_repairs_a_later_forgery,
+        ),
     ];
-    for (name, registry, prepare) in cases {
+    for (name, registry, goal_compacted, renames, prepare) in cases {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
-        let History { root, .. } = forked_history(&path);
+        let History { root, .. } = history(&path, goal_compacted, renames);
         prepare(&Connection::open(path.join(DATABASE_FILE)).unwrap());
         let original = std::fs::read(path.join(DATABASE_FILE)).unwrap();
 
@@ -561,74 +654,64 @@ fn unsupported_refused_or_forged_history_is_archived_intact() {
 }
 
 #[test]
-fn goal_compaction_digests_are_verified_before_they_are_repinned() {
+fn replay_validation_bounds_aggregate_work_but_not_each_lineage() {
     let floor = started_floor();
     let registry = synthetic(&floor, &STARTED_STEP);
-    for forged in [false, true] {
+    // Forks reload their ancestors: about 10,400 events in aggregate, under 10,000 per lineage.
+    for (limit, migrated) in [(MAX_VALIDATION_EVENTS, true), (5_000, false)] {
         let temp = tempfile::tempdir().unwrap();
-        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
-        let fixture = crate::session::worker_protocol_fixture();
-        let mut connection = open_connection(&root, false).unwrap();
-        let mut hot = None;
-        for event in &fixture.events {
-            append(&mut connection, &mut hot, fixture.session, event.clone()).unwrap();
-        }
-        let rows = rows(&connection);
-        let tool = rows.iter().find(|row| row.kind == "ToolFinished").unwrap();
-        let mut hasher = PrefixHasher::new();
-        hasher.update_row(&stored_prefix(tool)).unwrap();
-        let mut record = failed_compaction(
-            fixture.run,
-            u64::try_from(tool.sequence).unwrap(),
-            hasher.digest(),
-        );
-        record.source_digest[0] ^= u8::from(forged);
-        let event = Event::GoalContextCompacted {
-            goal_id: fixture.goal,
-            run_id: fixture.run,
-            covered_tool_count: 1,
-            record,
-        };
-        connection
-            .execute(
-                "INSERT INTO events (sequence, session_id, run_id, kind, event_version, payload, created_at_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0)",
-                rusqlite::params![
-                    rows.last().unwrap().sequence + 1,
-                    fixture.session.to_string(),
-                    fixture.run.to_string(),
-                    event.kind(),
-                    event.version(),
-                    event.payload().unwrap(),
-                ],
-            )
-            .unwrap();
-        downgrade_started(&connection, true);
-
-        let transaction = connection.transaction().unwrap();
-        let result = rewrite_events(&transaction, &registry);
-
-        if forged {
-            assert!(matches!(result, Err(StoreError::InvalidHistory)));
+        let path = temp.path().join("state");
+        let History { root, sessions } = history(&path, false, 3_400);
+        downgrade_started(&Connection::open(path.join(DATABASE_FILE)).unwrap(), true);
+        let original = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+        VALIDATION_LIMIT.with(|bound| bound.set(limit));
+        let result = root.upgrade_or_archive_history(&registry).unwrap();
+        VALIDATION_LIMIT.with(|bound| bound.set(MAX_VALIDATION_EVENTS));
+        if migrated {
+            assert!(result.is_none());
+            replays(&root, &sessions);
         } else {
-            assert_eq!(result.unwrap(), 1, "only SessionStarted changes");
+            let archived = result.unwrap();
+            assert_eq!(
+                std::fs::read(archived.path().join(DATABASE_FILE)).unwrap(),
+                original
+            );
         }
     }
 }
 
 #[test]
-fn replay_validation_stops_at_its_cumulative_event_bound() {
+fn unsupported_history_in_an_uncheckpointed_wal_is_archived_byte_for_byte() {
     let temp = tempfile::tempdir().unwrap();
-    let History { root, .. } = forked_history(&temp.path().join("state"));
-    let connection = open_connection(&root, false).unwrap();
-    let stored = rows(&connection).len();
+    let built = temp.path().join("built");
+    let path = temp.path().join("state");
+    forked_history(&built);
+    let writer = Connection::open(built.join(DATABASE_FILE)).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
+             UPDATE events SET event_version = 4 WHERE kind = 'SessionStarted';",
+        )
+        .unwrap();
+    let root = StateRoot::admit(&path).unwrap();
+    let mut copied = Vec::new();
+    for name in [DATABASE_FILE, "events.sqlite3-wal"] {
+        std::fs::copy(built.join(name), path.join(name)).unwrap();
+        std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(0o600)).unwrap();
+        copied.push((name, std::fs::read(path.join(name)).unwrap()));
+    }
+    drop(writer);
 
-    validate_all(&connection, MAX_VALIDATION_EVENTS).unwrap();
-    // Forks reload their ancestors, so whole-history replay loads more events than are stored.
-    assert!(matches!(
-        validate_all(&connection, stored),
-        Err(StoreError::ReplayLimit)
-    ));
+    let archived = root.archive_incompatible_history().unwrap().unwrap();
+
+    for (name, bytes) in copied {
+        assert_eq!(
+            std::fs::read(archived.path().join(name)).unwrap(),
+            bytes,
+            "{name} is archived unchanged"
+        );
+    }
+    assert!(!path.join(DIR).exists());
 }
 
 // The guard: every version above its declared floor needs a registered step and fixture per edge.
@@ -683,47 +766,28 @@ fn uncovered(
             }
         }
     }
-    let current_schema = schema_of(
-        &crate::store::journal::SCHEMA_SQL
-            .replace("BEGIN IMMEDIATE;", "")
-            .replace("COMMIT;", ""),
-    );
     for from in registry.schema_floor..schema {
-        let fixture = SCHEMA_FIXTURES.iter().find(|fixture| fixture.0 == from);
-        let (Some(step), Some((_, sql))) = (registry.schema_step(from), fixture) else {
+        let (Some(step), Some(target)) = (
+            registry.schema_step(from),
+            registry.expected_schema(from + 1),
+        ) else {
             problems.push(format!(
                 "schema {from} -> {} has no step and fixture",
                 from + 1
             ));
             continue;
         };
-        let target = SCHEMA_FIXTURES
-            .iter()
-            .find(|fixture| fixture.0 == from + 1)
-            .map_or_else(|| current_schema.clone(), |(_, sql)| schema_of(sql));
-        if schema_of(&format!("{sql}{}", step.sql)) != target {
+        if schema_of(&format!("{}{}", step.source, step.sql)) != schema_of(target) {
             problems.push(format!("schema {from} -> {} fixture mismatch", from + 1));
         }
     }
     problems
 }
 
-fn schema_of(sql: &str) -> Vec<(String, String)> {
+fn schema_of(sql: &str) -> Vec<[String; 4]> {
     let connection = Connection::open_in_memory().unwrap();
     connection.execute_batch(sql).unwrap();
-    connection
-        .prepare("SELECT name, sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap()
-        .query_map([], |row| {
-            let sql: String = row.get(1)?;
-            Ok((
-                row.get(0)?,
-                sql.split_whitespace().collect::<Vec<_>>().join(" "),
-            ))
-        })
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap()
+    schema_objects(&connection).unwrap()
 }
 
 #[test]

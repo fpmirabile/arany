@@ -1,4 +1,4 @@
-use super::journal::{SCHEMA_VERSION, open_database};
+use super::journal::{SCHEMA_SQL, SCHEMA_VERSION, open_database};
 use super::replay::{ROWS_AFTER_SQL, RawRow, raw_row, resolve_view, validate_history};
 use super::state::{
     HISTORY_FILES, Identity, archive_name, check_private_record_file, identity_of, nonblocking,
@@ -30,6 +30,8 @@ const MAX_VALIDATION_EVENTS: usize = 1 << 20;
 
 pub(super) struct SchemaStep {
     pub(super) from: i64,
+    // The exact schema at `from`; any other object (trigger, view, table, index) refuses.
+    pub(super) source: &'static str,
     pub(super) sql: &'static str,
 }
 
@@ -53,6 +55,30 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     schema_floor: 4,
     schema_steps: &[SchemaStep {
         from: 4,
+        source: "CREATE TABLE events (
+                sequence INTEGER PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                run_id TEXT,
+                agent_run_id TEXT,
+                kind TEXT NOT NULL,
+                event_version INTEGER NOT NULL CHECK (event_version >= 1),
+                payload TEXT NOT NULL CHECK (json_valid(payload)),
+                created_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX events_by_session ON events (session_id, sequence);
+            CREATE INDEX events_by_run ON events (run_id, sequence) WHERE run_id IS NOT NULL;
+            CREATE TABLE provider_evidence (
+                profile_name TEXT PRIMARY KEY,
+                profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
+                addresses TEXT NOT NULL CHECK(json_valid(addresses)),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE TABLE native_provider_evidence (
+                fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
+                checked_at_ms INTEGER NOT NULL,
+                expires_at_ms INTEGER NOT NULL
+            ) STRICT;",
         sql: "CREATE TABLE migrations (
                 id TEXT PRIMARY KEY CHECK (length(id) = 36),
                 from_schema INTEGER NOT NULL,
@@ -127,6 +153,14 @@ impl Registry<'_> {
 
     fn schema_step(&self, from: i64) -> Option<&SchemaStep> {
         self.schema_steps.iter().find(|step| step.from == from)
+    }
+
+    fn expected_schema(&self, version: i64) -> Option<&'static str> {
+        if version == SCHEMA_VERSION {
+            Some(SCHEMA_SQL)
+        } else {
+            self.schema_step(version).map(|step| step.source)
+        }
     }
 
     // `None` for a current payload; prefix digests of older versions hash this canonical text.
@@ -206,12 +240,21 @@ pub(super) fn pending(root: &StateRoot) -> Result<bool, StoreError> {
     }
 }
 
-pub(super) fn recover_pending(root: &StateRoot) -> Result<(), StoreError> {
-    if pending(root)? {
+// Checked under the shared lease, so no migration can start or crash between the check and the open.
+pub(super) fn lease_after_recovery(
+    root: &StateRoot,
+    writable: bool,
+) -> Result<super::state::HistoryLock, StoreError> {
+    for _ in 0..3 {
+        let shared = root.lock_history(false)?;
+        if !writable || !pending(root)? {
+            return Ok(shared);
+        }
+        drop(shared);
         let _exclusive = root.lock_history(true)?;
         recover(root)?;
     }
-    Ok(())
+    Err(StoreError::HistoryChanged)
 }
 
 // The caller holds the exclusive history lock.
@@ -225,11 +268,8 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             if current != Some(marker.source) {
                 return Err(StoreError::MigrationConflict);
             }
-            // An interrupted copy can leave a rollback journal; it goes before its database.
-            for name in [STAGED, marker.backup.as_str()] {
-                remove_if_present(&dir, &format!("{name}-journal"))?;
-                remove_if_present(&dir, name)?;
-            }
+            discard(&dir, STAGED)?;
+            discard(&dir, &marker.backup)?;
         }
         Phase::Ready {
             source_digest,
@@ -238,18 +278,25 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
             staged_digest,
         } => {
             let original = current == Some(marker.source);
+            let staging = identity_of(&dir, STAGED)?;
             let matches = if original {
                 digest(&root.dir, DATABASE_FILE)? == Some(*source_digest)
+                    && (staging.is_none()
+                        || staging == Some(*staged)
+                            && digest(&dir, STAGED)? == Some(*staged_digest))
             } else {
-                current == Some(*staged)
+                staging.is_none()
+                    && current == Some(*staged)
                     && digest(&root.dir, DATABASE_FILE)? == Some(*staged_digest)
                     && recorded(&root.path().join(DATABASE_FILE), &marker.id)?
             };
             if !matches || digest(&dir, &marker.backup)? != Some(*backup_digest) {
                 return Err(StoreError::MigrationConflict);
             }
+            // The original stays live, so this attempt's copies are discarded; a retry makes its own.
             if original {
-                remove_if_present(&dir, STAGED)?;
+                discard(&dir, STAGED)?;
+                discard(&dir, &marker.backup)?;
             }
         }
     }
@@ -257,7 +304,33 @@ pub(super) fn recover(root: &StateRoot) -> Result<(), StoreError> {
     sync(&dir)?;
     step()?;
     dir.remove_file(MARKER)?;
-    sync(&dir)
+    sync(&dir)?;
+    if matches!(marker.phase, Phase::Ready { .. }) && current != Some(marker.source) {
+        keep_only(&dir, &marker.backup)?;
+    }
+    Ok(())
+}
+
+// An interrupted copy can leave a rollback journal; it goes before its database.
+fn discard(dir: &Dir, name: &str) -> Result<(), StoreError> {
+    remove_if_present(dir, &format!("{name}-journal"))?;
+    remove_if_present(dir, name)
+}
+
+// `migrations/` holds at most the latest completed migration's backup; older backups are removed.
+fn keep_only(dir: &Dir, backup: &str) -> Result<(), StoreError> {
+    let mut older = Vec::new();
+    for entry in dir.entries()? {
+        let name = entry?.file_name();
+        let name = name.to_str().ok_or(StoreError::InvalidStateDirectory)?;
+        if name.starts_with("history-") && name != backup {
+            older.push(name.to_owned());
+        }
+    }
+    for name in &older {
+        remove_if_present(dir, name)?;
+    }
+    sync(dir)
 }
 
 // The caller holds the exclusive history lock and has found the history incompatible.
@@ -313,6 +386,7 @@ pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool,
     step()?;
     dir.remove_file(MARKER)?;
     sync(&dir)?;
+    keep_only(&dir, &marker.backup)?;
     Ok(true)
 }
 
@@ -365,6 +439,9 @@ fn stage(
             [],
             |_| Ok(()),
         )?;
+        if !exact_schema(&staged, registry, marker.from_schema)? {
+            return Err(StoreError::InvalidHistory);
+        }
         let transaction = staged.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for from in marker.from_schema..SCHEMA_VERSION {
             let schema_step = registry
@@ -394,7 +471,7 @@ fn stage(
         step()?;
         transaction.commit()?;
     }
-    validate_all(&open_database(&staged_path, false)?, MAX_VALIDATION_EVENTS)?;
+    validate_all(&open_database(&staged_path, false)?, validation_limit())?;
     if identity_of(dir, &format!("{STAGED}-journal"))?.is_some() {
         return Err(StoreError::InvalidStateDirectory);
     }
@@ -409,7 +486,6 @@ type Pins = ([u8; 32], [u8; 32]);
 struct Lane {
     historical: PrefixHasher,
     upgraded: PrefixHasher,
-    tools: (PrefixHasher, PrefixHasher),
 }
 
 // A recorded digest must match the historical prefix before it is re-pinned to the upgraded one.
@@ -428,9 +504,8 @@ fn rewrite_events(
     registry: &Registry<'_>,
 ) -> Result<i64, StoreError> {
     let mut lanes = HashMap::<SessionId, Lane>::new();
-    // Digest pairs after fork and compaction boundaries, and after each ToolFinished.
+    // Whole-Session prefix digests after fork and compaction boundaries and after each ToolFinished.
     let mut boundaries = HashMap::<(SessionId, u64), Pins>::new();
-    let mut tools = HashMap::<(SessionId, u64), Pins>::new();
     let mut statement = transaction.prepare(ROWS_AFTER_SQL)?;
     let (mut after, mut rewritten) = (0_i64, 0_i64);
     loop {
@@ -471,7 +546,7 @@ fn rewrite_events(
                 )?,
                 Event::GoalContextCompacted { record, .. } => repin(
                     &mut record.source_digest,
-                    tools.get(&(session, record.covered_sequence)),
+                    boundaries.get(&(session, record.covered_sequence)),
                 )?,
                 Event::WorkspaceRewindStarted { record } => {
                     repin(&mut record.prefix_digest, Some(&head))?;
@@ -499,19 +574,15 @@ fn rewrite_events(
             lane.historical.update_row(&stored)?;
             lane.upgraded.update(&envelope)?;
             let point = (session, envelope.sequence);
-            match envelope.event {
+            if matches!(
+                envelope.event,
                 Event::RunFinished { .. }
-                | Event::SessionForked { .. }
-                | Event::WorkspaceRewindStarted { .. }
-                | Event::WorkspaceRewindFinished { .. } => {
-                    boundaries.insert(point, (lane.historical.digest(), lane.upgraded.digest()));
-                }
-                Event::ToolFinished { .. } => {
-                    lane.tools.0.update_row(&stored)?;
-                    lane.tools.1.update(&envelope)?;
-                    tools.insert(point, (lane.tools.0.digest(), lane.tools.1.digest()));
-                }
-                _ => {}
+                    | Event::SessionForked { .. }
+                    | Event::WorkspaceRewindStarted { .. }
+                    | Event::WorkspaceRewindFinished { .. }
+                    | Event::ToolFinished { .. }
+            ) {
+                boundaries.insert(point, (lane.historical.digest(), lane.upgraded.digest()));
             }
             if (version, &payload) != (original.0, &original.1) {
                 transaction.execute(
@@ -541,15 +612,35 @@ fn validate_all(connection: &Connection, limit: usize) -> Result<(), StoreError>
         .prepare("SELECT DISTINCT session_id FROM events")?
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<Result<Vec<_>, _>>()?;
-    let mut loaded = 0;
+    let mut loaded = 0_usize;
     for session in sessions {
         let id = SessionId::from_str(&session).map_err(|_| StoreError::InvalidHistory)?;
-        resolve_view(&snapshot, id, 0, &mut loaded)?;
+        let mut lineage = 0;
+        resolve_view(&snapshot, id, 0, &mut lineage)?;
+        loaded = loaded.saturating_add(lineage);
         if loaded > limit {
             return Err(StoreError::ReplayLimit);
         }
     }
     Ok(())
+}
+
+// True only when a read-only look proves the history unsupported, leaving its database and WAL as found.
+pub(super) fn unsupported(root: &StateRoot) -> bool {
+    matches!(
+        inspect(&root.path().join(DATABASE_FILE)),
+        Err(StoreError::InvalidHistory)
+    ) && identity_of(&root.dir, DATABASE_FILE)
+        .is_ok_and(|file| file.is_some_and(|(_, _, size)| size > 0))
+}
+
+fn inspect(path: &std::path::Path) -> Result<(), StoreError> {
+    let connection = open_source(path, true)?;
+    let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+    if version != SCHEMA_VERSION {
+        return Err(StoreError::InvalidHistory);
+    }
+    validate_history(&connection)
 }
 
 fn migratable(connection: &Connection, registry: &Registry<'_>) -> Result<Option<i64>, StoreError> {
@@ -560,7 +651,10 @@ fn migratable(connection: &Connection, registry: &Registry<'_>) -> Result<Option
         [],
         |row| row.get(0),
     )?;
-    if !(registry.schema_floor..=SCHEMA_VERSION).contains(&schema) || has_events != 1 {
+    if !(registry.schema_floor..=SCHEMA_VERSION).contains(&schema)
+        || has_events != 1
+        || !exact_schema(connection, registry, schema)?
+    {
         return Ok(None);
     }
     let mut needed = schema != SCHEMA_VERSION;
@@ -575,6 +669,38 @@ fn migratable(connection: &Connection, registry: &Registry<'_>) -> Result<Option
         }
     }
     Ok(needed.then_some(schema))
+}
+
+pub(super) fn schema_objects(connection: &Connection) -> Result<Vec<[String; 4]>, StoreError> {
+    let mut statement = connection.prepare(
+        "SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_schema ORDER BY type, name",
+    )?;
+    let objects = statement
+        .query_map([], |row| {
+            let sql: String = row.get(3)?;
+            Ok([
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            ])
+        })?
+        .collect::<Result<_, _>>()?;
+    Ok(objects)
+}
+
+// Compared before any mutation, so no trigger or view can run during the rewrite.
+fn exact_schema(
+    connection: &Connection,
+    registry: &Registry<'_>,
+    version: i64,
+) -> Result<bool, StoreError> {
+    let Some(sql) = registry.expected_schema(version) else {
+        return Ok(false);
+    };
+    let expected = Connection::open_in_memory()?;
+    expected.execute_batch(sql)?;
+    Ok(schema_objects(connection)? == schema_objects(&expected)?)
 }
 
 fn open_source(path: &std::path::Path, read_only: bool) -> Result<Connection, StoreError> {
@@ -715,9 +841,20 @@ fn now() -> SystemTime {
     SystemTime::now()
 }
 
+#[cfg(not(test))]
+fn validation_limit() -> usize {
+    MAX_VALIDATION_EVENTS
+}
+
 #[cfg(test)]
 thread_local! {
     static CLOCK: std::cell::Cell<Option<SystemTime>> = const { std::cell::Cell::new(None) };
+    static VALIDATION_LIMIT: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_VALIDATION_EVENTS) };
+}
+
+#[cfg(test)]
+fn validation_limit() -> usize {
+    VALIDATION_LIMIT.with(std::cell::Cell::get)
 }
 
 #[cfg(test)]

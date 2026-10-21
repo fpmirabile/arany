@@ -193,6 +193,9 @@ pub(in crate::store) fn publish(
 }
 
 fn check_history(root: &StateRoot) -> Result<(), StoreError> {
+    if migrate::unsupported(root) {
+        return Err(StoreError::InvalidHistory);
+    }
     let connection = super::super::journal::open_connection(root, false)?;
     super::super::replay::validate_history(&connection)
 }

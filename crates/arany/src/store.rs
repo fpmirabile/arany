@@ -305,11 +305,7 @@ impl Store {
         let thread = std::thread::Builder::new()
             .name("arany-sqlite".into())
             .spawn(move || {
-                if !read_only && let Err(error) = migrate::recover_pending(&root) {
-                    let _ = ready_sender.send(Err(error));
-                    return;
-                }
-                let _history = match root.lock_history(false) {
+                let _history = match migrate::lease_after_recovery(&root, !read_only) {
                     Ok(lock) => lock,
                     Err(error) => {
                         let _ = ready_sender.send(Err(error));

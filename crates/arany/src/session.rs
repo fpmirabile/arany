@@ -59,6 +59,7 @@ pub(crate) use reducer::rewind_tests::{
 };
 #[cfg(test)]
 pub(crate) use reducer::worker_tests::{
+    compacted_fixture as worker_compacted_fixture,
     completed_command_fixture as worker_command_protocol_fixture,
     completed_fixture as worker_protocol_fixture,
 };
