@@ -279,7 +279,7 @@ impl AttachedTerminal {
             .map(run_targets)
             .unwrap_or_default();
         match targets.iter().position(|target| target.id == agent) {
-            Some(0) => self.end_agent_chat().map(|()| None),
+            Some(0) => self.leave_agent_chat().await.map(|_| None),
             Some(index) => match self.show_agent(view, run, targets, index, false).await? {
                 AgentChatInput::Notice(text) => Ok(Some(text)),
                 _ => Ok(None),

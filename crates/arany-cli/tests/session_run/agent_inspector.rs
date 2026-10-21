@@ -784,6 +784,20 @@ fn agent_chat_journey(
         &[picker, primary],
     );
     step(b"\x1b", returned, &[child]);
+    step(b"/agents\r", &[picker, "› 1. Run 1: primary"], &[child]);
+    let screen = step(
+        b"\rqueued-submit\rqueued-draft",
+        &[primary, "Alt+Left/Right agents"],
+        &[picker, child, "queued-submit", "queued-draft"],
+    );
+    let composer = screen.lines().find(|row| row.starts_with("> "));
+    assert_eq!(
+        composer.map(str::trim_end),
+        Some("> Ask a question, or type / for commands"),
+        "{screen}"
+    );
+    step(b"x", &["> x"], &["queued-submit", "queued-draft"]);
+    step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
     let from = checkpoint_screen(
         &mut transcript,
         &mut answered,
@@ -1433,6 +1447,21 @@ fn live_agent_picker_journey(
     pty.await_request(gates, "first");
     let from = pty.capture_from;
     pty.frame(from, &["child 2 ·", "Alt+Left/Right agents"], &[]);
+    pty.step(b"/agents\r", &[picker, "Current Run: 3 agents"], &[]);
+    let end = pty.step(
+        b"\rqueued-steer\rqueued-draft",
+        &["Ask Arany", "Alt+Left/Right agents"],
+        &[picker, "queued-steer", "queued-draft"],
+    );
+    let screen = pty.screen(end);
+    let composer = screen.lines().find(|row| row.starts_with("> "));
+    assert_eq!(
+        composer.map(str::trim_end),
+        Some("> Ask a question, or type / for commands"),
+        "{screen}"
+    );
+    pty.step(b"x", &["> x"], &["queued-steer", "queued-draft"]);
+    pty.step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
     pty.step(b"/agents\r", &[picker, "Current Run: 3 agents"], &[]);
     pty.step(b"active", &["Search: active · 3 of"], &[]);
     let end = pty.step(b"\x1b[B\x1b[B", &["› 3. Run "], &[]);
