@@ -7,9 +7,9 @@ use crate::provider::{
 use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
-    GoalPhase, GoalPlanContract, GoalStatus, GoalUsage, MAX_STEERING_CONTEXT_BYTES,
-    MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId,
-    RunView, SessionId, WorkspaceIdentity,
+    GoalPhase, GoalPlanContract, GoalStatus, GoalUsage, InstructionSource,
+    MAX_STEERING_CONTEXT_BYTES, MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES,
+    MAX_USER_MESSAGE_BYTES, RunConfig, RunId, RunView, SessionId, WorkspaceIdentity,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::Telemetry;
@@ -54,9 +54,10 @@ use run_loop::{LoopControls, RunIdentity, RunLoop};
 pub fn validate_workspace_inputs(
     state: &StateRoot,
     workspace: &std::path::Path,
+    launch_directory: Option<&std::path::Path>,
     include_paths: &[PathBuf],
 ) -> Result<(), EngineError> {
-    WorkspaceInputs::load(workspace, state, include_paths)?;
+    WorkspaceInputs::load(workspace, state, launch_directory, include_paths)?;
     Ok(())
 }
 
@@ -183,6 +184,7 @@ pub struct RunRequest {
     pub objective: String,
     pub images: Vec<ImageAttachment>,
     pub workspace: PathBuf,
+    pub launch_directory: Option<PathBuf>,
     pub include_paths: Vec<PathBuf>,
     pub policy: CollaborationPolicy,
     pub goal: GoalRequest,
@@ -1049,6 +1051,7 @@ impl Engine {
         hints: Option<RunHints>,
     ) -> Result<RunResult, EngineError> {
         let workspace = request.workspace.clone();
+        let launch_directory = request.launch_directory.clone();
         let include_paths = request.include_paths.clone();
         let policy = request.policy;
         let mut leases = WorkspaceLeases::new();
@@ -1076,6 +1079,7 @@ impl Engine {
                 objective: String::new(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: launch_directory.clone(),
                 include_paths: include_paths.clone(),
                 policy,
                 goal: GoalRequest::resume(turn.outcome.goal_id, false),
@@ -1699,10 +1703,16 @@ impl Engine {
             Some(runtime) => WorkspaceInputs::load_pinned(
                 &request.workspace,
                 &self.state,
+                request.launch_directory.as_deref(),
                 &request.include_paths,
                 Some(runtime.workspace_identity()),
             )?,
-            None => WorkspaceInputs::load(&request.workspace, &self.state, &request.include_paths)?,
+            None => WorkspaceInputs::load(
+                &request.workspace,
+                &self.state,
+                request.launch_directory.as_deref(),
+                &request.include_paths,
+            )?,
         };
         let root_identity = inputs.root_identity()?;
         if root_identity != workspace_identity {
@@ -1785,7 +1795,16 @@ impl Engine {
             provider_concurrency,
             workspace_device: root_identity.device,
             workspace_inode: root_identity.inode,
-            instruction_digest: inputs.instructions.as_ref().map(|snapshot| snapshot.digest),
+            instruction_sources: inputs
+                .instructions
+                .iter()
+                .map(|snapshot| InstructionSource {
+                    directory: snapshot.directory().to_owned(),
+                    file: snapshot.instruction_file(),
+                    digest: snapshot.digest,
+                })
+                .collect(),
+            launch_directory: inputs.launch_directory.clone(),
             include_digests: inputs
                 .includes
                 .iter()
@@ -1799,6 +1818,9 @@ impl Engine {
             tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
+        if !crate::session::run_started_fits(&config) {
+            return Err(EngineError::InputTooLarge);
+        }
         Ok(PreparedTurn {
             tools,
             tool_context,
@@ -2026,12 +2048,13 @@ fn root_request(
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
             pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
-            workspace_guidance: input.inputs.instructions.take().map(|snapshot| {
-                WorkspaceGuidance {
+            workspace_guidance: std::mem::take(&mut input.inputs.instructions)
+                .into_iter()
+                .map(|snapshot| WorkspaceGuidance {
                     path: snapshot.path,
                     text: snapshot.content,
-                }
-            }),
+                })
+                .collect(),
             includes: std::mem::take(&mut input.inputs.includes)
                 .into_iter()
                 .map(|snapshot| snapshot.model_include())

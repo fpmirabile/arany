@@ -45,12 +45,16 @@ pub fn input(wire: &Value) -> Value {
     });
     let mut notes = Vec::new();
     for part in parts(wire) {
-        if let Some(text) = part
+        if let Some((path, text)) = part
             .strip_prefix("# AGENTS.md instructions for ")
             .and_then(|rest| rest.split_once("\n\n<INSTRUCTIONS>\n"))
-            .and_then(|(_, body)| body.strip_suffix("\n</INSTRUCTIONS>"))
+            .and_then(|(path, body)| Some((path, body.strip_suffix("\n</INSTRUCTIONS>")?)))
         {
-            semantic["workspace_guidance"] = json!(text);
+            let guidance = json!({"path": path, "text": text});
+            match semantic["workspace_guidance"].as_array_mut() {
+                Some(files) => files.push(guidance),
+                None => semantic["workspace_guidance"] = json!([guidance]),
+            }
         } else if let Some((scope, data)) = scoped(&part) {
             match scope.split(" (").next().unwrap_or_default() {
                 "previous_run" => semantic["history"].as_array_mut().unwrap().push(data),
@@ -157,7 +161,16 @@ mod tests {
 
     #[test]
     fn semantic_inverts_render() {
-        let request = test_support::read_only_request("gpt-5.4");
+        for without_guidance in [false, true] {
+            assert_inverts(without_guidance);
+        }
+    }
+
+    fn assert_inverts(without_guidance: bool) {
+        let mut request = test_support::read_only_request("gpt-5.4");
+        if without_guidance {
+            request.input.workspace_guidance.clear();
+        }
         let conversation = render::conversation(&request).unwrap();
         let responses =
             openai::wire::run_body_with_effort(&request, &conversation, Effort::High).unwrap();
@@ -171,7 +184,13 @@ mod tests {
                 .map(|turn| json!({"user": turn.user, "assistant": turn.assistant}))
                 .collect::<Vec<_>>(),
             "includes": input.includes,
-            "workspace_guidance": input.workspace_guidance.as_ref().map(|guidance| &guidance.text),
+            "workspace_guidance": (!input.workspace_guidance.is_empty()).then(|| {
+                input
+                    .workspace_guidance
+                    .iter()
+                    .map(|guidance| json!({"path": guidance.path, "text": guidance.text}))
+                    .collect::<Vec<_>>()
+            }),
             "derived_context_summary": input.context_summary,
             "child_results": input
                 .child_results

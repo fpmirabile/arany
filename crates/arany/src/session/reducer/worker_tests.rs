@@ -604,7 +604,8 @@ fn fixture_with_manifest(
         provider_concurrency: 4,
         workspace_device: 1,
         workspace_inode: 2,
-        instruction_digest: None,
+        instruction_sources: Vec::new(),
+        launch_directory: String::new(),
         include_digests: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
@@ -1561,7 +1562,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 18),
+        ("RunStarted", 19),
         ("AgentSpawned", 12),
         ("ProviderCallRecorded", 14),
         ("AgentFinished", 10),

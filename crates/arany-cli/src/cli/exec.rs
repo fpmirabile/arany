@@ -335,6 +335,7 @@ async fn run_on_engine(
             objective,
             images: Vec::new(),
             workspace: admission.workspace,
+            launch_directory: std::env::current_dir().ok(),
             include_paths: args.include_paths,
             policy: admission.policy,
             goal,
@@ -1148,6 +1149,7 @@ mod tests {
                     objective: "Use the only Provider call".into(),
                     images: Vec::new(),
                     workspace: workspace.clone(),
+                    launch_directory: None,
                     include_paths: Vec::new(),
                     policy: CollaborationPolicy::Single,
                     goal,
@@ -1427,7 +1429,7 @@ mod tests {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
             let version = match line["kind"].as_str() {
-                Some("RunStarted") => 18,
+                Some("RunStarted") => 19,
                 Some("AgentSpawned") => 12,
                 Some("AgentFinished") => 10,
                 Some("ProviderCallRecorded") => 14,
@@ -1601,7 +1603,10 @@ mod tests {
             assert!(call.input.objective == objective, "exec objective");
             assert!(call.input.images.is_empty(), "exec images");
             assert!(call.input.history == expected_history, "exec history");
-            assert!(call.input.workspace_guidance.is_none(), "exec instructions");
+            assert!(
+                call.input.workspace_guidance.is_empty(),
+                "exec instructions"
+            );
             assert!(call.input.includes.is_empty(), "exec includes");
             assert!(call.input.context_summary.is_none(), "exec summary");
             assert!(call.input.child_results.is_empty(), "exec children");

@@ -436,6 +436,7 @@ pub(in crate::cli) async fn run_configured(
                                     objective,
                                     images,
                                     workspace: loaded.workspace.clone(),
+                                    launch_directory: None,
                                     include_paths: loaded.include_paths.clone(),
                                     policy: loaded.policy,
                                     goal,

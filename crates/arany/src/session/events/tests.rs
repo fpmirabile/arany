@@ -670,7 +670,8 @@ mod account_default_tests {
             provider_concurrency: 1,
             workspace_device: 1,
             workspace_inode: 1,
-            instruction_digest: None,
+            instruction_sources: Vec::new(),
+            launch_directory: String::new(),
             include_digests: Vec::new(),
             history_run_ids: Vec::new(),
             excluded_history_runs: 0,
@@ -689,7 +690,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -777,7 +778,7 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(18));
+        assert_eq!(payload_version("RunStarted"), Some(19));
         assert_eq!(payload_version("ProviderCallRecorded"), Some(14));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
@@ -792,6 +793,36 @@ mod account_default_tests {
             assert_eq!(config.validate().is_ok(), valid, "output cap {cap}");
         }
         config.output_token_cap = 4096;
+        let source = |directory: &str| crate::session::InstructionSource {
+            directory: directory.into(),
+            file: Some(crate::session::InstructionFile::Agents),
+            digest: [3; 32],
+        };
+        let deep = vec!["d"; 31].join("/");
+        let too_deep = format!("{deep}/d");
+        for (case, launch, sources, valid) in [
+            (
+                "root and nested",
+                "a/b",
+                vec![source(""), source("a/b")],
+                true,
+            ),
+            ("nested only", "a/b", vec![source("a")], true),
+            ("deepest allowed", deep.as_str(), vec![source(&deep)], true),
+            ("too deep", too_deep.as_str(), vec![], false),
+            ("deeper first", "a/b", vec![source("a"), source("")], false),
+            ("repeated", "a", vec![source("a"), source("a")], false),
+            ("off the path", "a/b", vec![source("c")], false),
+            ("below launch", "a", vec![source("a/b")], false),
+            ("traversal", "a/..", vec![], false),
+            ("empty component", "a//b", vec![], false),
+        ] {
+            config.launch_directory = launch.into();
+            config.instruction_sources = sources;
+            assert_eq!(config.validate().is_ok(), valid, "instruction scope {case}");
+        }
+        config.launch_directory.clear();
+        config.instruction_sources.clear();
         config.saved_api_account_id = Some(Uuid::nil());
         assert!(matches!(
             config.validate(),
@@ -1823,7 +1854,8 @@ mod payload_version_tests {
             provider_concurrency: 1,
             workspace_device: 1,
             workspace_inode: 2,
-            instruction_digest: None,
+            instruction_sources: Vec::new(),
+            launch_directory: String::new(),
             include_digests: Vec::new(),
             history_run_ids: Vec::new(),
             excluded_history_runs: 0,
@@ -1866,7 +1898,7 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 18,
+                Event::RunStarted { .. } => 19,
                 Event::ToolStarted { .. } => 14,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
@@ -2187,7 +2219,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(18));
+    assert_eq!(payload_version("RunStarted"), Some(19));
 }
 
 #[test]

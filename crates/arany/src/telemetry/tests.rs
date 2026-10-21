@@ -248,6 +248,7 @@ fn failed_child_aborts_sibling_provider_span_as_cancelled() {
                 objective: "synthetic task".into(),
                 images: Vec::new(),
                 workspace,
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Team {
                     max_active_children: 2,
@@ -402,6 +403,7 @@ fn timed_out_provider_call_exports_closed_error_type() {
             objective: "synthetic task".into(),
             images: Vec::new(),
             workspace,
+            launch_directory: None,
             include_paths: Vec::new(),
             policy: CollaborationPolicy::Single,
             goal: crate::engine::GoalRequest::default(),
@@ -467,7 +469,7 @@ fn assert_trace_call(actual: &ProviderRequest, phase: AgentPhase, objective: &st
     assert!(actual.input.objective == objective, "trace call objective");
     assert!(actual.input.images.is_empty(), "trace call images");
     assert!(
-        actual.input.workspace_guidance.is_none(),
+        actual.input.workspace_guidance.is_empty(),
         "trace call instructions"
     );
     assert!(actual.input.includes.is_empty(), "trace call includes");
@@ -637,7 +639,8 @@ fn run_config(providers: Option<ProviderRoutes>) -> crate::session::RunConfig {
         provider_concurrency: 1,
         workspace_device: 1,
         workspace_inode: 1,
-        instruction_digest: None,
+        instruction_sources: Vec::new(),
+        launch_directory: String::new(),
         include_digests: Vec::new(),
         history_run_ids: Vec::new(),
         excluded_history_runs: 0,
@@ -1764,6 +1767,7 @@ async fn session_compaction_span_uses_the_previously_switched_route() {
                 objective: "task".into(),
                 images: Vec::new(),
                 workspace: workspace.clone(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: crate::engine::GoalRequest::default(),

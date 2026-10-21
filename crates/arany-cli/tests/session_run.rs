@@ -2068,7 +2068,8 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             provider_concurrency: 1,
             workspace_device,
             workspace_inode,
-            instruction_digest: None,
+            instruction_sources: Vec::new(),
+            launch_directory: String::new(),
             include_digests: Vec::new(),
             history_run_ids: Vec::new(),
             excluded_history_runs: 0,
@@ -2671,7 +2672,8 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                 provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
-                instruction_digest: None,
+                instruction_sources: Vec::new(),
+                launch_directory: String::new(),
                 include_digests: Vec::new(),
                 history_run_ids: Vec::new(),
                 excluded_history_runs: 0,
@@ -3037,7 +3039,7 @@ impl arany::Provider for HeldProvider {
                 "holder call objective"
             );
             assert!(
-                request.input.workspace_guidance.is_none(),
+                request.input.workspace_guidance.is_empty(),
                 "holder call instructions"
             );
             assert!(request.input.includes.is_empty(), "holder call includes");
@@ -3095,6 +3097,7 @@ fn process_lock_holder() {
                 objective: "Held in another process".into(),
                 images: Vec::new(),
                 workspace: workspace.into(),
+                launch_directory: None,
                 include_paths: Vec::new(),
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),

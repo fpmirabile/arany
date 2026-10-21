@@ -546,7 +546,7 @@ mod tests {
             assert_eq!(request.model, "synthetic-model");
             assert_eq!(request.max_output_tokens, PROBE_OUTPUT_CAP);
             assert!(
-                request.input.workspace_guidance.is_none()
+                request.input.workspace_guidance.is_empty()
                     && request.input.includes.is_empty()
                     && request.input.history.is_empty()
                     && request.input.context_summary.is_none()

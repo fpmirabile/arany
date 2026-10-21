@@ -880,7 +880,7 @@ fn compaction_input_limit_rejects_before_provider_egress() {
                     request.input.includes,
                     [include_data("notes/facts.txt", "Fact")]
                 );
-                assert!(request.input.workspace_guidance.is_none());
+                assert!(request.input.workspace_guidance.is_empty());
                 assert!(request.input.child_results.is_empty());
             }
             let compactions = compactions.lock().expect("observed compactions");
@@ -1674,7 +1674,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
             assert_eq!(request.model, "test-model");
             assert_eq!(request.input.objective, "Recovered");
             assert!(request.input.images.is_empty());
-            assert!(request.input.workspace_guidance.is_none());
+            assert!(request.input.workspace_guidance.is_empty());
             assert_eq!(request.input.includes, vec![include_data("notes/facts.txt", "Fact")]);
             assert_eq!(request.input.history, vec![arany::HistoryTurn { user: "Source".into(), assistant: "answer".into() }]);
             assert!(request.input.context_summary.is_none());
@@ -3585,6 +3585,44 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
             Err(EngineError::WorkspaceUnavailable)
         ));
         std::fs::remove_file(workspace.join("AGENTS.md")).expect("remove test symlink");
+        symlink(
+            temp.path().join("outside"),
+            workspace.join("notes/AGENTS.md"),
+        )
+        .expect("symlinked nested instruction");
+        let mut nested = request(&workspace, "Question");
+        nested.launch_directory = Some(workspace.join("notes"));
+        assert!(matches!(
+            run_to_end(&engine, &provider, nested).await,
+            Err(EngineError::WorkspaceUnavailable)
+        ));
+        std::fs::remove_file(workspace.join("notes/AGENTS.md")).expect("remove nested symlink");
+        // 32 sources with sixfold-escaped names overflow RunStarted; nothing may commit first.
+        let mut launch = workspace.join("long");
+        std::fs::create_dir(&launch).expect("long tree");
+        for level in 0..30 {
+            std::fs::write(launch.join("AGENTS.md"), "x").expect("nested instruction");
+            launch.push(if level < 2 {
+                "\u{1}".repeat(255)
+            } else {
+                "s".into()
+            });
+            std::fs::create_dir(&launch).expect("long tree level");
+        }
+        std::fs::write(launch.join("AGENTS.md"), "x").expect("deepest instruction");
+        assert!(
+            launch.join("AGENTS.md").as_os_str().len() < 1024,
+            "within macOS PATH_MAX"
+        );
+        std::fs::write(workspace.join("AGENTS.md"), "x").expect("root instruction");
+        let mut long = request(&workspace, "Question");
+        long.launch_directory = Some(launch);
+        assert!(matches!(
+            run_to_end(&engine, &provider, long).await,
+            Err(EngineError::InputTooLarge)
+        ));
+        std::fs::remove_dir_all(workspace.join("long")).expect("remove long tree");
+        std::fs::remove_file(workspace.join("AGENTS.md")).expect("remove root instruction");
         let mut traversal = request(&workspace, "Question");
         traversal.include_paths = vec!["../outside".into()];
         assert!(matches!(
@@ -3664,6 +3702,18 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
             Err(EngineError::InputTooLarge)
         ));
         std::fs::remove_file(workspace.join("AGENTS.md")).expect("clear test instruction");
+        // Nested files share one cap; the second file overflowing it rejects the turn.
+        std::fs::write(workspace.join("AGENTS.md"), vec![b'a'; 32 * 1024]).expect("root");
+        std::fs::write(workspace.join("notes/AGENTS.md"), vec![b'n'; 32 * 1024 + 1])
+            .expect("nested instruction");
+        let mut nested = request(&workspace, "Question");
+        nested.launch_directory = Some(workspace.join("notes"));
+        assert!(matches!(
+            run_to_end(&engine, &provider, nested).await,
+            Err(EngineError::InputTooLarge)
+        ));
+        std::fs::remove_file(workspace.join("AGENTS.md")).expect("clear test instruction");
+        std::fs::remove_file(workspace.join("notes/AGENTS.md")).expect("clear nested");
 
         std::fs::write(
             workspace.join("notes/facts.txt"),

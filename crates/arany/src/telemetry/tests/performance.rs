@@ -207,6 +207,7 @@ async fn timed_direct_run(engine: &Engine, observer: &Store, workspace: &Path) -
         objective: "synthetic objective".into(),
         images: Vec::new(),
         workspace: workspace.to_path_buf(),
+        launch_directory: None,
         include_paths: Vec::new(),
         policy: CollaborationPolicy::Single,
         goal: crate::engine::GoalRequest::default(),
