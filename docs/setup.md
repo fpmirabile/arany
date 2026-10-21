@@ -176,45 +176,10 @@ Generic Messages routes require a private version-2 `provider-profiles.json` in
 environment key is used; native Anthropic accounts and workspace headers do not
 supply credentials. Keep the file private (`0600` on Unix).
 
-**DeepSeek is UNAVAILABLE.** These are candidate profiles for inspection, not
-working recipes. DeepSeek documents `output_config.effort`, but lacks evidence
-for the provider-enforced compaction schema Arany requires. Ordinary answers or
-successful delegation cannot establish compatibility. Never repair JSON, skip
-compaction or loosen the schema to enable these candidates.
-
-```json
-{
-  "version": 2,
-  "profiles": [
-    {
-      "name": "deepseek-flash",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.deepseek.com/anthropic",
-      "auth": "x-api-key",
-      "model": "deepseek-flash",
-      "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    },
-    {
-      "name": "deepseek-v4-pro",
-      "protocol": "anthropic-messages",
-      "base_url": "https://api.deepseek.com/anthropic",
-      "auth": "x-api-key",
-      "model": "deepseek-v4-pro",
-      "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
-      "outcome_encoding": "native_tools",
-      "privacy": "user_authorized",
-      "max_output_tokens": 4096,
-      "capability_evidence_version": 2,
-      "efforts": []
-    }
-  ]
-}
-```
+**DeepSeek is UNAVAILABLE until strict compaction is proven.** It lacks evidence
+for the provider-enforced compaction schema Arany requires. Ordinary answers,
+delegation and plausible summary JSON cannot establish that support. Do not
+configure DeepSeek or relax compaction to enable it.
 
 For an independently compatible service, configure its exact base, model and
 selected key reference outside the repository. Run the potentially billable

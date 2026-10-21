@@ -322,6 +322,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                 }
                 _ => unreachable!(),
             };
+            let text = arany::semantic::compaction_probe_reply(&body, text);
             let mut response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
@@ -1108,7 +1109,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
 
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).unwrap();
-        for index in 0..6 {
+        for index in 0..8 {
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -1123,13 +1124,13 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             let body: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).unwrap();
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body.get("text").is_some(), index == 2);
+            assert_eq!(body.get("text").is_some(), matches!(index, 2 | 4 | 6));
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
                 match index {
-                    3 => Some("low"),
-                    4 | 5 => Some("high"),
+                    3 | 4 => Some("low"),
+                    5..=7 => Some("high"),
                     _ => None,
                 }
             );
@@ -1137,7 +1138,7 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 | 4 | 6 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
                 _ => {
                     serde_json::json!("answer")
                 }

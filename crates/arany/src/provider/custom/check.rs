@@ -6,12 +6,13 @@ use crate::provider::{
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::{StateRoot, Store};
+use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-goal-contract-conformance-effort-stream-v31";
+const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v32";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -137,16 +138,7 @@ async fn probe(
         })],
         max_output_tokens: 128,
     };
-    let compact_response = transport
-        .compact(&compact, None)
-        .await
-        .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if compact_response.summary.trim().is_empty() || compact_response.summary.len() > 8 * 1024 {
-        return Err(CustomProfileError::ConformanceFailed);
-    }
-    let compact_id = compact_response
-        .response_id
-        .ok_or(CustomProfileError::ConformanceFailed)?;
+    let compact_id = probe_compaction(&transport, &compact, None).await?;
     if compact_id == direct_id || compact_id == delegate_id {
         return Err(CustomProfileError::ConformanceFailed);
     }
@@ -173,6 +165,11 @@ async fn probe(
             return Err(CustomProfileError::ConformanceFailed);
         }
         seen_ids.push(id);
+        let compact_id = probe_compaction(&transport, &compact, Some(*effort)).await?;
+        if seen_ids.contains(&compact_id) {
+            return Err(CustomProfileError::ConformanceFailed);
+        }
+        seen_ids.push(compact_id);
     }
 
     let checked_at_ms = SystemTime::now()
@@ -191,6 +188,28 @@ async fn probe(
         checked_at_ms,
         expires_at_ms,
     })
+}
+
+async fn probe_compaction(
+    transport: &CustomTransport,
+    request: &CompactionRequest,
+    effort: Option<crate::provider::Effort>,
+) -> Result<String, CustomProfileError> {
+    let mut random = [0; 16];
+    SystemRandom::new()
+        .fill(&mut random)
+        .map_err(|_| CustomProfileError::ConformanceFailed)?;
+    let nonce = uuid::Uuid::from_bytes(random).simple().to_string();
+    let response = transport
+        .probe_compaction(request, effort, &nonce)
+        .await
+        .map_err(|_| CustomProfileError::ConformanceFailed)?;
+    if response.summary != nonce {
+        return Err(CustomProfileError::ConformanceFailed);
+    }
+    response
+        .response_id
+        .ok_or(CustomProfileError::ConformanceFailed)
 }
 
 pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
@@ -251,6 +270,8 @@ mod tests {
         Valid,
         ValidEfforts,
         CompactionRejected,
+        IgnoredFormat,
+        EffortCompactionRejected,
         ZeroUsage,
         AggregateJsonNodes,
         WrongModel,
@@ -271,13 +292,20 @@ mod tests {
         reply: ProbeReply,
         messages: Option<super::super::MessagesAuth>,
     ) {
-        let count = if matches!(reply, ProbeReply::ValidEfforts) {
-            5
-        } else if matches!(reply, ProbeReply::Valid | ProbeReply::CompactionRejected) {
+        let count = if matches!(
+            reply,
+            ProbeReply::ValidEfforts | ProbeReply::EffortCompactionRejected
+        ) {
+            7
+        } else if matches!(
+            reply,
+            ProbeReply::Valid | ProbeReply::CompactionRejected | ProbeReply::IgnoredFormat
+        ) {
             3
         } else {
             1
         };
+        let mut seen_nonces = std::collections::HashSet::new();
         for index in 0..count {
             let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
                 .await
@@ -329,19 +357,60 @@ mod tests {
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("JSON request");
             let streaming = body["stream"] == true;
+            let content_type = if streaming {
+                "text/event-stream"
+            } else {
+                "application/json"
+            };
             let compaction = if messages.is_some() {
                 body["output_config"]["format"]["type"] == "json_schema"
             } else {
                 body["text"]["format"]["name"] == "arany_compaction"
             };
+            let schema = if messages.is_some() {
+                &body["output_config"]["format"]["schema"]
+            } else {
+                &body["text"]["format"]["schema"]
+            };
+            let nonce = schema
+                .pointer("/properties/summary/enum/0")
+                .and_then(serde_json::Value::as_str);
+            if let Some(nonce) = nonce {
+                assert!(
+                    compaction
+                        && nonce.len() == 32
+                        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+                );
+                assert!(
+                    seen_nonces.insert(nonce.to_owned()),
+                    "every compaction probe needs a fresh challenge"
+                );
+                let mut without_schema = body.clone();
+                if messages.is_some() {
+                    without_schema["output_config"]["format"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("schema");
+                } else {
+                    without_schema["text"]["format"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("schema");
+                }
+                assert!(
+                    !without_schema.to_string().contains(nonce),
+                    "the challenge occurs only in the schema, never in a prompt"
+                );
+            }
             assert_eq!(body["model"], "model-1");
             if messages.is_some() {
                 assert!(body.get("thinking").is_none());
                 if compaction {
-                    assert_eq!(
-                        body["output_config"]["format"]["schema"],
-                        crate::provider::summary_schema()
-                    );
+                    let mut expected = crate::provider::summary_schema();
+                    if let Some(nonce) = nonce {
+                        expected["properties"]["summary"]["enum"] = json!([nonce]);
+                    }
+                    assert_eq!(schema, &expected);
                 } else {
                     assert_eq!(body.get("output_config").is_some(), index >= 3);
                 }
@@ -373,8 +442,8 @@ mod tests {
                 })
                 .and_then(|value| value["effort"].as_str()),
                 match index {
-                    3 => Some("low"),
-                    4 => Some("high"),
+                    3 | 4 => Some("low"),
+                    5 | 6 => Some("high"),
                     _ => None,
                 }
             );
@@ -392,7 +461,10 @@ mod tests {
                     .any(|window| window == b"OMITTED_WORKSPACE_CANARY")
             );
 
-            if compaction && matches!(reply, ProbeReply::CompactionRejected) {
+            if compaction
+                && (matches!(reply, ProbeReply::CompactionRejected)
+                    || (matches!(reply, ProbeReply::EffortCompactionRejected) && index == 6))
+            {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
                 continue;
             }
@@ -407,7 +479,7 @@ mod tests {
                     "gzip"
                 };
                 stream
-                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: {encoding}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").as_bytes())
+                    .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Encoding: {encoding}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n").as_bytes())
                     .await
                     .expect("encoded response headers");
                 let mut next = [0];
@@ -425,6 +497,8 @@ mod tests {
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
                 | ProbeReply::CompactionRejected
+                | ProbeReply::IgnoredFormat
+                | ProbeReply::EffortCompactionRejected
                 | ProbeReply::ZeroUsage
                 | ProbeReply::AggregateJsonNodes
                 | ProbeReply::ValidEfforts
@@ -436,7 +510,7 @@ mod tests {
                 | ProbeReply::InputAtLimit
                 | ProbeReply::InputAboveLimit => {
                     let text = match index {
-                        0 if compaction => json!(r#"{"summary":"synthetic summary"}"#),
+                        _ if compaction => json!(r#"{"summary":"synthetic summary"}"#),
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
                             json!("test-key")
                         }
@@ -453,6 +527,11 @@ mod tests {
                             json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
                         _ => json!(r#"{"summary":"synthetic summary"}"#),
+                    };
+                    let text = if matches!(reply, ProbeReply::IgnoredFormat) {
+                        text
+                    } else {
+                        crate::provider::render::semantic::compaction_probe_reply(&body, text)
                     };
                     let model = if matches!(reply, ProbeReply::WrongModel) {
                         "drifted-model"
@@ -489,10 +568,12 @@ mod tests {
                                 + u32::from(matches!(reply, ProbeReply::InputAboveLimit))
                         );
                     }
-                    if matches!(
-                        reply,
-                        ProbeReply::ChunkedAtLimit | ProbeReply::ChunkedOversize
-                    ) {
+                    if !streaming
+                        && matches!(
+                            reply,
+                            ProbeReply::ChunkedAtLimit | ProbeReply::ChunkedOversize
+                        )
+                    {
                         response["padding"] = json!("");
                         let target = CONTRACT_RESPONSE_BYTES
                             + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
@@ -507,8 +588,21 @@ mod tests {
                 reply,
                 ProbeReply::ChunkedAtLimit | ProbeReply::ChunkedOversize
             ) {
+                let response_body = if streaming {
+                    assert!(messages.is_some());
+                    let response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
+                    let events = crate::provider::render::semantic::messages_stream(&response);
+                    let target = CONTRACT_RESPONSE_BYTES
+                        + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
+                    let padding = target - events.len() - 3;
+                    let body = format!(":{}\n\n{events}", "x".repeat(padding));
+                    assert_eq!(body.len(), target);
+                    body
+                } else {
+                    response_body
+                };
                 let response = format!(
-                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{response_body}\r\n0\r\n\r\n",
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{:X}\r\n{response_body}\r\n0\r\n\r\n",
                     response_body.len()
                 );
                 stream
@@ -589,7 +683,7 @@ mod tests {
                 response_body.len()
             };
             let response = format!(
-                "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {declared_len}\r\nConnection: close\r\n\r\n{response_body}"
+                "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {declared_len}\r\nConnection: close\r\n\r\n{response_body}"
             );
             stream
                 .write_all(response.as_bytes())
@@ -617,7 +711,10 @@ mod tests {
             model: "model-1".into(),
             credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
             capability_evidence_version: 2,
-            efforts: if matches!(reply, ProbeReply::ValidEfforts) {
+            efforts: if matches!(
+                reply,
+                ProbeReply::ValidEfforts | ProbeReply::EffortCompactionRejected
+            ) {
                 vec![crate::provider::Effort::Low, crate::provider::Effort::High]
             } else {
                 Vec::new()
@@ -643,6 +740,7 @@ mod tests {
         reply: ProbeReply,
         compaction: bool,
         messages: bool,
+        streaming: bool,
     ) -> Result<(), super::super::transport::TransportError> {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -707,7 +805,7 @@ mod tests {
                 .await
                 .expect("compaction transport deadline")
                 .map(|_| ())
-        } else if messages {
+        } else if streaming {
             tokio::time::timeout(
                 Duration::from_secs(10),
                 transport.run_streamed(&request, None, None),
@@ -729,26 +827,50 @@ mod tests {
     async fn transport_accepts_exact_cap_and_rejects_excess_or_encoding() {
         assert!(
             matches!(
-                run_transport_case(ProbeReply::AggregateJsonNodes, false, true).await,
+                run_transport_case(ProbeReply::AggregateJsonNodes, false, true, true).await,
                 Err(super::super::transport::TransportError::InvalidOutcome)
             ),
             "assembled Messages JSON retains the aggregate node bound"
         );
         assert!(
-            run_transport_case(ProbeReply::ChunkedAtLimit, false, false)
+            run_transport_case(ProbeReply::ChunkedAtLimit, false, false, false)
+                .await
+                .is_ok()
+        );
+        assert!(
+            run_transport_case(ProbeReply::ChunkedAtLimit, false, true, false)
+                .await
+                .is_ok()
+        );
+        for streaming in [false, true] {
+            for reply in [
+                ProbeReply::Oversize,
+                ProbeReply::ChunkedOversize,
+                ProbeReply::EncodedBody,
+                ProbeReply::EncodedBodyAfterIdentity,
+                ProbeReply::InputAboveLimit,
+            ] {
+                assert!(matches!(
+                    run_transport_case(reply, false, true, streaming).await,
+                    Err(super::super::transport::TransportError::InvalidOutcome)
+                ));
+            }
+        }
+        assert!(
+            run_transport_case(ProbeReply::ChunkedAtLimit, false, true, true)
                 .await
                 .is_ok()
         );
         for compaction in [false, true] {
             assert!(
-                run_transport_case(ProbeReply::InputAtLimit, compaction, false)
+                run_transport_case(ProbeReply::InputAtLimit, compaction, false, false)
                     .await
                     .is_ok(),
                 "maximum reported input remains valid; compaction={compaction}"
             );
             assert!(
                 matches!(
-                    run_transport_case(ProbeReply::InputAboveLimit, compaction, false).await,
+                    run_transport_case(ProbeReply::InputAboveLimit, compaction, false, false).await,
                     Err(super::super::transport::TransportError::InvalidOutcome)
                 ),
                 "reported input above shared ceiling must reject; compaction={compaction}"
@@ -761,7 +883,7 @@ mod tests {
             ProbeReply::EncodedBodyAfterIdentity,
         ] {
             assert!(matches!(
-                run_transport_case(reply, false, false).await,
+                run_transport_case(reply, false, false, false).await,
                 Err(super::super::transport::TransportError::InvalidOutcome)
             ));
         }
@@ -844,38 +966,56 @@ mod tests {
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
             Err(CustomProfileError::EvidenceUnavailable)
         ));
-        // Reproduce the prior check contract rather than treating a random digest as old evidence.
         let responses_profile = CustomProfile::load_named(&root, "local").unwrap();
-        let mut v30 = Sha256::new();
-        for field in [
-            env!("CARGO_PKG_VERSION"),
-            "openai-responses-goal-contract-conformance-effort-stream-v30",
-            responses_profile.name(),
-            responses_profile.endpoint(),
-            responses_profile.model(),
-            responses_profile.credential_env(),
-            "openai-responses",
-            "json_schema",
-            "user_authorized",
-            "4096",
+        for fields in [
+            vec![
+                env!("CARGO_PKG_VERSION"),
+                "openai-responses-goal-contract-conformance-effort-stream-v30",
+                responses_profile.name(),
+                responses_profile.endpoint(),
+                responses_profile.model(),
+                responses_profile.credential_env(),
+                "openai-responses",
+                "json_schema",
+                "user_authorized",
+                "4096",
+            ],
+            vec![
+                env!("CARGO_PKG_VERSION"),
+                "custom-protocol-goal-contract-conformance-effort-stream-v31",
+                responses_profile.name(),
+                responses_profile.endpoint(),
+                responses_profile.model(),
+                responses_profile.credential_env(),
+                "2",
+                "openai-responses",
+                "",
+                "json_schema",
+                "bearer",
+                "user_authorized",
+                "4096",
+            ],
         ] {
-            v30.update((field.len() as u64).to_be_bytes());
-            v30.update(field.as_bytes());
+            let mut legacy = Sha256::new();
+            for field in fields {
+                legacy.update((field.len() as u64).to_be_bytes());
+                legacy.update(field.as_bytes());
+            }
+            legacy.update(2_u32.to_be_bytes());
+            let old = ProviderEvidenceRecord {
+                digest: legacy.finalize().into(),
+                ..evidence.clone()
+            };
+            let store = Store::open(root.try_clone().unwrap()).unwrap();
+            store.record_provider_evidence(old).await.unwrap();
+            store.close().await.unwrap();
+            responses["version"] = json!(1);
+            write(&responses);
+            assert!(matches!(
+                super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
+                Err(CustomProfileError::EvidenceUnavailable)
+            ));
         }
-        v30.update(2_u32.to_be_bytes());
-        let old = ProviderEvidenceRecord {
-            digest: v30.finalize().into(),
-            ..evidence.clone()
-        };
-        let store = Store::open(root.try_clone().unwrap()).unwrap();
-        store.record_provider_evidence(old).await.unwrap();
-        store.close().await.unwrap();
-        responses["version"] = json!(1);
-        write(&responses);
-        assert!(matches!(
-            super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
-            Err(CustomProfileError::EvidenceUnavailable)
-        ));
         write(&original);
         assert!(matches!(
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
@@ -890,6 +1030,25 @@ mod tests {
             super::super::CustomProvider::admit(&root, "local", "model-1", None).await,
             Err(CustomProfileError::EvidenceUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn custom_compaction_requires_schema_only_challenges_at_every_effort() {
+        for messages in [
+            None,
+            Some(super::super::MessagesAuth::Bearer),
+            Some(super::super::MessagesAuth::ApiKey),
+        ] {
+            for reply in [
+                ProbeReply::IgnoredFormat,
+                ProbeReply::EffortCompactionRejected,
+            ] {
+                assert!(matches!(
+                    run_case_protocol(reply, messages).await,
+                    Err(CustomProfileError::ConformanceFailed)
+                ));
+            }
+        }
     }
 
     #[tokio::test]

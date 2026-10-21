@@ -5,7 +5,10 @@ use crate::provider::{
     ProviderRequest, ProviderResponse, Usage, anthropic::wire as messages, openai::wire,
     raw_reflects_secret, render,
 };
-use reqwest::{Client, header};
+use reqwest::{
+    Client,
+    header::{self, HeaderValue},
+};
 use serde_json::Value;
 
 pub(super) struct CustomTransport {
@@ -142,10 +145,28 @@ impl CustomTransport {
         request: &CompactionRequest,
         effort: Option<Effort>,
     ) -> Result<CompactionResponse, TransportError> {
+        self.compact_request(request, effort, None).await
+    }
+
+    pub(super) async fn probe_compaction(
+        &self,
+        request: &CompactionRequest,
+        effort: Option<Effort>,
+        nonce: &str,
+    ) -> Result<CompactionResponse, TransportError> {
+        self.compact_request(request, effort, Some(nonce)).await
+    }
+
+    async fn compact_request(
+        &self,
+        request: &CompactionRequest,
+        effort: Option<Effort>,
+        nonce: Option<&str>,
+    ) -> Result<CompactionResponse, TransportError> {
         if !(1..=1024).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
-        let body = match &self.protocol {
+        let mut body = match &self.protocol {
             Protocol::OpenaiResponses => effort.map_or_else(
                 || wire::compaction_body(request),
                 |value| wire::compaction_body_with_effort(request, value),
@@ -154,6 +175,15 @@ impl CustomTransport {
                 messages::compaction_body_with_optional_effort(request, effort)
             }
         };
+        if let Some(nonce) = nonce {
+            let schema = match &self.protocol {
+                Protocol::OpenaiResponses => &mut body["text"]["format"]["schema"],
+                Protocol::AnthropicMessages { .. } => {
+                    &mut body["output_config"]["format"]["schema"]
+                }
+            };
+            schema["properties"]["summary"]["enum"] = serde_json::json!([nonce]);
+        }
         let bytes = self.send(body).await?;
         let response = match &self.protocol {
             Protocol::OpenaiResponses => wire::decode_compaction(&bytes, &request.model),
@@ -193,7 +223,12 @@ impl CustomTransport {
                 let request = request.header("anthropic-version", "2023-06-01");
                 match auth {
                     MessagesAuth::Bearer => request.bearer_auth(&self.key),
-                    MessagesAuth::ApiKey => request.header("x-api-key", &self.key),
+                    MessagesAuth::ApiKey => {
+                        let mut key = HeaderValue::from_str(&self.key)
+                            .map_err(|_| TransportError::Rejected)?;
+                        key.set_sensitive(true);
+                        request.header("x-api-key", key)
+                    }
                 }
             }
         })
@@ -328,4 +363,31 @@ fn valid_usage(usage: Usage, cap: u32) -> bool {
             .output_tokens
             .is_some_and(|value| value > 0 && value <= cap)
         && usage.cache_consistent()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_api_key_header_is_sensitive() {
+        let key = "synthetic-private-key";
+        let transport = CustomTransport {
+            client: Client::new(),
+            endpoint: "http://127.0.0.1:9321/v1/messages".into(),
+            key: key.into(),
+            protocol: Protocol::AnthropicMessages {
+                base_url: "http://127.0.0.1:9321".into(),
+                auth: MessagesAuth::ApiKey,
+            },
+        };
+        let request = transport
+            .request(&serde_json::json!({}))
+            .unwrap_or_else(|_| panic!("synthetic request"))
+            .build()
+            .expect("request headers");
+        assert_eq!(request.headers()["x-api-key"], key);
+        assert!(request.headers()["x-api-key"].is_sensitive());
+        assert!(!format!("{request:?}").contains(key));
+    }
 }

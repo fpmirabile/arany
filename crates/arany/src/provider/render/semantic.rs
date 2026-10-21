@@ -131,6 +131,16 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
         .collect()
 }
 
+pub fn compaction_probe_reply(wire: &Value, fallback: Value) -> Value {
+    let nonce = wire
+        .pointer("/text/format/schema/properties/summary/enum/0")
+        .or_else(|| wire.pointer("/output_config/format/schema/properties/summary/enum/0"))
+        .and_then(Value::as_str);
+    nonce.map_or(fallback, |nonce| {
+        json!(json!({"summary":nonce}).to_string())
+    })
+}
+
 pub fn responses_output(value: &Value) -> Value {
     if value["outcome"]["type"] == "delegate" {
         let mut arguments = value["outcome"].clone();
