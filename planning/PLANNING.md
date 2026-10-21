@@ -5,8 +5,14 @@ Rules for maintained execution plans. [README.md](./README.md) defines the folde
 ## Rules
 
 - Put repository-level plans under `planning/`, not in ad hoc documentation folders. Edit an existing plan only when the user asks to change or continue it.
+- One plan delivers one feature: a single capability a user, client or test can observe. Two or more features get two or more plans, each with its own lifecycle; link a dependency instead of merging them.
+- Work in Research → Plan → Implement (RPI) order, and do not start the next phase until the previous one passes its gate:
+  - **Research:** verify the current code, the owning spec and the peer harness behavior from source. Record the findings with citations in the plan's research section, or in `docs/research/` when they outlive the plan. Gate: no material claim rests on memory or assumption.
+  - **Plan:** write the outcome, the scenarios and the vertical slices from those findings only. Gate: no material open question remains.
+  - **Implement:** land slices in order. If implementation contradicts the research, stop and update the plan before continuing.
+- Slice vertically. Each slice is a thin end-to-end increment, crossing every layer the feature touches (input or protocol, Engine, journal, Tools, presentation, spec and tests), that ships a behavior observable on its own and leaves the feature usable. Do not slice by layer (types first, all specs, then wiring) or by artifact. A refactor slices by flow: each slice moves one complete path and keeps observations byte-identical.
 - Resolve checkable facts before finalizing; turn remaining material uncertainty into a concrete open question. Sweep for `assume`, `probably`, `maybe`, `TBD`, `later` and `follow up`.
-- Split work by responsibility and risk. Each branch or PR is describable in one sentence and leaves the repository coherent.
+- Each slice is one branch or PR, describable in one sentence, and leaves the repository coherent. Split a slice further only by risk, never by layer.
 - Set status to `In progress` when implementation starts; for multi-PR plans keep only remaining work and the next action, and close completed plans under the [planning lifecycle](./README.md#lifecycle), including local uncommitted work.
 - Cite adjacent rules, specs and research instead of restating them. Match detail to the work: empty headings and repeated repository rules do not make a plan implementation-ready.
 - For behavior work, link the owning spec and its evidence owner and describe the successful path plus meaningful rejection, failure and recovery scenarios before implementation; the [spec workflow](../docs/specs/README.md) owns contract updates.
