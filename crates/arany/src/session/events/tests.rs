@@ -2356,7 +2356,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, 14).is_err(), "{key}");
+        assert!(decode(&malformed, 15).is_err(), "{key}");
     }
 }
 

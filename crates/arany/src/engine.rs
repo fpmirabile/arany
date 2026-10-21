@@ -1542,6 +1542,24 @@ impl Engine {
                 }
                 crate::tools::worker::recover_private(&ids).await?;
             }
+            // A Git write whose Guard died with the Engine may have left its locks; remove them
+            // once private recovery confirms its unit is gone. Publication is never retried.
+            let git_writes: Vec<_> = view
+                .runs
+                .iter()
+                .filter(|r| stored.run_ids.contains(&r.id))
+                .flat_map(|r| &r.tools)
+                .filter(|t| {
+                    t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop()
+                })
+                .map(|t| t.intent.id)
+                .collect();
+            if !git_writes.is_empty() && submission.tools.is_some() {
+                crate::tools::worker::recover_private(&git_writes).await?;
+                for id in git_writes {
+                    crate::tools::recover_git_locks(&request.workspace, id)?;
+                }
+            }
         }
         if entry == GoalEntry::Resume {
             let previous = history

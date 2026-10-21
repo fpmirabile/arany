@@ -1,8 +1,8 @@
 use super::super::ToolError;
 use super::super::config::{GitIdentity, Program};
 use super::super::types::{
-    FileChange, FileVersion, MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES, ToolCall,
-    hex_digest, valid_relative,
+    EffectIntent, FileChange, FileVersion, MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES,
+    ToolCall, hex_digest, valid_relative,
 };
 use super::{
     CAPTURE_BYTES, Captured, MAX_GIT_RUNTIME, Repository, VIEW, environment, failure, inspect,
@@ -41,6 +41,7 @@ const DETACHED: &str =
 const DRIFT: &str = "The repository changed or another Git process holds its lock; nothing was published. Inspect the repository and try again.";
 const PROTECTED: &str = "Switching would change a protected, invalid or deeply nested path; switch in your own terminal instead.";
 const CASE_ALIAS: &str = "Switching would change paths that differ only by letter case, or one that aliases an existing name by case; switch in your own terminal instead.";
+const REF_CASE_ALIAS: &str = "A ref differing only by letter case already exists; on case-insensitive storage the new branch would overwrite it.";
 const UNSUPPORTED_ENTRY: &str = "Switching would change a symbolic link or submodule entry, which typed Git writes do not support.";
 
 // What a write replaces, plus `holds`: refs it read and only locks so they cannot move meanwhile.
@@ -60,6 +61,19 @@ struct RefState {
     head: Vec<u8>,
     packed: Option<Vec<u8>>,
     loose: Vec<(String, Vec<u8>)>,
+}
+
+impl RefState {
+    fn names(&self) -> BTreeSet<String> {
+        let packed = self.packed.as_deref().unwrap_or_default();
+        packed
+            .split(|byte| *byte == b'\n')
+            .filter_map(|line| std::str::from_utf8(line).ok()?.split_once(' '))
+            .filter(|(oid, _)| !oid.starts_with(['#', '^']))
+            .map(|(_, name)| name.to_owned())
+            .chain(self.loose.iter().map(|(name, _)| name.clone()))
+            .collect()
+    }
 }
 
 struct RefUpdate {
@@ -150,10 +164,10 @@ pub(super) async fn execute(
     scratch: &Path,
     git: &Program,
     identity: &GitIdentity,
-    call: &ToolCall,
-    max_bytes: usize,
+    intent: &EffectIntent,
     runtime: Duration,
 ) -> Result<String, ToolError> {
+    let (call, max_bytes) = (&intent.call, intent.limits.result_bytes as usize);
     if max_bytes < RECEIPT_BYTES {
         return Err(ToolError::Limit);
     }
@@ -205,7 +219,7 @@ pub(super) async fn execute(
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
-        } => branch(&git, name, start_point.as_deref()).await?,
+        } => branch(&git, &repository, &snapshot, name, start_point.as_deref()).await?,
         ToolCall::GitSwitch { branch } => switch(&git, &repository, branch).await?,
         _ => return Err(ToolError::Configuration),
     };
@@ -215,11 +229,17 @@ pub(super) async fn execute(
     };
     #[cfg(all(test, target_os = "linux"))]
     tests::race(workspace, tests::Stage::Planned);
-    result["publication"] =
-        match publish(workspace, &git.view, &repository, &snapshot, &publication)? {
-            Ok(receipt) => receipt,
-            Err(message) => return Ok(failure(message, &[], max_bytes)),
-        };
+    result["publication"] = match publish(
+        workspace,
+        &git.view,
+        &repository,
+        &snapshot,
+        &publication,
+        intent.id,
+    )? {
+        Ok(receipt) => receipt,
+        Err(message) => return Ok(failure(message, &[], max_bytes)),
+    };
     let text = result.to_string();
     if text.len() > max_bytes {
         // Unreachable within RECEIPT_BYTES; a published effect without its receipt is unknown.
@@ -392,6 +412,8 @@ async fn commit(
 
 async fn branch(
     git: &Git<'_>,
+    repository: &Repository,
+    snapshot: &RefState,
     branch: &str,
     start_point: Option<&str>,
 ) -> Result<Planned, ToolError> {
@@ -402,6 +424,10 @@ async fn branch(
             &[],
             git.max_bytes,
         )));
+    }
+    let existing = snapshot.names();
+    if existing.iter().any(|other| case_alias(&name, other)) {
+        return Ok(Err(failure(REF_CASE_ALIAS, &[], git.max_bytes)));
     }
     let mut argv = vec!["branch", "--no-track", "--end-of-options", branch];
     argv.extend(start_point);
@@ -414,11 +440,47 @@ async fn branch(
                 before: None,
                 after: after.clone(),
             }),
-            holds: vec!["HEAD".into(), "packed-refs".into()],
+            holds: start_refs(&existing, &repository.head, start_point)
+                .into_iter()
+                .chain(["HEAD".into(), "packed-refs".into()])
+                .collect(),
             ..Publication::default()
         },
         json!({"branch": branch, "oid": after}),
     )))
+}
+
+// A ref path whose components match an existing ref case-insensitively but differ in case.
+fn case_alias(name: &str, other: &str) -> bool {
+    name.split('/')
+        .zip(other.split('/'))
+        .take_while(|(left, right)| left.eq_ignore_ascii_case(right))
+        .any(|(left, right)| left != right)
+}
+
+// The loose refs a start point can name under Git's lookup order, held while the branch publishes;
+// HEAD (held by every write) stands for its own referent.
+fn start_refs(existing: &BTreeSet<String>, head: &[u8], start_point: Option<&str>) -> Vec<String> {
+    let start = start_point.unwrap_or("HEAD");
+    let name = &start[..start.find(['~', '^']).unwrap_or(start.len())];
+    let candidates = if name == "HEAD" {
+        branch_of(head)
+            .map(|branch| vec![format!("refs/heads/{branch}")])
+            .unwrap_or_default()
+    } else {
+        vec![
+            name.to_owned(),
+            format!("refs/{name}"),
+            format!("refs/tags/{name}"),
+            format!("refs/heads/{name}"),
+            format!("refs/remotes/{name}"),
+            format!("refs/remotes/{name}/HEAD"),
+        ]
+    };
+    candidates
+        .into_iter()
+        .filter(|candidate| existing.contains(candidate))
+        .collect()
 }
 
 async fn switch(
@@ -600,13 +662,20 @@ fn changed_files<'a>(
             git.max_bytes,
         )));
     }
-    // Paths differing only by ASCII case would alias each other on a case-insensitive volume.
-    let folded: BTreeSet<String> = files
-        .iter()
-        .map(|file| file.path.to_ascii_lowercase())
-        .collect();
-    if folded.len() != files.len() {
-        return Ok(Err(failure(CASE_ALIAS, &[], git.max_bytes)));
+    // Paths or parent directories differing only by ASCII case would alias each other on a
+    // case-insensitive volume.
+    let mut prefixes = std::collections::BTreeMap::new();
+    for file in &files {
+        for (end, _) in file.path.match_indices('/').chain([(file.path.len(), "")]) {
+            let prefix = &file.path[..end];
+            if *prefixes
+                .entry(prefix.to_ascii_lowercase())
+                .or_insert(prefix)
+                != prefix
+            {
+                return Ok(Err(failure(CASE_ALIAS, &[], git.max_bytes)));
+            }
+        }
     }
     Ok(Ok((files, blobs)))
 }
@@ -802,8 +871,11 @@ fn resolve(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
 struct Lock {
     directory: Dir,
     leaf: String,
+    path: String,
     file: Option<cap_std::fs::File>,
     committed: bool,
+    // Directories this lock created, outermost first, removed again unless it commits.
+    created: Vec<(Dir, String)>,
 }
 
 impl Lock {
@@ -811,7 +883,9 @@ impl Lock {
         let mut directory = git_dir.try_clone().map_err(|_| ToolError::Operation)?;
         let mut parts: Vec<&str> = path.split('/').collect();
         let leaf = parts.pop().ok_or(ToolError::Operation)?;
+        let mut created = Vec::new();
         for part in parts {
+            exact_case(&directory, part)?;
             match directory.open_dir_nofollow(part) {
                 Ok(next) => directory = next,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -819,6 +893,10 @@ impl Lock {
                     directory
                         .create_dir(part)
                         .map_err(|_| ToolError::Conflict)?;
+                    created.push((
+                        directory.try_clone().map_err(|_| ToolError::Operation)?,
+                        part.to_owned(),
+                    ));
                     directory = directory
                         .open_dir_nofollow(part)
                         .map_err(|_| ToolError::Conflict)?;
@@ -826,6 +904,7 @@ impl Lock {
                 Err(_) => return Err(ToolError::Conflict),
             }
         }
+        exact_case(&directory, leaf)?;
         let mut options = OpenOptions::new();
         options
             .write(true)
@@ -837,12 +916,21 @@ impl Lock {
         }
         let file = directory
             .open_with(format!("{leaf}.lock"), &options)
-            .map_err(|_| ToolError::Conflict)?;
+            .map_err(|_| ToolError::Conflict);
+        let file = match file {
+            Ok(file) => file,
+            Err(error) => {
+                remove_created(&created);
+                return Err(error);
+            }
+        };
         Ok(Self {
             directory,
             leaf: leaf.to_owned(),
+            path: format!("{path}.lock"),
             file: Some(file),
             committed: false,
+            created,
         })
     }
 
@@ -851,6 +939,17 @@ impl Lock {
         file.write_all(bytes)
             .and_then(|()| file.sync_all())
             .map_err(|_| ToolError::Operation)
+    }
+
+    fn identity(&self) -> Result<(u64, u64), ToolError> {
+        use cap_std::fs::MetadataExt;
+        let metadata = self
+            .file
+            .as_ref()
+            .ok_or(ToolError::Operation)?
+            .metadata()
+            .map_err(|_| ToolError::Operation)?;
+        Ok((metadata.dev(), metadata.ino()))
     }
 
     fn commit(&mut self) -> Result<(), ToolError> {
@@ -867,8 +966,184 @@ impl Drop for Lock {
     fn drop(&mut self) {
         if !self.committed {
             let _ = self.directory.remove_file(format!("{}.lock", self.leaf));
+            remove_created(&self.created);
         }
     }
+}
+
+// A directory another Git populated meanwhile is not empty and stays.
+fn remove_created(created: &[(Dir, String)]) {
+    for (parent, name) in created.iter().rev() {
+        let _ = parent.remove_dir(name);
+    }
+}
+
+// Exact-case admission: a name that differs from an existing entry only by ASCII case would
+// alias it on case-insensitive storage.
+fn exact_case(directory: &Dir, name: &str) -> Result<(), ToolError> {
+    for (count, entry) in directory
+        .entries()
+        .map_err(|_| ToolError::Conflict)?
+        .enumerate()
+    {
+        if count >= MAX_REF_ENTRIES {
+            return Err(ToolError::Limit);
+        }
+        let other = entry.map_err(|_| ToolError::Conflict)?.file_name();
+        if other
+            .to_str()
+            .is_none_or(|other| other != name && other.eq_ignore_ascii_case(name))
+        {
+            return Err(ToolError::Conflict);
+        }
+    }
+    Ok(())
+}
+
+const LEDGER_BYTES: usize = 64 * 1024;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LockRecord {
+    path: String,
+    device: u64,
+    inode: u64,
+    sha256: String,
+}
+
+fn ledger_name(intent: uuid::Uuid) -> String {
+    format!("arany-locks-{intent}.json")
+}
+
+// Durable ownership of one write's locks in `.git`: if the Guard dies, recovery removes only
+// these exact, unchanged files. Dropping it after the locks removes the record.
+struct Ledger<'a> {
+    git_dir: &'a Dir,
+    name: String,
+    locks: Vec<LockRecord>,
+}
+
+impl<'a> Ledger<'a> {
+    fn create(git_dir: &'a Dir, intent: uuid::Uuid) -> Result<Self, ToolError> {
+        let ledger = Self {
+            git_dir,
+            name: ledger_name(intent),
+            locks: Vec::new(),
+        };
+        ledger.save()?;
+        Ok(ledger)
+    }
+
+    fn record(&mut self, lock: &Lock, content: &[u8]) -> Result<(), ToolError> {
+        let (device, inode) = lock.identity()?;
+        self.locks.push(LockRecord {
+            path: lock.path.clone(),
+            device,
+            inode,
+            sha256: hex_digest(content),
+        });
+        self.save()
+    }
+
+    fn save(&self) -> Result<(), ToolError> {
+        let temporary = format!("{}.tmp", self.name);
+        let bytes = serde_json::to_vec(&self.locks).map_err(|_| ToolError::Operation)?;
+        let mut options = OpenOptions::new();
+        options
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .follow(FollowSymlinks::No);
+        {
+            use cap_std::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        self.git_dir
+            .open_with(&temporary, &options)
+            .and_then(|mut file| file.write_all(&bytes).and_then(|()| file.sync_all()))
+            .and_then(|()| self.git_dir.rename(&temporary, self.git_dir, &self.name))
+            .map_err(|_| ToolError::Operation)?;
+        sync_directory(self.git_dir)
+    }
+}
+
+impl Drop for Ledger<'_> {
+    fn drop(&mut self) {
+        let _ = self.git_dir.remove_file(format!("{}.tmp", self.name));
+        let _ = self.git_dir.remove_file(&self.name);
+    }
+}
+
+fn valid_lock_path(path: &str) -> bool {
+    matches!(path, "HEAD.lock" | "index.lock" | "packed-refs.lock")
+        || path.len() <= 512
+            && path.ends_with(".lock")
+            && path.strip_prefix("refs/").is_some_and(|rest| {
+                rest.split('/').all(|part| {
+                    !part.is_empty()
+                        && part != "."
+                        && part != ".."
+                        && !part.chars().any(char::is_control)
+                })
+            })
+}
+
+/// Removes the locks a dead Guard recorded for `intent`, each only while it is the same inode
+/// with the same bytes it wrote; anything else stays for the user. Publication is never retried.
+pub(crate) fn recover_locks(workspace: &Path, intent: uuid::Uuid) -> Result<(), ToolError> {
+    let root = super::super::fs::open_directory(workspace)?;
+    let Ok(git_dir) = root.open_dir_nofollow(".git") else {
+        return Ok(());
+    };
+    let name = ledger_name(intent);
+    let Some(bytes) = read_optional(&git_dir, &name, LEDGER_BYTES)? else {
+        let _ = git_dir.remove_file(format!("{name}.tmp"));
+        return Ok(());
+    };
+    let locks: Vec<LockRecord> =
+        serde_json::from_slice(&bytes).map_err(|_| ToolError::Operation)?;
+    for record in locks {
+        if !valid_lock_path(&record.path) {
+            return Err(ToolError::Operation);
+        }
+        let (parent, leaf) = record.path.rsplit_once('/').unwrap_or(("", &record.path));
+        let mut directory = git_dir.try_clone().map_err(|_| ToolError::Operation)?;
+        let mut present = true;
+        for part in parent.split('/').filter(|part| !part.is_empty()) {
+            match directory.open_dir_nofollow(part) {
+                Ok(next) => directory = next,
+                Err(_) => {
+                    present = false;
+                    break;
+                }
+            }
+        }
+        let Some(file) = present
+            .then(|| super::open_optional(&directory, leaf))
+            .transpose()?
+            .flatten()
+        else {
+            continue;
+        };
+        use std::os::unix::fs::MetadataExt;
+        let metadata = file.metadata().map_err(|_| ToolError::Operation)?;
+        if (metadata.dev(), metadata.ino()) != (record.device, record.inode) {
+            continue;
+        }
+        // A multiply linked, special or changed file is not the lock this Guard wrote.
+        if super::super::fs::read_regular(file, MAX_SNAPSHOT_BYTES)
+            .is_ok_and(|bytes| hex_digest(&bytes) == record.sha256)
+        {
+            directory
+                .remove_file(leaf)
+                .map_err(|_| ToolError::Operation)?;
+        }
+    }
+    git_dir
+        .remove_file(&name)
+        .map_err(|_| ToolError::Operation)?;
+    let _ = git_dir.remove_file(format!("{name}.tmp"));
+    sync_directory(&git_dir)
 }
 
 // Reopen "." readably: a path-only capability handle cannot prove durability through fsync.
@@ -887,6 +1162,7 @@ fn publish(
     repository: &Repository,
     snapshot: &RefState,
     publication: &Publication,
+    intent: uuid::Uuid,
 ) -> Result<Result<Value, &'static str>, ToolError> {
     let root = super::super::fs::open_directory(workspace)?;
     let Ok(git_dir) = root.open_dir_nofollow(".git") else {
@@ -899,35 +1175,36 @@ fn publish(
         .index
         .as_ref()
         .map(|(bytes, _)| hex_digest(bytes));
+    // Declared before the locks so it outlives them: its record goes only once they are gone.
+    let mut ledger = Ledger::create(&git_dir, intent)?;
     let locked = (|| {
-        let mut reference = None;
-        if let Some(update) = &publication.reference {
-            let mut lock = Lock::acquire(&git_dir, &update.name)?;
-            lock.write(format!("{}\n", update.after).as_bytes())?;
-            reference = Some(lock);
-        }
+        let mut take = |path: &str, content: Option<&[u8]>| {
+            let mut lock = Lock::acquire(&git_dir, path)?;
+            if let Some(content) = content {
+                lock.write(content)?;
+            }
+            ledger.record(&lock, content.unwrap_or_default())?;
+            Ok::<_, ToolError>(lock)
+        };
+        let reference = publication
+            .reference
+            .as_ref()
+            .map(|update| take(&update.name, Some(format!("{}\n", update.after).as_bytes())))
+            .transpose()?;
         let holds = publication
             .holds
             .iter()
-            .map(|name| Lock::acquire(&git_dir, name))
+            .map(|name| take(name, None))
             .collect::<Result<Vec<_>, _>>()?;
         let index = publication
             .index
             .as_ref()
-            .map(|bytes| {
-                let mut lock = Lock::acquire(&git_dir, "index")?;
-                lock.write(bytes)?;
-                Ok::<_, ToolError>(lock)
-            })
+            .map(|bytes| take("index", Some(bytes)))
             .transpose()?;
         let head = publication
             .head
             .as_ref()
-            .map(|bytes| {
-                let mut lock = Lock::acquire(&git_dir, "HEAD")?;
-                lock.write(bytes)?;
-                Ok::<_, ToolError>(lock)
-            })
+            .map(|bytes| take("HEAD", Some(bytes)))
             .transpose()?;
         let live_head =
             read_optional(&git_dir, "HEAD", super::HEAD_BYTES)?.ok_or(ToolError::Conflict)?;
@@ -945,6 +1222,8 @@ fn publish(
         Err(ToolError::Conflict | ToolError::Path | ToolError::NotFound) => return Ok(Err(DRIFT)),
         Err(error) => return Err(error),
     };
+    #[cfg(all(test, target_os = "linux"))]
+    tests::race(workspace, tests::Stage::Locked);
     if !publication.files.is_empty() {
         // The shared publisher's exact-case admission: never write through a case alias.
         match super::super::fs::worker_publication_paths(&root, &publication.files) {

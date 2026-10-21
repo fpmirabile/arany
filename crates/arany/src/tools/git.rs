@@ -1,5 +1,7 @@
 mod write;
 
+pub(crate) use write::recover_locks;
+
 use super::ToolError;
 use super::config::{GitIdentity, Program};
 use super::executable::{EXECUTABLES, git_root, has_magic};
@@ -732,8 +734,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
             scratch,
             git,
             &site.config.git_identity.clone().unwrap_or_default(),
-            &site.intent.call,
-            max_bytes,
+            site.intent,
             site.remaining_runtime(),
         )
         .await

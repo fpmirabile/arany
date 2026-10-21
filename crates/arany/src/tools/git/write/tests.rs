@@ -11,6 +11,7 @@ pub(super) enum Stage {
     Snapshot,
     Checked,
     Planned,
+    Locked,
 }
 
 type Race = (PathBuf, Stage, Box<dyn FnOnce() + Send>);
@@ -58,6 +59,7 @@ struct Repo {
     workspace: PathBuf,
     home: PathBuf,
     runs: usize,
+    intent: uuid::Uuid,
 }
 
 impl Repo {
@@ -70,6 +72,7 @@ impl Repo {
             workspace,
             home,
             runs: 0,
+            intent: uuid::Uuid::nil(),
         }
     }
 
@@ -77,6 +80,24 @@ impl Repo {
         self.runs += 1;
         let git = super::super::discover().expect("pinned system git");
         let scratch = scratch(self.temp.path(), self.runs);
+        self.intent = uuid::Uuid::now_v7();
+        let intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: self.intent,
+            run_id: crate::session::RunId::new(),
+            agent_run_id: crate::session::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call,
+            limits: crate::tools::types::ToolLimits {
+                result_bytes: 16 * 1024,
+                ..Default::default()
+            },
+            expires_at_ms: 1,
+            use_count: 1,
+        };
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -86,8 +107,7 @@ impl Repo {
                 &scratch,
                 &git,
                 &identity(),
-                &call,
-                16 * 1024,
+                &intent,
                 Duration::from_secs(30),
             ))
             .map(|output| serde_json::from_str(&output).unwrap())
@@ -304,7 +324,50 @@ fn hostile_repository_configuration_never_executes_during_writes() {
 #[test]
 fn refusals_leave_the_repository_and_workspace_unchanged() {
     type Setup = fn(&Repo);
-    let cases: [(&str, Setup, ToolCall, &str); 12] = [
+    let cases: [(&str, Setup, ToolCall, &str); 16] = [
+        (
+            "a branch differing from an existing one only by case",
+            |_| {},
+            branch("MAIN", None),
+            REF_CASE_ALIAS,
+        ),
+        (
+            "a branch directory differing from an existing one only by case",
+            |repo| host_git(&repo.workspace, &repo.home, &["branch", "feature/y"]),
+            branch("Feature/x", None),
+            REF_CASE_ALIAS,
+        ),
+        (
+            "new parent directories differing only by case",
+            |repo| {
+                let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+                git(&["checkout", "-q", "-b", "parents"]);
+                for path in ["Src2/x.txt", "src2/y.txt"] {
+                    let path = repo.workspace.join(path);
+                    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                    std::fs::write(path, "x\n").unwrap();
+                }
+                git(&["add", "Src2/x.txt", "src2/y.txt"]);
+                git(&["commit", "-q", "-m", "parents"]);
+                git(&["checkout", "-q", "main"]);
+            },
+            switch("parents"),
+            CASE_ALIAS,
+        ),
+        (
+            "an added path under a case alias of an existing directory",
+            |repo| {
+                let git = |args: &[&str]| host_git(&repo.workspace, &repo.home, args);
+                git(&["checkout", "-q", "-b", "upper"]);
+                std::fs::create_dir_all(repo.workspace.join("SRC")).unwrap();
+                std::fs::write(repo.workspace.join("SRC/z.txt"), "z\n").unwrap();
+                git(&["add", "SRC/z.txt"]);
+                git(&["commit", "-q", "-m", "upper"]);
+                git(&["checkout", "-q", "main"]);
+            },
+            switch("upper"),
+            CASE_ALIAS,
+        ),
         (
             "detached HEAD",
             |repo| host_git(&repo.workspace, &repo.home, &["checkout", "-q", "--detach"]),
@@ -465,7 +528,14 @@ fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
         &'static [&'static [&'static str]],
         ToolCall,
     );
-    let cases: [Case; 6] = [
+    let cases: [Case; 7] = [
+        (
+            "nested branch while its source advanced",
+            |_| {},
+            Stage::Planned,
+            &[&["commit", "-q", "--allow-empty", "-m", "concurrent"]],
+            branch("feature/x", None),
+        ),
         (
             "branch advanced after the snapshot",
             |_| {},
@@ -529,10 +599,16 @@ fn concurrent_ref_changes_after_the_snapshot_publish_nothing() {
                 || name.contains("target"),
             "{name}: the concurrent commit is never overwritten"
         );
-        assert!(
-            !repo.workspace.join(".git/refs/heads/topic").exists(),
-            "{name}: nothing was created"
-        );
+        for created in ["topic", "feature"] {
+            assert!(
+                !repo
+                    .workspace
+                    .join(".git/refs/heads")
+                    .join(created)
+                    .exists(),
+                "{name}: nothing was created"
+            );
+        }
     }
 }
 
@@ -576,11 +652,14 @@ async fn the_git_child_cannot_write_the_workspace_directly() {
         .filter(|(key, _)| !key.starts_with("GIT_DIR") && *key != "GIT_WORK_TREE")
         .collect();
     let before = tree(&repo.workspace);
+    // `git config --file` creates its file through a lock and a rename, as a write's Git does.
     let init = |target: PathBuf| {
         let argv = vec![
-            "init".to_owned(),
-            "-q".to_owned(),
+            "config".to_owned(),
+            "--file".to_owned(),
             target.display().to_string(),
+            "arany.probe".to_owned(),
+            "yes".to_owned(),
         ];
         let env = env.clone();
         let git = git.clone();
@@ -606,7 +685,113 @@ async fn the_git_child_cannot_write_the_workspace_directly() {
     let denied = init(repo.workspace.join(".git/injected")).await;
     assert_ne!(denied.status, Some(0));
     assert_unchanged(&repo.workspace, &before);
-    let allowed = init(scratch.join("private")).await;
+    let allowed = init(scratch.join("private.config")).await;
     assert_eq!(allowed.status, Some(0));
-    assert!(scratch.join("private/.git/HEAD").exists());
+    assert!(scratch.join("private.config").exists());
+}
+
+#[test]
+fn a_branch_start_ref_stays_locked_until_the_branch_publishes() {
+    let mut repo = Repo::new();
+    host_git(&repo.workspace, &repo.home, &["branch", "older", "HEAD~1"]);
+    let older = repo.git(&["rev-parse", "older"]);
+    let moved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let (workspace, home, flag) = (repo.workspace.clone(), repo.home.clone(), moved.clone());
+    RACES.lock().unwrap().push((
+        repo.workspace.clone(),
+        Stage::Locked,
+        Box::new(move || {
+            let output = host_git_output(
+                &workspace,
+                &home,
+                &["update-ref", "refs/heads/older", "HEAD"],
+            );
+            flag.store(output.status.success(), std::sync::atomic::Ordering::SeqCst);
+        }),
+    ));
+    repo.succeeded(branch("topic", Some("older")));
+    assert!(
+        !moved.load(std::sync::atomic::Ordering::SeqCst),
+        "the start ref was held"
+    );
+    assert_eq!(repo.git(&["rev-parse", "older"]), older);
+    assert_eq!(repo.git(&["rev-parse", "topic"]), older);
+}
+
+#[test]
+fn locks_left_by_a_dead_guard_are_recovered_only_while_unchanged() {
+    let mut repo = Repo::new();
+    let stash = repo.temp.path().join("stash");
+    std::fs::create_dir(&stash).unwrap();
+    let left = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (git_dir, stash_dir, kept) = (repo.workspace.join(".git"), stash.clone(), left.clone());
+    // Hard links keep each lock's inode and bytes, as a killed Guard would leave them.
+    RACES.lock().unwrap().push((
+        repo.workspace.clone(),
+        Stage::Locked,
+        Box::new(move || {
+            for (index, (path, _)) in tree(&git_dir).into_iter().enumerate() {
+                let name = path.to_string_lossy().into_owned();
+                if name.ends_with(".lock") || name.starts_with("arany-locks-") {
+                    let link = stash_dir.join(index.to_string());
+                    std::fs::hard_link(git_dir.join(&path), &link).unwrap();
+                    kept.lock().unwrap().push((path, link));
+                }
+            }
+        }),
+    ));
+    repo.succeeded(commit(&["src/a.txt"], "m"));
+    let git_dir = repo.workspace.join(".git");
+    assert!(
+        !tree(&git_dir)
+            .iter()
+            .any(|(path, _)| path.to_string_lossy().contains(".lock")
+                || path.to_string_lossy().starts_with("arany-locks-")),
+        "a finished write leaves no lock or ledger"
+    );
+    let left = left.lock().unwrap().clone();
+    let names: BTreeSet<String> = left
+        .iter()
+        .map(|(path, _)| path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "HEAD.lock".to_owned(),
+            format!("arany-locks-{}.json", repo.intent),
+            "index.lock".into(),
+            "packed-refs.lock".into(),
+            "refs/heads/main.lock".into(),
+        ]
+        .into_iter()
+        .collect()
+    );
+    // Locks already renamed into place would not survive a crash, so only the others return.
+    for (path, link) in &left {
+        let name = path.to_string_lossy();
+        if name != "index.lock" && name != "refs/heads/main.lock" {
+            std::fs::hard_link(link, git_dir.join(path)).unwrap();
+            std::fs::remove_file(link).unwrap();
+        }
+    }
+    // A lock someone else rewrote is no longer ours.
+    std::fs::write(git_dir.join("HEAD.lock"), "x").unwrap();
+    recover_locks(&repo.workspace, uuid::Uuid::now_v7()).unwrap();
+    assert!(
+        git_dir.join("packed-refs.lock").exists(),
+        "another intent recovers nothing"
+    );
+    recover_locks(&repo.workspace, repo.intent).unwrap();
+    assert!(!git_dir.join("packed-refs.lock").exists());
+    assert!(git_dir.join("HEAD.lock").exists(), "a changed lock stays");
+    assert!(
+        !git_dir
+            .join(format!("arany-locks-{}.json", repo.intent))
+            .exists()
+    );
+    assert_eq!(
+        repo.git(&["log", "-1", "--format=%s"]),
+        "m\n",
+        "publication is not retried"
+    );
 }

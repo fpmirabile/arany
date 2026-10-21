@@ -32,10 +32,7 @@ struct PathBeneathAttr {
     parent_fd: i32,
 }
 
-/// Spawns `command` from a short-lived thread whose Landlock domain denies every filesystem
-/// write outside `writable`. Landlock domains belong to the thread and its descendants, so the
-/// child inherits the restriction while the calling Guard thread keeps its own access.
-/// Reads and execution are not restricted. Missing Landlock support fails closed.
+// Landlock and seccomp bind the thread and its descendants, so the Guard thread keeps its access.
 pub(crate) fn spawn_confined(
     command: &mut tokio::process::Command,
     writable: &[&Path],
@@ -64,10 +61,11 @@ fn restrict_thread(writable: &[&Path]) -> Result<(), ToolError> {
             CREATE_RULESET_VERSION,
         )
     };
-    if abi < 1 {
+    // ABI 3 (Linux 6.2) is the first that mediates truncation; older kernels fail closed.
+    if abi < 3 {
         return Err(ToolError::ProtectionUnavailable);
     }
-    let mut handled = WRITE_FILE
+    let handled = WRITE_FILE
         | REMOVE_DIR
         | REMOVE_FILE
         | MAKE_CHAR
@@ -76,13 +74,9 @@ fn restrict_thread(writable: &[&Path]) -> Result<(), ToolError> {
         | MAKE_SOCK
         | MAKE_FIFO
         | MAKE_BLOCK
-        | MAKE_SYM;
-    if abi >= 2 {
-        handled |= REFER;
-    }
-    if abi >= 3 {
-        handled |= TRUNCATE;
-    }
+        | MAKE_SYM
+        | REFER
+        | TRUNCATE;
     let attr = RulesetAttr {
         handled_access_fs: handled,
     };
@@ -150,7 +144,7 @@ fn restrict_thread(writable: &[&Path]) -> Result<(), ToolError> {
     if restricted != 0 {
         return Err(ToolError::ProtectionUnavailable);
     }
-    Ok(())
+    super::profile::install_metadata_filter()
 }
 
 #[cfg(test)]
@@ -165,8 +159,13 @@ mod tests {
         std::fs::create_dir_all(workspace.join(".git")).unwrap();
         std::fs::create_dir_all(&scratch).unwrap();
         std::fs::write(workspace.join("kept.txt"), "kept\n").unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let mode = std::fs::metadata(workspace.join("kept.txt"))
+            .unwrap()
+            .mode()
+            & 0o777;
         let script = format!(
-            "printf x > {scratch}/allowed; printf x > {workspace}/denied; printf x > {workspace}/.git/denied; printf y > {workspace}/kept.txt; rm -f {workspace}/kept.txt; mkdir {workspace}/dir; printf x > /dev/null; cat {workspace}/kept.txt",
+            "printf x > {scratch}/allowed; printf x > {workspace}/denied; printf x > {workspace}/.git/denied; printf y > {workspace}/kept.txt; truncate -s 0 {workspace}/kept.txt; chmod 0777 {workspace}/kept.txt; chmod 0777 {scratch}/allowed; touch -d @1 {workspace}/kept.txt; ln {workspace}/kept.txt {scratch}/link; rm -f {workspace}/kept.txt; mkdir {workspace}/dir; printf x > /dev/null; cat {workspace}/kept.txt",
             scratch = scratch.display(),
             workspace = workspace.display(),
         );
@@ -189,6 +188,13 @@ mod tests {
             std::fs::read_to_string(workspace.join("kept.txt")).unwrap(),
             "kept\n"
         );
+        let kept = std::fs::metadata(workspace.join("kept.txt")).unwrap();
+        assert_eq!(kept.mode() & 0o777, mode, "mode unchanged");
+        assert_ne!(kept.mtime(), 1, "time unchanged");
+        assert_eq!(kept.nlink(), 1, "no link was made into scratch");
+        // Metadata changes are refused even in the writable view.
+        let allowed = std::fs::metadata(scratch.join("allowed")).unwrap();
+        assert_ne!(allowed.mode() & 0o777, 0o777);
         std::fs::write(workspace.join("guard.txt"), "guard").unwrap();
     }
 }

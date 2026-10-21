@@ -696,6 +696,19 @@ pub(super) async fn execute(
     .await;
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let result = Err(ToolError::ProtectionUnavailable);
+    // The unit is confirmed stopped unless process cleanup failed, so locks its Git write left
+    // behind are now recoverable; an unconfirmed stop keeps them.
+    if dispatched
+        && intent.call.is_git()
+        && intent.call.mutates()
+        && !matches!(
+            result,
+            Err(ToolError::GuardRejected(GuardStage::ProcessCleanup))
+        )
+        && let Err(error) = super::git::recover_locks(&runtime.workspace, intent.id)
+    {
+        crate::diagnostics::tool_failure("Guard", &error);
+    }
     #[cfg(any(test, feature = "test-support"))]
     if result.is_ok() && crate::fault::FaultPlan::guard_receipt_lost(intent.id) {
         return Err(ToolError::Uncertain);
