@@ -1173,6 +1173,27 @@ impl AttachedTerminal {
         }
     }
 
+    // Pointer input with nothing to do, discarded while chat waits so it causes no redraw.
+    pub fn ignores_pointer(&mut self, input: TerminalInput) -> bool {
+        let selects = !self.is_linear()
+            && self.mode == TerminalMode::Fullscreen
+            && self.pointer.mouse.effective() == MouseMode::WheelAndClicks;
+        match input {
+            TerminalInput::PointerMove { .. } => true,
+            TerminalInput::PointerClick { column, row, .. } => {
+                !selects || (self.history_cell(column, row).is_none() && !self.history.selecting())
+            }
+            TerminalInput::PointerDrag { .. } => !selects || !self.history.selecting(),
+            TerminalInput::PointerRelease { .. } => {
+                if !self.history.has_selection() {
+                    self.history.clear_selection();
+                }
+                !selects || !self.pointer.copy_on_select || !self.history.has_selection()
+            }
+            _ => false,
+        }
+    }
+
     fn history_cell(&self, column: u16, row: u16) -> Option<(usize, usize)> {
         let area = self.history_area?;
         area.contains(ratatui::layout::Position::new(column, row))

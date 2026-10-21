@@ -21,6 +21,8 @@ use std::{
 use tokio::sync::mpsc::{self, error::TrySendError};
 
 const MAX_KEY_SEQUENCE_BYTES: usize = 64;
+// `ESC [ < 127 ; 65535 ; 65535 M` is 20 bytes; longer records are malformed.
+const MAX_MOUSE_RECORD_BYTES: usize = 32;
 const RECORD_DEADLINE: Duration = Duration::from_secs(10);
 const OUTBOX_LIMIT: usize = 256;
 const READ_BUFFER_BYTES: usize = 4096;
@@ -190,6 +192,10 @@ enum Mode {
         alt: bool,
     },
     Mouse,
+    // An SGR mouse record, discarded whole through its `M`/`m` terminator when malformed.
+    MouseRecord {
+        malformed: bool,
+    },
     SkipCsi,
     ControlString {
         escape: bool,
@@ -346,6 +352,10 @@ impl Decoder {
                         self.mode = Mode::Mouse;
                         return None;
                     }
+                    if self.sequence == b"\x1b[<" {
+                        self.mode = Mode::MouseRecord { malformed: false };
+                        return None;
+                    }
                     if self.sequence == b"\x1b[200~" {
                         self.sequence.clear();
                         self.mode = Mode::Paste(Paste::default());
@@ -377,6 +387,27 @@ impl Decoder {
                 });
                 self.reset();
                 self.count_click(event, now)
+            }
+            Mode::MouseRecord { malformed } => {
+                if matches!(byte, b'M' | b'm') {
+                    let event = if *malformed {
+                        None
+                    } else {
+                        self.sequence.push(byte);
+                        sequence_event(&self.sequence)
+                    };
+                    self.reset();
+                    return self.count_click(event, now);
+                }
+                // Nothing inside a record reaches the key path; the record deadline ends an unterminated one.
+                if self.sequence.len() < MAX_MOUSE_RECORD_BYTES
+                    && (byte.is_ascii_digit() || byte == b';')
+                {
+                    self.sequence.push(byte);
+                } else {
+                    *malformed = true;
+                }
+                None
             }
             Mode::SkipCsi => {
                 if byte.is_ascii_control() || (b'@'..=b'~').contains(&byte) {

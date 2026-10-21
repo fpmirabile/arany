@@ -1306,6 +1306,23 @@ mod tests {
                     b"\x1b[99;6u\x1b[27;6;99~\x1b[67;6u".as_slice(),
                     vec![TerminalInput::CopySelection; 3],
                 ),
+                // A malformed record is consumed through its terminator; its digits never become keys.
+                (
+                    b"\x1b[<0;1;x1M\x1b[<0;1;1;2M\x1b[<0;-1;1M\x1b[<0;1;1~1M\x1b[<0;1;1\x031m\x1b[<0;1;1\x1b[A2M"
+                        .as_slice(),
+                    vec![],
+                ),
+                (
+                    b"a\x1b[<0;2;3Mb\x1b[<0;1;x9mc\x1b[<64;1;1M1".as_slice(),
+                    vec![
+                        TerminalInput::Character('a'),
+                        click(1, 2, 1),
+                        TerminalInput::Character('b'),
+                        TerminalInput::Character('c'),
+                        TerminalInput::PointerScrollUp { column: 0, row: 0 },
+                        TerminalInput::Character('1'),
+                    ],
+                ),
                 (
                     b"\x1b]52;c;/exit\r\x07\x1bP/quit\r\x1b\\x".as_slice(),
                     vec![TerminalInput::Character('x')],
@@ -1362,6 +1379,43 @@ mod tests {
                     "multi-click window at {offset} ms"
                 );
             }
+            let mut oversized_record = b"\x1b[<0;".to_vec();
+            oversized_record.extend([b'1'; 40]);
+            oversized_record.extend_from_slice(b";1;1M\x1b[<0;1;");
+            oversized_record.extend([b'2'; 40]);
+            oversized_record.extend_from_slice(b"mz");
+            assert!(matches!(
+                decode(&oversized_record).as_slice(),
+                [ReaderEvent::Event(Event::Key(KeyEvent {
+                    code: KeyCode::Char('z'),
+                    ..
+                }))]
+            ));
+            // Records split across reads complete or stay discarded as a whole.
+            for (parts, expected) in [
+                ([&b"\x1b[<0;5"[..], b";7M"], Some(click(4, 6, 1))),
+                ([&b"\x1b[<0;1;x"[..], b"1M"], None),
+                ([&b"\x1b[<"[..], b"0;1;1"], None),
+            ] {
+                let mut decoder = raw::Decoder::default();
+                let events = parts
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(read, part)| {
+                        let at = now + Duration::from_millis(50 * read as u64);
+                        part.iter()
+                            .filter_map(|&byte| decoder.feed(byte, at))
+                            .collect::<Vec<_>>()
+                    })
+                    .collect::<Vec<_>>();
+                match expected {
+                    Some(input) => assert!(
+                        matches!(events.as_slice(), [ReaderEvent::Pointer(event)] if *event == input),
+                        "split record {parts:?}"
+                    ),
+                    None => assert!(events.is_empty(), "split record {parts:?}"),
+                }
+            }
             let mut oversized = b"\x1b[".to_vec();
             oversized.extend([b'1'; 100]);
             oversized.extend_from_slice(b";5Dx");
@@ -1390,6 +1444,7 @@ mod tests {
                 b"\x1b[200~unfinished".as_slice(),
                 b"\x1b[201",
                 b"\x1b]unclosed",
+                b"\x1b[<0;1;x1",
                 b"\xf0\x9f",
             ] {
                 let mut decoder = raw::Decoder::default();

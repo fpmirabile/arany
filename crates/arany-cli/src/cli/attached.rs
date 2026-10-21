@@ -708,7 +708,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 .next_input()
                 .await
                 .map_err(|error| error.to_string())?;
-            if !terminal.help_open() && terminal.ignores_page_key(input) {
+            if !terminal.help_open()
+                && (terminal.ignores_page_key(input) || terminal.ignores_pointer(input))
+            {
                 continue;
             }
             break input;

@@ -540,13 +540,18 @@ pub fn render_cache_update_feedback(run: &RunView) -> Option<&'static str> {
 }
 
 pub(crate) fn tool_detail_text(tool: &arany::ToolView) -> String {
+    let (head, output) = tool_detail_parts(tool);
+    head + output
+}
+
+// The bounded summary and arguments, then the borrowed result, so callers can measure before joining.
+pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, &str) {
     let arguments = serde_json::to_string(&tool.intent.call).expect("typed Tool call");
-    format!(
-        "{}\nArguments: {arguments}\nResult:\n{}",
-        tool_summary(tool),
+    (
+        format!("{}\nArguments: {arguments}\nResult:\n", tool_summary(tool)),
         tool.observation
             .as_ref()
-            .map_or("Awaiting result", |observation| observation.output.as_str())
+            .map_or("Awaiting result", |observation| observation.output.as_str()),
     )
 }
 

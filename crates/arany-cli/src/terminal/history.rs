@@ -5,6 +5,7 @@ use crate::presentation::{
 use arany::{RunId, RunView, SessionId, SessionView};
 use std::borrow::Cow;
 use std::collections::VecDeque;
+use std::ops::Range;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -642,23 +643,34 @@ impl History {
         let mut parts = Vec::new();
         let mut bytes = 0usize;
         for index in first..=last {
-            let text = message_text(view, &self.messages[index], &self.notices);
-            let from = floor_boundary(&text, if index == first { start } else { 0 });
-            let to = floor_boundary(&text, if index == last { end } else { text.len() });
-            if from >= to {
+            let message = &self.messages[index];
+            let source = message_source(view, message, &self.notices);
+            let from = source.floor(if index == first { start } else { 0 });
+            let to = source.floor(if index == last { end } else { source.len() });
+            let kept = plain_ranges(&chrome(message.kind, &source.head), from, to);
+            let plain_bytes = kept.iter().map(ExactSizeIterator::len).sum::<usize>();
+            if plain_bytes == 0 {
                 continue;
             }
             let separator = if parts.is_empty() { 0 } else { 2 };
-            bytes = bytes.saturating_add(separator + display_bytes(&text[from..to]));
+            // Escaping never shrinks text, so the plain length refuses an oversized copy before it is joined.
+            if bytes.saturating_add(separator + plain_bytes) > MAX_COPY_BYTES {
+                return Some(Err(COPY_TOO_LARGE));
+            }
+            let mut plain = String::with_capacity(plain_bytes);
+            for range in kept {
+                source.push_to(&mut plain, range);
+            }
+            bytes = bytes.saturating_add(separator + display_bytes(&plain));
             if bytes > MAX_COPY_BYTES {
                 return Some(Err(COPY_TOO_LARGE));
             }
-            parts.push((text, from, to));
+            parts.push(plain);
         }
         (!parts.is_empty()).then(|| {
             Ok(parts
                 .iter()
-                .map(|(text, from, to)| display_text(&text[*from..*to]))
+                .map(|plain| display_text(plain))
                 .collect::<Vec<_>>()
                 .join("\n\n"))
         })
@@ -718,6 +730,17 @@ impl History {
             .map(|(byte, grapheme)| (line_start + byte, grapheme))
             .collect::<Vec<_>>();
         let at = graphemes.iter().position(|(byte, _)| *byte == point.byte)?;
+        let at_index = |index: usize| TextPoint {
+            byte: graphemes[index].0,
+            ..point
+        };
+        if let Some((first, last)) = url_span(&graphemes, at) {
+            return Some(Selection {
+                anchor: at_index(first),
+                head: at_index(last),
+                shown: true,
+            });
+        }
         let word = |grapheme: &str| {
             grapheme
                 .chars()
@@ -737,10 +760,6 @@ impl History {
             )
         } else {
             (at, at)
-        };
-        let at_index = |index: usize| TextPoint {
-            byte: graphemes[index].0,
-            ..point
         };
         Some(Selection {
             anchor: at_index(first),
@@ -785,11 +804,10 @@ impl History {
         let end = if high.1.boundary {
             high.1.byte
         } else {
-            let text = message_text(view, &self.messages[high.0], &self.notices);
-            let byte = floor_boundary(&text, high.1.byte);
-            text[byte..]
-                .graphemes(true)
-                .next()
+            let source = message_source(view, &self.messages[high.0], &self.notices);
+            let byte = source.floor(high.1.byte);
+            source
+                .grapheme_at(byte)
                 .filter(|grapheme| *grapheme != "\n")
                 .map_or(byte, |grapheme| byte + grapheme.len())
         };
@@ -876,11 +894,12 @@ impl History {
             }
             let text = message_text(view, message, &self.notices);
             let rows = message_rows(message.kind, &text, self.width);
+            let chrome = chrome(message.kind, &text);
             for offset in 0..rows.len() {
                 let row = message.start + offset;
                 if row >= self.top && row < end {
                     let selected = range.and_then(|range| {
-                        selected_cells(message.kind, &text, &rows, offset, index, range)
+                        selected_cells(message.kind, &text, &rows, &chrome, offset, index, range)
                     });
                     visible.push(HistoryRow {
                         speaker: message.kind,
@@ -1144,6 +1163,152 @@ pub(super) fn display_rows(kind: MessageKind, text: &str, width: usize) -> Vec<H
         .collect()
 }
 
+// A message's text as a bounded head and a borrowed tail; only selected bytes are ever joined.
+struct SourceText<'a> {
+    head: Cow<'a, str>,
+    tail: &'a str,
+}
+
+impl SourceText<'_> {
+    fn len(&self) -> usize {
+        self.head.len() + self.tail.len()
+    }
+
+    fn floor(&self, byte: usize) -> usize {
+        match byte.checked_sub(self.head.len()) {
+            Some(tail) if tail > 0 => self.head.len() + floor_boundary(self.tail, tail),
+            _ => floor_boundary(&self.head, byte),
+        }
+    }
+
+    fn grapheme_at(&self, byte: usize) -> Option<&str> {
+        match byte.checked_sub(self.head.len()) {
+            Some(tail) => self.tail.get(tail..)?.graphemes(true).next(),
+            None => self.head.get(byte..)?.graphemes(true).next(),
+        }
+    }
+
+    fn push_to(&self, plain: &mut String, range: Range<usize>) {
+        let split = self.head.len();
+        plain.push_str(&self.head[range.start.min(split)..range.end.min(split)]);
+        plain.push_str(&self.tail[range.start.max(split) - split..range.end.max(split) - split]);
+    }
+}
+
+fn message_source<'a>(
+    view: &'a SessionView,
+    message: &'a MessageIndex,
+    notices: &'a VecDeque<Notice>,
+) -> SourceText<'a> {
+    if message.text.is_none()
+        && message.kind == MessageKind::ToolDetails
+        && let MessageSource::Tool(run, tool) = message.source
+    {
+        let (head, tail) = crate::presentation::tool_detail_parts(&view.runs[run].tools[tool]);
+        return SourceText {
+            head: Cow::Owned(head),
+            tail,
+        };
+    }
+    SourceText {
+        head: message_text(view, message, notices),
+        tail: "",
+    }
+}
+
+// Tool summary markers that the selection highlights and copies leave out.
+fn chrome(kind: MessageKind, text: &str) -> Vec<Range<usize>> {
+    if !matches!(kind, MessageKind::Tool | MessageKind::ToolDetails) {
+        return Vec::new();
+    }
+    let mut start = 0;
+    let mut ranges = Vec::new();
+    for line in text.split_inclusive('\n').take(2) {
+        if let Some(marker) = ["⏺ ", "  ⎿ "]
+            .into_iter()
+            .find(|marker| line.starts_with(marker))
+        {
+            ranges.push(start..start + marker.len());
+        }
+        start += line.len();
+    }
+    ranges
+}
+
+fn plain_ranges(chrome: &[Range<usize>], from: usize, to: usize) -> Vec<Range<usize>> {
+    let mut kept = Vec::new();
+    let mut at = from;
+    for cut in chrome {
+        if cut.start >= to {
+            break;
+        }
+        if cut.end <= at {
+            continue;
+        }
+        if cut.start > at {
+            kept.push(at..cut.start);
+        }
+        at = cut.end;
+    }
+    if at < to {
+        kept.push(at..to);
+    }
+    kept
+}
+
+// A double click inside `scheme://...` selects the whole URL, trimming trailing punctuation.
+fn url_span(graphemes: &[(usize, &str)], at: usize) -> Option<(usize, usize)> {
+    let blank = |grapheme: &str| grapheme.chars().all(char::is_whitespace);
+    let first = graphemes[..at]
+        .iter()
+        .rposition(|(_, grapheme)| blank(grapheme))
+        .map_or(0, |index| index + 1);
+    let end = graphemes[at..]
+        .iter()
+        .position(|(_, grapheme)| blank(grapheme))
+        .map_or(graphemes.len(), |index| at + index);
+    let token = graphemes[first..end]
+        .iter()
+        .map(|(_, grapheme)| *grapheme)
+        .collect::<Vec<_>>();
+    let separator = token.windows(3).position(|part| part == [":", "/", "/"])?;
+    let scheme = token[..separator]
+        .iter()
+        .rposition(|grapheme| {
+            !grapheme
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || "+-.".contains(character))
+        })
+        .map_or(0, |index| index + 1);
+    if scheme == separator
+        || !token[scheme]
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let mut last = token.len().checked_sub(1)?;
+    while last > separator + 2 {
+        let closing = |open: &str, close: &str| {
+            token[last] == close
+                && token[scheme..=last].iter().filter(|g| **g == close).count()
+                    > token[scheme..=last].iter().filter(|g| **g == open).count()
+        };
+        if [".", ",", ";", ":", "!", "?", "'", "\""].contains(&token[last])
+            || closing("(", ")")
+            || closing("[", "]")
+            || closing("<", ">")
+        {
+            last -= 1;
+        } else {
+            break;
+        }
+    }
+    let (url_first, url_last) = (first + scheme, first + last);
+    (last > separator + 2 && (url_first..=url_last).contains(&at)).then_some((url_first, url_last))
+}
+
 fn has_heading(kind: MessageKind) -> bool {
     !matches!(
         kind,
@@ -1207,6 +1372,7 @@ fn selected_cells(
     kind: MessageKind,
     text: &str,
     rows: &[MessageRow],
+    chrome: &[Range<usize>],
     offset: usize,
     index: usize,
     ((first, start), (last, end)): ((usize, usize), (usize, usize)),
@@ -1217,8 +1383,9 @@ fn selected_cells(
     let (row_start, row_end) = row_span(text, rows, offset)?;
     let from = if index == first { start } else { 0 };
     let to = if index == last { end } else { usize::MAX };
-    let mut cells = row_cells(text, row_start, row_end, row_indent(kind))
-        .filter(|(byte, _, _)| (from..to).contains(byte));
+    let mut cells = row_cells(text, row_start, row_end, row_indent(kind)).filter(|(byte, _, _)| {
+        (from..to).contains(byte) && !chrome.iter().any(|cut| cut.contains(byte))
+    });
     let first = cells.next()?;
     let last = cells.last().unwrap_or(first);
     Some((first.1, last.1 + last.2))
@@ -1478,6 +1645,111 @@ mod tests {
         assert!(!text.contains('\u{1b}') && !text.contains('\u{7}'));
         assert!(history.clear_selection());
         assert!(!history.selecting());
+    }
+
+    #[test]
+    fn tool_selection_copies_plain_text_without_markers_and_urls_whole() {
+        let mut view = session();
+        let mut first = run(
+            "inspect",
+            "see https://example.com/a_b?x=1. ok (http://x.y/z) a://",
+        );
+        let read = |output: &str| {
+            crate::presentation::tool_fixture(
+                arany::ToolCall::Read {
+                    path: "a".into(),
+                    offset: None,
+                    limit: Some(100),
+                },
+                output,
+            )
+        };
+        first.tools = vec![read(r#"{"text":"a\nb\n"}"#)];
+        view.runs.push(first);
+        let mut history = History::default();
+        history.sync(&view, 80, 40);
+        let row_of = |history: &History, needle: &str| {
+            history
+                .visible(&view)
+                .iter()
+                .position(|row| row.text.contains(needle))
+                .expect("rendered row")
+        };
+        let copied = |history: &History| {
+            history
+                .selection_text(&view)
+                .map(|text| text.expect("bounded selection"))
+        };
+        let tool = row_of(&history, "Read(a)");
+        history.select_at(&view, tool, 0, 1);
+        history.extend_selection(&view, tool + 1, 79);
+        let summary = history.visible(&view)[tool].text.clone();
+        let result = history.visible(&view)[tool + 1].text.clone();
+        let plain = |row: &str| {
+            row.trim_start_matches("⏺ ")
+                .trim_start_matches("  ⎿ ")
+                .to_owned()
+        };
+        assert_eq!(
+            copied(&history),
+            Some(format!("{}\n{}", plain(&summary), plain(&result)))
+        );
+        let rows = history.visible(&view);
+        assert!(rows[tool].selected.is_some_and(|(from, _)| from > 0));
+        assert!(rows[tool + 1].selected.is_some_and(|(from, _)| from >= 4));
+        history.select_at(&view, tool, 3, 3);
+        assert_eq!(copied(&history), Some(plain(&summary)));
+
+        let body = row_of(&history, "https://");
+        let answer = "see https://example.com/a_b?x=1. ok (http://x.y/z) a://";
+        for (needle, expected) in [
+            ("example", "https://example.com/a_b?x=1"),
+            ("https", "https://example.com/a_b?x=1"),
+            ("x.y", "http://x.y/z"),
+            ("ok", "ok"),
+            ("a://", "a"),
+        ] {
+            history.select_at(&view, body, 2 + answer.find(needle).unwrap(), 2);
+            assert_eq!(copied(&history).as_deref(), Some(expected), "{needle}");
+        }
+
+        history.set_details(true);
+        history.sync(&view, 80, 40);
+        let tool = row_of(&history, "Read(a)");
+        history.select_at(&view, tool, 0, 1);
+        history.extend_selection(&view, 1_000, 0);
+        let details = crate::presentation::tool_detail_text(&view.runs[0].tools[0])
+            .replacen("⏺ ", "", 1)
+            .replacen("\n  ⎿ ", "\n", 1);
+        let text = copied(&history).expect("details selection");
+        assert!(
+            text.starts_with(&super::super::clipboard::display_text(&details)),
+            "{text:?}"
+        );
+
+        // A detail result larger than the limit is refused whole, yet its summary stays copyable.
+        let mut view = session();
+        let mut large = run("inspect", "done");
+        large.tools = vec![read(&"z".repeat(MAX_COPY_BYTES + 1))];
+        view.runs.push(large);
+        let mut history = History::default();
+        history.set_details(true);
+        history.sync(&view, 80, 40);
+        history.scroll(true, usize::MAX);
+        let tool = history
+            .visible(&view)
+            .iter()
+            .position(|row| row.text.contains("Read(a)"))
+            .expect("detail row");
+        history.select_at(&view, tool, 0, 1);
+        history.extend_selection(&view, 1_000_000, 0);
+        assert_eq!(history.selection_text(&view), Some(Err(COPY_TOO_LARGE)));
+        history.select_at(&view, tool, 3, 3);
+        assert!(
+            history
+                .selection_text(&view)
+                .is_some_and(|text| text.is_ok())
+        );
     }
 
     #[test]
