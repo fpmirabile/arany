@@ -15,19 +15,18 @@ Arany is a harness for multi-agent coding teams that can be trusted to work auto
 
 The goal: one normal engineering day in this repository (explore, multi-file edits, tests, commit and PR) without falling back to Claude Code, then the owner's other repositories. These items come before the list below; none weakens a guarantee.
 
-1. **Tool protocol slices 1-5** ([plan](./planning/tools-protocol/README.md)), then its live checks 1-4 on ChatGPT.
-2. **Tool output limits like the peers** ([plan](./planning/tool-output-limits/README.md)): truncate instead of failing, line-paged Read, clear old results, honest "not found". Window allowance remaining (owner, live): confirm whether the ChatGPT `/v1/models` reply carries `context_window` (plan Q3), then that `provider check chatgpt` plus a Run pins `context_window_tokens` in `arany show`.
+1. **Tool protocol: live evidence.** Owner: run the [ChatGPT protocol checks](#tool-protocol).
+2. **Tool output limits: live evidence.** Owner: run the [output-limit checks](#tool-output-limits) and resolve [catalog window metadata](#catalog-window-metadata).
 3. **ChatGPT route limits like Codex.** The local output cap must not count reasoning tokens (or must match the API routes), and the 120 s per-call deadline becomes a stream-idle deadline. Bump the check versions.
 4. **Bounded Provider retries: live evidence.** The [retry contract](./docs/specs/provider.md#usage-provenance-and-reliability) has synthetic evidence only. Remaining (owner, live): against ChatGPT and each API-key route, confirm that a real 429 or 5xx shows `Reconnecting… n/3`, honors the server's `Retry-After` and charges every attempt in `arany show`; Codex's `Reconnecting... n/max` is the peer reference.
 5. **Attached-turn defaults.** A Goal budget that fits ordinary turns, a Write/Edit cap of at least 64 KiB, large drafts as attachments, and nested plus user-global `AGENTS.md`.
 6. **`cargo test` here inside the Guard.** Toolchain and Cargo cache selection in folder trust, and a Build profile on more cores; measure `cargo test -p arany --lib`.
-7. **Engine loop "decide, then apply" refactor** after tools-protocol slice 5 ([plan](./planning/engine-loop/README.md)).
-8. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
-9. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
-10. **Git write workflow.** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
-11. **Tool ergonomics.** Regex and glob Search beyond 64 rows, a Glob Tool, larger Write/Edit, MultiEdit, typed delete and move; parallel reads with item 10 below.
-12. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
-13. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
+7. **Real-scale command snapshot** (security pass). Respect `.gitignore`, skip files over 1 MiB instead of aborting, and raise the 2,048-file, 32 MiB and 8 KiB changeset caps.
+8. **Development command environment** (security pass). Use all cores by default, plus opt-in network through a per-project domain allowlist behind a Guard proxy, like the Claude Code sandbox and Codex `network_access`.
+9. **Git write workflow.** Typed Guard operations (`commit`, `branch`, `switch`) on the neutralized view, plus approved prefix rules for `git push` and `gh pr`. Until then, exact-command "Always allow" rules.
+10. **Tool ergonomics.** Regex and glob Search beyond 64 rows, a Glob Tool, larger Write/Edit, MultiEdit, typed delete and move; parallel reads with Pursue item 10.
+11. **Visible reliability.** Green macOS CI on `main`, a closed flake list, and Linux p95 for Read, Edit and a command end to end.
+12. **Anthropic window allowance.** Wire the Models API `max_input_tokens` into the window allowance with the next native-evidence schema change; the evidence row has no slot for it today.
 
 Exit: a week of dogfooding with every fallback to another harness recorded here; done when a full day passes without one.
 
@@ -51,9 +50,16 @@ Dogfooding starts after item 2; the owner leads it when that point is reached. E
 
 Teams support read-only researchers (C1) and Run-scoped edit-only workers (C2) with explicit fresh-assignment ID resume ([Session](./docs/specs/session.md#worker-identity-and-explicit-reassignment)). Native build evidence and named-host measurements still precede Build-profile support claims (finite approved maxima: 4 GiB memory, 8 GiB requested cache, 1 GiB project storage, 256 tasks; effective cache capacity derives from StateRoot headroom and is not guaranteed). Remote MCP/OAuth, interactive/background jobs and other network grants need their own Policy/Guard/protocol evidence; retain the existing [Tool scope](./docs/specs/tools.md) until each slice lands.
 
+### Tool and Engine follow-ups
+
+- **Full-output spill (owner decision).** Keep the [current excerpt-only contract](./docs/specs/tools.md#limits-and-failure-behavior) until dogfooding demonstrates a need for a private per-Run file that Read can page. Revisit only with a security pass for the new persistent format and read surface.
+- **Original 45-line Read diagnosis (owner, optional).** If the dogfood Session journal survives, inspect its call and receipt with `arany show` to distinguish the model's byte limit from the fitted result budget. Line paging and fixed per-call budgets remove both causes; this is historical diagnosis, not a remaining paging defect.
+- **Engine stop channels.** The [decision rule](./agents/arany.md#engine-loop-decisions) still has exceptions: `intent_observation` in `run_loop/step.rs` converts ActiveTime and Capacity back to errors, and `begin_worker_inner` and `complete_worker_inner` in `run_loop/worker.rs` use budget/limit errors for control flow. Carry closed stop/admission values through those helpers and their callers, preserving journal ordering and the existing stop/replay tables.
+- **Conditional loop refinements.** Revisit RAII `ActiveSegment`, a typed `ChildQueue` state machine or a repeated-call stop only if dogfooding demonstrates remaining pain. First identify the failing lifecycle or repetition case; accept a contract before adding a stop beyond the existing proposal-refusal cap.
+
 ### Frozen areas
 
-The owner lifted this freeze for item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
+The owner lifted this freeze for Pursue item 12 (C3 views and the Supervisor in shadow mode), accepting its plan; it stays in force for the rest of the list below until the owner lifts it.
 
 CI stays green; no new features, spec sections or evidence gates for: terminal views and tmux evidence beyond dogfooding; macOS Guard features beyond parity probes; build cache; ChatGPT OAuth and subscription routes; A6 registry fetch; the Anthropic consumer-subscription gate; new typed Tools other than the in-process read set.
 
@@ -75,6 +81,37 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 - Exercise classic scrollback, narrow resize/reflow, temporary details, idle `/settings` chat-view transitions and a 200-line streamed response in a real macOS emulator and native Linux terminals, including under WSL2. Synthetic macOS PTYs prove controlled cursor ownership, transcript insertion and restoration; they do not emulate scrollback or prove other OS support.
 - With explicit usage consent, repeat OpenAI, Anthropic, ChatGPT and exact-custom streaming conformance against actual selected accounts/endpoints. Offline fixtures prove protocol/lifecycle behavior, not live compatibility. Keep incomplete answers outside future context and confirm recovery after cancellation/crash.
 - Check `--screen-reader`, `/transcript`, monochrome labels and managed following with real assistive technology. These usability claims remain unverified.
+
+## ChatGPT coding loop: owner-run live checks
+
+Owner: use a ChatGPT-plan account with explicit usage consent, a new Session and attached chat in a trusted disposable project. Follow [Provider encoding](./docs/specs/provider.md#structured-outcomes-and-tool-encoding), [Tools](./docs/specs/tools.md#limits-and-failure-behavior) and [terminal output](./docs/specs/terminal.md#conversation-progress-and-history). Synthetic fixtures do not establish live or native support.
+
+### Tool protocol
+
+1. Send `hello!`: exactly one greeting answer, no Tool row or notice, and one Provider call in `arany show`.
+2. Ask to write `test.txt` containing `hello`: one `⏺ Write(test.txt)` row with `⎿ applied`, one answer and matching file content.
+3. Ask to write `../outside.txt`: a denial row; a follow-up asking why explains the denial.
+4. Ask to write `a.txt`, then Ctrl+C before any Tool row: a follow-up recalls cancellation and no file was written.
+5. `/ask-matt` + Enter starts immediately, shows `⏺ Skill(ask-matt)` and applies the admitted Skill.
+6. `/ask-matt which skill fits a refactor plan?` applies that Skill to the question.
+7. `/resume` after the greeting shows `Resumed: hello!`.
+8. `/model` + Enter during a Run names the unavailable command and the cancellation alternative.
+9. Force a proposal refusal with the [Engine refusal fixture](./crates/arany/tests/engine_run.rs): the development build's `development.log` and `arany show` retain the closed cause on the call.
+
+### Tool output limits
+
+In this repository, repeat the task `work on planning/terminal-parity` from a new Session:
+
+1. Grouped Command reads of the task's guidance files show a line count and truncation if needed, without a result-limit failure.
+2. Read `agents/testing.md`: all current lines fit in one page, including after earlier Tool steps.
+3. Read the absent `agents/skills/ponytail/SKILL.md`: the result says not found, and the agent locates `.agents/skills/ponytail/SKILL.md` without help.
+4. No row says `cache not attempted`.
+5. The agent proceeds through reading, editing and verification without giving up on a Tool result limit.
+6. `arany show --output text` retains truncation totals and any `ToolResultsCleared`; a Run of at least 30 Tool calls completes without `ContextFull`.
+
+### Catalog window metadata
+
+Owner: confirm whether the authenticated ChatGPT `/v1/models` reply carries `context_window` for the selected account/model. Run `provider check chatgpt MODEL --effort LEVEL --accept-cost`, then a Run, and inspect `context_window_tokens` in `arany show`. An absent field must retain conservative bounds; a present admitted value must pin the window and derived allowance. Follow the [catalog contract](./docs/specs/chatgpt.md#catalog-checks-and-runs).
 
 ## Message-native Provider request: owner-run live probes
 
@@ -147,7 +184,7 @@ to the user's credential store or clipboard.
 
 | Pending gate | Completion condition and owner |
 | --- | --- |
-| Hosted CI and native Linux regression checks | `Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`, `macOS Tests (debug)` and `macOS Tests (release)` must pass on the published head. Native consent, terminal, setup, Session picker, pinned-Skill and Tool owners include private-mount shared-source success, nested-mount refusal and no late propagation; command descendant termination before create/modify/delete publication; rejection, approval, cancellation and closed replay. `Native Linux Guard and tmux (x86_64)` and `Native Linux Guard and tmux (arm64)` (`linux_native_advanced=true`) separately own the shipped systemd Guard journey; both remain pending. C2 parser/private-target execution, foreground/background cancellation, exact-ID recovery containment/disposal, no-host-execution and full channel/telemetry canaries on the final head remain unverified until these lanes run. Re-run the native Linux and macOS lanes after the workspace split, covering reservation overhead, admitted in-process reads, guarded mutations, same-binary Guard and credential-helper entry points, terminal journeys and closed replay; code motion and synthetic runs alone do not establish native parity. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
+| Hosted CI and native Linux regression checks | `Clippy`, `Linux Tests (debug)`, `Linux Tests (release)`, `macOS Tests (debug)` and `macOS Tests (release)` must pass on the published head. Native consent, terminal, setup, Session picker, pinned-Skill and Tool owners include private-mount shared-source success, nested-mount refusal and no late propagation; command descendant termination before create/modify/delete publication; rejection, approval, cancellation and closed replay. Include oversized/grouped Command output with normal changeset publication, the drain ceiling, lossy UTF-8, missing mutation parents and deterministic slash-Skill loading/digest refusal before egress. `Native Linux Guard and tmux (x86_64)` and `Native Linux Guard and tmux (arm64)` (`linux_native_advanced=true`) separately own the shipped systemd Guard journey; both remain pending. C2 parser/private-target execution, foreground/background cancellation, exact-ID recovery containment/disposal, no-host-execution and full channel/telemetry canaries on the final head remain unverified until these lanes run. Re-run the native Linux and macOS lanes after the workspace split, covering reservation overhead, admitted in-process reads, guarded mutations, same-binary Guard and credential-helper entry points, terminal journeys and closed replay; code motion and synthetic runs alone do not establish native parity. [Workflow](./.github/workflows/ci.yml), [testing rules](./agents/testing.md) |
 | macOS timeout partial output | On native macOS, run `guard_runs::permissions::a_one_second_command_timeout_is_admitted_and_ends_as_a_limit` and the background-descendant timeout journey on the final head. Confirm bounded partial stdout/stderr, `limit_cause: timeout`, no changeset publication, confirmed teardown and identical reopened replay. Linux compilation does not establish launcher parity. |
 | macOS runtime mount topology | `macOS Tests (debug)` owns mounted-image refusal and selected-runtime commands under Seatbelt. Manual lane: **macOS product Ready/GO mount injection** remains unverified; adapter topology and guarded unit commands do not prove lifetime mount isolation. Busy-detach cleanup in `crates/arany-cli/tests/session_run/tools_macos.rs::guarded_runtime_profile_checks_mount_topology_before_dispatch` remains unresolved. Identify the owner natively without retries; repeated passing macOS CI is required before claiming the flake fixed. [Tools spec](./docs/specs/tools.md) |
 | Native build profile coverage | Manual lane: **Linux offline builds** after A3/A4, on named hosts. Prove a guarded offline Cargo build, execution of its artifact, cleanup and closed replay using only explicitly selected runtime profiles. The explicitly ignored macOS offline-build owner requires a passing published-head verdict from the named debug opt-in CI step; ordinary workspace tests do not run it. macOS build coverage on other architectures and the distributed binary remains unverified. [Tools spec](./docs/specs/tools.md), [native evidence rules](./agents/references/testing-details.md#native-and-live-evidence) |
