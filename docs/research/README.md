@@ -14,6 +14,7 @@ must be read before using an old recommendation as implementation guidance.
 
 | Report | Investigation area |
 |---|---|
+| [DeepSeek, Kimi and GLM providers](./deepseek-kimi-glm-providers-2026-10.md) | Anthropic-compatible endpoints, key and subscription authorization, strict-wire gaps and peer adapter precedent |
 | [Git writes and remembered approvals](./git-writes-2026-10.md) | Peer permission evidence, neutralized Git publication, typed prefix authorization and host write isolation conflicts |
 | [Agent chat switching](./agent-switching-2026-10.md) | Codex and Claude Code navigation, journaled Arany child history, input barriers, read-only authority and OS evidence limits |
 | [Automatic state migrations](./state-migrations-2026-10.md) | Persisted-format inventory, commit churn, digest and storage constraints, and peer evidence |
