@@ -12,4 +12,4 @@ Decide, then apply. A Run-loop decision (step end, stop cause, settlement, dispa
 - Match decision enums exhaustively, without a `_` arm, so a new cause fails to compile at every consumer.
 - Pin each decision with a table test in its owner module; journeys keep proving the shell's ordering.
 
-The [Engine loop plan](../planning/engine-loop/README.md) migrates the current loop to this rule.
+The [stop and settlement tables](../crates/arany/src/engine/run_loop/stop.rs) pin precedence; [Run-stop projection tests](../crates/arany/src/session/stop.rs) pin the committed facts shared by live and historical output.
