@@ -278,12 +278,11 @@ fn subscription_compaction_body_keeps_only_bounded_history_data() {
     assert!(input.contains("Unanswered objective"));
     assert!(!input.contains("workspace_guidance"));
     assert_eq!(value["text"]["format"]["name"], "arany_compaction");
-    // With no remote cap, the request states the summary bound instead.
     assert!(
         value["instructions"]
             .as_str()
             .expect("instructions")
-            .ends_with("Keep the summary under 6144 characters.")
+            .ends_with("Keep the summary under 6144 UTF-8 bytes; a non-ASCII character takes up to 4 bytes.")
     );
     for forbidden in ["max_output_tokens", "truncation", "previous_response_id"] {
         assert!(value.get(forbidden).is_none(), "{forbidden}");
@@ -904,8 +903,6 @@ fn with_output_details(stream: Vec<u8>, details: &Value) -> Vec<u8> {
 async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
     use crate::ProviderFailureReason::{LocalOutputLimit, ResponseContract};
     type Usage = fn(u32) -> (u32, Value);
-    // A turn caps visible output at its request's 64 tokens. Compaction takes the route's turn cap,
-    // above its request's cap, because the route sends no cap and the summary bytes bound it.
     let rows: [(&str, Usage, Option<_>); 6] = [
         (
             "reasoning-heavy, visible output at the cap",

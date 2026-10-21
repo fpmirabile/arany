@@ -28,10 +28,9 @@ const STREAM_IDLE: Duration = Duration::from_secs(300);
 const CALL_CEILING: Duration = Duration::from_secs(600);
 const PROBE_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
-// The route takes no remote cap, so a summary is bounded by the Engine's summary bytes; the visible
-// cap is the route's turn cap and the request states a target with headroom under that bound.
+// The route sends no cap, so the Engine's summary byte bound decides compaction acceptance.
 const COMPACTION_VISIBLE_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
-const COMPACTION_TARGET_CHARACTERS: usize = crate::session::MAX_COMPACTION_SUMMARY_BYTES * 3 / 4;
+const COMPACTION_TARGET_BYTES: usize = crate::session::MAX_COMPACTION_SUMMARY_BYTES * 3 / 4;
 
 pub struct ChatGptProvider {
     client: Client,
@@ -653,7 +652,7 @@ fn subscription_compaction_body(
 ) -> Result<Vec<u8>, ProviderError> {
     let mut body = wire::compaction_body_with_effort(request, effort);
     body["instructions"] = json!(format!(
-        "{} Keep the summary under {COMPACTION_TARGET_CHARACTERS} characters.",
+        "{} Keep the summary under {COMPACTION_TARGET_BYTES} UTF-8 bytes; a non-ASCII character takes up to 4 bytes.",
         crate::provider::prompts::COMPACTION_INSTRUCTIONS
     ));
     streaming_body(body, crate::provider::MAX_PROVIDER_REQUEST_BYTES)
