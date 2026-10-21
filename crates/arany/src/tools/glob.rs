@@ -1,6 +1,6 @@
 use super::ToolError;
 use super::config::Config;
-use super::fs::{identity, ignored_directory, open_file};
+use super::fs::{Keep, identity, ignored_directory, open_file};
 use super::types::{MAX_SNAPSHOT_FILES, ToolCall, forbidden, valid_relative};
 use cap_std::fs::Dir;
 use regex::{Regex, RegexBuilder};
@@ -191,6 +191,7 @@ pub(super) fn inspect(
     root: &Dir,
     call: &ToolCall,
     config: &Config,
+    hidden: Keep,
     result_bytes: usize,
 ) -> Result<String, ToolError> {
     let ToolCall::Glob {
@@ -207,6 +208,7 @@ pub(super) fn inspect(
         root,
         device: identity(root)?.0,
         matcher: &matcher,
+        hidden,
         base: path,
         max_depth: (!pattern.split('/').any(|part| part == "**"))
             .then(|| pattern.split('/').count()),
@@ -261,6 +263,7 @@ struct Walk<'a> {
     root: &'a Dir,
     device: u64,
     matcher: &'a Regex,
+    hidden: Keep<'a>,
     base: &'a str,
     max_depth: Option<usize>,
     scanned: usize,
@@ -272,6 +275,9 @@ impl Walk<'_> {
         if path.is_empty() {
             let directory = self.root.try_clone().map_err(|_| ToolError::Path)?;
             return self.visit(&directory, "", whole_project);
+        }
+        if (self.hidden)(path) {
+            return Ok(());
         }
         let file = open_file(self.root, path)?;
         let metadata = cap_std::fs::Metadata::from_file(&file).map_err(|_| ToolError::Path)?;
@@ -317,6 +323,9 @@ impl Walk<'_> {
                 if relative.len() > 512 {
                     return Err(ToolError::Limit);
                 }
+                continue;
+            }
+            if (self.hidden)(&relative) {
                 continue;
             }
             let metadata = directory

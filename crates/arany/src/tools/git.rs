@@ -1,6 +1,7 @@
 use super::ToolError;
 use super::config::Program;
 use super::executable::{EXECUTABLES, git_root, has_magic};
+use super::fs::Keep;
 use super::guard::GuardContext;
 use super::types::{
     FORBIDDEN_NAMES, MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall, forbidden, hex_digest,
@@ -693,17 +694,7 @@ fn diff_output(numstat: &Captured, patch: &Captured, budget: usize) -> Result<Va
     }
     let mut remaining = budget - rows.used;
     let mut text = String::new();
-    let mut hidden = false;
-    for line in String::from_utf8_lossy(&patch.stdout).split_inclusive('\n') {
-        if let Some(header) = line.strip_prefix("diff --git ") {
-            // The new-side path follows the last " b/"; an unparsable header hides its hunk (fail closed).
-            hidden = header
-                .rfind(" b/")
-                .is_none_or(|at| excluded(header[at + 3..].trim_end()));
-        }
-        if hidden {
-            continue;
-        }
+    for line in visible_patch(&String::from_utf8_lossy(&patch.stdout), &excluded) {
         let size = serde_json::to_string(line)
             .map_err(|_| ToolError::Operation)?
             .len()
@@ -716,6 +707,40 @@ fn diff_output(numstat: &Captured, patch: &Captured, budget: usize) -> Result<Va
         text.push_str(line);
     }
     Ok(json!({"files": rows.rows, "patch": text, "truncated": truncated}))
+}
+
+fn visible_patch<'a>(patch: &'a str, hidden: Keep<'a>) -> impl Iterator<Item = &'a str> {
+    let mut hiding = false;
+    patch.split_inclusive('\n').filter(move |line| {
+        if let Some(header) = line.strip_prefix("diff --git ") {
+            // Without renames the header is `a/P b/P`; any other form hides its hunk (fail closed).
+            let header = header.strip_suffix('\n').unwrap_or(header);
+            let path = header
+                .len()
+                .checked_sub(5)
+                .and_then(|len| header.get(2..2 + len / 2));
+            hiding = path.is_none_or(|path| header != format!("a/{path} b/{path}") || hidden(path));
+        }
+        !hiding
+    })
+}
+
+// The Guard holds no permission settings, so the Engine drops restricted rows before the observation commits.
+pub(super) fn hide(output: &str, hidden: Keep) -> String {
+    let Ok(Value::Object(mut map)) = serde_json::from_str(output) else {
+        return json!({"failed": "git output could not be filtered"}).to_string();
+    };
+    map.remove("stderr");
+    for key in ["entries", "files"] {
+        if let Some(Value::Array(rows)) = map.get_mut(key) {
+            rows.retain(|row| row["path"].as_str().is_some_and(|path| !hidden(path)));
+        }
+    }
+    if let Some(Value::String(patch)) = map.get_mut("patch") {
+        let visible: String = visible_patch(patch, hidden).collect();
+        *patch = visible;
+    }
+    Value::Object(map).to_string()
 }
 
 fn object_id(bytes: &[u8]) -> Result<&str, ToolError> {
@@ -1789,5 +1814,38 @@ mod tests {
         let text = value["patch"].as_str().unwrap();
         assert!(text.contains("+ok"));
         assert!(!text.contains("SECRET_CANARY"));
+    }
+
+    #[test]
+    fn engine_filter_drops_restricted_rows_hunks_and_failure_details() {
+        let hidden: Keep = &|path| path.starts_with("private");
+        let status = json!({"branch":{"oid":null,"head":"main"},"entries":[
+            {"path":"private/s","state":".M"},{"path":"private/","state":"??"},{"path":"src/a","state":".M"}],"truncated":false});
+        assert_eq!(
+            serde_json::from_str::<Value>(&hide(&status.to_string(), hidden)).unwrap()["entries"],
+            json!([{"path":"src/a","state":".M"}])
+        );
+        let patch = [
+            "diff --git a/private/s b/private/s\n+DENY_CANARY\n",
+            // A path containing ` b/` cannot pose as a visible new-side path.
+            "diff --git a/private/x b/y b/private/x b/y\n+DENY_CANARY\n",
+            "diff --git \"a/private/caf\\303\\251\" \"b/private/caf\\303\\251\"\n+DENY_CANARY\n",
+            "diff --git a/src/a b/src/a\n+ok\n",
+        ]
+        .concat();
+        let diff = json!({"files":[{"path":"private/s","added":1,"deleted":0},{"path":"src/a","added":1,"deleted":0}],
+            "patch":patch,"truncated":false});
+        let diff: Value = serde_json::from_str(&hide(&diff.to_string(), hidden)).unwrap();
+        assert_eq!(
+            diff["files"],
+            json!([{"path":"src/a","added":1,"deleted":0}])
+        );
+        assert_eq!(diff["patch"], "diff --git a/src/a b/src/a\n+ok\n");
+        let failed = json!({"failed":"git exited with status 128","stderr":"fatal: private/s"});
+        assert_eq!(
+            hide(&failed.to_string(), hidden),
+            json!({"failed":"git exited with status 128"}).to_string()
+        );
+        assert!(hide("not json", hidden).contains("could not be filtered"));
     }
 }

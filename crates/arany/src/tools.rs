@@ -760,6 +760,12 @@ impl ToolRuntime {
         receipt
     }
 
+    fn hidden_paths(&self, call: &ToolCall) -> permissions::HiddenPaths<'_> {
+        self.permissions()
+            .map(|config| config.hidden_paths(call))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn permissions(&self) -> Option<&permissions::PermissionConfig> {
         self.permissions
             .as_ref()
@@ -1058,7 +1064,14 @@ impl ToolRuntime {
             Site::InProcess => self.run_in_process(intent, cancellation).await,
             Site::Unguarded => self.run_unguarded(intent, cancellation).await,
             Site::Guard => match guard::execute(self, &intent, cancellation).await {
-                Ok(observation) => observation,
+                Ok(mut observation) => {
+                    let hidden = self.hidden_paths(&observation.intent.call);
+                    if !hidden.is_empty() && observation.intent.call.is_git_read() {
+                        observation.output =
+                            git::hide(&observation.output, &|path| hidden.covers(path));
+                    }
+                    observation
+                }
                 Err(error) => {
                     let cache_update =
                         guard_error_cache_update(&intent.call, self.cache_state.is_some());
@@ -1175,10 +1188,12 @@ impl ToolRuntime {
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
+            let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(
                 &root,
                 &read_intent.call,
                 &runtime.config,
+                &|path| hidden.covers(path),
                 read_intent.limits.result_bytes as usize,
                 std::time::Instant::now()
                     + Duration::from_millis(u64::from(read_intent.limits.runtime_ms)),

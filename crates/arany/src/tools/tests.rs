@@ -3448,3 +3448,87 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     assert_eq!(scanned.limit_cause, Some(super::LimitCause::Resource));
     assert!(scanned.attestation.is_some());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn restricted_read_paths_stay_out_of_list_search_and_glob_results_unopened() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    for (path, text) in [
+        ("a.rs", "foo\n"),
+        ("private/secret.rs", "foo deny-canary\n"),
+        ("private/deep/x.rs", "foo deny-canary\n"),
+        ("src/b.rs", "foo\n"),
+        ("src/c.KEY", "foo ask-canary\n"),
+        ("src/caf\u{e9}.rs", "foo unicode-canary\n"),
+        ("src/z.rs", "foo\n"),
+        ("vault/v.rs", "foo approved\n"),
+    ] {
+        std::fs::create_dir_all(workspace.join(path).parent().unwrap()).unwrap();
+        std::fs::write(workspace.join(path), text).unwrap();
+    }
+    // Opening any of these fails, so a walk that touched one would fail instead of succeeding.
+    for path in ["private/secret.rs", "src/c.KEY", "private/deep"] {
+        std::fs::set_permissions(workspace.join(path), std::fs::Permissions::from_mode(0o000))
+            .unwrap();
+    }
+    let mut runtime = in_process_runtime(
+        &workspace,
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    let settings = br#"{"permissions":{"deny":["Read(./private/**)"],"ask":["Read(**/*.key)","Read(./vault/**)"]}}"#;
+    runtime.permissions = Some(super::PermissionSnapshot {
+        config: std::sync::Arc::new(super::permissions::PermissionConfig::parse(settings).unwrap()),
+        digest: digest(settings),
+    });
+    let paths = |page: &Value| {
+        page["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row.as_str().or(row["path"].as_str()).unwrap().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let visible = ["a.rs", "src/b.rs", "src/z.rs"];
+    let page = search_page(&runtime, search(".", "foo"), 64 * 1024).await;
+    assert_eq!(paths(&page), visible, "{page}");
+    for (offset, path, next) in [
+        (0, "a.rs", json!(1)),
+        (1, "src/b.rs", json!(2)),
+        (2, "src/z.rs", Value::Null),
+    ] {
+        let call = with_search(search(".", "foo"), |_, _, _, start, limit| {
+            (*start, *limit) = (offset, 1);
+        });
+        let page = search_page(&runtime, call, 64 * 1024).await;
+        assert_eq!(
+            (paths(&page), &page["next_offset"]),
+            (vec![path.to_owned()], &next)
+        );
+    }
+    // An approved ask covers the call's own path, so a search inside it shows its rows.
+    let approved = search_page(&runtime, search("vault", "foo"), 64 * 1024).await;
+    assert_eq!(paths(&approved), ["vault/v.rs"]);
+    let list = |path: &str| ToolCall::List { path: path.into() };
+    assert_eq!(
+        paths(&search_page(&runtime, list("."), 64 * 1024).await),
+        ["a.rs", "src/"]
+    );
+    assert_eq!(
+        paths(&search_page(&runtime, list("src"), 64 * 1024).await),
+        ["src/b.rs", "src/z.rs"]
+    );
+    let (found, truncated) =
+        glob_paths(&glob_result(&runtime, glob("**", ".", 100), 64 * 1024).await);
+    assert_eq!(
+        (found, truncated),
+        (visible.map(str::to_owned).to_vec(), false)
+    );
+    let (found, _) = glob_paths(&glob_result(&runtime, glob("**", ".", 1), 64 * 1024).await);
+    assert_eq!(found, ["a.rs"]);
+    for path in ["private/secret.rs", "src/c.KEY", "private/deep"] {
+        std::fs::set_permissions(workspace.join(path), std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+    }
+}

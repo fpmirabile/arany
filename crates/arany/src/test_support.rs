@@ -665,7 +665,7 @@ pub async fn exercise_private_guard_target(
             },
         );
         read.target = actor.target();
-        let read = actor.read(read);
+        let read = actor.read(read, None);
         assert_eq!(read.disposition, ToolDisposition::Succeeded);
         let output: serde_json::Value = serde_json::from_str(&read.output).unwrap();
         assert!(
