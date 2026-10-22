@@ -737,7 +737,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                     }
                     tokio::time::pause();
                     let _resume_time = ResumeTime;
-                    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
                 }
                 if step < 40 {
                     super::scenario::tool_outcome(ToolCall::Read {
