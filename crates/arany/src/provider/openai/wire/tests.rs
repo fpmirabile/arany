@@ -1150,6 +1150,54 @@ fn ordinary_call_arguments_are_bounded_as_raw_text_before_parsing() {
 }
 
 #[test]
+fn native_tool_argument_limits_include_outer_whitespace() {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    for (operation, input) in [
+        ("read", read_arguments()),
+        (
+            "write",
+            json!({"path":"README.md","expected_digest":null,"content":"x"}),
+        ),
+        (
+            "edit",
+            json!({"path":"README.md","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
+        ),
+    ] {
+        let limit = argument_limit(operation);
+        let text = input.to_string();
+        for (len, accepted) in [(limit, true), (limit + 1, false)] {
+            let padding = " ".repeat(len - text.len());
+            for arguments in [format!("{padding}{text}"), format!("{text}{padding}")] {
+                let fixture = response(
+                    "completed",
+                    json!([function_call_raw(&format!("arany_{operation}"), &arguments)]),
+                );
+                let case = format!("{operation} len={len}");
+                assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{case}");
+                assert_eq!(
+                    decode_streamed(&request, &fixture).is_ok(),
+                    accepted,
+                    "{case}"
+                );
+                if !accepted {
+                    let bytes = serde_json::to_vec(
+                        &json!({"type":"response.completed","response":fixture}),
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        outcome_failure_stage(&bytes, MODEL),
+                        Stage::OutcomeToolArgumentSize,
+                        "{case}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn escape_heavy_write_and_edit_decode_at_the_content_ceiling() {
     let mut request = primary_request(MODEL);
     request.max_output_tokens = 128_000;

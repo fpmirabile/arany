@@ -177,7 +177,7 @@ pub(crate) fn outcome_failure_diagnostic(
             && item
                 .arguments
                 .as_ref()
-                .is_some_and(|arguments| arguments.trim().len() > argument_limit(operation))
+                .is_some_and(|arguments| arguments.len() > argument_limit(operation))
     }) {
         return (Stage::OutcomeToolArgumentSize, None);
     }
@@ -649,10 +649,10 @@ impl FunctionCall {
 
     fn fields(&self) -> Result<Map<String, Value>, ResponseError> {
         let limit = argument_limit(self.operation()?);
-        let arguments = self.arguments.trim();
-        if arguments.len() > limit {
+        if self.arguments.len() > limit {
             return Err(ResponseError::Outcome);
         }
+        let arguments = self.arguments.trim();
         match crate::tools::parse_json(arguments.as_bytes(), limit) {
             Ok(Value::Object(fields)) => Ok(fields),
             _ => Err(ResponseError::Outcome),

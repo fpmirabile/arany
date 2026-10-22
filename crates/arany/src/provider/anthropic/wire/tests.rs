@@ -17,9 +17,16 @@ fn body(request: &ProviderRequest, effort: Effort) -> Value {
 }
 
 fn decode(request: &ProviderRequest, fixture: &Value) -> Result<ProviderResponse, ProviderError> {
+    decode_bytes(request, &serde_json::to_vec(fixture).unwrap())
+}
+
+fn decode_bytes(
+    request: &ProviderRequest,
+    bytes: &[u8],
+) -> Result<ProviderResponse, ProviderError> {
     let conversation = render::conversation(request).unwrap();
     decode_run(
-        &serde_json::to_vec(fixture).unwrap(),
+        bytes,
         &RunScope {
             model: &request.model,
             output_cap: request.max_output_tokens,
@@ -1405,6 +1412,44 @@ fn decode_streamed_tool(
             review: false,
         },
     )
+}
+
+#[test]
+fn native_tool_arguments_are_bounded_as_raw_text_before_parsing() {
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    for (operation, input) in [
+        ("read", read_input()),
+        (
+            "write",
+            json!({"path":"src/new.rs","expected_digest":null,"content":"x"}),
+        ),
+        (
+            "edit",
+            json!({"path":"src/main.rs","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
+        ),
+    ] {
+        let name = format!("arany_{operation}");
+        let limit = argument_limit(operation);
+        let text = input.to_string();
+        for (len, accepted) in [(limit, true), (limit + 1, false)] {
+            let arguments = format!(
+                "{{{}{rest}",
+                " ".repeat(len - text.len()),
+                rest = &text[1..]
+            );
+            assert_eq!(arguments.len(), len);
+            let fixture = response("tool_use", json!([tool_use("toolu_1", &name, json!({}))]))
+                .to_string()
+                .replace("\"input\":{}", &format!("\"input\":{arguments}"));
+            let case = format!("{operation} len={len}");
+            assert_eq!(
+                decode_bytes(&request, fixture.as_bytes()).is_ok(),
+                accepted,
+                "{case}"
+            );
+        }
+    }
 }
 
 #[test]
