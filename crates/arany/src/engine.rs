@@ -948,6 +948,15 @@ impl Engine {
         binding.as_ref().expect("bound epoch").1
     }
 
+    #[cfg(feature = "test-support")]
+    pub(crate) fn record_tool_latency(&self) -> Arc<crate::test_support::latency::Recorder> {
+        Arc::clone(
+            self.journal
+                .tool_latency
+                .get_or_init(|| Arc::new(crate::test_support::latency::Recorder::default())),
+        )
+    }
+
     async fn lock_lineage(
         &self,
         view: &crate::session::SessionView,
