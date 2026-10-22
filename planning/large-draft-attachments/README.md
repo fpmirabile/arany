@@ -8,7 +8,7 @@
 
 ## Outcome and scope
 
-Users can compose, inspect, remove and submit text and image attachments as compact draft chips, with complete accepted content available on Session resume. This is one draft-attachment capability delivered in text and image vertical slices; existing image transport/persistence is reused. It delivers the input half of [Daily use first item 5](../../NEXT_STEPS.md#daily-use-first). [Goal defaults](../attached-turn-defaults/README.md) ships independently.
+Users can compose, inspect, remove and submit text and image attachments as compact draft chips, with complete accepted content available on Session resume. This is one draft-attachment capability delivered in text and image vertical slices; existing image transport/persistence is reused. It delivers [Daily use first item 5](../../NEXT_STEPS.md#daily-use-first). Shared [Goal defaults](../../docs/specs/goals.md#lifecycle-budgets-and-recovery) already apply independently.
 
 Text chips expand inline into the ordinary objective; image chips refer to the existing typed PNG payload. No upload service, Workspace artifact, paste cache or new durable format is needed. Submitted content is durable; unsubmitted drafts remain process-local, as in the selected Codex behavior.
 

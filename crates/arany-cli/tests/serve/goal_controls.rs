@@ -70,13 +70,14 @@ struct Wire {
     input: mpsc::Sender<ClientMessage>,
     output: mpsc::Receiver<Message>,
     seen: Vec<Value>,
+    timeout: Duration,
 }
 
 impl Wire {
     async fn call(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.input.send(request(id, method, params)).await.unwrap();
         loop {
-            let message = next(&mut self.output).await;
+            let message = next_with_timeout(&mut self.output, self.timeout).await;
             if message["id"] == id {
                 return message;
             }
@@ -89,7 +90,7 @@ impl Wire {
             if let Some(index) = self.seen.iter().position(|m| m["method"] == method) {
                 return self.seen.remove(index);
             }
-            let message = next(&mut self.output).await;
+            let message = next_with_timeout(&mut self.output, self.timeout).await;
             self.seen.push(message);
         }
     }
@@ -144,6 +145,7 @@ where
             input,
             output,
             seen: Vec::new(),
+            timeout: Duration::from_secs(10),
         };
         wire.call(
             1,
@@ -189,6 +191,190 @@ fn reason(response: &Value) -> (&Value, &Value) {
         &response["error"]["code"],
         &response["error"]["data"]["reason"],
     )
+}
+
+#[tokio::test]
+async fn serve_defaults_complete_past_64_calls_and_30_active_minutes() {
+    use arany::test_support::goals::{assert_long_turn, facts_workspace, long_turn_provider};
+    use std::os::unix::fs::PermissionsExt;
+    let _deadline = deadline();
+    for finite in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        facts_workspace(root.path(), "Fact");
+        let state = root.path().join("state");
+        let admitted = StateRoot::admit(&state).unwrap();
+        let config = state.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if finite {
+            let preferences = json!({"version":4,"preferences":{
+                "completion":"tabs","view":"fullscreen",
+                "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
+                "resources":arany::ToolResourceSettings::default(),"mouse":"wheel_and_clicks","copy_on_select":true
+            }});
+            admitted
+                .record(arany::RecordKind::UiPreferences)
+                .replace(&serde_json::to_vec(&preferences).unwrap())
+                .unwrap();
+        }
+        drop(admitted);
+        let provider = Arc::new(long_turn_provider());
+        let observed = provider.clone();
+        let threads = threads::Threads::with_provider(provider);
+        let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+        let (outbound, output) = mpsc::channel(OUTBOUND_CAPACITY);
+        let client = async {
+            let mut wire = Wire {
+                input,
+                output,
+                seen: Vec::new(),
+                timeout: Duration::from_secs(2_000),
+            };
+            wire.call(
+                1,
+                "initialize",
+                json!({"clientInfo":{"name":"test","version":"1"}}),
+            )
+            .await;
+            let thread = wire.call(2, "thread/start", json!({"cwd":root.path().join("workspace"),"provider":"openai","model":"gpt-5.4","collaboration":"single","tools":true})).await["result"]["thread"]["id"].clone();
+            let turn = wire.start_turn(&thread, "Inspect the folder").await;
+            let completed = wire.notification("turn/completed").await;
+            assert_eq!(
+                completed["params"]["turn"]["status"],
+                if finite { "failed" } else { "completed" }
+            );
+            if finite {
+                assert_eq!(
+                    completed["params"]["turn"]["goal"]["stopped"],
+                    json!({"reason":"goalExhausted","limit":"calls"})
+                );
+            }
+            let receipt = wire
+                .call(
+                    10,
+                    "receipt/get",
+                    json!({"threadId":thread,"goalId":turn["goalId"]}),
+                )
+                .await;
+            let goal = &receipt["result"]["goal"];
+            assert_eq!(
+                goal["budget"],
+                json!({"maxProviderCalls":if finite { Some(1) } else { None },"maxTokens":null,"maxActiveMs":null,"maxRuns":16})
+            );
+            assert_eq!(goal["usage"]["providerCalls"], if finite { 1 } else { 65 });
+            assert_eq!(goal["status"], if finite { "failed" } else { "completed" });
+            wire.input.send(ClientMessage::Eof).await.unwrap();
+            serde_json::from_value::<arany::SessionId>(thread).unwrap()
+        };
+        let (result, id) = tokio::join!(
+            server::run_with_threads(
+                Engine::open(
+                    StateRoot::admit(&state).unwrap(),
+                    EngineConfig {
+                        guard_executable: Some(std::env::current_exe().unwrap()),
+                        ..EngineConfig::default()
+                    }
+                )
+                .unwrap(),
+                state.clone(),
+                inbound,
+                outbound,
+                threads
+            ),
+            client
+        );
+        result.unwrap();
+        let (events, view) = closed_view(&state, id).await;
+        if finite {
+            assert_eq!(view.goals[0].budget.max_provider_calls, Some(1));
+            assert_eq!(view.goals[0].provider_calls, 1);
+            assert!(matches!(
+                events.last().unwrap().event,
+                Event::GoalFinished {
+                    exhausted: true,
+                    ..
+                }
+            ));
+            assert!(view.runs[0].tools.is_empty());
+        } else {
+            assert_long_turn(&events, &view);
+            assert!(observed.responses.lock().unwrap().is_empty());
+        }
+        assert_eq!(
+            observed.requests.lock().unwrap().len(),
+            if finite { 1 } else { 65 }
+        );
+    }
+}
+
+#[tokio::test]
+async fn malformed_and_unsafe_settings_refuse_thread_admission_before_dispatch() {
+    use std::os::unix::fs::PermissionsExt;
+    let _deadline = deadline();
+    for unsafe_record in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = root.path().join("state");
+        let admitted = StateRoot::admit(&state).unwrap();
+        admitted
+            .record(arany::RecordKind::UiPreferences)
+            .replace(b"malformed")
+            .unwrap();
+        if unsafe_record {
+            std::fs::set_permissions(
+                state.join("ui-preferences.json"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+        }
+        drop(admitted);
+        let provider =
+            Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+        let observed = provider.requests.clone();
+        let threads = threads::Threads::with_provider(provider);
+        let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+        let (outbound, output) = mpsc::channel(OUTBOUND_CAPACITY);
+        let client = async {
+            let mut wire = Wire {
+                input,
+                output,
+                seen: Vec::new(),
+                timeout: Duration::from_secs(10),
+            };
+            wire.call(
+                1,
+                "initialize",
+                json!({"clientInfo":{"name":"test","version":"1"}}),
+            )
+            .await;
+            let refused = wire
+                .call(
+                    2,
+                    "thread/start",
+                    json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4"}),
+                )
+                .await;
+            assert_eq!(reason(&refused), (&json!(-32000), &json!("invalidRequest")));
+            wire.input.send(ClientMessage::Eof).await.unwrap();
+        };
+        let (result, ()) = tokio::join!(
+            server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
+            client
+        );
+        result.unwrap();
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(
+            arany::list_sessions(StateRoot::open_existing(&state).unwrap(), workspace)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            std::fs::read(state.join("ui-preferences.json")).unwrap(),
+            b"malformed"
+        );
+    }
 }
 
 #[tokio::test]
@@ -448,6 +634,14 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
     })
     .await;
     let goal = goal.lock().unwrap().clone();
+    let mut preferences = preferences;
+    preferences["preferences"]["goal_budget"] =
+        serde_json::to_value(arany::GoalBudget::default()).unwrap();
+    StateRoot::open_existing(&state)
+        .unwrap()
+        .record(arany::RecordKind::UiPreferences)
+        .replace(&serde_json::to_vec(&preferences).unwrap())
+        .unwrap();
 
     let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
     let requests = provider.requests.clone();

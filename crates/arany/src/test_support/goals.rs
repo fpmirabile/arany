@@ -5,6 +5,47 @@ pub fn finish_with(text: &str) -> ProviderOutcome {
     ProviderOutcome::Answer(Answer { text: text.into() })
 }
 
+pub fn long_turn_provider() -> super::scenario::ScriptedProvider {
+    super::scenario::ScriptedProvider::new(
+        (0..64)
+            .map(|_| {
+                super::scenario::tool_outcome(crate::ToolCall::Read {
+                    path: "notes/facts.txt".into(),
+                    offset: None,
+                    limit: None,
+                })
+            })
+            .chain([finish_with("Long turn completed")])
+            .collect(),
+    )
+    .with_profile("openai", "gpt-5.4")
+    .with_known_input_tokens()
+    .with_active_time_per_call(std::time::Duration::from_secs(29))
+}
+
+pub fn assert_long_turn(events: &[crate::EventEnvelope], view: &SessionView) {
+    let goal = view.goals.last().expect("Goal");
+    assert_eq!(goal.status, crate::GoalStatus::Completed);
+    assert_eq!(goal.budget.max_provider_calls, None);
+    assert_eq!(goal.budget.max_tokens, None);
+    assert_eq!(goal.budget.max_active_ms, None);
+    assert_eq!(goal.budget.max_runs, 16);
+    assert_eq!(goal.provider_calls, 65);
+    assert!(goal.active_ms >= 65 * 29_000);
+    assert_eq!(goal.uncertain_active_ms, 0);
+    assert!(!goal.token_usage_unknown);
+    assert_eq!(goal.known_tokens, 65 * 8);
+    assert_eq!(view.runs.last().expect("Run").tools.len(), 64);
+    assert!(matches!(
+        events.last().expect("receipt").event,
+        Event::GoalFinished {
+            exhausted: false,
+            ..
+        }
+    ));
+    assert_action_bounds(events, false, false);
+}
+
 pub fn facts_workspace(root: &Path, text: &str) -> std::path::PathBuf {
     let workspace = root.join("workspace");
     std::fs::create_dir_all(workspace.join("notes")).expect("workspace");

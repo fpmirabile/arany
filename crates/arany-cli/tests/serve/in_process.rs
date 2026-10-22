@@ -65,7 +65,10 @@ fn thread_start(root: &std::path::Path) -> ClientMessage {
     )
 }
 async fn next(output: &mut mpsc::Receiver<Message>) -> Value {
-    let message = tokio::time::timeout(Duration::from_secs(10), output.recv())
+    next_with_timeout(output, Duration::from_secs(10)).await
+}
+async fn next_with_timeout(output: &mut mpsc::Receiver<Message>, timeout: Duration) -> Value {
+    let message = tokio::time::timeout(timeout, output.recv())
         .await
         .expect("server response deadline")
         .expect("server message");
