@@ -606,7 +606,7 @@ Host execution does not enforce Guard filesystem, network, CPU, memory or proces
 
 | Scenario | Evidence owner |
 |---|---|
-| Explicit push with an index above 32 MiB and objects above the former 32 MiB/4096-object copy budget; local bare peer, definite non-fast-forward rejection and fixed refspec | `host_git_local_bare_peer_receipt_and_credential_canary` in [host.rs](../../crates/arany/src/tools/git/host.rs) |
+| Explicit push with an index above 32 MiB and an object store exceeding 32 MiB and 4,096 entries, linked without copying or counting its contents; local bare peer, definite non-fast-forward rejection and fixed refspec | `host_git_local_bare_peer_receipt_and_credential_canary` in [host.rs](../../crates/arany/src/tools/git/host.rs) |
 | Ordered credential scopes/resets/chains, username/useHttpPath and include refusal; large executable copy/mismatch/limit; unsafe helper directories | Host credential, executable and helper-search regressions in [host.rs](../../crates/arany/src/tools/git/host.rs) |
 | Private State scratch, locked publication, stale/live cleanup, slot exhaustion and unsafe-parent refusal | `host_auth_files_are_private_and_stale_cleanup_preserves_live_leases` in [host.rs](../../crates/arany/src/tools/git/host.rs) |
 | Actual HTTPS-path helper credential flow through a local synthetic transport; no secret in Provider projection, persisted Events, diagnostics or output | `host_https_helper_credentials_never_enter_provider_journal_or_diagnostics` in [host.rs](../../crates/arany/src/tools/git/host.rs) |
