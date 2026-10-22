@@ -22,6 +22,7 @@ pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };
+use usage::grouped_count;
 pub use usage::usage_pages;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -425,14 +426,7 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         total.bytes > text.len() as u64 || total.lines != text.lines().count() as u64
     });
     let lines = stdout.lines.saturating_add(stderr.lines);
-    let digits = lines.to_string();
-    let mut count = String::new();
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            count.push(',');
-        }
-        count.push(character);
-    }
+    let count = grouped_count(lines);
     let selection = result.get("selection")?;
     let selection_count = |key: &str| selection[key].as_u64();
     let counts = [
@@ -442,7 +436,11 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         selection_count("discarded_outputs")?,
     ];
     let noun = |count: u64, singular: &str, plural: &str| {
-        format!("{count} {}", if count == 1 { singular } else { plural })
+        format!(
+            "{} {}",
+            grouped_count(count),
+            if count == 1 { singular } else { plural }
+        )
     };
     let omissions = if counts.iter().any(|count| *count > 0) {
         format!(
@@ -2959,6 +2957,10 @@ mod peer_row_tests {
             "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized input, 3 discarded outputs"
         );
         for (count, expected) in [
+            (
+                1000,
+                "1,000 ignored entries (1,000 pruned roots), 1,000 oversized inputs, 1,000 discarded outputs",
+            ),
             (
                 1,
                 "1 ignored entry (1 pruned root), 1 oversized input, 1 discarded output",
