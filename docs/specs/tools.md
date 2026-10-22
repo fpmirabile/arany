@@ -592,14 +592,18 @@ keeps the [write contract](#typed-git-writes) and requires these three fields nu
 
 The JSON result has `branches`, nullable `comparison_base: {revision, oid}`,
 `history_complete`, `truncated` and `timed_out`. Rows are sorted by their full
-ref names before clipping, with `name` capped at 1 KiB on a UTF-8 boundary and
-`name_truncated` indicating a clipped identity. Never treat a clipped name as
-an exact ref identity. Rows carry `kind: local|remote|non-commit`, captured tip
-`oid`, `current`, nullable `symbolic_target`, nullable `subject`,
+ref names before projection, with invalid UTF-8 replaced by U+FFFD and `name`
+capped at 1 KiB on a UTF-8 boundary. `name_truncated` marks clipped or lossy
+names; never treat either as an exact ref identity. A lossy local name has no
+upstream association and reports `upstream_status:unsupported`, so its displayed
+name cannot select another branch's metadata. Rows carry
+`kind: local|remote|non-commit`, captured tip `oid`, `current`,
+nullable `symbolic_target`, nullable `subject`,
 `subject_withheld`, nullable `upstream`, `upstream_status`, nullable
 `ahead`/`behind`, `counts_withheld` and `counts_capped`. Symbolic targets share
-the 1 KiB cap and add `symbolic_target_truncated:true` when clipped. Non-commit
-refs, including annotated tags stored in branch namespaces, remain rows with
+the same replacement and cap, adding `symbolic_target_truncated:true` when
+clipped or lossy. Non-commit refs, including annotated tags stored in branch
+namespaces, remain rows with
 their captured object OID, a null subject and withheld counts; they do not fail
 the listing. Remote symbolic aliases retain their target but have no independent
 subject or counts. Detached or unborn HEAD does not prevent enumeration; an
@@ -647,7 +651,7 @@ requested revision still recorded in the intent. A timeout is not an empty
 successful inspection of the whole repository. An overflowing tip capture keeps
 only complete evidence lines; without visible evidence its subject stays withheld.
 Complete rows fit the Tool result budget; overflow
-or clipped names returns `truncated:true`, never partial rows or invented counts.
+or clipped or lossy names return `truncated:true`, never partial rows or invented counts.
 Cancellation, teardown and unknown completion follow the existing Guard contract:
 only confirmed cleanup permits a partial result, while a missing receipt remains
 Uncertain. Replay uses committed rows, flags and OIDs without running Git or

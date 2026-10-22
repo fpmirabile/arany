@@ -1571,25 +1571,29 @@ fn branch_row(
     let [name, oid, head, symbolic, kind] = fields.as_slice() else {
         return Err(ToolError::Operation);
     };
-    let name = std::str::from_utf8(name).map_err(|_| ToolError::Operation)?;
+    let name_exact = std::str::from_utf8(name).is_ok();
+    let name = String::from_utf8_lossy(name);
+    let name = name.as_ref();
     let local = name.starts_with("refs/heads/");
     if !local && !name.starts_with("refs/remotes/") {
         return Err(ToolError::Operation);
     }
-    let symbolic = if symbolic.is_empty() {
-        None
+    let symbolic_exact = std::str::from_utf8(symbolic).is_ok();
+    let symbolic_text = String::from_utf8_lossy(symbolic);
+    let symbolic = (!symbolic.is_empty()).then_some(symbolic_text.as_ref());
+    let (upstream, status) = if local && !name_exact {
+        (None, "unsupported")
     } else {
-        Some(std::str::from_utf8(symbolic).map_err(|_| ToolError::Operation)?)
+        upstream_status(config, git_dir, packed, name)
     };
-    let (upstream, status) = upstream_status(config, git_dir, packed, name);
     let commit = *kind == b"commit";
-    let mut row = json!({"name": bounded_ref_name(name), "name_truncated": name.len() > REF_BYTES,
+    let mut row = json!({"name": bounded_ref_name(name), "name_truncated": !name_exact || name.len() > REF_BYTES,
         "kind": if !commit { "non-commit" } else if local { "local" } else { "remote" },
         "oid": object_id(oid)?, "current": *head == b"*", "symbolic_target": symbolic.map(bounded_ref_name),
         "subject": null, "subject_withheld": symbolic.is_none() || !commit,
         "upstream": upstream, "upstream_status": status, "ahead": null, "behind": null,
         "counts_withheld": !commit || symbolic.is_none() && comparison, "counts_capped": false});
-    if symbolic.is_some_and(|name| name.len() > REF_BYTES) {
+    if !symbolic_exact || symbolic.is_some_and(|name| name.len() > REF_BYTES) {
         row["symbolic_target_truncated"] = json!(true);
     }
     Ok(row)
@@ -2325,6 +2329,84 @@ pub(super) mod tests {
         assert_eq!(clipped["name_truncated"], true);
         let shown = clipped["name"].as_str().unwrap();
         assert!(shown.len() <= REF_BYTES && name.starts_with(shown));
+        let oid = main["oid"].as_str().unwrap();
+        let mut packed = Vec::new();
+        for name in [
+            b"refs/heads/legacy-\xff".as_slice(),
+            b"refs/remotes/review/legacy-\xff".as_slice(),
+        ] {
+            packed.extend_from_slice(oid.as_bytes());
+            packed.push(b' ');
+            packed.extend_from_slice(name);
+            packed.push(b'\n');
+        }
+        std::fs::write(workspace.join(".git/packed-refs"), packed).unwrap();
+        std::fs::write(
+            workspace.join(".git/refs/heads/legacy-\u{fffd}"),
+            format!("{oid}\n"),
+        )
+        .unwrap();
+        let mut config = std::fs::read(workspace.join(".git/config")).unwrap();
+        config.extend_from_slice(
+            "\n[branch \"legacy-\u{fffd}\"]\nremote = .\nmerge = refs/heads/main\n".as_bytes(),
+        );
+        std::fs::write(workspace.join(".git/config"), config).unwrap();
+        let lossy = run_call(
+            &workspace,
+            &scratch(temp.path(), 512),
+            &branches(Some("all"), Some("main"), None),
+        );
+        assert_eq!(lossy["truncated"], true);
+        let rows = lossy["branches"].as_array().unwrap();
+        assert_eq!(rows.len(), 6);
+        assert_eq!(
+            rows.iter()
+                .filter(|row| row["name_truncated"] == true)
+                .count(),
+            2
+        );
+        let collision: Vec<_> = rows
+            .iter()
+            .filter(|row| row["name"] == "refs/heads/legacy-\u{fffd}")
+            .collect();
+        assert_eq!(collision.len(), 2);
+        for row in collision {
+            if row["name_truncated"] == true {
+                assert!(row["upstream"].is_null());
+                assert_eq!(row["upstream_status"], "unsupported");
+            } else {
+                assert_eq!(row["upstream"], "refs/heads/main");
+                assert_eq!(row["upstream_status"], "present");
+            }
+        }
+        let remote = rows
+            .iter()
+            .find(|row| row["name"] == "refs/remotes/review/legacy-\u{fffd}")
+            .unwrap();
+        assert_eq!(remote["name_truncated"], true);
+        assert_eq!(remote["kind"], "remote");
+        assert_eq!(remote["upstream_status"], "not_applicable");
+        let main = rows.iter().find(|row| row["current"] == true).unwrap();
+        assert_eq!(main["name"], "refs/heads/main");
+        assert_eq!(main["name_truncated"], false);
+        assert_eq!(main["subject"], "second commit");
+        let mut alias = format!("refs/remotes/review/alias\0{oid}\0 \0").into_bytes();
+        alias.extend_from_slice(b"refs/remotes/review/legacy-\xff\0commit");
+        let alias = branch_row(
+            &alias,
+            None,
+            &repository.git_dir,
+            &PackedUpstreams::new(),
+            false,
+        )
+        .unwrap();
+        assert_eq!(alias["name_truncated"], false);
+        assert_eq!(
+            alias["symbolic_target"],
+            "refs/remotes/review/legacy-\u{fffd}"
+        );
+        assert_eq!(alias["symbolic_target_truncated"], true);
+        assert_eq!(alias["upstream_status"], "not_applicable");
     }
 
     fn import_refs(workspace: &Path, home: &Path, import: &str) {
