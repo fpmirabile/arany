@@ -858,14 +858,14 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 );
                 if !linear {
                     let from = transcript.len();
-                    input.write_all(b"/rev\x1b[C").unwrap();
+                    input.write_all(b"/rev").unwrap();
                     wait(
                         &mut output,
                         &mut input,
                         &mut transcript,
                         &mut answered,
                         from,
-                        b"Skill /review",
+                        b"(skill) /review",
                     );
                     let from = transcript.len();
                     input.write_all(b"\x03").unwrap();
@@ -1137,7 +1137,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "trusted startup screen stage missing: {}",
+                "trusted startup screen stage {needle:?} missing: {}",
                 super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
             );
             thread::yield_now();

@@ -31,6 +31,8 @@ pub fn plan_outcome(contract: crate::GoalPlanContract) -> crate::ProviderOutcome
 }
 
 pub struct ScriptedProvider {
+    pub rate_limits: Mutex<VecDeque<Option<crate::RateLimits>>>,
+    pub compact_rate_limits: Mutex<VecDeque<Option<crate::RateLimits>>>,
     pub identity: ProviderIdentity,
     pub preview: Option<crate::PreviewText>,
     pub preview_gate: Option<Arc<tokio::sync::Notify>>,
@@ -60,6 +62,8 @@ impl ScriptedProvider {
                 },
                 ..ProviderIdentity::new("scripted", "test-model", crate::Provenance::native())
             },
+            rate_limits: Mutex::new(VecDeque::new()),
+            compact_rate_limits: Mutex::new(VecDeque::new()),
             preview: None,
             preview_gate: None,
             responses: Mutex::new(responses.into_iter().map(Ok).collect()),
@@ -183,6 +187,36 @@ impl Provider for ScriptedProvider {
 
     fn context_window_tokens(&self) -> Option<u32> {
         self.context_window_tokens
+    }
+
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<crate::ResponsePreview>,
+        limits: crate::RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        if let Some(Some(sample)) = self.rate_limits.lock().expect("limit samples").pop_front() {
+            limits.record(sample);
+        }
+        match preview {
+            Some(preview) => self.invoke_with_preview(request, preview).await,
+            None => self.invoke(request).await,
+        }
+    }
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: crate::RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        if let Some(Some(sample)) = self
+            .compact_rate_limits
+            .lock()
+            .expect("compaction limit samples")
+            .pop_front()
+        {
+            limits.record(sample);
+        }
+        self.compact(request).await
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {

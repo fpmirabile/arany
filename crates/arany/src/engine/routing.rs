@@ -6,7 +6,7 @@ use crate::journal::Journal;
 use crate::provider::{
     AdmittedProviders, MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS, MAX_PROVIDER_SWITCHES,
     Provider, ProviderError, ProviderFallback, ProviderIdentity, ProviderRequest, ProviderRetry,
-    ProviderRole, ResponsePreview, RetryCause,
+    ProviderRole, RateLimitSlot, ResponsePreview, RetryCause,
 };
 use crate::session::{AgentRole, AgentRunId, Event, RunId, SessionId};
 use crate::store::StoreError;
@@ -227,6 +227,7 @@ impl CallRouter<'_> {
         deadline: Instant,
         mut cancellation: RunCancellation,
         preview: Option<ResponsePreview>,
+        limits: RateLimitSlot,
     ) -> Result<CallResult, EngineError> {
         let role = ProviderRole::for_phase(request.phase);
         let scope = CallScope {
@@ -254,6 +255,7 @@ impl CallRouter<'_> {
                 deadline,
                 cancellation.clone(),
                 preview.clone(),
+                limits.clone(),
                 #[cfg(feature = "test-support")]
                 if role == ProviderRole::Primary {
                     self.journal.tool_latency.get().map(|recorder| {
@@ -298,7 +300,7 @@ impl CallRouter<'_> {
                 preview.clear();
             }
             let Some(delay) = self
-                .continue_attempt(scope, role, decision, &request, || Ok(provider))
+                .continue_attempt(scope, role, decision, &request, &limits, || Ok(provider))
                 .await?
             else {
                 return Ok(attempt.result);
@@ -326,18 +328,19 @@ impl CallRouter<'_> {
         role: ProviderRole,
         decision: AttemptDecision,
         request: &ProviderRequest,
+        limits: &RateLimitSlot,
         provider: impl FnOnce() -> Result<Arc<dyn Provider>, EngineError>,
     ) -> Result<Option<Duration>, EngineError> {
         Ok(match decision {
             AttemptDecision::Accept => None,
             AttemptDecision::Retry { cause, delay } => self
-                .retry(scope, role, cause, delay, Some(request))
+                .retry(scope, role, cause, delay, Some(request), limits)
                 .await?
                 .then_some(delay),
             AttemptDecision::Switch => {
                 // The wave resolves its provider only after deciding to switch.
                 let provider = provider()?;
-                self.switch(scope, role, provider.identity(), Some(request))
+                self.switch(scope, role, provider.identity(), Some(request), limits)
                     .await?
                     .then_some(Duration::ZERO)
             }
@@ -410,6 +413,7 @@ impl CallRouter<'_> {
         actor: AgentRunId,
         deadline: Instant,
         mut cancellation: RunCancellation,
+        limits: RateLimitSlot,
     ) -> Result<Option<CompactionOutcome>, EngineError> {
         loop {
             let provider = self.bind(
@@ -429,7 +433,7 @@ impl CallRouter<'_> {
                 tokio::select! {
                     biased;
                     () = cancellation.cancelled() => return Ok(None),
-                    response = tokio::time::timeout_at(attempt_deadline, provider.compact(request.clone())) => {
+                    response = tokio::time::timeout_at(attempt_deadline, provider.compact_observed(request.clone(), limits.clone())) => {
                         response.unwrap_or(Err(ProviderError::CallTimedOut))
                     }
                 }
@@ -459,7 +463,7 @@ impl CallRouter<'_> {
                 AttemptDecision::Accept => false,
                 AttemptDecision::Retry { cause, delay } => {
                     if !self
-                        .retry(scope, ProviderRole::Compaction, cause, delay, None)
+                        .retry(scope, ProviderRole::Compaction, cause, delay, None, &limits)
                         .await?
                     {
                         false
@@ -478,8 +482,14 @@ impl CallRouter<'_> {
                     }
                 }
                 AttemptDecision::Switch => {
-                    self.switch(scope, ProviderRole::Compaction, provider.identity(), None)
-                        .await?
+                    self.switch(
+                        scope,
+                        ProviderRole::Compaction,
+                        provider.identity(),
+                        None,
+                        &limits,
+                    )
+                    .await?
                 }
             };
             if !continued {
@@ -508,6 +518,7 @@ impl CallRouter<'_> {
         role: ProviderRole,
         from: &ProviderIdentity,
         request: Option<&ProviderRequest>,
+        limits: &RateLimitSlot,
     ) -> Result<bool, EngineError> {
         let CallScope {
             run_id,
@@ -543,6 +554,7 @@ impl CallRouter<'_> {
             }
             let agent = run.agents.iter().find(|agent| agent.id == agent_run_id)?;
             Some(ProviderFallback {
+                rate_limits: limits.snapshot(),
                 role,
                 failure: crate::session::ProviderCallDisposition::Unavailable,
                 call_index: u32::try_from(if role == ProviderRole::Compaction {
@@ -562,17 +574,22 @@ impl CallRouter<'_> {
         let Some(fallback) = candidate else {
             return Ok(false);
         };
-        self.commit_attempt(
-            scope,
-            role,
-            request,
-            Event::ProviderFallbackUsed {
-                run_id,
-                agent_run_id,
-                fallback,
-            },
-        )
-        .await
+        let committed = self
+            .commit_attempt(
+                scope,
+                role,
+                request,
+                Event::ProviderFallbackUsed {
+                    run_id,
+                    agent_run_id,
+                    fallback,
+                },
+            )
+            .await?;
+        if committed {
+            limits.take();
+        }
+        Ok(committed)
     }
 
     pub(super) async fn retry(
@@ -582,6 +599,7 @@ impl CallRouter<'_> {
         cause: RetryCause,
         delay: Duration,
         request: Option<&ProviderRequest>,
+        limits: &RateLimitSlot,
     ) -> Result<bool, EngineError> {
         let retry = self.ledger.view(|view| {
             let run = view.runs.last()?;
@@ -592,6 +610,7 @@ impl CallRouter<'_> {
             let call_index = call_index(view, run, agent, role)?;
             let earlier = earlier_retries(run, scope.agent_run_id, role, call_index);
             Some(ProviderRetry {
+                rate_limits: limits.snapshot(),
                 role,
                 call_index,
                 attempt: u8::try_from(earlier + 1).ok()?,
@@ -602,17 +621,22 @@ impl CallRouter<'_> {
         let Some(retry) = retry else {
             return Ok(false);
         };
-        self.commit_attempt(
-            scope,
-            role,
-            request,
-            Event::ProviderRetryScheduled {
-                run_id: scope.run_id,
-                agent_run_id: scope.agent_run_id,
-                retry,
-            },
-        )
-        .await
+        let committed = self
+            .commit_attempt(
+                scope,
+                role,
+                request,
+                Event::ProviderRetryScheduled {
+                    run_id: scope.run_id,
+                    agent_run_id: scope.agent_run_id,
+                    retry,
+                },
+            )
+            .await?;
+        if committed {
+            limits.take();
+        }
+        Ok(committed)
     }
 
     // Charges the failed attempt and admits the next one before its fact commits; a refusal declines it.
@@ -732,6 +756,7 @@ pub(super) async fn invoke_attempt(
     deadline: Instant,
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
+    limits: RateLimitSlot,
     #[cfg(feature = "test-support")] receipt: Option<crate::test_support::latency::Receipt<'_>>,
 ) -> AttemptResult {
     let (result, transient) = invoke_bounded_with_preview(
@@ -740,6 +765,7 @@ pub(super) async fn invoke_attempt(
         deadline,
         cancellation,
         preview.clone(),
+        limits,
         #[cfg(feature = "test-support")]
         receipt,
     )

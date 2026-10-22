@@ -15,7 +15,12 @@ mod image;
 #[cfg(any(test, feature = "test-support"))]
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
+mod limits;
 mod native_check;
+pub use limits::{
+    LimitFailure, LimitSource, LimitUnavailable, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES,
+    PlanWindow, RateLimitSlot, RateLimits, UsedPercent,
+};
 mod openai;
 pub(crate) mod prompts;
 mod render;
@@ -44,12 +49,12 @@ pub use conversation::{
 pub(crate) use custom::PROVIDER_PROFILES;
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
+    check_custom_profile_with_cancellation,
 };
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{ImageAttachment, ImageOrigin, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ProviderImage};
 pub use native_check::{
-    NativeCheckError, check_native_model_from_env, check_native_model_with_api_key,
-    check_native_model_with_credentials,
+    NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 pub(crate) use render::instructions_text;
@@ -276,6 +281,7 @@ pub const MAX_NATIVE_API_KEY_BYTES: usize = 512;
 pub const MAX_ANTHROPIC_WORKSPACE_ID_BYTES: usize = 128;
 
 /// A selected native key and its explicit API workspace, never ambient account state.
+#[derive(Clone, Eq, PartialEq)]
 pub struct NativeApiCredentials {
     profile: &'static str,
     key: String,
@@ -1203,6 +1209,26 @@ pub trait Provider: Send + Sync {
         self.invoke(request).await
     }
 
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<ResponsePreview>,
+        _limits: RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        match preview {
+            Some(preview) => self.invoke_with_preview(request, preview).await,
+            None => self.invoke(request).await,
+        }
+    }
+
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        _limits: RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.compact(request).await
+    }
+
     /// Summarizes accepted conversation data without Workspace guidance or effects.
     /// Unsupported compaction returns `Unavailable`. Adapters enforce the declared
     /// output bound; a local-only bound requires explicit account consent and cannot
@@ -1232,6 +1258,21 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
         preview: ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke_with_preview(request, preview).await
+    }
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<ResponsePreview>,
+        limits: RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke_observed(request, preview, limits).await
+    }
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        (**self).compact_observed(request, limits).await
     }
     async fn compact(
         &self,

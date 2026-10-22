@@ -17,6 +17,7 @@ must be read before using an old recommendation as implementation guidance.
 | [Claude Code MultiEdit](./claude-code-multiedit-evidence.md) | Versioned payload, matching, permission and publication evidence; public removal boundary and differences from Arany |
 | [DeepSeek, Kimi and GLM providers](./deepseek-kimi-glm-providers-2026-10.md) | Anthropic-compatible endpoints, key and subscription authorization, strict-wire gaps and peer adapter precedent |
 | [Git writes and remembered approvals](./git-writes-2026-10.md) | Peer permission evidence, neutralized Git publication, typed prefix authorization and host write isolation conflicts |
+| [Slash command and Skill completion](./slash-skill-completion.md) | Claude Code unified filtering, invocation controls and collision-policy differences |
 | [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Protocol upgrade boundary, SDK and parser source evidence |
 | [macOS Guard crash recovery in other harnesses](./macos-guard-crash-recovery-in-harnesses-2026-10.md) | Owner-side cleanup versus persistent launchd/coalition/image recovery, source comparisons and verification limits |
 | [Agent-state persistence](./agent-state-persistence.md) | SQLite alternatives, rollback-journal rationale and reconsideration gates |

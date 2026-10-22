@@ -8,7 +8,7 @@ use rusqlite::{Connection, OpenFlags, Transaction, TransactionBehavior, config::
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(all(test, target_os = "linux"))]
-mod crash_tests;
+pub(super) mod crash_tests;
 #[cfg(test)]
 mod tests;
 
@@ -35,13 +35,26 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 profile_digest BLOB NOT NULL CHECK(length(profile_digest) = 32),
                 addresses TEXT NOT NULL CHECK(json_valid(addresses)),
                 checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
+                expires_at_ms INTEGER NOT NULL,
+                check_id TEXT NOT NULL
             ) STRICT;
             CREATE TABLE native_provider_evidence (
                 fingerprint BLOB PRIMARY KEY CHECK(length(fingerprint) = 32),
                 checked_at_ms INTEGER NOT NULL,
-                expires_at_ms INTEGER NOT NULL
+                expires_at_ms INTEGER NOT NULL,
+                check_id TEXT NOT NULL
             ) STRICT;
+            CREATE TABLE provider_check_events (
+                sequence INTEGER PRIMARY KEY,
+                check_id TEXT NOT NULL,
+                target_key BLOB NOT NULL CHECK(length(target_key) = 32),
+                kind TEXT NOT NULL,
+                event_version INTEGER NOT NULL CHECK(event_version >= 1),
+                payload TEXT NOT NULL CHECK(json_valid(payload) AND length(CAST(payload AS BLOB)) <= 4096),
+                created_at_ms INTEGER NOT NULL
+            ) STRICT;
+            CREATE INDEX provider_checks_by_id ON provider_check_events (check_id, sequence);
+            CREATE INDEX provider_checks_by_target ON provider_check_events (target_key, sequence);
             CREATE TABLE migrations (
                 id TEXT PRIMARY KEY CHECK (length(id) = 36),
                 from_schema INTEGER NOT NULL,
@@ -50,9 +63,9 @@ pub(super) const SCHEMA_SQL: &str = "BEGIN IMMEDIATE;
                 backup TEXT NOT NULL,
                 recorded_at_ms INTEGER NOT NULL
             ) STRICT;
-            PRAGMA user_version=5;
+            PRAGMA user_version=6;
             COMMIT;";
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 pub(super) struct HotSession {
     session_id: SessionId,
@@ -127,7 +140,9 @@ fn admit_in_transaction(
     let observations =
         i64::try_from(tool_observations.min(event_slots)).map_err(|_| StoreError::ReplayLimit)?;
     let event_bytes = slots
-        * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
+        * (super::MAX_EVENT_BYTES as i64
+            + crate::provider::MAX_RATE_LIMIT_BYTES as i64
+            + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
         + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64;
     let run_start_extra = if run_start {
         super::RUN_START_EXTRA_BYTES as i64
@@ -135,7 +150,10 @@ fn admit_in_transaction(
         0
     };
     if MAX_DATABASE_BYTES - page_count * page_size
-        < ADMISSION_HEADROOM_BYTES + event_bytes + run_start_extra
+        < ADMISSION_HEADROOM_BYTES
+            + event_bytes
+            + run_start_extra
+            + super::check::reserved_bytes(transaction, page_size)?
     {
         return Err(StoreError::StorageFull);
     }
@@ -226,6 +244,7 @@ pub(super) fn open_database(
         SCHEMA_VERSION => {}
         _ => return Err(StoreError::InvalidHistory),
     }
+    super::check::validate(&connection)?;
     Ok(connection)
 }
 
@@ -289,7 +308,15 @@ fn append_in_transaction(
     }
     let page_count: i64 = transaction.query_row("PRAGMA page_count", [], |row| row.get(0))?;
     let page_size: i64 = transaction.query_row("PRAGMA page_size", [], |row| row.get(0))?;
-    if MAX_DATABASE_BYTES - page_count * page_size < ADMISSION_HEADROOM_BYTES {
+    let check_reserve = super::check::reserved_bytes(transaction, page_size)?;
+    let append_bytes = if check_reserve > 0 {
+        payload.len() as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size
+    } else {
+        0
+    };
+    if MAX_DATABASE_BYTES - page_count * page_size
+        < ADMISSION_HEADROOM_BYTES + check_reserve + append_bytes
+    {
         return Err(StoreError::StorageFull);
     }
     let created_at_ms = SystemTime::now()
