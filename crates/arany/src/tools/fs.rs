@@ -936,10 +936,9 @@ pub(crate) fn workspace_entries(
 
 fn entries(root: &Dir, folder: &str, prefix: &str, hidden: Keep) -> Result<Vec<String>, ToolError> {
     let folder = if folder == "." { "" } else { folder };
-    if !valid_relative(folder, true)
-        || folder.split('/').count() > 16
-        || !valid_relative(prefix, true)
-    {
+    validate_mention_path(folder, true)?;
+    validate_mention_path(prefix, true)?;
+    if folder.split('/').count() > 16 {
         return Err(ToolError::Path);
     }
     if !prefix.is_empty() {

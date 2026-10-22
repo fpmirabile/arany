@@ -564,6 +564,19 @@ pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
             .all(|part| matches!(part, Component::Normal(_)))
 }
 
+pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super::ToolError> {
+    if Path::new(value).is_absolute() || value.split('/').any(|part| part == "..") {
+        return Err(super::ToolError::OutsideWorkspace.at_path(value));
+    }
+    if value.split('/').any(forbidden) {
+        return Err(super::ToolError::ProtectedPath.at_path(value));
+    }
+    if !valid_relative(value, root) {
+        return Err(super::ToolError::Path.at_path(value));
+    }
+    Ok(())
+}
+
 pub(crate) fn forbidden(value: &str) -> bool {
     FORBIDDEN_NAMES
         .iter()

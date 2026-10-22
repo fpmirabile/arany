@@ -105,11 +105,16 @@ pub use types::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("{path:?}: {source}")]
+    AtPath {
+        path: String,
+        #[source]
+        source: Box<ToolError>,
+    },
     #[error("No admitted credential-helper search directory")]
     HostHelperSearch,
     #[error("Credential includes cannot be safely omitted")]
     CredentialIncludes,
-
     #[error("tools require a private tools.json; see docs/tools.md")]
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
@@ -124,6 +129,18 @@ pub enum ToolError {
     ChangedInput,
     #[error("Tool path is not admitted")]
     Path,
+    #[error("path is outside workspace")]
+    OutsideWorkspace,
+    #[error("protected path")]
+    ProtectedPath,
+    #[error("path is a symbolic link")]
+    SymbolicLink,
+    #[error("path crosses a filesystem boundary")]
+    FilesystemBoundary,
+    #[error("not a directory")]
+    NotDirectory,
+    #[error("unterminated quoted path")]
+    UnterminatedQuotedPath,
     #[error("Tool file or directory not found")]
     NotFound,
     #[error("Guard filesystem boundary denied access")]
@@ -150,6 +167,19 @@ pub enum ToolError {
     GuardRejected(guard::GuardStage),
     #[error("Guard rejected at {0}")]
     GuardBootstrap(guard::BootstrapFailure),
+}
+
+impl ToolError {
+    pub(crate) fn at_path(self, path: &str) -> Self {
+        let source = match self {
+            Self::AtPath { source, .. } => source,
+            error => Box::new(error),
+        };
+        Self::AtPath {
+            path: path.to_owned(),
+            source,
+        }
+    }
 }
 
 #[derive(Clone)]

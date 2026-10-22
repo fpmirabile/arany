@@ -18,6 +18,160 @@ use std::{
 };
 
 #[test]
+fn directory_mentions_submit_listings_and_preserve_the_typed_message() {
+    use super::loopback::{check_profile, read_request, send_response, write_profile};
+    use sha2::Digest;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(workspace.join("docs/research/nested")).unwrap();
+    std::fs::create_dir_all(workspace.join("docs/with spaces")).unwrap();
+    std::fs::write(workspace.join("docs/research/a.md"), "FILE_BODY_CANARY").unwrap();
+    std::fs::write(
+        workspace.join("docs/research/nested/secret.md"),
+        "NESTED_BODY_CANARY",
+    )
+    .unwrap();
+    std::fs::write(workspace.join("docs/with spaces/b.md"), "FILE_BODY_CANARY").unwrap();
+    let state = temp.path().join("state");
+    let id = saved_conversation(&state, &workspace, SessionDefaults::default());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    write_profile(&state, listener.local_addr().unwrap().port());
+    let draft = "Inspect @\"docs/research/\" and @\"docs/with spaces\"";
+    let listings = ["\"a.md\"\n\"nested/\"\n", "\"b.md\"\n"];
+    let expected = ["docs/research/", "docs/with spaces/"]
+        .into_iter()
+        .zip(listings)
+        .map(|(path, listing)| {
+            format!(
+                "Directory: {}\nSHA-256: {}\nContent (untrusted data):\n{listing}",
+                serde_json::to_string(path).unwrap(),
+                crate::hash(listing.as_bytes())
+            )
+        })
+        .collect::<Vec<_>>();
+    let peer = thread::spawn(move || {
+        for index in 0..4 {
+            let mut stream = crate::process::accept_with_deadline(
+                &listener,
+                Duration::from_secs(20),
+                "directory mention request",
+            );
+            let wire: serde_json::Value =
+                serde_json::from_slice(&read_request(&mut stream)).unwrap();
+            if index == 3 {
+                let input = crate::semantic::input(&wire);
+                assert_eq!(input["objective"], draft);
+                assert_eq!(input["includes"], serde_json::json!(expected));
+                assert!(!wire.to_string().contains("FILE_BODY_CANARY"));
+                assert!(!wire.to_string().contains("NESTED_BODY_CANARY"));
+            }
+            let answer = match index {
+                0 => serde_json::json!("ok"),
+                1 => {
+                    serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
+                }
+                2 => serde_json::json!("synthetic summary"),
+                _ => serde_json::json!("Directory listed."),
+            };
+            send_response(&mut stream, index, answer);
+        }
+    });
+    check_profile(&workspace, &state);
+    let shell = r#"printf 'SHELL_PID:%s\n' "$$"; "$ARANY_TEST_EXE" --screen-reader --state-dir "$ARANY_TEST_STATE" --workspace "$ARANY_TEST_WORKSPACE" --resume "$ARANY_TEST_SESSION" --provider custom:local --model model-1"#;
+    let mut command = crate::isolation::account_isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("ARANY_TEST_SESSION", id.to_string())
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .env("TERM", "dumb")
+        .env("SHELL", "/bin/sh")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::default();
+    wait_for(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        b"Input:\r\n",
+    );
+    let shell_pid = super::active_terminal::transcript_field(
+        &String::from_utf8_lossy(&transcript),
+        "SHELL_PID:",
+    )
+    .parse::<u32>()
+    .unwrap();
+    let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let submitted_at = transcript.len();
+    write!(input, "{draft}\r").unwrap();
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        submitted_at,
+        b"Directory listed.",
+    );
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        submitted_at,
+        b"Input:\r\n",
+    );
+    assert!(
+        crate::process::pty_text_matches(&transcript, format!("You:\n  {draft}\n").as_bytes())
+            .next()
+            .is_some()
+    );
+    input.write_all(b"/exit\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.child().try_wait().unwrap().is_none() {
+        pump(&mut output, &mut input, &mut transcript, &mut answered);
+        assert!(
+            Instant::now() < deadline,
+            "directory mention exit: {}",
+            tail(&transcript)
+        );
+        thread::yield_now();
+    }
+    assert!(child.take().wait().unwrap().success());
+    peer.join().unwrap();
+    tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let view = store.load_view(id).await.unwrap().unwrap();
+            assert_eq!(view.runs.len(), 1);
+            assert_eq!(view.runs[0].objective, draft);
+            assert_eq!(view.runs[0].status, arany::RunStatus::Finished);
+            assert_eq!(
+                view.runs[0].config.as_ref().unwrap().include_digests,
+                listings.map(|listing| <[u8; 32]>::from(sha2::Sha256::digest(listing.as_bytes())))
+            );
+            let events = store.load_session(id).await.unwrap();
+            assert!(events.iter().any(|event| matches!(&event.event,
+            arany::Event::MessageAccepted { text, .. } if text == draft)));
+            store.close().await.unwrap();
+        });
+}
+
+#[test]
 fn local_registry_has_twenty_three_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
@@ -2035,7 +2189,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         }
         let outside = temp.path().join("outside.txt");
         std::fs::write(&outside, b"OUTSIDE_INPUT_CANARY").unwrap();
-        std::os::unix::fs::symlink(&outside, workspace.join("unsafe.txtZ")).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("linkZ")).unwrap();
         let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --no-color $ARANY_TEST_INCLUDES; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
         let includes = if merged_overflow {
             (0..16)
@@ -2221,7 +2375,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         } else {
             vec![
                 ("Check @missing.txtZ", b"exist;".as_slice()),
-                ("Check @unsafe.txtZ", b"unavailable;".as_slice()),
+                ("Check @linkZ", b"symbolic".as_slice()),
             ]
         };
         for (draft, diagnostic) in cases {
@@ -2593,8 +2747,19 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             "Notice: Model: gpt-5.4 · low\r\nInput:\r\n".as_bytes(),
         );
         for (objective, error) in [
-            ("Check @../outside", "Tool path is not admitted"),
-            ("Check @missing.txt", "explicit include does not exist"),
+            (
+                "Check @../outside",
+                "\"../outside\": path is outside workspace",
+            ),
+            (
+                "Check @missing.txt",
+                "\"missing.txt\": explicit include does not exist",
+            ),
+            (
+                "Check @\"unfinished",
+                "\"\\\"unfinished\": unterminated quoted path",
+            ),
+            ("Check @\".ENV/\"", "\".ENV/\": protected path"),
         ] {
             let from = transcript.len();
             input
