@@ -627,7 +627,7 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
         (
             "invalid answer",
             Ok(ProviderOutcome::Answer(Answer { text: "".into() })),
-            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::Rejected,
             Some(crate::ProviderFailureReason::ProposalRefused),
         ),
         (

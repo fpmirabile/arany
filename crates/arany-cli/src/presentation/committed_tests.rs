@@ -131,6 +131,10 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                         responses.push_back(Err(ProviderError::RemoteHttp(503)));
                     }
                 }
+                if failure_reason == Some(arany::ProviderFailureReason::OutcomeContract) && !cancel
+                {
+                    responses.push_back(Err(ProviderError::InvalidOutcomeContract));
+                }
                 if case == "invalid answer" && !cancel {
                     for _ in 0..2 {
                         responses.push_back(Ok(ProviderOutcome::Answer(Answer {
@@ -138,6 +142,7 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                         })));
                     }
                 }
+                let expected_calls = responses.len();
                 provider.responses = Mutex::new(responses);
                 let provider = Arc::new(provider);
                 let run = run_with(
@@ -163,6 +168,34 @@ async fn completion_boundary_feedback_and_jsonl_use_the_committed_call_record() 
                 .unwrap();
                 engine.close().await.unwrap();
                 let (replay, events) = committed(root.path(), outcome.session_id).await;
+                assert_eq!(
+                    provider.requests.lock().unwrap().len(),
+                    expected_calls,
+                    "{phase:?}, {case}, cancellation {cancel}"
+                );
+                assert!(
+                    provider.responses.lock().unwrap().is_empty(),
+                    "{phase:?}, {case}, cancellation {cancel}"
+                );
+                let calls = &replay.runs[0].agents[0].provider_calls;
+                let record = calls.last().expect("committed primary call");
+                assert_eq!(record.disposition, call_disposition, "{case}");
+                assert_eq!(record.failure_reason, failure_reason, "{case}");
+                let corrections = provider
+                    .requests
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|request| request.input.outcome_correction)
+                    .count();
+                assert_eq!(
+                    corrections,
+                    usize::from(
+                        !cancel
+                            && failure_reason
+                                == Some(arany::ProviderFailureReason::OutcomeContract)
+                    )
+                );
                 if !cancel && call_disposition != ProviderCallDisposition::Finished {
                     let feedback = run_feedback(&replay.runs[0]).expect("failure guidance");
                     for (reason, text) in [

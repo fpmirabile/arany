@@ -5290,6 +5290,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             expected_phases.push(phase);
                         }
                     }
+                    if failure_reason == Some(arany::ProviderFailureReason::OutcomeContract) && !cancel {
+                        responses.push_back(Err(ProviderError::InvalidOutcomeContract));
+                        expected_phases.push(phase);
+                    }
                     if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
                             responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
@@ -5347,6 +5351,12 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     assert_eq!(record.phase, phase);
                     assert_eq!(record.disposition, call_disposition);
                     assert_eq!(record.failure_reason, failure_reason);
+                    if failure_reason == Some(arany::ProviderFailureReason::ProposalRefused) {
+                        assert_eq!(record.refusal.as_ref().expect("semantic refusal").cause,
+                            arany::ProposalRefusalCause::AnswerInvalid);
+                    }
+                    assert!(provider.responses.lock().expect("responses").is_empty(),
+                        "{phase:?}, {case}, cancellation {cancel}");
                     assert_eq!(record.response_id, None);
                     assert_eq!(record.input_tokens, None);
                     assert_eq!(
