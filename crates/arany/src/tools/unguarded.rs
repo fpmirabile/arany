@@ -1012,7 +1012,7 @@ mod tests {
             &["sh".into(), "-c".into(), "sudo true".into()]
         ));
         assert!(!prohibited("sh", &["script.sh".into()]));
-        assert!(!prohibited("sh", &["-c".into(), "su\"\"do true".into()]));
+        assert!(prohibited("sh", &["-c".into(), "su\"\"do true".into()]));
     }
 
     #[test]
@@ -1282,6 +1282,8 @@ mod tests {
             "OLDPWD",
             "SHLVL",
             "_",
+            #[cfg(target_os = "macos")]
+            "__CF_USER_TEXT_ENCODING",
         ];
         assert!(names.iter().all(|name| allowed.contains(name)), "{names:?}");
         let home = directories::BaseDirs::new().unwrap();

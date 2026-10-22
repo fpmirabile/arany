@@ -633,7 +633,10 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
     assert_eq!(stored_rows(&upgraded), current);
     assert_eq!(fork_digests(&upgraded), digests);
     let started = first_of(&upgraded, "RunStarted");
-    assert_eq!(started.version, 21);
+    assert_eq!(
+        started.version,
+        crate::test_support::payload_version("RunStarted")
+    );
     assert!(
         started
             .payload

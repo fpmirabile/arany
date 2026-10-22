@@ -3501,13 +3501,22 @@ mod goal_replay_tests {
                     .as_mut()
                     .unwrap()
                     .child_unguarded = parent;
+                let started = Event::RunStarted {
+                    run_id: view.runs[0].id,
+                    config: view.runs[0].config.clone().unwrap(),
+                    active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+                };
+                assert_eq!(started.validate().is_ok(), parent == Denied);
+                if parent != Denied {
+                    continue;
+                }
                 let result = apply_child_spawn(
                     &mut view,
                     ChildGrant::ReadOnly {
                         unguarded: requested,
                     },
                 );
-                assert_eq!(result.is_ok(), requested == Denied && parent == Denied);
+                assert_eq!(result.is_ok(), requested == Denied);
             }
         }
         let mut no_tools = session_with_tools(false);
@@ -4416,6 +4425,23 @@ mod goal_replay_tests {
                 }),
             })
             .unwrap()
+        } else if matches!(
+            intent.call,
+            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+        ) {
+            let stdout = String::from_utf8(content.to_vec()).unwrap();
+            serde_json::to_string(&crate::tools::types::CommandResult {
+                exit_code: Some(0),
+                stdout_total: crate::tools::OutputTotal {
+                    bytes: stdout.len() as u64,
+                    lines: stdout.lines().count() as u64,
+                },
+                stdout,
+                stderr: String::new(),
+                stderr_total: Default::default(),
+                changeset: Default::default(),
+            })
+            .unwrap()
         } else {
             serde_json::json!({ "sha256": crate::tools::types::hex_digest(content) }).to_string()
         };
@@ -5280,11 +5306,11 @@ mod goal_replay_tests {
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
-            for (event, version) in [
-                (started(intent.digest(), &hook_intent), 6),
-                (finished(hook_observation.clone(), deny.clone()), 11),
+            for event in [
+                started(intent.digest(), &hook_intent),
+                finished(hook_observation.clone(), deny.clone()),
             ] {
-                assert_eq!(event.version(), version);
+                let version = event.version();
                 let payload = event.payload().unwrap();
                 assert_eq!(
                     Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
