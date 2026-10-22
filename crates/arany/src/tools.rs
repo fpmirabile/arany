@@ -1186,7 +1186,15 @@ impl ToolRuntime {
             Self::load_permissions(state)
                 .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
         });
-        if !self.host_settings_admitted || !settings_match || pin.verify(&self.workspace).is_err() {
+        if !self.host_settings_admitted || !settings_match {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        }
+        let checked_pin = pin.clone();
+        let workspace = self.workspace.clone();
+        if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace))
+            .await
+            .is_ok_and(|result| result.is_ok())
+        {
             return unstarted_observation(intent, ToolError::ChangedInput);
         }
         let pinned = config::Program {

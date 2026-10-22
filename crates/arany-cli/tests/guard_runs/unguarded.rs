@@ -686,6 +686,19 @@ async fn changed_permission_settings_require_explicit_readmission() {
         .await;
     assert!(denied_run.prompts.is_empty());
     denied(&denied_run, "use /permissions to re-admit");
+    private_file(&host.state.join("permissions.json"), b"invalid");
+    assert!(host.engine.readmit_host_permissions().is_err());
+    std::fs::remove_file(host.state.join("permissions.json")).unwrap();
+    let still_denied = host
+        .run(
+            &host.workspace,
+            outcomes(),
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    denied(&still_denied, "use /permissions to re-admit");
+    assert!(still_denied.prompts.is_empty());
     host.engine.readmit_host_permissions().unwrap();
     let admitted = host
         .run(
@@ -844,11 +857,14 @@ async fn ignored_pre_compact_hook_does_not_block_for_a_host_offer() {
             wire_provenance: None,
         })]),
     ));
-    assert!(!matches!(
-        host.engine
-            .compact_session(&providers, session, host.workspace.clone())
-            .await,
-        Err(arany::EngineError::CompactionBlockedByHook)
+    let compacted = host
+        .engine
+        .compact_session(&providers, session, host.workspace.clone())
+        .await
+        .expect("ignored PreCompact hook permits compaction");
+    assert!(matches!(
+        compacted.status,
+        arany::CompactionStatus::Succeeded { .. }
     ));
     let (events, _) = host.reopen(session).await;
     assert!(!events.iter().any(|event| matches!(&event.event,

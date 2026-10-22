@@ -876,6 +876,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     }
                     QuickChoice::Selected(selector) => {
                         notice = run_selector(
+                            &engine,
                             selector,
                             &mut terminal,
                             &mut admission,
@@ -1066,9 +1067,6 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             break;
                         }
                         if command == InteractiveCommand::Rewind {
-                            engine
-                                .revoke_host_approvals()
-                                .map_err(|error| error.to_string())?;
                             notice = Some(Feedback::History(
                                 rewind::open(
                                     &engine,
@@ -1143,10 +1141,8 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     terminal
                                         .restore_draft_input(composer.text().len())
                                         .map_err(|error| error.to_string())?;
-                                    engine
-                                        .readmit_host_permissions()
-                                        .map_err(|error| error.to_string())?;
                                     notice = Some(Feedback::History(summary));
+                                    readmit_host_permissions(&engine, &mut notice);
                                     continue;
                                 }
                                 Some(permissions::PermissionArea::FolderTrust) => {}
@@ -1211,10 +1207,8 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             } else {
                                 "Read only · /permissions can enable guarded Tools".into()
                             }));
-                            engine
-                                .readmit_host_permissions()
-                                .map_err(|error| error.to_string())?;
                             admission.workspace_permissions = Some(access);
+                            readmit_host_permissions(&engine, &mut notice);
                             admission.tools = false;
                             refresh_runtime_skills(
                                 &admission,
@@ -1240,6 +1234,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
                             notice = run_selector(
+                                &engine,
                                 Selector::Resume,
                                 &mut terminal,
                                 &mut admission,
@@ -1300,6 +1295,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 Selector::Models
                             };
                             notice = run_selector(
+                                &engine,
                                 selector,
                                 &mut terminal,
                                 &mut admission,
@@ -1398,6 +1394,7 @@ async fn close_engine(engine: Engine) -> Result<(), String> {
 }
 
 async fn run_selector(
+    engine: &Engine,
     selector: Selector,
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
@@ -1424,16 +1421,20 @@ async fn run_selector(
             Ok(None) if terminal.agent_chat_open() => return Ok(None),
             Ok(None) => Feedback::Transient("Agent inspection closed".into()),
         },
-        Selector::Resume => resume_selector(terminal, admission, session_id, view).await?,
+        Selector::Resume => resume_selector(engine, terminal, admission, session_id, view).await?,
     }))
 }
 
 async fn resume_selector(
+    engine: &Engine,
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
     session_id: &mut SessionId,
     view: &mut SessionView,
 ) -> Result<Feedback, LoopError> {
+    engine
+        .revoke_host_approvals()
+        .map_err(|error| error.to_string())?;
     let choice = pick_session(terminal, admission, Some(view)).await?;
     match choice {
         PickerChoice::Selected(id) => {
@@ -2119,6 +2120,15 @@ fn archive_notice_drawn(notice: Option<&Feedback>, archive: Option<&str>) -> boo
     archive.is_some_and(
         |archive| matches!(notice, Some(Feedback::History(text)) if text.contains(archive)),
     )
+}
+
+fn readmit_host_permissions(engine: &Engine, notice: &mut Option<Feedback>) {
+    if let Err(error) = engine.readmit_host_permissions() {
+        append_notice(
+            notice,
+            &format!("Error: {error}; host approvals remain denied until /permissions succeeds"),
+        );
+    }
 }
 
 fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {

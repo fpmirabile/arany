@@ -582,7 +582,36 @@ pub(super) async fn run(request: Request<'_>, mut cancellation: Cancellation) ->
             "Cancelled before the unguarded run started; nothing ran",
         );
     }
-    let (mut command, cap) = match prepare(&request) {
+    let launcher = request.launcher.to_owned();
+    let program = request.program.clone();
+    let host = request.host.cloned();
+    let args = request.args.to_vec();
+    let cwd = request.cwd.to_owned();
+    let workspace = request.workspace.to_owned();
+    let runtime_grants = request.runtime_grants.to_vec();
+    let prepared = tokio::task::spawn_blocking(move || {
+        prepare(&Request {
+            launcher: &launcher,
+            program: &program,
+            host: host.as_ref(),
+            args: &args,
+            cwd: &cwd,
+            workspace: &workspace,
+            workspace_identity: request.workspace_identity,
+            runtime_grants: &runtime_grants,
+            result_bytes: request.result_bytes,
+            runtime_ms: request.runtime_ms,
+        })
+    })
+    .await
+    .unwrap_or(Err(ToolError::Operation));
+    if cancellation.is_cancelled() {
+        return Outcome::unstarted(
+            ToolDisposition::Cancelled,
+            "Cancelled before the unguarded run started; nothing ran",
+        );
+    }
+    let (mut command, cap) = match prepared {
         Ok(prepared) => prepared,
         Err(ToolError::Path) => {
             return Outcome::unstarted(

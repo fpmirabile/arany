@@ -840,7 +840,8 @@ impl RunLoop<'_> {
             },
         };
         let intent = self
-            .primary_intent(runtime, preparation.clone())?
+            .primary_intent(runtime, preparation.clone())
+            .await?
             .ok_or(EngineError::GoalBudgetExhausted)?;
         let observation = self
             .run_intent(
@@ -1145,7 +1146,7 @@ impl RunLoop<'_> {
                 data,
             },
         };
-        let Some(mut intent) = self.primary_intent(runtime, call.clone())? else {
+        let Some(mut intent) = self.primary_intent(runtime, call.clone()).await? else {
             self.record_capacity_stop().await?;
             self.discard_worker(
                 id,

@@ -305,29 +305,31 @@ impl RunLoop<'_> {
             hook_feedback: Default::default(),
         };
         loop {
-            let intent =
-                match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
-                    Ok(intent) => intent,
-                    Err(refusal @ SizingRefusal::DelegationDeadline) => {
-                        return Ok(StepEnd::Stopped(
-                            match self
-                                .record_delegation_deadline(&grant, runtime, call)
-                                .await?
-                            {
-                                Ok(()) => refusal.into(),
-                                Err(admission) => admission.into(),
-                            },
-                        ));
-                    }
-                    Err(refusal @ SizingRefusal::ActiveTime) => {
-                        self.active_time_floor
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                    Err(refusal @ SizingRefusal::ContextFull) => {
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                };
+            let intent = match self
+                .sized_intent(&grant, runtime, &step, call.clone(), &source_call)
+                .await?
+            {
+                Ok(intent) => intent,
+                Err(refusal @ SizingRefusal::DelegationDeadline) => {
+                    return Ok(StepEnd::Stopped(
+                        match self
+                            .record_delegation_deadline(&grant, runtime, call)
+                            .await?
+                        {
+                            Ok(()) => refusal.into(),
+                            Err(admission) => admission.into(),
+                        },
+                    ));
+                }
+                Err(refusal @ SizingRefusal::ActiveTime) => {
+                    self.active_time_floor
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    return Ok(StepEnd::Stopped(refusal.into()));
+                }
+                Err(refusal @ SizingRefusal::ContextFull) => {
+                    return Ok(StepEnd::Stopped(refusal.into()));
+                }
+            };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
             let source_intent_digest = intent.digest();
@@ -438,7 +440,7 @@ impl RunLoop<'_> {
         }
     }
 
-    fn sized_intent(
+    async fn sized_intent(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -447,7 +449,7 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
         let intent = match grant {
-            Grant::Primary { .. } => self.primary_intent(runtime, call)?,
+            Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
             Grant::Researcher { child, deadline } => {
                 let Some(mut intent) =
                     self.researcher_intent(runtime, child.agent_run_id, call, *deadline)
@@ -591,14 +593,22 @@ impl RunLoop<'_> {
         Ok(Ok(()))
     }
 
-    pub(super) fn primary_intent(
+    pub(super) async fn primary_intent(
         &self,
         runtime: &ToolRuntime,
         call: ToolCall,
     ) -> Result<Option<EffectIntent>, EngineError> {
         let command = matches!(call, ToolCall::Command { .. });
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
-        let mut intent = runtime.intent(self.run_id, self.primary_id, call);
+        let mut intent = if call.is_unguarded() {
+            let runtime = runtime.clone();
+            let (run, actor) = (self.run_id, self.primary_id);
+            tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))
+                .await
+                .map_err(|_| ToolError::Operation)?
+        } else {
+            runtime.intent(self.run_id, self.primary_id, call)
+        };
         let (resource_class, requested_runtime_ms, resource_settings) =
             self.ledger().requested_command_resources()?;
         if command {
@@ -2794,7 +2804,7 @@ impl RunLoop<'_> {
                 crate::session::RunFailure::ToolStopped,
             ));
         }
-        let intent = match self.primary_intent(runtime, call.clone())? {
+        let intent = match self.primary_intent(runtime, call.clone()).await? {
             None => return Ok(SkillInitialization::Stopped),
             Some(intent) => intent,
         };
@@ -2856,7 +2866,7 @@ impl RunLoop<'_> {
                 index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
                 raw_digest: file.digest,
             };
-            let Some(mut intent) = self.primary_intent(runtime, call)? else {
+            let Some(mut intent) = self.primary_intent(runtime, call).await? else {
                 self.active_time_floor
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(DefinitionInitialization::Stopped);

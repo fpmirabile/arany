@@ -1443,41 +1443,76 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
 }
 
 pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
-    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
-        serialize(&parse::<T>(payload).ok()?).ok()
+    use crate::tools::permissions::{HookResult, PermissionSource};
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(
+        payload: &str,
+        allowed: impl FnOnce(&T) -> bool,
+    ) -> Option<String> {
+        let value = parse::<T>(payload).ok()?;
+        allowed(&value).then(|| serialize(&value).ok()).flatten()
     }
-    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
-    fn carries_host(value: &serde_json::Value) -> bool {
-        match value {
-            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
-                matches!(key.as_str(), "host" | "host_epoch")
-                    || key == "child_unguarded" && value == "human_only"
-                    || key == "unguarded" && value == "human_only" && fields.len() == 1
-                    || carries_host(value)
-            }),
-            serde_json::Value::Array(items) => items.iter().any(carries_host),
-            serde_json::Value::String(text) => matches!(
-                text.as_str(),
-                "command_unguarded"
-                    | "arany_command_unguarded"
-                    | "exact_command_rule"
-                    | "session_approval"
-            ),
-            _ => false,
-        }
+    fn intent_allowed(intent: &crate::tools::EffectIntent) -> bool {
+        intent.host.is_none() && !intent.call.is_unguarded()
     }
-    if carries_host(&value) {
-        return None;
+    fn observation_allowed(observation: &crate::tools::ToolObservation) -> bool {
+        intent_allowed(&observation.intent)
+            && !matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::Unguarded(_))
+            )
+    }
+    fn criterion_allowed(criterion: &GoalSuccessCriterion) -> bool {
+        !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if call.is_unguarded())
     }
     match kind {
-        "RunStarted" => again::<RunStartedPayload>(payload),
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
-        "ToolFinished" => again::<ToolFinishedPayload>(payload),
-        "ToolPermissionDecided" => again::<crate::tools::permissions::PermissionVerdict>(payload),
-        "AgentSpawned" => again::<SpawnPayload>(payload),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
-        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        "RunStarted" => again::<RunStartedPayload>(payload, |data| {
+            data.config.tool_policy.as_ref().is_none_or(|policy| {
+                policy.host_epoch.is_none()
+                    && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
+            })
+        }),
+        "ToolStarted" => again::<ToolStartedPayload>(payload, |data| intent_allowed(&data.intent)),
+        "ToolFinished" => {
+            again::<ToolFinishedPayload>(payload, |data| observation_allowed(&data.observation))
+        }
+        "ToolPermissionDecided" => {
+            again::<crate::tools::permissions::PermissionVerdict>(payload, |verdict| {
+                verdict.host.is_none()
+                    && verdict.basis != PermissionSource::SessionApproval
+                    && verdict.source != PermissionSource::SessionApproval
+            })
+        }
+        "AgentSpawned" => again::<SpawnPayload>(payload, |data| {
+            data.grant
+                .is_none_or(|grant| grant.unguarded() == crate::tools::UnguardedGrant::Denied)
+                && data
+                    .assignment
+                    .as_ref()
+                    .is_none_or(|assignment| criterion_allowed(&assignment.request.criterion))
+        }),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload, |hook| {
+            intent_allowed(&hook.intent)
+        }),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload, |outcome| {
+            observation_allowed(&outcome.observation)
+                && !matches!(&outcome.result, HookResult::Narrowed { call } if call.is_unguarded())
+        }),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload, |record| {
+            record
+                .refusal
+                .as_ref()
+                .is_none_or(|refusal| refusal.operation != "arany_command_unguarded")
+                && record
+                    .delegation
+                    .iter()
+                    .flatten()
+                    .all(|assignment| match assignment {
+                        ChildAssignment::Researcher { .. } => true,
+                        ChildAssignment::Editor { assignment } => {
+                            criterion_allowed(&assignment.criterion)
+                        }
+                    })
+        }),
         _ => None,
     }
 }

@@ -917,12 +917,16 @@ impl Engine {
 
     pub fn readmit_host_permissions(&self) -> Result<(), EngineError> {
         let _slot = self.claim()?;
+        self.clear_host_epoch();
+        *self.host_permissions.lock().expect("host permissions lock") = Some(HostSettings {
+            digest: None,
+            changed: true,
+        });
         let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
         *self.host_permissions.lock().expect("host permissions lock") = Some(HostSettings {
             digest: snapshot.map(|snapshot| snapshot.digest),
             changed: false,
         });
-        self.clear_host_epoch();
         Ok(())
     }
 

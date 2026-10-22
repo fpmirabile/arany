@@ -1069,6 +1069,7 @@ fn valid_host_approval(
     match verdict.source {
         PermissionSource::Human => {
             host.source_intent.is_none()
+                && verdict.basis != PermissionSource::SessionApproval
                 && verdict.decision == Decision::Ask
                 && (!host.session
                     || matches!(verdict.mode, None | Some(PermissionMode::Default))
@@ -1076,6 +1077,7 @@ fn valid_host_approval(
         }
         PermissionSource::SessionApproval => {
             !host.session
+                && verdict.decision == Decision::Allow
                 && !crate::tools::unguarded::state_target(&tool.intent.call, pin)
                 && matches!(
                     verdict.mode,

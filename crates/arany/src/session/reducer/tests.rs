@@ -5976,6 +5976,21 @@ mod goal_replay_tests {
         };
         verdict.host.as_mut().unwrap().session = true;
         let epoch = verdict.host.as_ref().unwrap().epoch;
+        for basis in [
+            PermissionSource::Mode,
+            PermissionSource::Rule,
+            PermissionSource::SessionApproval,
+        ] {
+            let mut candidate = human.clone();
+            let Event::ToolPermissionDecided { verdict, .. } = &mut candidate else {
+                unreachable!()
+            };
+            verdict.basis = basis;
+            assert_eq!(
+                rejected(&scenario.view, candidate),
+                basis == PermissionSource::SessionApproval
+            );
+        }
         apply(&mut scenario.view, human).unwrap();
         apply(
             &mut scenario.view,
@@ -6038,6 +6053,7 @@ mod goal_replay_tests {
             "limit",
             "revoked",
             "state",
+            "decision",
         ] {
             let mut view = scenario.view.clone();
             let mut event = reused.clone();
@@ -6056,6 +6072,28 @@ mod goal_replay_tests {
                 }
                 "scope" => verdict.host.as_mut().unwrap().session = true,
                 "revoked" => view.host_epoch_floor = u64::MAX,
+                "decision" => verdict.decision = Decision::Ask,
+                "state" => {
+                    for tool in &mut view.runs[0].tools {
+                        let ToolCall::CommandUnguarded { args, .. } = &mut tool.intent.call else {
+                            unreachable!()
+                        };
+                        args.push("/state/settings.json".into());
+                        if let Some(permission) = &mut tool.permission_verdict {
+                            permission.intent_digest = tool.intent.digest();
+                        }
+                        if let Some(observation) = &mut tool.observation {
+                            observation.intent = tool.intent.clone();
+                            observation.attestation =
+                                Some(crate::tools::Attestation::for_site(&tool.intent));
+                        }
+                    }
+                    let intent = &view.runs[0].tools.last().unwrap().intent;
+                    verdict.intent_digest = intent.digest();
+                    let source = view.runs[0].tools[0].intent.digest();
+                    verdict.host.as_mut().unwrap().source_intent = Some(source);
+                    assert_eq!(view.host_approval(intent, epoch), Some(source));
+                }
                 _ => {
                     let intent = &mut view.runs[0].tools.last_mut().unwrap().intent;
                     match case {
@@ -6067,12 +6105,6 @@ mod goal_replay_tests {
                         }
                         "environment" => intent.host.as_mut().unwrap().environment_digest = [9; 32],
                         "limit" => intent.limits.runtime_ms = scenario.host.limits.runtime_ms + 1,
-                        "state" => {
-                            let ToolCall::CommandUnguarded { args, .. } = &mut intent.call else {
-                                unreachable!()
-                            };
-                            args.push("/state/settings.json".into());
-                        }
                         _ => unreachable!(),
                     }
                     verdict.intent_digest = intent.digest();

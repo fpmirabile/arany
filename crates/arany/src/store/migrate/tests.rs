@@ -1628,3 +1628,61 @@ fn pre_host_migrations_never_create_live_authority() {
         );
     }
 }
+
+#[test]
+fn pre_host_migrations_preserve_marker_words_in_data() {
+    for marker in [
+        "command_unguarded",
+        "arany_command_unguarded",
+        "exact_command_rule",
+        "session_approval",
+    ] {
+        let mut tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+        tool["intent"]["call"] =
+            serde_json::json!({"operation":"search","path":"src","query":marker});
+        let (run, agent) = intent_scope(&tool).unwrap();
+        let event = Event::decode(
+            "ToolStarted",
+            crate::test_support::payload_version("ToolStarted"),
+            &tool.to_string(),
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ToolStarted", &payload),
+            Some(payload)
+        );
+        let mut finished: Value = serde_json::from_str(GLOB_TOOLFINISHED).unwrap();
+        finished["output"] = marker.into();
+        let event = Event::decode(
+            "ToolFinished",
+            crate::test_support::payload_version("ToolFinished"),
+            &finished.to_string(),
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ToolFinished", &payload),
+            Some(payload)
+        );
+        let mut provider: Value = serde_json::from_str(GLOB_PROVIDERCALLRECORDED).unwrap();
+        provider["response_id"] = marker.into();
+        let event = Event::decode(
+            "ProviderCallRecorded",
+            crate::test_support::payload_version("ProviderCallRecorded"),
+            &provider.to_string(),
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ProviderCallRecorded", &payload),
+            Some(payload)
+        );
+    }
+}
