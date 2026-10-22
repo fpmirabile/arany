@@ -296,6 +296,10 @@ impl LinearState {
             self.line_open = false;
         }
         writeln!(writer, "Draft (not sent):")?;
+        if composer.has_text_pastes() {
+            writeln!(writer, "  {}", escape_terminal(&composer.display_text().0))?;
+            writeln!(writer, "Expanded text (not sent):")?;
+        }
         for line in composer.text().split('\n') {
             writeln!(writer, "  {}", escape_terminal(line))?;
         }

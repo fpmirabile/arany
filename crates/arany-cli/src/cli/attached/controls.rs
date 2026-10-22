@@ -2323,6 +2323,7 @@ mod tests {
             .append(
                 original_id,
                 arany::Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Prior accepted objective".into(),
                     workspace_identity,

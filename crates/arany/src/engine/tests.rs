@@ -85,6 +85,7 @@ mod goal_workspace_lease_tests {
             session_id,
             None,
             Event::GoalStarted {
+                include_paths: Some(Vec::new()),
                 goal_id,
                 objective: "Keep the Workspace lease through Store acknowledgment".into(),
                 workspace_identity,
@@ -216,6 +217,7 @@ mod goal_workspace_lease_tests {
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: RESUMABLE_OBJECTIVE.into(),
                     workspace_identity,

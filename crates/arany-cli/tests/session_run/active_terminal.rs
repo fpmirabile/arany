@@ -408,7 +408,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             });
         }
         if expect_draft {
-            patterns.push(b"Draft retained: 6 characters; Enter submits");
+            patterns.push(b"Draft retained: 9222 characters; Enter submits");
         }
         if expect_idle {
             patterns.push(if inline { b"\x1b[?25h" } else { b"Input:" });
@@ -497,6 +497,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 .0,
             2
         );
+        let pasted = format!("@not-admitted /exit {}", "p".repeat(9196));
+        assert_eq!(pasted.len(), 9 * 1024);
+        write_input(&input, format!("\x1b[200~{pasted}\x1b[201~").as_bytes());
     }
     match exit {
         ActiveExit::ProviderFailure => {
@@ -807,7 +810,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 }
         );
         if expect_draft {
-            write_input(&input, b"\x1b[3~\r");
+            write_input(&input, b"\x1b[D\x1b[3~\x1b[3~\r");
             for expected in [7, 8] {
                 assert_eq!(
                     stages
@@ -990,6 +993,13 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     }
     assert!(!transcript.contains("Answer:"));
     assert!(!transcript.contains("OMITTED_CANARY"));
+    assert!(
+        !transcript.contains("@not-admitted"),
+        "unsent payload stays collapsed and undisclosed"
+    );
+    if expect_draft {
+        assert!(transcript.contains("Pasted Content 9216 chars"));
+    }
     assert!(!transcript.contains("test-key"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1027,6 +1037,14 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let view = SessionView::replay(session_id, &events)
         .expect("strict replay")
         .expect("Session");
+    assert!(
+        events.iter().all(|event| !event
+            .event
+            .payload()
+            .expect("payload")
+            .contains("@not-admitted")),
+        "unsubmitted paste never enters the journal"
+    );
     assert_eq!(view.runs.len(), 1);
     assert_eq!(
         view.runs[0].status,

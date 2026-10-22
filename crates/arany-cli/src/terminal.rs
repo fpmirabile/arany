@@ -43,7 +43,7 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     invoked_objective, parse_submission, skill_invocation, transcript_agents,
 };
-pub use composer::{CompletionLayout, Composer, ComposerEdit};
+pub use composer::{CompletionLayout, Composer, ComposerDraft, ComposerEdit};
 use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
@@ -1076,6 +1076,34 @@ impl AttachedTerminal {
             && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
     }
 
+    pub fn handle_draft_detail(&mut self, composer: &mut Composer, input: TerminalInput) -> bool {
+        if self.is_linear() {
+            return false;
+        }
+        let limit = composer.paste_detail().and_then(|(_, text, _)| {
+            let size = self.terminal.as_mut()?.size().ok()?;
+            Some(view::paste_detail_scroll_limit(
+                text,
+                usize::from(size.width),
+                usize::from(size.height),
+            ))
+        });
+        if let Some(limit) = limit {
+            composer.clamp_detail_scroll(limit);
+        }
+        let handled = composer.inspect_input(input);
+        if let Some(limit) = limit {
+            composer.clamp_detail_scroll(limit);
+        }
+        if handled {
+            self.cancel_clipboard_paste();
+            if input == TerminalInput::Paste {
+                let _ = self.take_paste();
+            }
+        }
+        handled
+    }
+
     pub fn handle_transcript_input(
         &mut self,
         input: TerminalInput,
@@ -1681,6 +1709,12 @@ impl AttachedTerminal {
             ratatui::layout::Position::ORIGIN,
             self.terminal.as_mut().expect("owned terminal").size()?,
         ));
+        if let Some((label, text, scroll)) = composer.paste_detail() {
+            let palette = self.palette();
+            return self.draw_frame(screen.height, |frame, area| {
+                view::draw_paste_detail(frame, area, &label, text, scroll, palette);
+            });
+        }
         if self.mode == TerminalMode::Fullscreen && self.transcript_open {
             return self.draw_pager(view, notice, screen);
         }

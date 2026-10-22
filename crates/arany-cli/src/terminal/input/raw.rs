@@ -1,5 +1,5 @@
 use super::{
-    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_DRAFT_BYTES, ReaderEvent, TerminalInput,
+    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_PASTE_BYTES, ReaderEvent, TerminalInput,
     admit_input, map_input, pointer_input, terminal_input,
 };
 use crossterm::event::{
@@ -466,7 +466,7 @@ impl Paste {
         if self.overflow {
             return;
         }
-        if self.bytes.len() == MAX_DRAFT_BYTES {
+        if self.bytes.len() == MAX_PASTE_BYTES {
             self.bytes.clear();
             self.overflow = true;
         } else {

@@ -10,6 +10,54 @@ use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
 pub(super) const MAX_DRAFT_BYTES: usize = 8 * 1024;
+pub(super) const MAX_PASTE_BYTES: usize = 64 * 1024;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct TextPaste {
+    range: std::ops::Range<usize>,
+    characters: usize,
+    suffix: usize,
+}
+
+impl TextPaste {
+    fn label(&self) -> String {
+        let label = format!("[Pasted Content {} chars]", self.characters);
+        if self.suffix == 1 {
+            label
+        } else {
+            format!("{label} #{}", self.suffix)
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ComposerDraft {
+    text: String,
+    pastes: Vec<TextPaste>,
+    images: Vec<ImageAttachment>,
+    cursor: usize,
+}
+
+impl ComposerDraft {
+    pub fn images(&self) -> &[ImageAttachment] {
+        &self.images
+    }
+    pub fn editable_text(&self) -> String {
+        editable_text(&self.text, &self.pastes)
+    }
+}
+
+fn editable_text(text: &str, pastes: &[TextPaste]) -> String {
+    let mut result = String::new();
+    let mut start = 0;
+    for paste in pastes {
+        result.push_str(&text[start..paste.range.start]);
+        result.push(' ');
+        start = paste.range.end;
+    }
+    result.push_str(&text[start..]);
+    result
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ComposerEdit {
@@ -45,6 +93,10 @@ impl CompletionLayout {
 #[derive(Default)]
 pub struct Composer {
     text: String,
+    pastes: Vec<TextPaste>,
+    retained: Option<ComposerDraft>,
+    pending_draft: Option<ComposerDraft>,
+    detail_scroll: Option<usize>,
     text_only: bool,
     images: Vec<ImageAttachment>,
     cursor: usize,
@@ -58,7 +110,8 @@ pub struct Composer {
     file_candidates: Vec<String>,
     skills: Vec<String>,
     approval_mode: Option<arany::ApprovalMode>,
-    recalled_draft: Option<(String, Vec<ImageAttachment>)>,
+    recalled_draft: Option<ComposerDraft>,
+    recalled_pending: bool,
 }
 
 impl Composer {
@@ -71,14 +124,167 @@ impl Composer {
 
     pub fn restore_prompt(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
         let literal = (!self.text_only && text.starts_with('/')).then(|| format!("/{text}"));
-        self.insert_paste(literal.as_deref().unwrap_or(text))
+        self.insert_text(literal.as_deref().unwrap_or(text), false)
     }
-    pub fn remember_and_clear(&mut self) {
-        let draft = self.take();
-        let images = self.take_images();
+    pub fn remember_and_clear(&mut self) -> bool {
+        if self.recalled_pending {
+            return false;
+        }
+        self.recalled_draft = Some(self.take_draft());
+        true
+    }
+
+    pub fn take_draft(&mut self) -> ComposerDraft {
+        let draft = ComposerDraft {
+            text: std::mem::take(&mut self.text),
+            pastes: std::mem::take(&mut self.pastes),
+            images: std::mem::take(&mut self.images),
+            cursor: self.cursor,
+        };
         self.clear();
-        self.recalled_draft = Some((draft, images));
+        draft
     }
+
+    pub fn restore_draft(&mut self, draft: ComposerDraft) -> bool {
+        let separator = usize::from(!self.text.is_empty() && !draft.text.is_empty());
+        let limit = if self.text_only {
+            MAX_DRAFT_BYTES
+        } else {
+            MAX_PASTE_BYTES
+        };
+        if self.text.len() + draft.text.len() + separator > limit
+            || self.images.len() + draft.images.len() > MAX_MESSAGE_IMAGES
+            || self
+                .images
+                .iter()
+                .chain(&draft.images)
+                .map(ImageAttachment::byte_len)
+                .sum::<usize>()
+                > MAX_IMAGE_BYTES
+        {
+            if self.retained.is_none() {
+                self.retained = Some(draft);
+            } else if self.recalled_pending {
+                self.pending_draft = Some(draft);
+            } else {
+                self.recalled_draft = Some(draft);
+                self.recalled_pending = true;
+            }
+            return false;
+        }
+        let offset = draft.text.len() + separator;
+        for paste in &mut self.pastes {
+            paste.range.start += offset;
+            paste.range.end += offset;
+        }
+        let mut text = draft.text;
+        if separator != 0 {
+            text.push('\n');
+        }
+        text.push_str(&self.text);
+        let mut pastes = draft.pastes;
+        for mut paste in self.pastes.drain(..) {
+            if pastes
+                .iter()
+                .any(|old| old.characters == paste.characters && old.suffix == paste.suffix)
+            {
+                paste.suffix = pastes
+                    .iter()
+                    .filter(|old| old.characters == paste.characters)
+                    .map(|old| old.suffix)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+            }
+            pastes.push(paste);
+        }
+        let mut images = draft.images;
+        images.append(&mut self.images);
+        self.cursor = if self.text.is_empty() {
+            draft.cursor
+        } else {
+            self.cursor + offset
+        };
+        self.text = text;
+        self.pastes = pastes;
+        self.images = images;
+        true
+    }
+
+    pub fn has_text_pastes(&self) -> bool {
+        !self.pastes.is_empty()
+    }
+
+    pub fn editable_text(&self) -> String {
+        editable_text(&self.text, &self.pastes)
+    }
+
+    pub(super) fn display_text(&self) -> (String, usize) {
+        let mut text = String::new();
+        let mut start = 0;
+        let mut cursor = self.cursor;
+        for paste in &self.pastes {
+            text.push_str(&self.text[start..paste.range.start]);
+            let label = paste.label();
+            if self.cursor >= paste.range.end {
+                cursor = cursor - paste.range.len() + label.len();
+            }
+            text.push_str(&label);
+            start = paste.range.end;
+        }
+        text.push_str(&self.text[start..]);
+        (text, cursor)
+    }
+
+    pub(super) fn paste_detail(&self) -> Option<(String, &str, usize)> {
+        let scroll = self.detail_scroll?;
+        let (label, text) = self.selected_paste()?;
+        Some((label, text, scroll))
+    }
+
+    pub(super) fn clamp_detail_scroll(&mut self, maximum: usize) {
+        if let Some(scroll) = &mut self.detail_scroll {
+            *scroll = (*scroll).min(maximum);
+        }
+    }
+
+    pub fn inspect_input(&mut self, input: TerminalInput) -> bool {
+        if let Some(scroll) = self.detail_scroll.as_mut() {
+            match input {
+                TerminalInput::Escape | TerminalInput::Submit => self.detail_scroll = None,
+                TerminalInput::Up => *scroll = scroll.saturating_sub(1),
+                TerminalInput::Down => *scroll = scroll.saturating_add(1).min(MAX_PASTE_BYTES * 10),
+                TerminalInput::PageUp => *scroll = scroll.saturating_sub(10),
+                TerminalInput::PageDown => {
+                    *scroll = scroll.saturating_add(10).min(MAX_PASTE_BYTES * 10)
+                }
+                TerminalInput::Home => *scroll = 0,
+                TerminalInput::End => *scroll = MAX_PASTE_BYTES * 10,
+                TerminalInput::Interrupt => {
+                    self.detail_scroll = None;
+                    return false;
+                }
+                TerminalInput::Resize | TerminalInput::Suspend | TerminalInput::Shutdown(_) => {
+                    return false;
+                }
+                _ => {}
+            }
+            return true;
+        }
+        if input == TerminalInput::Tab && self.selected_paste().is_some() {
+            self.detail_scroll = Some(0);
+            return true;
+        }
+        false
+    }
+
+    pub fn selected_paste(&self) -> Option<(String, &str)> {
+        self.pastes
+            .iter()
+            .find(|paste| paste.range.start == self.cursor)
+            .map(|paste| (paste.label(), &self.text[paste.range.clone()]))
+    }
+
     pub fn completion_layout(&self) -> CompletionLayout {
         self.completion_layout
     }
@@ -143,7 +349,7 @@ impl Composer {
     }
 
     pub fn file_query(&self) -> Option<String> {
-        if self.text_only {
+        if self.text_only || !self.pastes.is_empty() {
             return None;
         }
         if self.cursor < self.text.len()
@@ -236,6 +442,9 @@ impl Composer {
         if self.text_only {
             return Err("Child messages are text only; draft retained");
         }
+        if self.retained.is_some() || self.pending_draft.is_some() {
+            return Err("Two drafts retained; submit or clear this draft, then press Up");
+        }
         if self.images.len() == MAX_MESSAGE_IMAGES {
             return Err("draft already has four images; submit or clear it first");
         }
@@ -258,10 +467,29 @@ impl Composer {
     }
 
     pub fn submission(&self) -> Result<Submission<'_>, CommandParseError> {
+        if self.has_text_pastes() {
+            let editable = self.editable_text();
+            if editable.trim_start().starts_with('/') {
+                return Err(CommandParseError::Attachments);
+            }
+            return Ok(Submission::Objective(&self.text));
+        }
         self.parse_submission(&self.text)
     }
 
     pub fn parse_submission<'a>(&self, text: &'a str) -> Result<Submission<'a>, CommandParseError> {
+        if text.len()
+            > if self.text_only {
+                MAX_DRAFT_BYTES
+            } else {
+                MAX_PASTE_BYTES
+            }
+        {
+            return Err(CommandParseError::TooLong);
+        }
+        if !text.starts_with('/') && !text.trim().is_empty() {
+            return Ok(Submission::Objective(text));
+        }
         if self.text_only {
             return if text.trim().is_empty() {
                 Err(CommandParseError::Empty)
@@ -283,7 +511,19 @@ impl Composer {
     }
 
     pub fn insert_paste(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
-        if text.len() > MAX_DRAFT_BYTES {
+        self.insert_text(text, !self.text_only)
+    }
+
+    fn insert_text(&mut self, text: &str, collapse: bool) -> Result<ComposerEdit, &'static str> {
+        if self.retained.is_some() || self.pending_draft.is_some() {
+            return Err("Two drafts retained; submit or clear this draft, then press Up");
+        }
+        let limit = if collapse {
+            MAX_PASTE_BYTES
+        } else {
+            MAX_DRAFT_BYTES
+        };
+        if self.text.len() + text.len() > limit {
             return Ok(ComposerEdit::AtCapacity);
         }
         if text
@@ -293,11 +533,35 @@ impl Composer {
             return Err("paste contains unsupported control characters");
         }
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        if self.text.len() + text.len() > MAX_DRAFT_BYTES {
-            return Ok(ComposerEdit::AtCapacity);
-        }
         if text.is_empty() {
             return Ok(ComposerEdit::Unchanged);
+        }
+        let characters = text.chars().count();
+        let chip = collapse && characters > 1000;
+        if !chip && !self.can_type(text.len()) {
+            return Ok(ComposerEdit::AtCapacity);
+        }
+        for paste in &mut self.pastes {
+            if paste.range.start >= self.cursor {
+                paste.range.start += text.len();
+                paste.range.end += text.len();
+            }
+        }
+        if chip {
+            let suffix = self
+                .pastes
+                .iter()
+                .filter(|paste| paste.characters == characters)
+                .map(|paste| paste.suffix)
+                .max()
+                .unwrap_or(0)
+                + 1;
+            self.pastes.push(TextPaste {
+                range: self.cursor..self.cursor + text.len(),
+                characters,
+                suffix,
+            });
+            self.pastes.sort_by_key(|paste| paste.range.start);
         }
         self.text.insert_str(self.cursor, &text);
         let target = self.cursor + text.len();
@@ -320,6 +584,8 @@ impl Composer {
     pub fn clear(&mut self) {
         self.skills_tab = false;
         self.text.clear();
+        self.pastes.clear();
+        self.detail_scroll = None;
         self.images.clear();
         self.cursor = 0;
         self.vertical_grapheme_column = None;
@@ -333,6 +599,7 @@ impl Composer {
         self.vertical_grapheme_column = None;
         self.completion_index = 0;
         self.completion_hidden = false;
+        self.pastes.clear();
         std::mem::take(&mut self.text)
     }
 
@@ -354,7 +621,7 @@ impl Composer {
     }
 
     pub(super) fn command_preview(&self) -> Option<CommandPreview> {
-        if self.text_only {
+        if self.text_only || !self.pastes.is_empty() {
             return None;
         }
         if let Some((items, selected)) = self.file_menu() {
@@ -398,11 +665,13 @@ impl Composer {
 
     #[must_use]
     pub fn recall_pending(&self) -> bool {
-        self.recalled_draft.is_some()
+        self.recalled_draft.is_some() || self.retained.is_some() || self.pending_draft.is_some()
     }
 
     pub fn has_open_menu(&self) -> bool {
-        self.file_menu().is_some() || self.completion_menu().is_some()
+        self.detail_scroll.is_some()
+            || self.file_menu().is_some()
+            || self.completion_menu().is_some()
     }
 
     fn skill_matches<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> + 'a {
@@ -414,7 +683,7 @@ impl Composer {
     }
 
     pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
-        if self.text_only {
+        if self.text_only || !self.pastes.is_empty() {
             return None;
         }
         if self.completion_hidden || self.cursor != self.text.len() {
@@ -444,11 +713,16 @@ impl Composer {
     pub fn apply(&mut self, input: TerminalInput) -> ComposerEdit {
         if input == TerminalInput::Up
             && self.is_empty()
-            && let Some((draft, images)) = self.recalled_draft.take()
+            && let Some(draft) = self
+                .retained
+                .take()
+                .or_else(|| self.pending_draft.take())
+                .or_else(|| self.recalled_draft.take())
         {
-            self.text = draft;
-            self.images = images;
-            self.cursor = self.text.len();
+            if self.recalled_draft.is_none() {
+                self.recalled_pending = false;
+            }
+            self.restore_draft(draft);
             return ComposerEdit::Changed;
         }
         if let Some((items, selected)) = self.file_menu() {
@@ -575,7 +849,29 @@ impl Composer {
                 _ => {}
             }
         }
+        if (self.retained.is_some() || self.pending_draft.is_some())
+            && matches!(
+                input,
+                TerminalInput::Character(_) | TerminalInput::Newline | TerminalInput::Tab
+            )
+        {
+            return ComposerEdit::AtCapacity;
+        }
         let edit = self.apply_edit(input);
+        if let Some(paste) = self
+            .pastes
+            .iter()
+            .find(|paste| paste.range.start < self.cursor && self.cursor < paste.range.end)
+        {
+            self.cursor = if matches!(
+                input,
+                TerminalInput::Left | TerminalInput::WordLeft | TerminalInput::Up
+            ) {
+                paste.range.start
+            } else {
+                paste.range.end
+            };
+        }
         if edit == ComposerEdit::Changed {
             self.completion_index = 0;
             self.completion_hidden = false;
@@ -588,7 +884,9 @@ impl Composer {
             self.vertical_grapheme_column = None;
         }
         match input {
-            TerminalInput::Tab if !self.text_only && self.cursor == self.text.len() => {
+            TerminalInput::Tab
+                if !self.text_only && self.pastes.is_empty() && self.cursor == self.text.len() =>
+            {
                 let Some(suffix) = completion_suffix(&self.text, &self.choices) else {
                     return ComposerEdit::Unchanged;
                 };
@@ -603,17 +901,19 @@ impl Composer {
                 ComposerEdit::Unchanged
             }
             TerminalInput::Newline => {
-                if self.text.len() == MAX_DRAFT_BYTES {
+                if !self.can_type(1) {
                     return ComposerEdit::AtCapacity;
                 }
+                self.shift_pastes(1);
                 self.text.insert(self.cursor, '\n');
                 self.cursor += 1;
                 ComposerEdit::Changed
             }
             TerminalInput::Character(character) => {
-                if self.text.len() + character.len_utf8() > MAX_DRAFT_BYTES {
+                if !self.can_type(character.len_utf8()) {
                     return ComposerEdit::AtCapacity;
                 }
+                self.shift_pastes(character.len_utf8());
                 if self.cursor == self.text.len() {
                     self.text.push(character);
                     self.cursor = self.text.len();
@@ -674,7 +974,42 @@ impl Composer {
         }
     }
 
-    fn remove_range(&mut self, start: usize, end: usize) {
+    fn can_type(&self, bytes: usize) -> bool {
+        let editable = self.text.len()
+            - self
+                .pastes
+                .iter()
+                .map(|paste| paste.range.len())
+                .sum::<usize>();
+        editable + bytes <= MAX_DRAFT_BYTES && self.text.len() + bytes <= MAX_PASTE_BYTES
+    }
+
+    fn shift_pastes(&mut self, bytes: usize) {
+        for paste in &mut self.pastes {
+            if paste.range.start >= self.cursor {
+                paste.range.start += bytes;
+                paste.range.end += bytes;
+            }
+        }
+    }
+
+    fn remove_range(&mut self, mut start: usize, mut end: usize) {
+        for paste in &self.pastes {
+            if paste.range.start < end && paste.range.end > start {
+                start = start.min(paste.range.start);
+                end = end.max(paste.range.end);
+            }
+        }
+        self.pastes.retain_mut(|paste| {
+            if paste.range.start >= start && paste.range.end <= end {
+                return false;
+            }
+            if paste.range.start >= end {
+                paste.range.start -= end - start;
+                paste.range.end -= end - start;
+            }
+            true
+        });
         self.text.replace_range(start..end, "");
         self.cursor = self
             .text
@@ -1033,20 +1368,190 @@ mod tests {
         assert_eq!(composer.insert_paste(""), Ok(ComposerEdit::Unchanged));
         composer.clear();
         assert_eq!(
-            composer.insert_paste(&"x".repeat(MAX_DRAFT_BYTES)),
+            composer.insert_paste(&"x".repeat(MAX_PASTE_BYTES)),
             Ok(ComposerEdit::Changed)
         );
         composer.apply(TerminalInput::Left);
         let cursor = composer.cursor_byte_offset();
         assert_eq!(composer.insert_paste("y"), Ok(ComposerEdit::AtCapacity));
         assert_eq!(composer.cursor_byte_offset(), cursor);
-        assert_eq!(composer.text(), "x".repeat(MAX_DRAFT_BYTES));
+        assert_eq!(composer.text(), "x".repeat(MAX_PASTE_BYTES));
         composer.clear();
         assert_eq!(
-            composer.insert_paste(&"\r\n".repeat(MAX_DRAFT_BYTES / 2 + 1)),
+            composer.insert_paste(&"\r\n".repeat(MAX_PASTE_BYTES / 2 + 1)),
             Ok(ComposerEdit::AtCapacity)
         );
         assert!(composer.text().is_empty());
+        composer.insert_paste("prefix").unwrap();
+        assert_eq!(
+            composer.insert_paste(&"\r\n".repeat(MAX_PASTE_BYTES / 2)),
+            Ok(ComposerEdit::AtCapacity)
+        );
+        assert_eq!(composer.text(), "prefix");
+    }
+
+    #[test]
+    fn refused_restoration_preserves_every_waiting_payload_and_merge_labels() {
+        let mut composer = Composer::default();
+        composer.insert_paste(&"first ".repeat(200)).unwrap();
+        let first = composer.take_draft();
+        composer.insert_paste(&"later ".repeat(200)).unwrap();
+        assert!(composer.restore_draft(first));
+        assert_eq!(
+            composer.text(),
+            format!("{}\n{}", "first ".repeat(200), "later ".repeat(200))
+        );
+        assert_eq!(composer.pastes[0].label(), "[Pasted Content 1200 chars]");
+        assert_eq!(composer.pastes[1].label(), "[Pasted Content 1200 chars] #2");
+        composer.clear();
+        composer.insert_paste(&"a".repeat(MAX_PASTE_BYTES)).unwrap();
+        let held = composer.take_draft();
+        composer.insert_paste(&"b".repeat(MAX_PASTE_BYTES)).unwrap();
+        assert!(!composer.restore_draft(held));
+        let mut note = Composer::default();
+        note.insert_paste("waiting steering note").unwrap();
+        assert!(!composer.restore_draft(note.take_draft()));
+        let mut submitted = Composer::default();
+        submitted.insert_paste(&"original ".repeat(1100)).unwrap();
+        assert!(!composer.restore_draft(submitted.take_draft()));
+        assert!(
+            !composer.remember_and_clear(),
+            "a waiting note is not replaceable recall"
+        );
+        assert_eq!(composer.text(), "b".repeat(MAX_PASTE_BYTES));
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "a".repeat(MAX_PASTE_BYTES));
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "original ".repeat(1100));
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "waiting steering note");
+    }
+
+    #[test]
+    fn small_pastes_share_the_typed_limit_while_chips_use_the_expanded_limit() {
+        let mut composer = Composer::default();
+        for _ in 0..8 {
+            assert_eq!(
+                composer.insert_paste(&"a".repeat(1000)),
+                Ok(ComposerEdit::Changed)
+            );
+        }
+        assert_eq!(
+            composer.insert_paste(&"é".repeat(96)),
+            Ok(ComposerEdit::Changed)
+        );
+        let editable = composer.text().to_owned();
+        assert_eq!(editable.len(), MAX_DRAFT_BYTES);
+        for text in ["a", "é", "\r\n"] {
+            assert_eq!(composer.insert_paste(text), Ok(ComposerEdit::AtCapacity));
+            assert_eq!(composer.text(), editable);
+        }
+        composer.apply(TerminalInput::Home);
+        assert_eq!(
+            composer.insert_paste(&"@hidden ".repeat(200)),
+            Ok(ComposerEdit::Changed)
+        );
+        assert!(composer.has_text_pastes());
+        assert!(
+            arany::mention_paths(&composer.editable_text())
+                .unwrap()
+                .is_empty()
+        );
+        let draft = composer.take_draft();
+        assert!(composer.restore_draft(draft.clone()));
+        assert_eq!(composer.insert_paste("@file"), Ok(ComposerEdit::AtCapacity));
+        assert_eq!(
+            composer.apply(TerminalInput::Character('a')),
+            ComposerEdit::AtCapacity
+        );
+        assert_eq!(composer.take_draft(), draft);
+    }
+
+    #[test]
+    fn text_attachments_keep_exact_bytes_atomic_identity_and_literal_syntax() {
+        for (input, characters, collapsed) in [
+            ("a".repeat(1000), 1000, false),
+            ("中".repeat(1001), 1001, true),
+            ("e\u{301}".repeat(501), 1002, true),
+            ("a\r\n".repeat(500), 1000, false),
+            ("a\r".repeat(501), 1002, true),
+        ] {
+            let mut composer = Composer::default();
+            composer.insert_paste(&input).unwrap();
+            let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
+            assert_eq!(composer.text(), normalized);
+            assert_eq!(composer.has_text_pastes(), collapsed);
+            if collapsed {
+                assert_eq!(
+                    composer.display_text().0,
+                    format!("[Pasted Content {characters} chars]")
+                );
+                composer.apply(TerminalInput::Left);
+                assert_eq!(composer.selected_paste().unwrap().1, normalized);
+                let cursor = composer.cursor_byte_offset();
+                assert!(composer.inspect_input(TerminalInput::Tab));
+                assert!(composer.inspect_input(TerminalInput::Character('x')));
+                assert!(composer.inspect_input(TerminalInput::Escape));
+                assert_eq!(composer.cursor_byte_offset(), cursor);
+                assert_eq!(composer.text(), normalized);
+                composer.apply(TerminalInput::Delete);
+                assert!(composer.is_empty());
+            }
+        }
+        let mut composer = Composer::default();
+        composer.insert_paste("before ").unwrap();
+        let payload = format!("/exit @private.txt {}", "text ".repeat(1840));
+        composer.insert_paste(&payload).unwrap();
+        composer
+            .insert_paste(" after [Pasted Content 1001 chars]")
+            .unwrap();
+        assert_eq!(
+            composer.editable_text(),
+            "before   after [Pasted Content 1001 chars]"
+        );
+        assert_eq!(
+            composer.submission(),
+            Ok(Submission::Objective(composer.text()))
+        );
+        let exact = composer.text().to_owned();
+        composer.remember_and_clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), exact);
+        assert!(composer.has_text_pastes());
+        composer.apply(TerminalInput::Home);
+        composer.insert_paste("/help ").unwrap();
+        assert_eq!(composer.submission(), Err(CommandParseError::Attachments));
+
+        composer.clear();
+        for _ in 0..20 {
+            composer.insert_paste(&"a".repeat(1001)).unwrap();
+        }
+        assert_eq!(composer.pastes.len(), 20);
+        assert!(
+            composer
+                .display_text()
+                .0
+                .ends_with("[Pasted Content 1001 chars] #20")
+        );
+        composer.apply(TerminalInput::Home);
+        composer.apply(TerminalInput::Delete);
+        composer.insert_paste(&"a".repeat(1001)).unwrap();
+        assert_eq!(
+            composer.pastes[0].label(),
+            "[Pasted Content 1001 chars] #21"
+        );
+        composer.clear();
+        composer.insert_paste(&"a".repeat(1001)).unwrap();
+        assert_eq!(composer.pastes[0].label(), "[Pasted Content 1001 chars]");
+        let mut child = Composer::text_only();
+        assert_eq!(
+            child.insert_paste(&"a".repeat(MAX_DRAFT_BYTES + 1)),
+            Ok(ComposerEdit::AtCapacity)
+        );
+        assert!(child.is_empty());
     }
 
     #[test]

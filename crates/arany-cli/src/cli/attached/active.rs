@@ -4,12 +4,12 @@ use super::{
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
-    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, ShutdownSignal,
-    TerminalError, TerminalInput, TerminalNotice,
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
+    ShutdownSignal, TerminalError, TerminalInput, TerminalNotice,
 };
 use arany::{
-    CompactionFailure, CompactionRecord, CompactionStatus, ImageAttachment, RunCancellation,
-    RunHints, RunOutcome, RunRequest, RunSteering, SessionView, SteeringRefused,
+    CompactionFailure, CompactionRecord, CompactionStatus, RunCancellation, RunHints, RunOutcome,
+    RunRequest, RunSteering, SessionView, SteeringRefused,
 };
 use std::time::Duration;
 
@@ -50,18 +50,37 @@ fn linear_approval_choice(
     }
 }
 
-// A continuation submits no text, so its @-mentions come from the source Goal's objective.
-pub(super) fn mention_source<'a>(
-    view: &'a SessionView,
+fn submission_includes(
+    admission: &Admission,
+    view: &SessionView,
     start: GoalStart,
-    text: &'a str,
-) -> &'a str {
+    text: &str,
+) -> Result<Vec<std::path::PathBuf>, String> {
     if start == GoalStart::Continue {
-        view.continuable_goal()
-            .map_or(text, |source| source.objective.as_str())
-    } else {
-        text
+        return continuation_includes(view);
     }
+    if start == GoalStart::Resume {
+        return view
+            .interrupted_goal_id()
+            .and_then(|id| view.goal(id))
+            .and_then(|goal| goal.include_paths.as_ref())
+            .map(|paths| paths.iter().map(std::path::PathBuf::from).collect())
+            .ok_or_else(|| arany::EngineError::GoalIncludesUnavailable.to_string());
+    }
+    objective_includes(admission, text)
+}
+
+fn continuation_includes(view: &SessionView) -> Result<Vec<std::path::PathBuf>, String> {
+    let source = view
+        .continuable_goal()
+        .ok_or("No exhausted Goal is available to continue")?;
+    source
+        .include_paths
+        .as_ref()
+        .map(|paths| paths.iter().map(std::path::PathBuf::from).collect())
+        .ok_or_else(|| {
+            "Goal include paths are unknown; start a new Goal with explicit inputs".into()
+        })
 }
 
 pub(super) fn objective_includes(
@@ -85,13 +104,20 @@ pub(super) fn validate_objective_inputs(
         return Ok(());
     }
     let paths = objective_includes(admission, objective)?;
+    validate_include_paths(admission, &paths)
+}
+
+fn validate_include_paths(
+    admission: &Admission,
+    paths: &[std::path::PathBuf],
+) -> Result<(), String> {
     let root = arany::StateRoot::admit(&admission.state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
     arany::validate_workspace_inputs(
         &root,
         &admission.workspace,
         std::env::current_dir().ok().as_deref(),
-        &paths,
+        paths,
     )
     .map_err(|error| error.to_string())
 }
@@ -254,11 +280,9 @@ fn active_escape(
 
 fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
     if !restored {
-        return Some(if note_returned {
-            "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
-        } else {
-            "Retained draft and newer text exceed the draft limit; newer text kept"
-        });
+        return Some(
+            "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up",
+        );
     }
     if sent {
         Some(STEERING_SENT)
@@ -269,51 +293,14 @@ fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'s
     }
 }
 
-fn retained_linear_draft(note: Option<String>, held: Option<HeldDraft>) -> Option<HeldDraft> {
-    match (note, held) {
-        (Some(note), Some((text, images))) => Some((format!("{note}\n{text}"), images)),
-        (Some(note), None) => Some((note, Vec::new())),
-        (None, draft) => draft,
-    }
-}
+type HeldDraft = ComposerDraft;
 
-type HeldDraft = (String, Vec<ImageAttachment>);
-
-// Move a refused linear draft aside so later lines cannot be appended to it.
 fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
-    if composer.is_empty() {
-        return None;
-    }
-    Some((composer.take(), composer.take_images()))
+    (!composer.is_empty()).then(|| composer.take_draft())
 }
 
-fn release_held_draft(composer: &mut Composer, (text, images): HeldDraft) -> bool {
-    let typed = composer.take();
-    let typed_images = composer.take_images();
-    let joined = if typed.is_empty() {
-        text
-    } else {
-        format!("{text}\n{typed}")
-    };
-    let fits = matches!(
-        composer.insert_paste(&joined),
-        Ok(ComposerEdit::Changed | ComposerEdit::Unchanged)
-    ) && images
-        .into_iter()
-        .chain(typed_images.iter().cloned())
-        .all(|image| composer.attach_image(image).is_ok());
-    if !fits {
-        composer.clear();
-        composer
-            .insert_paste(&typed)
-            .expect("newer draft came from this composer");
-        for image in typed_images {
-            composer
-                .attach_image(image)
-                .expect("newer images came from this composer");
-        }
-    }
-    fits
+fn release_held_draft(composer: &mut Composer, draft: HeldDraft) -> bool {
+    composer.restore_draft(draft)
 }
 
 pub(super) fn preflight_idle_run(
@@ -370,16 +357,18 @@ pub(super) fn preflight_idle_run(
         account_id: view.defaults.account_id,
     })
     .map_err(|error| format!("Error: {error}"))?;
-    validate_objective_inputs(admission, mention_source(view, start, draft)).map_err(|error| {
-        format!(
-            "Error: {error}; {}",
-            if linear {
-                "check the file inputs and enter a new line"
-            } else {
-                "check the file inputs; draft unchanged"
-            }
-        )
-    })
+    submission_includes(admission, view, start, draft)
+        .and_then(|paths| validate_include_paths(admission, &paths))
+        .map_err(|error| {
+            format!(
+                "Error: {error}; {}",
+                if linear {
+                    "check the file inputs and enter a new line"
+                } else {
+                    "check the file inputs; draft unchanged"
+                }
+            )
+        })
 }
 
 #[expect(
@@ -395,6 +384,7 @@ pub(super) async fn submit_objective(
     composer: &mut Composer,
     objective: String,
     skill: Option<String>,
+    draft: Option<&ComposerDraft>,
 ) -> Result<RunSubmission, String> {
     let profile = view
         .defaults
@@ -444,7 +434,8 @@ pub(super) async fn submit_objective(
     let mut approval_answer = Composer::default();
     let mut approval_unarmed = false;
     let mut approval_review_notice = false;
-    let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
+    let editable = draft.map_or_else(|| objective.clone(), ComposerDraft::editable_text);
+    let include_paths = submission_includes(admission, view, goal, &editable)?;
     let execution_settings = super::controls::settings_or_defaults(admission).await?;
     let goal = goal_request(view, goal, execution_settings)?;
     let request = RunRequest {
@@ -452,7 +443,7 @@ pub(super) async fn submit_objective(
         session_id: Some(view.id),
         title: None,
         objective,
-        images: composer.take_images(),
+        images: draft.map_or_else(|| composer.take_images(), |draft| draft.images().to_vec()),
         workspace: admission.workspace.clone(),
         launch_directory: std::env::current_dir().ok(),
         include_paths,
@@ -569,9 +560,12 @@ pub(super) async fn submit_objective(
                 // The undelivered note predates the held draft, so restore it ahead of that draft.
                 let note = steering.withdraw_note().filter(|_| terminal.is_linear());
                 let withdrawn = note.is_some();
-                let pending = retained_linear_draft(note, held.take());
-                // A held draft returns before the undelivered note, so a newer draft wins over the note.
-                let restored = pending.is_none_or(|draft| release_held_draft(composer, draft));
+                let mut restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
+                if let Some(note) = note {
+                    let mut note_draft = Composer::default();
+                    note_draft.insert_paste(&note).expect("admitted steering note");
+                    restored &= composer.restore_draft(note_draft.take_draft());
+                }
                 if (result.is_err() || had_offer || sent || had_held)
                     && terminal.restore_draft_input(composer.text().len()).is_err()
                 {
@@ -789,6 +783,12 @@ pub(super) async fn submit_objective(
                     }
                     continue;
                 }
+                if terminal.handle_draft_detail(composer, input) {
+                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                        break "terminal rendering failed".into();
+                    }
+                    continue;
+                }
                 if terminal.ignores_page_key(input) {
                     continue;
                 }
@@ -862,11 +862,10 @@ pub(super) async fn submit_objective(
                         Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
                     }
                     TerminalInput::LineContinued if held.is_some() => {
-                        composer.take();
-                        if terminal.restore_draft_input(0).is_err() {
+                        if terminal.restore_draft_input(composer.text().len()).is_err() {
                             break "terminal input failed".to_owned();
                         }
-                        Some(Feedback::Transient("A draft is already retained; line not kept".into()))
+                        Some(Feedback::Transient("Both drafts retained; wait for the Run to finish".into()))
                     }
                     TerminalInput::LineContinued => {
                         Some(Feedback::History(format!("Draft: {} characters; Enter offers it as a steering note", composer.character_count())))
@@ -901,9 +900,7 @@ pub(super) async fn submit_objective(
                         match super::controls::handle_active_submission(composer, view, starting_sequence) {
                             ActiveSubmission::SteeringNote(text) => {
                                 let feedback = if terminal.is_linear() && held.is_some() {
-                                    composer.take();
-                                    composer.take_images();
-                                    Feedback::Transient("A draft is already retained; line not kept".into())
+                                    Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
                                 } else if !composer.images().is_empty() {
                                     Feedback::Transient("Steering notes are text only; draft retained".into())
                                 } else if offered.is_some() && !terminal.is_linear() {
@@ -924,7 +921,7 @@ pub(super) async fn submit_objective(
                                     }
                                 };
                                 // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
-                                if terminal.is_linear()
+                                if terminal.is_linear() && held.is_none()
                                     && let Some(draft) = hold_draft(composer)
                                 {
                                     held = Some(draft);
@@ -955,7 +952,7 @@ pub(super) async fn submit_objective(
                                 None
                             }
                             ActiveSubmission::Rejected(notice) => {
-                                if terminal.is_linear() {
+                                if terminal.is_linear() && !composer.has_text_pastes() {
                                     composer.take();
                                 }
                                 Some(Feedback::History(format!("Error: {notice}")))
@@ -1669,6 +1666,7 @@ mod goal_request_tests {
     fn session_with_goal(autonomous: bool) -> SessionView {
         let session_id = arany::SessionId::new();
         let event = arany::Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id: arany::GoalId::new(),
             objective: "Ship the parser".into(),
             workspace_identity: WorkspaceIdentity {
@@ -1851,11 +1849,12 @@ mod goal_request_tests {
         abandon_drafts_for_exit(&mut composer, &mut held, &steering);
         assert!(composer.is_empty());
         // Run end hands back nothing, so the deferred Ctrl+D exits instead of retaining a draft.
-        assert!(retained_linear_draft(steering.withdraw_note(), held.take()).is_none());
+        assert!(steering.withdraw_note().is_none());
+        assert!(held.is_none());
     }
 
     #[test]
-    fn continuation_takes_its_file_mentions_from_the_source_objective() {
+    fn continuation_reuses_admitted_includes_without_expanding_stored_text() {
         let mut view = session_with_goal(true);
         view.goals[0].objective = "Fix @src/lib.rs".into();
         view.goals[0].status = arany::GoalStatus::Failed;
@@ -1889,14 +1888,17 @@ mod goal_request_tests {
         };
         view.goals[0].run_ids.push(run.id);
         view.runs.push(run);
+        view.goals[0].include_paths = Some(vec!["admitted.rs".into()]);
         assert_eq!(
-            mention_source(&view, GoalStart::Continue, ""),
-            "Fix @src/lib.rs"
+            continuation_includes(&view).unwrap(),
+            vec![std::path::PathBuf::from("admitted.rs")]
         );
-        assert_eq!(mention_source(&view, GoalStart::Plain, ""), "");
+        view.goals[0].include_paths = Some(Vec::new());
+        assert!(continuation_includes(&view).unwrap().is_empty());
+        view.goals[0].include_paths = None;
         assert_eq!(
-            arany::mention_paths(mention_source(&view, GoalStart::Continue, "")).unwrap(),
-            vec![std::path::PathBuf::from("src/lib.rs")]
+            continuation_includes(&view),
+            Err(arany::EngineError::GoalIncludesUnavailable.to_string())
         );
     }
 
@@ -2056,15 +2058,21 @@ mod goal_request_tests {
     #[test]
     fn overflowing_release_keeps_the_newer_draft() {
         let mut composer = Composer::default();
-        for character in std::iter::repeat_n('a', 5000) {
-            composer.apply(TerminalInput::Character(character));
-        }
+        composer.insert_paste(&"a".repeat(64 * 1024)).unwrap();
         let held = hold_draft(&mut composer).expect("refused draft is held");
         for character in std::iter::repeat_n('b', 4000) {
             composer.apply(TerminalInput::Character(character));
         }
         assert!(!release_held_draft(&mut composer, held));
         assert_eq!(composer.text(), "b".repeat(4000));
+        assert_eq!(
+            composer.apply(TerminalInput::Character('c')),
+            ComposerEdit::AtCapacity
+        );
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "a".repeat(64 * 1024));
+        assert!(composer.has_text_pastes());
     }
 
     #[test]
@@ -2089,12 +2097,14 @@ mod escape_tests {
         assert_eq!(
             run_end_notice(false, true, false),
             Some(
-                "Retained draft, steering note and newer text exceed the draft limit; newer text kept"
+                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
             )
         );
         assert_eq!(
             run_end_notice(false, false, false),
-            Some("Retained draft and newer text exceed the draft limit; newer text kept")
+            Some(
+                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
+            )
         );
         assert_eq!(
             run_end_notice(false, true, true),
@@ -2102,23 +2112,6 @@ mod escape_tests {
         );
         assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
         assert_eq!(run_end_notice(false, false, true), None);
-    }
-
-    #[test]
-    fn undelivered_note_stays_ahead_of_a_held_draft() {
-        assert_eq!(
-            retained_linear_draft(Some("note".into()), Some(("held".into(), Vec::new()))),
-            Some(("note\nheld".into(), Vec::new()))
-        );
-        assert_eq!(
-            retained_linear_draft(Some("note".into()), None),
-            Some(("note".into(), Vec::new()))
-        );
-        assert_eq!(
-            retained_linear_draft(None, Some(("held".into(), Vec::new()))),
-            Some(("held".into(), Vec::new()))
-        );
-        assert_eq!(retained_linear_draft(None, None), None);
     }
 
     #[test]

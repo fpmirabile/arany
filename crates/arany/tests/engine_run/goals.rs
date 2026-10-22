@@ -3,6 +3,98 @@ use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(workspace.join("admitted.txt"), "Admitted facts").expect("include");
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Answer(Answer {
+            text: "first".into(),
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "second".into(),
+        }),
+    ]));
+    let mut first = request(&workspace, "Read the admitted input");
+    first.include_paths = vec!["admitted.txt".into()];
+    first.goal.finish_after_run = false;
+    let first = run_to_end(&engine, &provider, first).await.unwrap();
+    let mut next = request(&workspace, "Continue");
+    next.session_id = Some(first.session_id);
+    next.title = None;
+    next.include_paths = vec!["never-admitted.txt".into()];
+    next.goal = arany::GoalRequest::resume(first.goal_id, true);
+    run_to_end(&engine, &provider, next).await.unwrap();
+    {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].input.includes, calls[0].input.includes);
+        assert!(calls[1].input.includes[0].contains("Admitted facts"));
+    }
+    engine.close().await.unwrap();
+    let (events, _) = replayed(&state_path, first.session_id).await;
+    for path in [
+        ".env",
+        "nested/.env.local",
+        ".git/config",
+        "../outside",
+        "line\nfeed",
+    ] {
+        let mut forged = events.clone();
+        let event = forged
+            .iter_mut()
+            .find(|event| matches!(event.event, Event::GoalStarted { .. }))
+            .unwrap();
+        if let Event::GoalStarted { include_paths, .. } = &mut event.event {
+            *include_paths = Some(vec![path.into()]);
+        }
+        assert!(
+            event.event.payload().is_err(),
+            "protected recorded path {path:?}"
+        );
+        assert!(SessionView::replay(first.session_id, &forged).is_err());
+    }
+}
+
+#[tokio::test]
+async fn objective_plus_includes_overflow_has_a_typed_pre_admission_error() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    let component = "\"".repeat(170);
+    let relative = format!("{component}/{component}/{component}");
+    let path = workspace.join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "").unwrap();
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+    let mut input = request(&workspace, &"\0".repeat(64 * 1024));
+    input.include_paths = vec![relative.into(); 16];
+    let error = run_to_end(&engine, &provider, input).await.unwrap_err();
+    assert!(matches!(error, EngineError::GoalInputTooLarge), "{error:?}");
+    assert_eq!(error.to_string(), "objective plus includes too large");
+    assert!(provider.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+    assert!(
+        arany::list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn default_goal_completes_past_64_calls_and_30_active_minutes() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "Fact");
@@ -985,7 +1077,9 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     )
     .expect("first engine");
     let mut first = request(&workspace, "Ship the migration");
-    first.include_paths.clear();
+    std::fs::write(workspace.join("admitted.txt"), "Original admitted input").expect("include");
+    first.include_paths = vec!["admitted.txt".into()];
+    first.objective = "Ship the migration; literal @never-admit.txt".into();
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
             max_provider_calls: Some(1),
@@ -1053,10 +1147,23 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         Err(EngineError::GoalNotContinuable)
     ));
 
+    let mut changed = continue_request(initial.goal_id);
+    changed.include_paths = vec!["never-admit.txt".into()];
+    assert!(matches!(
+        run_to_end(&engine, &provider, changed).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    let requests = Arc::clone(&provider.requests);
     let continued = run_to_end(&engine, &provider, continue_request(initial.goal_id))
         .await
         .expect("continued Goal Run");
     assert_ne!(continued.goal_id, initial.goal_id);
+    {
+        let calls = requests.lock().expect("requests");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input.includes.len(), 1);
+        assert!(calls[0].input.includes[0].contains("Original admitted input"));
+    }
     assert!(matches!(
         run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
         Err(EngineError::GoalNotContinuable)
@@ -1077,7 +1184,12 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     assert_eq!(old.status, arany::GoalStatus::Failed);
     assert_eq!(old.run_ids.len(), 1);
     assert_eq!(new.continues, Some(initial.goal_id));
-    assert_eq!(new.objective, "Ship the migration");
+    assert_eq!(
+        new.objective,
+        "Ship the migration; literal @never-admit.txt"
+    );
+    assert_eq!(new.include_paths, Some(vec!["admitted.txt".into()]));
+    assert_eq!(old.include_paths, new.include_paths);
     assert_eq!(new.budget.max_provider_calls, Some(4));
     assert_eq!(new.status, arany::GoalStatus::Completed);
     assert_eq!(new.run_ids.len(), 1);
@@ -1496,6 +1608,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
@@ -1607,6 +1720,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
             workspace_identity: identity,
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             phase: arany::GoalPhase::Implementation,
             autonomous: false,
@@ -5822,6 +5936,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             workspace_identity: identity,
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             phase: arany::GoalPhase::Implementation,
             autonomous: false,

@@ -1507,6 +1507,7 @@ mod exec_jsonl_tests {
 
     fn goal_started(goal_id: GoalId, objective: &str) -> Event {
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: objective.into(),
             workspace_identity: WorkspaceIdentity {
@@ -2003,6 +2004,7 @@ mod goal_status_tests {
                 },
             },
             Event::GoalStarted {
+                include_paths: Some(Vec::new()),
                 goal_id: GoalId::new(),
                 objective: "Ship the parser".into(),
                 workspace_identity: WorkspaceIdentity {

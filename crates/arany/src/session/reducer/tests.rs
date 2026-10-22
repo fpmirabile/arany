@@ -93,6 +93,7 @@ mod goal_recovery_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: "Inspect before planning".into(),
                 workspace_identity: WorkspaceIdentity {
@@ -288,6 +289,7 @@ mod goal_replay_tests {
         continues: Option<GoalId>,
     ) -> Event {
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
             workspace_identity: WorkspaceIdentity {
@@ -2676,6 +2678,28 @@ mod goal_replay_tests {
             .is_err(),
             "a second continuation of one source"
         );
+        for paths in [None, Some(vec!["new-input.txt".into()])] {
+            assert!(
+                replay(vec![continued(GoalId::new(), &|event| {
+                    if let Event::GoalStarted { include_paths, .. } = event {
+                        *include_paths = paths.clone();
+                    }
+                })])
+                .is_err(),
+                "continuation cannot replace admitted inputs"
+            );
+        }
+        let mut migrated = events.clone();
+        migrated.push(continued(GoalId::new(), &|_| {}));
+        for event in &mut migrated {
+            if let Event::GoalStarted { include_paths, .. } = event {
+                *include_paths = None;
+            }
+        }
+        assert!(
+            SessionView::replay_open(session, &session_with(session, migrated)).is_ok(),
+            "already-recorded legacy continuations replay with unknown inputs"
+        );
         let mismatches: [&dyn Fn(&mut Event); 3] = [
             &|event| {
                 if let Event::GoalStarted { objective, .. } = event {
@@ -2712,6 +2736,7 @@ mod goal_replay_tests {
             ..GoalBudget::default()
         };
         let mut events = vec![Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
             workspace_identity: WorkspaceIdentity {
@@ -2917,6 +2942,7 @@ mod goal_replay_tests {
                     },
                 },
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: GOAL_OBJECTIVE.into(),
                     workspace_identity: WorkspaceIdentity {
@@ -3411,6 +3437,7 @@ mod goal_replay_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {
@@ -4515,6 +4542,7 @@ mod goal_replay_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {
@@ -4708,6 +4736,7 @@ mod goal_replay_tests {
             ],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {

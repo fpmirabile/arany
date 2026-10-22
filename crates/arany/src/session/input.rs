@@ -13,7 +13,7 @@ const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
-const MAX_INCLUDES: usize = 16;
+pub(crate) const MAX_INCLUDES: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputError {
@@ -186,7 +186,7 @@ fn read_relative(
     let names = relative_components(path)?;
     let path = path
         .to_str()
-        .filter(|path| path.len() <= 4096)
+        .filter(|path| crate::tools::types::valid_relative(path, false))
         .ok_or(InputError::InvalidPath)?
         .to_owned();
     let mut directory = root.try_clone()?;

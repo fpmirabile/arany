@@ -56,6 +56,11 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
             "notes/./facts.txt",
             "notes/../facts.txt",
             "notes/facts.txt/",
+            ".env",
+            "notes/.env.local",
+            ".git/config",
+            "notes/line\nfeed",
+            "notes\\facts.txt",
         ] {
             let mut candidate = request(&workspace, "Question");
             candidate.include_paths = vec![path.into()];

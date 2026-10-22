@@ -55,12 +55,21 @@ impl Event {
             Self::ContextCompacted { record, .. } => record.validate(),
             Self::GoalStarted {
                 objective,
+                include_paths,
                 workspace_identity: WorkspaceIdentity { inode, .. },
                 budget,
                 resource_settings,
                 continues,
                 ..
             } => {
+                if include_paths.as_ref().is_some_and(|paths| {
+                    paths.len() > crate::session::input::MAX_INCLUDES
+                        || paths
+                            .iter()
+                            .any(|path| !crate::tools::types::valid_relative(path, false))
+                }) {
+                    return Err(ReplayError::InvalidPayload);
+                }
                 if continues.is_some_and(|id| !id.valid()) {
                     return Err(ReplayError::InvalidPayload);
                 }

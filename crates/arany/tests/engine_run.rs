@@ -1149,6 +1149,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Unfinished question".into(),
                     workspace_identity,
@@ -1606,6 +1607,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         };
         for policy in [CollaborationPolicy::Single, CollaborationPolicy::Team { max_active_children: 8 }] {
             let mut attempt = next();
+            attempt.objective = "large paste ".repeat(800);
             attempt.policy = policy;
             assert!(matches!(run_to_end(&engine, &provider, attempt).await, Err(EngineError::Store(arany::StoreError::StorageFull))));
             assert!(calls.lock().unwrap().is_empty(), "database capacity rejection must precede inference");
@@ -3816,7 +3818,7 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
             .expect("first maximum include");
         std::fs::write(workspace.join("notes/b.txt"), vec![b'b'; 128 * 1024])
             .expect("second maximum include");
-        let mut too_much_context = request(&workspace, "Question");
+        let mut too_much_context = request(&workspace, &"large paste ".repeat(800));
         too_much_context.include_paths = vec!["notes/a.txt".into(), "notes/b.txt".into()];
         too_much_context.policy = CollaborationPolicy::Auto {
             max_active_children: 3,
@@ -4166,6 +4168,7 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         let state_path = temp.path().join("state");
         let provider =
             ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);
+        let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4173,14 +4176,43 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         )
         .expect("engine");
         let mut next = request(&workspace, &"\0".repeat(64 * 1024));
+        let objective = next.objective.clone();
         next.images = vec![image_fixture(arany::MAX_IMAGE_BYTES)];
+        let images = next.images.clone();
         let outcome = run_to_end(&engine, &provider, next)
             .await
             .expect("maximal objective and image Run");
         assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(outcome.run.objective, objective);
+        assert_eq!(outcome.run.images, images);
+        {
+            let calls = requests.lock().expect("requests");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.objective, objective);
+            assert_eq!(
+                calls[0]
+                    .input
+                    .images
+                    .iter()
+                    .map(|value| value.image.clone())
+                    .collect::<Vec<_>>(),
+                images
+            );
+        }
         let session_id = outcome.session_id;
         engine.close().await.expect("engine shutdown");
 
+        std::fs::remove_file(workspace.join("notes/facts.txt")).expect("remove original include");
+        let reopened = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("reopened Engine");
+        let fork = reopened
+            .fork_session(session_id, workspace.clone(), None)
+            .await
+            .expect("fork canonical history without inputs");
+        reopened.close().await.expect("close reopened Engine");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
             .expect("reopened store");
         let events = store
@@ -4199,6 +4231,20 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
             (accepted, started),
             (1, 1),
             "the maximal Run is durably admitted and replayable"
+        );
+        for id in [session_id, fork] {
+            let view = store
+                .load_view(id)
+                .await
+                .expect("strict replay")
+                .expect("Session");
+            assert_eq!(view.runs[0].objective, objective);
+            assert_eq!(view.runs[0].images, images);
+        }
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            1,
+            "reopen and fork never call Provider"
         );
         store.close().await.expect("store shutdown");
     });

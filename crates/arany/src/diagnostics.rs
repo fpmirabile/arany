@@ -343,6 +343,8 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::GoalAdmissionUncertain => "GoalAdmissionUncertain",
         EngineError::GoalBudgetExhausted => "GoalBudgetExhausted",
         EngineError::GoalNotContinuable => "GoalNotContinuable",
+        EngineError::GoalIncludesUnavailable => "GoalIncludesUnavailable",
+        EngineError::GoalInputTooLarge => "GoalInputTooLarge",
         EngineError::Busy => "Busy",
         EngineError::RewindBlocked => "RewindBlocked",
         EngineError::RewindPreviewExpired => "RewindPreviewExpired",

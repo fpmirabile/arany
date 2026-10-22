@@ -1,6 +1,6 @@
 use super::TerminalError;
 #[cfg(unix)]
-use super::composer::MAX_DRAFT_BYTES;
+use super::composer::{MAX_DRAFT_BYTES, MAX_PASTE_BYTES};
 #[cfg(not(unix))]
 use crossterm::event;
 use crossterm::event::{
@@ -203,7 +203,7 @@ impl TerminalReader {
     pub(super) fn restore_draft_bytes(&mut self, bytes: usize) -> io::Result<()> {
         #[cfg(unix)]
         {
-            if bytes > MAX_DRAFT_BYTES {
+            if bytes > MAX_PASTE_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "draft too long",
@@ -482,7 +482,9 @@ fn decode_line(bytes: &[u8]) -> LineEvent {
 #[cfg(unix)]
 fn validate_segment(bytes: Vec<u8>, draft_bytes: usize) -> Option<String> {
     let line = String::from_utf8(bytes).ok()?;
-    if line.chars().any(char::is_control) || draft_bytes + line.len() > MAX_DRAFT_BYTES {
+    if line.chars().any(char::is_control)
+        || (!line.is_empty() && draft_bytes + line.len() > MAX_DRAFT_BYTES)
+    {
         return None;
     }
     Some(line)
@@ -975,7 +977,7 @@ mod tests {
         );
         assert!(
             terminal_reader
-                .restore_draft_bytes(MAX_DRAFT_BYTES + 1)
+                .restore_draft_bytes(MAX_PASTE_BYTES + 1)
                 .is_err()
         );
         terminal_reader.restore_draft_bytes(6000).unwrap();
@@ -1389,9 +1391,9 @@ mod tests {
                     b"/exit\r\n/setup\x03\t".to_vec(),
                     Ok("/exit\r\n/setup\x03\t".to_owned()),
                 ),
-                (vec![b'x'; MAX_DRAFT_BYTES], Ok("x".repeat(MAX_DRAFT_BYTES))),
+                (vec![b'x'; MAX_PASTE_BYTES], Ok("x".repeat(MAX_PASTE_BYTES))),
                 (
-                    vec![b'x'; MAX_DRAFT_BYTES + 1],
+                    vec![b'x'; MAX_PASTE_BYTES + 1],
                     Err("paste is too large; paste a smaller section"),
                 ),
                 (vec![0xff], Err("paste is not valid UTF-8")),

@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-22`
 
@@ -10,7 +10,7 @@
 
 Users can compose, inspect, remove and submit text and image attachments as compact draft chips, with complete accepted content available on Session resume. This is one draft-attachment capability delivered in text and image vertical slices; existing image transport/persistence is reused. It delivers [Daily use first item 5](../../NEXT_STEPS.md#daily-use-first). Shared [Goal defaults](../../docs/specs/goals.md#lifecycle-budgets-and-recovery) already apply independently.
 
-Text chips expand inline into the ordinary objective; image chips refer to the existing typed PNG payload. No upload service, Workspace artifact, paste cache or new durable format is needed. Submitted content is durable; unsubmitted drafts remain process-local, as in the selected Codex behavior.
+Text chips expand inline into the ordinary objective; image chips refer to the existing typed PNG payload. No upload service, Workspace artifact or paste cache is needed. The recorded continuation decision below requires a minimal Goal payload migration. Submitted content is durable; unsubmitted drafts remain process-local, as in the selected Codex behavior.
 
 ## Research
 
@@ -57,6 +57,8 @@ Editing/design rules: [AGENTS.md:23–24](../../AGENTS.md#product-and-implementa
 
 ## Chosen direction
 
+- **Decided 2026-10-22 (lead; Claude/Codex history parity):** `/goal continue` must never reparse stored objectives for `@` mentions. Reuse the original admitted include list. Existing GoalStarted records and plan contracts do not contain it, so slice 1 records required nullable `include_paths` in GoalStarted v8 with a v7 migration and canonical fixture. Migration records unknown, never guessed paths; unknown refuses continuation with explicit new-submission guidance. Ordinary existing-Goal Runs also reuse the recorded list rather than replacement request paths. This supersedes the initial no-stored-format-change assumption. Rationale lives in [D-23](../../docs/research/next-step-decision-register.md#d-23--pasted-text-and-continuation-inputs); behavior lives in Goals/Terminal/Execution.
+
 - **Decided 2026-10-22 (peer parity: Codex threshold and labels above):** pasted blocks collapse at **strictly more than 1,000 Unicode scalar characters**, after CRLF/CR-to-LF normalization, into `[Pasted Content N chars]`; same-size duplicates append ` #2`, ` #3` outside the bracket using the current highest suffix plus one. Reuse the base when no same-size paste remains. Claude's >800-character OR >3-line rule and `[Pasted text #N +M lines]` are recorded alternatives, not additional triggers. No line-based Arany threshold.
 - **Decided 2026-10-22 (owner; peer parity with Codex):** remove the invented 16-text-attachment quota. There is no separate count setting; nonempty payloads and all editable text share the existing 65,536-byte objective cap. Remove empty elements and coalesce adjacent editable spans, so finite bytes also bound metadata. Codex accepts up to 1,048,576 characters; Arany's smaller cap is required by existing journal/context admission, not a new product limit ([Execution persistence bounds](../../docs/specs/execution.md#persistence-bounds), [Session context](../../docs/specs/session.md#context-and-compaction)).
 - **Decided 2026-10-22 (peer parity: Codex history, backtrack and portable media above):** persist expanded text and PNG bytes through existing `GoalStarted.objective` and `MessageAccepted` before dispatch. Unsent drafts and original text-chip boundaries stay process-local; canonical text imports remain editable regardless of length, while conversation rewind restores images as numbered chips. Local recall may retain original chip metadata. Reuse Session history rather than copying Claude's expiring paste cache. No unsent crash recovery, stable cross-session paste IDs or legacy-record preservation work.
@@ -80,7 +82,7 @@ The [security pass](../../agents/security.md#security-pass-triggers) covers larg
 | Rendering | Existing four-row editor viewport and bounded scrollable text detail; image metadata only. No full payload in notices, diagnostics or telemetry. |
 | Input lifecycle | One pending clipboard or path read; reuse two-second read and one-second cleanup bounds and generation checks. Framed input keeps ten-second termination deadline and whole-record overflow drain. No automatic retry. |
 | Steering/child input | Existing 8-KiB per-Run steering and eight child drafts ×8 KiB; child input stays text-only. |
-| Canonical/model storage | Existing 400-KiB GoalStarted, 656-KiB MessageAccepted, 10,000-Event lineage, aggregate Store, context/request and compaction bounds. No separate disk cache, retention sweep or new stored format. |
+| Canonical/model storage | Existing 400-KiB GoalStarted, 656-KiB MessageAccepted, 10,000-Event lineage, aggregate Store, context/request and compaction bounds. No separate disk cache or retention sweep; the continuation decision adds only the admitted-path list. |
 
 Journal acknowledgment, Run identity and Provider reservation precede dispatch. A missing payload or uncertain acceptance stops continuation; replay performs no effects. Compaction may summarize text and image metadata/previous interpretation; canonical bytes remain intact and UI collapse saves no input tokens. No encryption-at-rest, unsent-crash-recovery or universal desktop-support claim. Synthetic canaries must prove pre-submission bytes stay out of diagnostics/errors/telemetry; hostile controls, fake chips and image paths cannot create authority.
 
@@ -94,7 +96,7 @@ Journal acknowledgment, Run identity and Provider reservation precede dispatch. 
 
 ## Vertical slices
 
-1. **One PR: large framed/clipboard text can be attached, inspected and submitted durably.** Cross raw/clipboard admission → composer elements/detail → attached validation → Engine objective → journal → Provider → transcript/reopen. Deliver exact Codex threshold/labels, 64-KiB aggregate admission, atomic removal, linear preview, busy/held-draft retention and steering protections. Update Terminal/Execution. Extend existing decoder/composer tables for 1,000/1,001 scalars, multibyte/normalization, duplicate labels, more than 16 fitting pastes, aggregate overflow, literal markers and controls. Clipboard/active-terminal journeys prove ingress, cancellation, pre-commit non-disclosure, Store refusal, context overflow and fresh-process resume/fork/replay. Exercise 64-KiB text plus admitted images/escaping under unchanged storage bounds.
+1. **Implemented: large framed/clipboard text can be attached, inspected and submitted durably.** Cross raw/clipboard admission → composer elements/detail → attached validation → Engine objective → journal → Provider → transcript/reopen. Deliver exact Codex threshold/labels, 64-KiB aggregate admission, atomic removal, linear preview, busy/held-draft retention and steering protections. Update Terminal/Execution. Extend existing decoder/composer tables for 1,000/1,001 scalars, multibyte/normalization, duplicate labels, more than 16 fitting pastes, aggregate overflow, literal markers and controls. Clipboard/active-terminal journeys prove ingress, cancellation, pre-commit non-disclosure, Store refusal, context overflow and fresh-process resume/fork/replay. Exercise 64-KiB text plus admitted images/escaping under unchanged storage bounds.
 2. **One PR: typed/startup/restored text uses the same full-capacity draft lifecycle.** Cross typing and `--prompt` → composer → Engine/journal/Provider, and conversation rewind → restored draft → resubmission. Admit text through 64 KiB; keep ordinary typing editable in the existing viewport rather than inventing an 8-KiB collapse trigger. Restore canonical text as editable input regardless of length, retaining local chip metadata only when it is available; preserve literal slash/mention content. Remove text rewind omission; image restoration arrives in slice 3. Update Terminal/Session and applicable admission docs. Existing argument/composer/rewind/terminal owners prove full-byte boundaries, Unicode/caret, refusal retention, suspend/resize and compaction/resume without a second persistence path.
 3. **One PR: clipboard and admitted image paths become removable, recoverable image chips.** Cross clipboard or pasted/dragged PNG path → admitted immutable snapshot → composer chip → Engine image admission → MessageAccepted → Provider → history/rewind. Add `[Image #N]` selection/removal/renumbering, mixed and image-only submission, generation/cancellation handling, focus preservation across detail/resize, linear/no-color accessibility and restoration of canonical images during rewind. Update Terminal/Session; existing Provider/Execution formats suffice. Extend composer/frame, clipboard, Workspace race, rewind and Engine owners for path quoting, inside/outside-root absolute paths, symlinks/hard links, replacement/missing files, unsupported/oversized PNGs, four/five images, held-draft overflow, stale reads, custom/child refusal, lost acknowledgment and Store failure. Remove source files before reopen; assert unchanged image bytes/digests/order and no attachment-source reads or Provider/effect calls during replay. Keep Linux/macOS adapter/native evidence separate.
 
@@ -103,6 +105,6 @@ Each slice is one usable PR, with existing semantic scripted Providers and reope
 ## Exit criteria
 
 - **Research gate passed:** current text/image flows, recovery gaps, journal/context bounds and Claude/Codex behavior are sourced. No closed-source internals or native support are inferred.
-- **Plan gate passed:** owner direction, peer choices and named guarantee constraints resolve the decisions; status is `Ready`, with no residual owner question or new dependency.
+- **Plan gate passed:** owner direction, peer choices and named guarantee constraints resolve the decisions; owner decisions are recorded, with no residual owner question or new dependency.
 - **Implement gate per slice:** exact-content success plus overflow, hostile-input, cancellation, Store failure and replay/resume observations pass through existing owners. A contradictory source finding or required stored-format/dependency change reopens Research before implementation.
 - Owning specs receive behavior as slices land; missing native/live/assistive evidence stays in [NEXT_STEPS](../../NEXT_STEPS.md). Close the completed plan/index under the [planning lifecycle](../README.md#lifecycle).

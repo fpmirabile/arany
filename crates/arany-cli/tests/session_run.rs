@@ -2014,6 +2014,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .append(
                 id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id: pending_goal_id,
                     objective: "pending objective".into(),
                     workspace_identity: WorkspaceIdentity { device: workspace_device, inode: workspace_inode },
@@ -2692,6 +2693,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     workspace_identity: identity,
                 },
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Question".into(),
                     workspace_identity: identity,

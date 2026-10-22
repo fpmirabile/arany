@@ -172,6 +172,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: goal_objective.clone(),
                     workspace_identity: WorkspaceIdentity {

@@ -4184,3 +4184,45 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
         }
     }
 }
+
+#[test]
+fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
+    for width in [16, 20, 50, 80] {
+        let mut composer = Composer::default();
+        let payload = format!("literal @missing /exit\n{}", "content ".repeat(1152));
+        composer.insert_paste("before ").unwrap();
+        composer.insert_paste(&payload).unwrap();
+        composer.apply(TerminalInput::Left);
+        let caret = composer.cursor_byte_offset();
+        let compact = wrapped_composer(&composer, usize::from(width));
+        assert!(!compact.lines.join(" ").contains("@missing"));
+        assert!(composer.inspect_input(TerminalInput::Tab));
+        let (label, text, _) = composer.paste_detail().unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_paste_detail(
+                    frame,
+                    frame.area(),
+                    &label,
+                    text,
+                    0,
+                    Palette { color: false },
+                )
+            })
+            .unwrap();
+        let rendered = (0..8)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("literal @missing"));
+        composer.inspect_input(TerminalInput::End);
+        composer.clamp_detail_scroll(paste_detail_scroll_limit(&payload, usize::from(width), 8));
+        let last = composer.paste_detail().unwrap().2;
+        composer.inspect_input(TerminalInput::Up);
+        assert_eq!(composer.paste_detail().unwrap().2, last - 1);
+        composer.inspect_input(TerminalInput::Escape);
+        assert_eq!(composer.cursor_byte_offset(), caret);
+        assert_eq!(composer.text(), format!("before {payload}"));
+    }
+}

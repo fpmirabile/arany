@@ -1153,6 +1153,7 @@ mod tests {
                 workspace_identity,
             },
             arany::Event::GoalStarted {
+                include_paths: Some(Vec::new()),
                 goal_id: arany::GoalId::new(),
                 objective: "team".into(),
                 workspace_identity,

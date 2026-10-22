@@ -651,6 +651,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             &mut composer,
             prompt,
             startup_skill,
+            None,
         )
         .await?
         {
@@ -762,6 +763,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 continue;
             }
         }
+        if terminal.handle_draft_detail(&mut composer, input) {
+            continue;
+        }
         if terminal
             .handle_transcript_input(input, &view)
             .map_err(|error| error.to_string())?
@@ -784,10 +788,12 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     .is_some_and(|at| at.elapsed() <= EMPTY_INTERRUPT_WINDOW)
                 {
                     if !composer.is_empty() {
-                        composer.remember_and_clear();
-                        notice = Some(Feedback::History(
-                            "Draft saved to input history; Up recalls it".into(),
-                        ));
+                        let saved = composer.remember_and_clear();
+                        notice = Some(Feedback::History(if saved {
+                            "Draft saved to input history; Up recalls it"
+                        } else {
+                            "Other drafts are waiting; submit or clear this draft, then press Up"
+                        }.into()));
                     } else {
                         notice = Some(Feedback::History(
                             rewind::open(
@@ -925,7 +931,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             }
                             error => notice = Some(Feedback::History(format!("Error: {error}"))),
                         }
-                        if terminal.is_linear() {
+                        if terminal.is_linear() && !composer.has_text_pastes() {
                             composer.take();
                         }
                         empty_interrupt = None;
@@ -946,12 +952,12 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             &admission,
                             &view,
                             start,
-                            composer.text(),
+                            &composer.editable_text(),
                             !composer.images().is_empty(),
                             terminal.is_linear(),
                         ) {
                             notice = Some(Feedback::History(message));
-                            if terminal.is_linear() {
+                            if terminal.is_linear() && !composer.has_text_pastes() {
                                 composer.take();
                             }
                             empty_interrupt = None;
@@ -969,7 +975,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             )
                         {
                             notice = Some(Feedback::History("Error: Submit or clear image attachments before switching Sessions".into()));
-                            if terminal.is_linear() {
+                            if terminal.is_linear() && !composer.has_text_pastes() {
                                 composer.take();
                             }
                             empty_interrupt = None;
@@ -979,7 +985,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             controls::validate_idle_command(&view, command, argument)
                         {
                             notice = Some(Feedback::History(format!("Error: {error}")));
-                            if terminal.is_linear() {
+                            if terminal.is_linear() && !composer.has_text_pastes() {
                                 composer.take();
                             }
                             empty_interrupt = None;
@@ -991,12 +997,12 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             &admission,
                             &view,
                             GoalStart::Plain,
-                            composer.text(),
+                            &composer.editable_text(),
                             !composer.images().is_empty(),
                             terminal.is_linear(),
                         ) {
                             notice = Some(Feedback::History(message));
-                            if terminal.is_linear() {
+                            if terminal.is_linear() && !composer.has_text_pastes() {
                                 composer.take();
                             }
                             empty_interrupt = None;
@@ -1004,8 +1010,12 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                         }
                     }
                 }
-                let line = composer.take();
-                let submission = match composer.parse_submission(&line) {
+                let line = composer.text().to_owned();
+                let submission = match if composer.has_text_pastes() {
+                    Ok(Submission::Objective(&line))
+                } else {
+                    composer.parse_submission(&line)
+                } {
                     Err(crate::terminal::CommandParseError::Empty)
                         if !composer.images().is_empty() =>
                     {
@@ -1013,6 +1023,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     }
                     result => result.expect("validated submission"),
                 };
+                if matches!(submission, Submission::Command { .. }) {
+                    composer.take();
+                }
                 match submission {
                     Submission::Objective(_) | Submission::Skill { .. } => {
                         let (objective, skill) = match submission {
@@ -1538,12 +1551,23 @@ async fn submit_idle_run(
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
-    let draft = match start {
-        GoalStart::Plain | GoalStart::Autonomous => draft,
-        GoalStart::Resume | GoalStart::Continue => String::new(),
-    };
+    if composer.is_empty()
+        && !draft.is_empty()
+        && matches!(start, GoalStart::Plain | GoalStart::Autonomous)
+    {
+        composer.insert_paste(&draft).map_err(str::to_owned)?;
+    }
+    let submitted = composer.take_draft();
     match submit_objective(
-        engine, terminal, admission, start, view, composer, objective, skill,
+        engine,
+        terminal,
+        admission,
+        start,
+        view,
+        composer,
+        objective,
+        skill,
+        Some(&submitted),
     )
     .await
     {
@@ -1561,6 +1585,7 @@ async fn submit_idle_run(
             .await
         }
         Ok(RunSubmission::InterruptedBeforeRun) => {
+            composer.restore_draft(submitted);
             finish_interrupted_submission(
                 terminal,
                 admission,
@@ -1574,20 +1599,22 @@ async fn submit_idle_run(
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
             let reloaded = load_view(&admission.state_dir, *session_id).await;
-            // Roster preflight cannot read the Workspace; return the draft only when nothing was committed.
-            if admission.roster.is_some()
-                && composer.is_empty()
-                && !draft.is_empty()
-                && committed_nothing(
-                    reloaded
-                        .as_ref()
-                        .ok()
-                        .map(|reloaded| reloaded.last_sequence),
-                    starting_sequence,
-                )
-            {
-                let _ = composer.insert_paste(&draft);
+            let accepted = reloaded.as_ref().ok().is_some_and(|view| {
+                view.runs
+                    .iter()
+                    .any(|run| run.accepted_sequence > starting_sequence)
+            });
+            let uncertain = reloaded.is_err();
+            if !accepted {
+                composer.restore_draft(submitted);
             }
+            let error = if uncertain {
+                format!(
+                    "{error}; acceptance is unknown; check Session history before submitting again"
+                )
+            } else {
+                error
+            };
             let text = if composer.is_empty() {
                 format!("Error: {error}")
             } else {
@@ -2423,10 +2450,6 @@ async fn load_view(state_dir: &Path, session_id: SessionId) -> Result<SessionVie
     Ok(view)
 }
 
-fn committed_nothing<T: PartialEq>(reloaded: Option<T>, starting: T) -> bool {
-    reloaded.is_some_and(|sequence| sequence == starting)
-}
-
 fn reload_view_or_keep(
     view: &mut SessionView,
     reloaded: Result<SessionView, String>,
@@ -2553,12 +2576,6 @@ mod tests {
         assert!(super::final_startup_notice(None, None).is_none());
     }
 
-    #[test]
-    fn draft_returns_only_when_no_sequence_was_committed() {
-        assert!(super::committed_nothing(Some(7), 7));
-        assert!(!super::committed_nothing(Some(8), 7));
-        assert!(!super::committed_nothing(None, 7));
-    }
     use super::*;
 
     #[test]

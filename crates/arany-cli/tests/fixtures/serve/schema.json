@@ -1103,6 +1103,8 @@
         "goalAdmissionUncertain",
         "goalBudgetExhausted",
         "goalNotContinuable",
+        "goalIncludesUnavailable",
+        "goalInputTooLarge",
         "guardUnavailable",
         "sessionNotIdle",
         "forkNotAtRunBoundary",

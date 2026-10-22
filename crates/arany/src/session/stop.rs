@@ -134,6 +134,7 @@ mod tests {
 
     fn goal(status: GoalStatus, budget_closed: bool) -> GoalView {
         GoalView {
+            include_paths: Some(Vec::new()),
             id: GoalId::new(),
             objective: "Stop".into(),
             workspace_identity: WorkspaceIdentity {

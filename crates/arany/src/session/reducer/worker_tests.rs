@@ -655,6 +655,7 @@ fn fixture_with_manifest(
         },
     });
     f.push(Event::GoalStarted {
+        include_paths: Some(Vec::new()),
         goal_id: goal,
         objective: "Edit".into(),
         workspace_identity: WorkspaceIdentity {

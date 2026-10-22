@@ -2048,6 +2048,7 @@ mod payload_version_tests {
             finished
         );
         let started = Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: "continue".into(),
             workspace_identity: WorkspaceIdentity {
@@ -2062,9 +2063,62 @@ mod payload_version_tests {
         };
         let started_payload = started.payload().expect("payload");
         assert_eq!(
-            Event::decode("GoalStarted", 7, &started_payload, None, None).expect("v7"),
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &started_payload,
+                None,
+                None
+            )
+            .expect("current"),
             started
         );
+        let current: serde_json::Value = serde_json::from_str(&started_payload).unwrap();
+        let mut missing = current.clone();
+        missing.as_object_mut().unwrap().remove("include_paths");
+        assert!(
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &missing.to_string(),
+                None,
+                None
+            )
+            .is_err()
+        );
+        let migrated = goal_started_v7_to_v8(missing).expect("unknown legacy inputs");
+        assert!(migrated["include_paths"].is_null());
+        assert!(
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &migrated.to_string(),
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(goal_started_v7_to_v8(current.clone()).is_none());
+        for paths in [
+            serde_json::json!(["../private"]),
+            serde_json::json!(["/absolute"]),
+            serde_json::json!([""]),
+            serde_json::json!(vec!["input.txt"; 17]),
+            serde_json::json!(["x".repeat(4097)]),
+        ] {
+            let mut invalid = current.clone();
+            invalid["include_paths"] = paths;
+            assert!(
+                Event::decode(
+                    "GoalStarted",
+                    started.version(),
+                    &invalid.to_string(),
+                    None,
+                    None
+                )
+                .is_err()
+            );
+        }
         for (kind, payload) in [
             ("GoalStarted", &started_payload),
             ("GoalFinished", &payload),
