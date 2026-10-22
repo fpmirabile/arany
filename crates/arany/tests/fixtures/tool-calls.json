@@ -10,5 +10,6 @@
   {"operation": "mcp_list", "server": "example"},
   {"operation": "mcp_call", "server": "example", "tool": "echo", "schema_digest": "0000000000000000000000000000000000000000000000000000000000000000", "arguments": "{\"value\":42}"},
   {"operation": "glob", "pattern": "**/*.rs", "path": null, "limit": null},
-  {"operation": "git_branch", "name": null, "start_point": null, "scope": "all", "base": "main", "max_count": 256}
+  {"operation": "git_branch", "name": null, "start_point": null, "scope": "all", "base": "main", "max_count": 256},
+  {"operation": "multiedit", "file_path": "src/main.rs", "expected_digest": "0000000000000000000000000000000000000000000000000000000000000000", "edits": [{"old_string": "old", "new_string": "new", "replace_all": null}]}
 ]

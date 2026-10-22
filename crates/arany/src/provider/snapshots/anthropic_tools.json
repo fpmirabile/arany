@@ -615,6 +615,58 @@
       "name": "arany_git_switch"
     },
     {
+      "description": "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
+      "input_schema": {
+        "additionalProperties": false,
+        "properties": {
+          "edits": {
+            "description": "Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "new_string": {
+                  "description": "Literal replacement; empty removes only the matched bytes.",
+                  "type": "string"
+                },
+                "old_string": {
+                  "description": "Nonempty exact literal text, different from new_string; no Read line-number prefixes.",
+                  "type": "string"
+                },
+                "replace_all": {
+                  "description": "true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false.",
+                  "type": [
+                    "boolean",
+                    "null"
+                  ]
+                }
+              },
+              "required": [
+                "old_string",
+                "new_string",
+                "replace_all"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "expected_digest": {
+            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
+            "type": "string"
+          },
+          "file_path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_path",
+          "expected_digest",
+          "edits"
+        ],
+        "type": "object"
+      },
+      "name": "arany_multiedit"
+    },
+    {
       "cache_control": {
         "type": "ephemeral"
       },
@@ -955,6 +1007,61 @@
                           "args",
                           "cwd",
                           "justification"
+                        ],
+                        "type": "object"
+                      },
+                      {
+                        "additionalProperties": false,
+                        "properties": {
+                          "edits": {
+                            "description": "Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
+                            "items": {
+                              "additionalProperties": false,
+                              "properties": {
+                                "new_string": {
+                                  "description": "Literal replacement; empty removes only the matched bytes.",
+                                  "type": "string"
+                                },
+                                "old_string": {
+                                  "description": "Nonempty exact literal text, different from new_string; no Read line-number prefixes.",
+                                  "type": "string"
+                                },
+                                "replace_all": {
+                                  "description": "true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false.",
+                                  "type": [
+                                    "boolean",
+                                    "null"
+                                  ]
+                                }
+                              },
+                              "required": [
+                                "old_string",
+                                "new_string",
+                                "replace_all"
+                              ],
+                              "type": "object"
+                            },
+                            "type": "array"
+                          },
+                          "expected_digest": {
+                            "description": "Exact lowercase 64-character SHA-256 of the existing file from Read or a file include.",
+                            "type": "string"
+                          },
+                          "file_path": {
+                            "type": "string"
+                          },
+                          "operation": {
+                            "enum": [
+                              "multiedit"
+                            ],
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "operation",
+                          "file_path",
+                          "expected_digest",
+                          "edits"
                         ],
                         "type": "object"
                       }

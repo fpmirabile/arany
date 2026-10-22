@@ -133,6 +133,7 @@ mod tests {
                 "arany_git_commit",
                 "arany_git_branch",
                 "arany_git_switch",
+                "arany_multiedit",
                 "arany_plan"
             ]
         );
