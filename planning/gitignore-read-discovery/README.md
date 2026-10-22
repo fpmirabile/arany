@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`; depends on shared parser dependency approval in [Real-scale command snapshot](../real-scale-command-snapshot/README.md#open-questions-and-gates).
+- Status: `Ready`; the shared parser dependency was approved on 2026-10-22 in [Real-scale command snapshot](../real-scale-command-snapshot/README.md#open-questions-and-gates).
 - Owner: Arany maintainer.
 - Last updated: 2026-10-22.
 - Delivery: Research → Plan → Implement; two vertical slices. No implementation in this documentation change.
@@ -107,7 +107,7 @@ Git is a disclosure filter over its neutralized private view, not a claim that i
 
 ## Open questions
 
-No separate product question remains. This plan shares only the [parser dependency approval](../real-scale-command-snapshot/README.md#open-questions-and-gates). Set it to `Ready` when that is resolved; implementation still depends on the selector slice, not the full snapshot plan.
+None. The shared [parser dependency](../real-scale-command-snapshot/README.md#open-questions-and-gates) is approved; implementation depends on the selector slice, not the full snapshot plan.
 
 ## Exit criteria
 

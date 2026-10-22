@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- **Status:** Draft; Plan gate awaits the exact parser dependency approval below.
+- **Status:** Ready; the owner approved the parser dependency on 2026-10-22.
 - **Owner:** Arany maintainer; implementation owner to be assigned.
 - **Last updated:** 2026-10-22.
 - **Baseline:** `9f8dc3564f6927c52dd7e2b4292d60dfaee3a964`.
@@ -216,9 +216,9 @@ Each PR must leave its shipped behavior usable and preserve all five guarantees.
 
 ## Open questions and gates
 
-1. **Dependency approval — owner:** Git-ignore semantics require a new parser and the unconditional transitive code described above. **Recommend approving `ignore = "=0.4.33"` with the pinned dependency review gate; no new workspace crate.**
+1. **Dependency approval — decided 2026-10-22 (owner):** approved `ignore = "=0.4.33"` with the pinned dependency review gate (`cargo tree`, `cargo deny`) before it lands; no new workspace crate.
 
-Owner Q1–Q3 product choices are settled. The placement decision is settled by the bounded Guard operation and in-process suggestion refinement above; its RSS, queue, cancellation and latency gates are implementation evidence, not a request to relax guarantees. Set this plan to `Ready` after dependency approval. A failed gate or source contradiction returns the affected design to Research before shipping.
+Owner Q1–Q3 product choices are settled. The placement decision is settled by the bounded Guard operation and in-process suggestion refinement above; its RSS, queue, cancellation and latency gates are implementation evidence, not a request to relax guarantees. A failed gate or source contradiction returns the affected design to Research before shipping.
 
 ## Exit criteria
 
