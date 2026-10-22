@@ -28,6 +28,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -162,6 +163,7 @@ pub(super) struct Scope {
     coalition: u64,
     pids: Vec<i32>,
     timebase: ffi::Timebase,
+    capture_cpu: Option<(Identity, u128)>,
     limits: ToolLimits,
     pub(super) teardown: Option<tokio::time::Instant>,
 }
@@ -183,6 +185,7 @@ impl Scope {
             coalition,
             pids: vec![0; maximum as usize + 1],
             timebase,
+            capture_cpu: None,
             limits: ToolLimits::default(),
             teardown: None,
         })
@@ -219,6 +222,34 @@ impl Scope {
             }
         }
         Ok(members)
+    }
+
+    fn begin_capture(&mut self, limits: &ToolLimits) -> Result<(), ToolError> {
+        let members = self.members()?;
+        let [supervisor] = members.as_slice() else {
+            return Err(ToolError::ProtectionUnavailable);
+        };
+        let usage = ffi::rusage(supervisor.pid)?;
+        if !identity(supervisor.pid)?.same_process(*supervisor) {
+            return Err(ToolError::ProtectionUnavailable);
+        }
+        self.capture_cpu = Some((
+            *supervisor,
+            u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time),
+        ));
+        self.apply_limits(selection_limits(limits));
+        self.check_resources()
+    }
+
+    fn cpu_elapsed(&self, member: Identity, ticks: u128) -> Result<u128, ToolError> {
+        let baseline = self
+            .capture_cpu
+            .filter(|(supervisor, _)| supervisor.same_process(member))
+            .map_or(0, |(_, baseline)| baseline);
+        ticks
+            .checked_sub(baseline)
+            .map(|ticks| ticks * u128::from(self.timebase.numer) / u128::from(self.timebase.denom))
+            .ok_or(ToolError::ProtectionUnavailable)
     }
 
     pub(super) fn check_resources(&mut self) -> Result<(), ToolError> {
@@ -258,10 +289,10 @@ impl Scope {
             };
             if memory > self.limits.memory_bytes
                 || threads > u64::from(self.limits.max_processes)
-                || (u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time))
-                    * u128::from(self.timebase.numer)
-                    / u128::from(self.timebase.denom)
-                    > cpu_limit.as_nanos()
+                || self.cpu_elapsed(
+                    member,
+                    u128::from(usage.ri_user_time) + u128::from(usage.ri_system_time),
+                )? > cpu_limit.as_nanos()
             {
                 return Err(ToolError::Limit);
             }
@@ -896,12 +927,12 @@ pub(super) async fn execute(
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
         let primary_command = primary_command(intent);
         let payload_phase = AtomicBool::new(!primary_command);
-        let mut watcher = Scope::new(
+        let watcher = Mutex::new(Scope::new(
             unit.scope
                 .as_ref()
                 .ok_or(ToolError::ProtectionUnavailable)?
                 .coalition,
-        )?;
+        )?);
         let phases = async {
             let task = super::super::encode_task(&Task::new(runtime, intent, cache_transfer)?)?;
             let mut bytes = tokio::time::timeout_at(preparation_deadline, async {
@@ -1020,6 +1051,10 @@ pub(super) async fn execute(
                         if marker != b"CAPTURE_READY\n" {
                             return Err(ToolError::Operation);
                         }
+                        watcher
+                            .lock()
+                            .map_err(|_| ToolError::ProtectionUnavailable)?
+                            .begin_capture(&intent.limits)?;
                         payload_phase.store(false, Ordering::Release);
                         let (deadline, report_deadline) =
                             super::super::selection_phase::capture_deadlines(completion_deadline)?;
@@ -1124,8 +1159,14 @@ pub(super) async fn execute(
                 result = &mut phases => break result,
                 _ = samples.tick() => {
                     if !payload_phase.load(Ordering::Acquire) {
-                        watcher.apply_limits(selection_limits(&intent.limits));
-                        if let Err(error) = watcher.check_resources() { break Err(error); }
+                        let checked = watcher
+                            .lock()
+                            .map_err(|_| ToolError::ProtectionUnavailable)
+                            .and_then(|mut watcher| {
+                                watcher.apply_limits(selection_limits(&intent.limits));
+                                watcher.check_resources()
+                            });
+                        if let Err(error) = checked { break Err(error); }
                     }
                 }
             }
@@ -1427,8 +1468,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                         .map_err(|_| ToolError::Timeout(String::new()))?
                         .map_err(|_| ToolError::Operation)?,
                     );
-                    scope.apply_limits(selection_limits(&intent.limits));
-                    scope.check_resources()?;
+                    scope.begin_capture(&intent.limits)?;
                 }
                 Ok(())
             }
@@ -1755,6 +1795,63 @@ mod tests {
     use crate::tools::ToolCall;
     use crate::tools::guard::read_capped;
     use std::io::Read;
+
+    #[test]
+    fn capture_cpu_excludes_prior_work_only_for_the_same_supervisor() {
+        let supervisor = Identity {
+            pid: 42,
+            version: 1,
+            unique_id: 7,
+            coalition: 3,
+        };
+        let prior = CPU_LIMIT.as_nanos() * 4;
+        let mut scope = Scope {
+            coalition: supervisor.coalition,
+            pids: Vec::new(),
+            timebase: ffi::Timebase { numer: 3, denom: 2 },
+            capture_cpu: None,
+            limits: ToolLimits::default(),
+            teardown: None,
+        };
+        assert!(scope.cpu_elapsed(supervisor, prior).unwrap() > CPU_LIMIT.as_nanos());
+        scope.capture_cpu = Some((supervisor, prior));
+        let ceiling_ticks = CPU_LIMIT.as_nanos() * 2 / 3;
+        for (ticks, nanos, exceeds) in [
+            (prior, 0, false),
+            (prior + ceiling_ticks, CPU_LIMIT.as_nanos(), false),
+            (prior + ceiling_ticks + 1, CPU_LIMIT.as_nanos() + 1, true),
+        ] {
+            let elapsed = scope.cpu_elapsed(supervisor, ticks).unwrap();
+            assert_eq!(elapsed, nanos);
+            assert_eq!(elapsed > CPU_LIMIT.as_nanos(), exceeds);
+        }
+        assert!(matches!(
+            scope.cpu_elapsed(supervisor, prior - 1),
+            Err(ToolError::ProtectionUnavailable)
+        ));
+        let mut executed = supervisor;
+        executed.version += 1;
+        assert_eq!(scope.cpu_elapsed(executed, prior).unwrap(), 0);
+        for replacement in [
+            Identity {
+                pid: 43,
+                ..supervisor
+            },
+            Identity {
+                unique_id: 8,
+                ..supervisor
+            },
+            Identity {
+                coalition: 4,
+                ..supervisor
+            },
+        ] {
+            assert_eq!(
+                scope.cpu_elapsed(replacement, prior).unwrap(),
+                prior * 3 / 2
+            );
+        }
+    }
 
     #[test]
     fn fallback_command_deadlines_reserve_selection_without_widening_active_windows() {
