@@ -495,6 +495,7 @@ impl AgentTranscript {
                 inherited_title: None,
                 workspace_identity: None,
                 defaults: view.defaults.clone(),
+                host_epoch_floor: 0,
                 created_sequence: view.created_sequence,
                 last_sequence: view.last_sequence,
                 lineage: None,
@@ -695,6 +696,7 @@ pub(crate) mod tests {
                 policy: CollaborationPolicy::Single,
                 ..SessionDefaults::default()
             },
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,

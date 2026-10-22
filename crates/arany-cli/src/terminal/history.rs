@@ -1825,6 +1825,7 @@ mod tests {
             inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,

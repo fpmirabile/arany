@@ -3782,7 +3782,10 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 assert!(page > 0);
             }
             if name == "unguarded" {
-                assert!(squashed.contains("this exact command"));
+                assert!(
+                    squashed.contains("this identical command in this live session (unguarded)"),
+                    "{width}: {squashed}"
+                );
             }
             if name == "git-prefix" {
                 assert!(

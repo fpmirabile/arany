@@ -21,7 +21,11 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             cwd,
             justification,
         } => {
-            valid_command(program, args, cwd)
+            (valid_name(program)
+                || (std::path::Path::new(program).is_absolute()
+                    && program.len() <= 4096
+                    && !program.chars().any(char::is_control)))
+                && valid_command("host", args, cwd)
                 && (1..=512).contains(&justification.len())
                 && !justification
                     .chars()

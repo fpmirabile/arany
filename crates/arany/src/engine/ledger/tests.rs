@@ -56,6 +56,7 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
             inode: 2,
         }),
         defaults: SessionDefaults::default(),
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 0,
         lineage: None,

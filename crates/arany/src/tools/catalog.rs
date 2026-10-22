@@ -191,6 +191,7 @@ pub(crate) static ALL: [OperationFacts; 24] = [
     ),
     OperationFacts {
         site: Site::Unguarded,
+        mutates: true,
         spawns_process: true,
         asks_approval: true,
         goal_success: true,
@@ -198,7 +199,7 @@ pub(crate) static ALL: [OperationFacts; 24] = [
             "command_unguarded",
             Family::Process,
             14,
-            "Ask the user to run a command that already failed inside the Guard again on the host with no sandbox. Use only after a `command` with identical program, args and cwd failed in this Run; put a one-sentence question for the user in `justification`. The user may refuse; never retry on your own.",
+            "Request a primary host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
         )
     },
     OperationFacts {
@@ -220,7 +221,7 @@ pub(crate) static ALL: [OperationFacts; 24] = [
     git_write_row(
         "git_branch",
         19,
-        "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
+        "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
@@ -347,9 +348,9 @@ pub(crate) fn has_git_reads(calls: &[Value]) -> bool {
 }
 
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
-    "Explicit argv only. Private selected-project cwd without .git; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded re-runs an identical failed command on the host only after the user approves it."
+    "Explicit argv only. Private selected-project cwd without .git; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required."
 } else {
-    "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded re-runs an identical failed command on the host only after the user approves it."
+    "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required."
 };
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
@@ -419,7 +420,8 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
         }
         let (key, field, cap) = match facts.family {
             Family::File if facts.mutates => return catalog["write"] == true,
-            Family::File => return true,
+            Family::File => return catalog["file_tools"] != "",
+            Family::Process if facts.site == Site::Unguarded => return catalog["host_commands"] == true,
             Family::Process => ("commands", "program", 8),
             Family::Skill => ("skills", "name", MAX_SKILLS),
             Family::Mcp => ("mcp_servers", "server", 4),
@@ -434,7 +436,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                     return true;
                 }
                 if facts.name == "git_branch" && listed {
-                    call["properties"]["name"] = json!({"type":"null", "description":"null lists local branches; creating one needs the write grant."});
+                    call["properties"]["name"] = json!({"type":"null", "description":"null lists branch tips; creating one needs the write grant."});
                     call["properties"]["start_point"] = json!({"type":"null"});
                     return true;
                 }
@@ -671,6 +673,9 @@ mod tests {
             ToolCall::GitBranch {
                 name: Some("topic".into()),
                 start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
             },
             ToolCall::GitSwitch {
                 branch: "topic".into(),
