@@ -502,6 +502,8 @@ pub enum CompactionStatus {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CompactionRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<crate::provider::RateLimits>,
     pub covered_run_id: RunId,
     pub covered_sequence: u64,
     pub source_digest: [u8; 32],
@@ -541,7 +543,11 @@ impl CompactionRecord {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
-        if self.covered_sequence == 0
+        if self
+            .rate_limits
+            .as_ref()
+            .is_some_and(|limits| !limits.valid())
+            || self.covered_sequence == 0
             || self.prompt_version != 1
             || self.schema_version != 1
             || self.compiler_version != 3
@@ -619,6 +625,8 @@ pub enum ProviderCallDisposition {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderCallRecord {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<crate::provider::RateLimits>,
     #[serde(deserialize_with = "Option::deserialize")]
     pub delegation: Option<Vec<super::ChildAssignment>>,
     pub phase: crate::provider::AgentPhase,
@@ -653,7 +661,11 @@ impl ProviderCallRecord {
     }
 
     pub(super) fn validate(&self) -> Result<(), ReplayError> {
-        if !serde_json::to_vec(self).is_ok_and(|b| b.len() <= crate::store::MAX_EVENT_BYTES)
+        if self
+            .rate_limits
+            .as_ref()
+            .is_some_and(|limits| !limits.valid())
+            || !serde_json::to_vec(self).is_ok_and(|b| b.len() <= crate::store::MAX_EVENT_BYTES)
             || (self.disposition == ProviderCallDisposition::Delegated) != self.delegation.is_some()
             || self.delegation.as_ref().is_some_and(|plan| {
                 plan.is_empty() || plan.len() > 8 || plan.iter().any(|a| !a.valid())

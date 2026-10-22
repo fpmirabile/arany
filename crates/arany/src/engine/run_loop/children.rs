@@ -98,6 +98,7 @@ struct EditorCompletion {
 }
 
 struct ActiveChild {
+    limits: crate::provider::RateLimitSlot,
     index: Option<usize>,
     request: ProviderRequest,
 }
@@ -1048,6 +1049,7 @@ impl RunLoop<'_> {
             || self.routing.chain(role, active.request.agent_run_id)?.len() > 1)
             .then(|| crate::provider::ResponsePreview::new().0);
         let request = active.request.clone();
+        let limits = active.limits.clone();
         let mut cancellation = self.controls.cancellation.clone();
         let steering = self.controls.steering.clone();
         let session_id = self.session_id;
@@ -1075,6 +1077,7 @@ impl RunLoop<'_> {
                 deadline,
                 cancellation,
                 preview,
+                limits,
                 #[cfg(feature = "test-support")]
                 None,
             )
@@ -1135,12 +1138,15 @@ impl RunLoop<'_> {
                 Ok(None) => {}
                 Err(error) => return Err(wave.queue.abort_with(error).await),
             }
-            wave.queue.active.remove(&task_id);
+            let Some(active) = wave.queue.active.remove(&task_id) else {
+                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
+            };
+            let limits = active.limits.take();
             let result = result.result;
             self.settle_result(&result)?;
             if index.is_none() {
                 let (decision, deferral) = self
-                    .classify_wave_primary(result, wave.queue, abort)
+                    .classify_wave_primary(result, limits, wave.queue, abort)
                     .await?;
                 self.apply_wave_primary(&mut wave, decision, deferral, &mut abort)
                     .await?;
@@ -1154,7 +1160,7 @@ impl RunLoop<'_> {
             }
             let index = index.ok_or(EngineError::CoordinatorFailed)?;
             let step_disposition = match self
-                .settle_wave_child(&mut wave, index, result, &mut abort)
+                .settle_wave_child(&mut wave, index, result, limits, &mut abort)
                 .await?
             {
                 ChildProgress::Refilled => continue,
@@ -1218,6 +1224,7 @@ impl RunLoop<'_> {
                 role,
                 decide_attempt(result.transient, facts),
                 &active.request,
+                &active.limits,
                 || self.routing.provider(role, active.request.agent_run_id),
             )
             .await
@@ -1226,6 +1233,7 @@ impl RunLoop<'_> {
     async fn classify_wave_primary(
         &self,
         result: CallResult,
+        limits: Option<crate::provider::RateLimits>,
         queue: &ChildQueue,
         abort: Option<WaveStop>,
     ) -> Result<(PrimaryDecision, Option<RepromptReason>), EngineError> {
@@ -1242,6 +1250,7 @@ impl RunLoop<'_> {
             record_admitted,
             None,
             None,
+            limits,
         );
         if wave_deferred(&result, record_admitted, &facts) {
             record.failure_reason = deferral.map(RepromptReason::failure_reason);
@@ -1372,6 +1381,7 @@ impl RunLoop<'_> {
         &self,
         child: &ChildWork,
         result: CallResult,
+        limits: Option<crate::provider::RateLimits>,
         valid_response: bool,
         abort: Option<WaveStop>,
         deadline: Instant,
@@ -1391,6 +1401,7 @@ impl RunLoop<'_> {
             valid_response && !gate_failed,
             None,
             None,
+            limits,
         );
         if gate_failed {
             record.failure_reason = Some(RepromptReason::CriterionNotMetInView.failure_reason());
@@ -1659,6 +1670,7 @@ impl RunLoop<'_> {
         wave: &mut ChildWave<'_>,
         index: usize,
         result: CallResult,
+        limits: Option<crate::provider::RateLimits>,
         abort: &mut Option<WaveStop>,
     ) -> Result<ChildProgress, EngineError> {
         let valid_response = self.ledger().tokens_within_limit()
@@ -1678,6 +1690,7 @@ impl RunLoop<'_> {
                 .classify_editor_call(
                     &wave.children[index],
                     result,
+                    limits,
                     valid_response,
                     *abort,
                     wave.deadline,
@@ -1692,6 +1705,7 @@ impl RunLoop<'_> {
                 .settle_child_call(
                     &mut wave.children[index],
                     result,
+                    limits,
                     valid_response,
                     abort,
                     wave.deadline,
@@ -1713,6 +1727,7 @@ impl RunLoop<'_> {
         &self,
         child: &mut ChildWork,
         result: CallResult,
+        limits: Option<crate::provider::RateLimits>,
         valid_response: bool,
         abort: &mut Option<WaveStop>,
         deadline: Instant,
@@ -1721,7 +1736,14 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id,
-            record: call_record(AgentPhase::ChildWork, &result, valid_response, None, None),
+            record: call_record(
+                AgentPhase::ChildWork,
+                &result,
+                valid_response,
+                None,
+                None,
+                limits,
+            ),
         })
         .await?;
         let facts = self.child_facts(child, deadline)?;
@@ -2208,7 +2230,7 @@ impl RunLoop<'_> {
                 self.append(Event::ProviderCallRecorded {
                     run_id: self.run_id,
                     agent_run_id: child.agent_run_id,
-                    record: call_record(AgentPhase::ChildWork, &result, false, None, None),
+                    record: call_record(AgentPhase::ChildWork, &result, false, None, None, None),
                 })
                 .await?;
                 self.settle_result(&result)?;
@@ -2243,6 +2265,8 @@ impl RunLoop<'_> {
                 > 1)
             .then(|| crate::provider::ResponsePreview::new().0);
             let attempt_request = request.clone();
+            let limits = crate::provider::RateLimitSlot::default();
+            let attempt_limits = limits.clone();
             let handle = queue.calls.spawn(async move {
                 crate::engine::routing::invoke_attempt(
                     provider.as_ref(),
@@ -2250,6 +2274,7 @@ impl RunLoop<'_> {
                     deadline,
                     cancellation,
                     preview,
+                    attempt_limits,
                     #[cfg(feature = "test-support")]
                     None,
                 )
@@ -2258,6 +2283,7 @@ impl RunLoop<'_> {
             queue.active.insert(
                 handle.id(),
                 ActiveChild {
+                    limits,
                     index: Some(index),
                     request,
                 },
@@ -2455,6 +2481,8 @@ impl RunLoop<'_> {
                 .routing
                 .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
             let attempt = request.clone();
+            let limits = crate::provider::RateLimitSlot::default();
+            let attempt_limits = limits.clone();
             let cancellation = self.controls.cancellation.clone();
             let handle = queue.calls.spawn(async move {
                 crate::engine::routing::invoke_attempt(
@@ -2463,6 +2491,7 @@ impl RunLoop<'_> {
                     deadline,
                     cancellation,
                     Some(crate::provider::ResponsePreview::new().0),
+                    attempt_limits,
                     #[cfg(feature = "test-support")]
                     None,
                 )
@@ -2471,6 +2500,7 @@ impl RunLoop<'_> {
             queue.active.insert(
                 handle.id(),
                 ActiveChild {
+                    limits,
                     index: None,
                     request,
                 },

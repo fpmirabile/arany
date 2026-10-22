@@ -1784,3 +1784,240 @@ fn streamed_answer_is_tentative_unless_the_item_is_final_answer() {
         assert_eq!(observed.borrow().tentative, tentative, "{phase:?}");
     }
 }
+
+#[test]
+fn passive_plan_windows_are_bounded_numeric_samples_with_one_receipt_clock_read() {
+    use crate::provider::{LimitSource, LimitUnavailable};
+    use std::cell::Cell;
+    for (label, values, invalid, expected) in [
+        (
+            "both",
+            vec![
+                ("primary-used-percent", "12.5"),
+                ("primary-window-minutes", "300"),
+                ("primary-reset-at", "2000"),
+                ("secondary-used-percent", "55"),
+                ("secondary-window-minutes", "10080"),
+            ],
+            None,
+            [Some(300), Some(10080)],
+        ),
+        (
+            "weekly only reversed",
+            vec![
+                ("primary-used-percent", "0"),
+                ("primary-window-minutes", "10080"),
+            ],
+            None,
+            [Some(10080), None],
+        ),
+        (
+            "missing duration",
+            vec![("primary-used-percent", "15")],
+            None,
+            [None, None],
+        ),
+        (
+            "missing percent",
+            vec![("primary-window-minutes", "10080")],
+            None,
+            [Some(10080), None],
+        ),
+        (
+            "nan",
+            vec![("primary-used-percent", "NaN")],
+            Some(LimitUnavailable::Invalid),
+            [None, None],
+        ),
+        (
+            "negative",
+            vec![("primary-used-percent", "-1")],
+            Some(LimitUnavailable::Invalid),
+            [None, None],
+        ),
+        (
+            "overflow",
+            vec![("primary-window-minutes", "4294967296")],
+            Some(LimitUnavailable::Invalid),
+            [None, None],
+        ),
+        (
+            "zero duration",
+            vec![("primary-window-minutes", "0")],
+            Some(LimitUnavailable::Invalid),
+            [None, None],
+        ),
+        (
+            "reset overflow",
+            vec![("primary-reset-at", "253402300800")],
+            Some(LimitUnavailable::Invalid),
+            [None, None],
+        ),
+        (
+            "duplicate",
+            vec![("primary-used-percent", "1"), ("primary-used-percent", "2")],
+            Some(LimitUnavailable::Duplicate),
+            [None, None],
+        ),
+    ] {
+        let mut headers = header::HeaderMap::new();
+        for (name, value) in values {
+            headers.append(
+                header::HeaderName::from_bytes(format!("x-codex-{name}").as_bytes()).unwrap(),
+                value.parse().unwrap(),
+            );
+        }
+        let reads = Cell::new(0);
+        let slot = RateLimitSlot::default();
+        limits::headers_at(&headers, &slot, || {
+            reads.set(reads.get() + 1);
+            1000
+        });
+        assert_eq!(reads.get(), 1, "{label}");
+        let sample = slot.take().expect(label);
+        assert_eq!(
+            sample.unavailable.map(|failure| failure.reason),
+            invalid,
+            "{label}"
+        );
+        assert_eq!(
+            [
+                sample.primary.as_ref().and_then(|w| w.window_minutes),
+                sample.secondary.as_ref().and_then(|w| w.window_minutes)
+            ],
+            expected,
+            "{label}"
+        );
+        for window in sample.primary.iter().chain(&sample.secondary) {
+            assert_eq!(window.observed_at, 1000);
+            assert_eq!(window.source, LimitSource::Headers);
+        }
+        assert!(slot.take().is_none(), "drain consumes sample");
+    }
+    let slot = RateLimitSlot::default();
+    limits::headers_at(&header::HeaderMap::new(), &slot, || {
+        panic!("no sample means no clock read")
+    });
+    let mut headers = header::HeaderMap::new();
+    headers.insert(
+        "x-codex-primary-used-percent",
+        "1".repeat(129).parse().unwrap(),
+    );
+    limits::headers_at(&headers, &slot, || 1000);
+    assert_eq!(
+        slot.take()
+            .unwrap()
+            .unavailable
+            .map(|failure| failure.reason),
+        Some(LimitUnavailable::Oversized)
+    );
+    headers.insert("x-codex-primary-used-percent", TOKEN.parse().unwrap());
+    assert!(limits::headers(&headers, TOKEN, &slot).is_err());
+    assert!(slot.take().is_none());
+
+    headers.insert("x-codex-primary-used-percent", "4".parse().unwrap());
+    headers.insert("x-codex-primary-window-minutes", "300".parse().unwrap());
+    headers.insert("x-codex-secondary-used-percent", "9".parse().unwrap());
+    headers.insert("x-codex-secondary-window-minutes", "10080".parse().unwrap());
+    limits::headers_at(&headers, &slot, || 1000);
+    for meter in [json!("other"), json!(null), json!(33)] {
+        limits::event_at(
+            &json!({"metered_limit_name":meter,"rate_limits":{"primary":{"used_percent":99}}}),
+            &slot,
+            || panic!("unsupported meter"),
+        );
+    }
+    let reads = Cell::new(0);
+    limits::event_at(
+        &json!({"metered_limit_name":"codex","rate_limits":{"primary":{"used_percent":7}}}),
+        &slot,
+        || {
+            reads.set(reads.get() + 1);
+            1001
+        },
+    );
+    assert_eq!(reads.get(), 1);
+    let sample = slot.take().unwrap();
+    let primary = sample.primary.unwrap();
+    assert_eq!(primary.source, LimitSource::Event);
+    assert_eq!(primary.observed_at, 1001);
+    assert_eq!(
+        primary.window_minutes, None,
+        "never merge fields from separate samples"
+    );
+    assert_eq!(primary.reset_at, None);
+    assert_eq!(sample.secondary.unwrap().observed_at, 1000);
+}
+
+#[tokio::test]
+async fn passive_headers_survive_http_and_body_failures_without_accepting_an_outcome() {
+    for (status, body, success) in [
+        (200, completed(Some(12)), true),
+        (
+            429,
+            br#"{"error":{"code":"usage_limit_reached"}}"#.to_vec(),
+            false,
+        ),
+        (503, Vec::new(), false),
+        (
+            200,
+            b"data: {\"type\":\"response.created\"}\n\n".to_vec(),
+            false,
+        ),
+        (200, b"data: not-json\n\n".to_vec(), false),
+    ] {
+        let reply = format!("HTTP/1.1 {status} Synthetic\r\nx-codex-primary-used-percent: 42\r\nx-codex-primary-window-minutes: 10080\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",body.len()).into_bytes().into_iter().chain(body).collect();
+        let (endpoint, server) = serve(reply).await;
+        let slot = RateLimitSlot::default();
+        let result = invoke_at_observed(
+            &client(),
+            endpoint,
+            TOKEN,
+            &request(),
+            Effort::Low,
+            crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+            (None, slot.clone()),
+        )
+        .await;
+        assert_eq!(result.is_ok(), success, "status {status}");
+        let sample = slot.take().unwrap();
+        assert_eq!(
+            sample.primary.unwrap().used_percent.map(f64::from),
+            Some(42.0)
+        );
+        server.await.unwrap();
+    }
+    for status in [429, 503] {
+        let reply = format!("HTTP/1.1 {status} Synthetic\r\nx-request-id: {TOKEN}\r\nx-codex-primary-used-percent: 42\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").into_bytes();
+        let (endpoint, server) = serve(reply).await;
+        let slot = RateLimitSlot::default();
+        let result = invoke_at_observed(
+            &client(),
+            endpoint,
+            TOKEN,
+            &request(),
+            Effort::Low,
+            crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+            (None, slot.clone()),
+        )
+        .await;
+        assert!(matches!(result, Err(ProviderError::InvalidOutcome)));
+        assert!(slot.take().is_none());
+        server.await.unwrap();
+    }
+    let slot = RateLimitSlot::default();
+    let mut decoder = StreamDecoder::new(TOKEN);
+    decoder.limits = slot.clone();
+    let event = json!({"type":"codex.rate_limits","rate_limits":{"secondary":{"used_percent":23,"window_minutes":10080,"reset_at":2000}},"plan_type":"DO_NOT_KEEP_PLAN","account_id":"DO_NOT_KEEP_ACCOUNT"});
+    assert!(
+        decoder
+            .feed(format!("data: {event}\n\n").as_bytes())
+            .unwrap()
+            .is_none()
+    );
+    assert!(decoder.feed(b"data: invalid\n\n").is_err());
+    let sample = slot.take().unwrap();
+    let encoded = serde_json::to_string(&sample).unwrap();
+    assert!(!encoded.contains("DO_NOT_KEEP"));
+    assert_eq!(sample.secondary.unwrap().source, crate::LimitSource::Event);
+}

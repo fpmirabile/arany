@@ -6782,7 +6782,7 @@ async fn reviewed_write_run(
         }
         transaction.commit().expect("padding commit");
     }
-    let provider = Arc::new(ScriptedProvider::new(vec![
+    let mut provider = ScriptedProvider::new(vec![
         arany::test_support::scenario::plan_outcome(facts_plan(facts_digest("v2"))),
         crate::tool_outcome(facts_read()),
         crate::tool_outcome(arany::ToolCall::Write {
@@ -6792,7 +6792,16 @@ async fn reviewed_write_run(
         }),
         ProviderOutcome::Review(arany::ReviewVerdict::Ask),
         finish_with("done"),
-    ]));
+    ])
+    .with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32]);
+    provider.rate_limits.get_mut().unwrap().extend([
+        None,
+        None,
+        None,
+        Some(arany::test_support::routing::plan_sample(1234)),
+        None,
+    ]);
+    let provider = Arc::new(provider);
     let engine = engine_support::open(
         StateRoot::open_existing(&state_path).expect("state"),
         EngineConfig {
@@ -6828,6 +6837,7 @@ async fn reviewed_tool_step_at_the_event_cap_closes_its_tool_and_leaves_no_tool_
  {
     let temp = tempfile::tempdir().expect("temporary root");
     let (dry, _) = reviewed_write_run(temp.path(), "dry", None, 0).await;
+    assert!(dry.iter().any(|event| matches!(&event.event, Event::ProviderCallRecorded { record, .. } if record.phase == AgentPhase::ToolReview && record.rate_limits == Some(arany::test_support::routing::plan_sample(1234)))));
     let index_of = |nth: usize, matches: fn(&Event) -> bool| {
         dry.iter()
             .enumerate()
@@ -6945,8 +6955,15 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
     let cancellation = RunCancellation::new();
-    let mut failing = ScriptedProvider::new(vec![]).with_profile("scripted", "compact-primary");
+    let mut failing = ScriptedProvider::new(vec![])
+        .with_chatgpt_account(uuid::Uuid::now_v7(), [1; 32])
+        .with_profile("chatgpt", "compact-primary");
     failing.compact_responses = Mutex::new(vec![Err(ProviderError::RemoteHttp(503))].into());
+    failing
+        .compact_rate_limits
+        .get_mut()
+        .unwrap()
+        .push_back(Some(arany::test_support::routing::plan_sample(1234)));
     failing.cancel_at_compaction = Some(cancellation.clone());
     let failing = Arc::new(failing);
     let fallback =
@@ -6996,6 +7013,10 @@ async fn in_run_compaction_cancelled_in_its_call_starts_no_retry_or_switch() {
         })
         .expect("compaction record");
     assert_eq!(record.model, "compact-primary");
+    assert_eq!(
+        record.rate_limits,
+        Some(arany::test_support::routing::plan_sample(1234))
+    );
     assert!(matches!(
         record.status,
         arany::CompactionStatus::Failed {

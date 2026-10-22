@@ -17,8 +17,10 @@ mod session;
 mod store;
 pub mod supervisor;
 mod telemetry;
+mod timestamp;
 mod tools;
 
+pub use timestamp::utc_date;
 pub use tools::permissions;
 
 #[cfg(target_os = "macos")]
@@ -47,15 +49,16 @@ pub use provider::{
     ChatGptAdmission, ChatGptProvenance, ChatGptProvider, ChildAssignment, ChildResult,
     CompactionItem, CompactionRequest, CompactionResponse, CustomProfile, CustomProfileCheck,
     CustomProfileError, CustomProfileProvenance, CustomProvider, Delegate, Effort,
-    GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
-    MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS,
-    MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, ModelEntry, NamedProviderRoutes,
-    NativeApiCredentials, NativeCheckError, OpenAiProvider, OutputTokenBound, PlanRequest,
-    PreviewText, PromptRole, Provenance, Provider, ProviderError, ProviderFailureReason,
-    ProviderFallback, ProviderIdentity, ProviderImage, ProviderOutcome, ProviderRequest,
-    ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
-    ProviderWireProvenance, Providers, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot,
-    RunInput, ToolUseId, UnansweredStatus, Usage, WorkspaceGuidance, admitted_context_window,
+    GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, LimitFailure, LimitSource,
+    LimitUnavailable, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP,
+    MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES,
+    MAX_PROVIDER_SWITCHES, ModelEntry, NamedProviderRoutes, NativeApiCredentials, NativeCheckError,
+    OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
+    Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
+    ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderRetry, ProviderRole,
+    ProviderRoutes, ProviderTurn, ProviderWireProvenance, Providers, RateLimitSlot, RateLimits,
+    ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot, RunInput, ToolUseId,
+    UnansweredStatus, Usage, UsedPercent, WorkspaceGuidance, admitted_context_window,
     check_custom_profile, check_native_model_from_env, check_native_model_with_api_key,
     check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
@@ -69,7 +72,7 @@ pub use session::{
     GoalId, GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding,
     GoalStatus, GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource,
     MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
-    MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause,
+    MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, PlanUsage, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
     RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId,
     SessionListItem, SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView,

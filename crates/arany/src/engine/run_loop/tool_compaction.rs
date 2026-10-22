@@ -125,6 +125,7 @@ struct CompactionWindow {
 }
 
 struct Summary {
+    rate_limits: Option<crate::provider::RateLimits>,
     status: CompactionStatus,
     response_id: Option<String>,
     usage: Usage,
@@ -562,6 +563,7 @@ impl RunLoop<'_> {
         let source_bytes = u32::try_from(source_len).map_err(|_| EngineError::InvalidRequest)?;
 
         let call_deadline = deadline.min(Instant::now() + COMPACTION_CALL_DEADLINE);
+        let limits = crate::provider::RateLimitSlot::default();
         let response = self
             .routing
             .compact(
@@ -569,6 +571,7 @@ impl RunLoop<'_> {
                 self.primary_id,
                 call_deadline,
                 self.controls.cancellation.clone(),
+                limits.clone(),
             )
             .await?;
         let failed = |reason| {
@@ -611,6 +614,7 @@ impl RunLoop<'_> {
             }
         }
         Ok(Summary {
+            rate_limits: limits.take(),
             status,
             response_id,
             usage,
@@ -630,6 +634,7 @@ impl RunLoop<'_> {
             .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
         let identity = provider.identity();
         let record = CompactionRecord {
+            rate_limits: summary.rate_limits,
             covered_run_id: self.run_id,
             covered_sequence: window.covered_sequence,
             source_digest: window.source_digest,
