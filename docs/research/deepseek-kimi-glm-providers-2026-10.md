@@ -184,7 +184,8 @@ Source reviewed at commit `cae9fd28a2d3d515c83ea495093e3768cc8efab6`:
 [base-URL customization](https://github.com/earendil-works/pi/blob/cae9fd28a2d3d515c83ea495093e3768cc8efab6/packages/coding-agent/docs/models.md#L69-L76).
 
 One shared Anthropic-compatible adapter avoids another vendor enum or wire
-protocol. Private first-party login is not a third-party authorization grant.
+protocol. A private or undocumented first-party login for another provider is not,
+by itself, a third-party authorization grant for Arany.
 
 ## Admission implications
 
