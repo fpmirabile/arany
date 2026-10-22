@@ -748,7 +748,7 @@ mod tests {
                     shutdown,
                     thread: Some(thread),
                     pending: VecDeque::from([TerminalInput::Character('1'), TerminalInput::Submit]),
-                    draft_bytes: 1,
+                    remaining_bytes: crate::terminal::MAX_DRAFT_BYTES - 1,
                     epoch: 0,
                     admission,
                 })

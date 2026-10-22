@@ -516,7 +516,7 @@ pub(super) async fn choose(
                     ApprovalMode::AutoEdits,
                     &selected_tokens,
                 ) {
-                    terminal.restore_draft_input(composer.text().len())?;
+                    terminal.restore_draft_input(composer.input_capacity())?;
                     return Ok(PermissionChoice::Rejected(
                         permissions,
                         format!("Could not remember folder trust: {error}"),
@@ -526,18 +526,18 @@ pub(super) async fn choose(
                     (native_protection_supported() && permissions.is_trusted())
                         .then_some(permissions.mode()),
                 );
-                terminal.restore_draft_input(composer.text().len())?;
+                terminal.restore_draft_input(composer.input_capacity())?;
                 return Ok(PermissionChoice::Selected(permissions));
             }
             TerminalInput::Escape => {
-                terminal.restore_draft_input(composer.text().len())?;
+                terminal.restore_draft_input(composer.input_capacity())?;
                 return Ok(PermissionChoice::Closed(permissions));
             }
             TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(PermissionChoice::Exit);
             }
             TerminalInput::Suspend => {
-                terminal.suspend_and_resume(composer.text().len())?;
+                terminal.suspend_and_resume(composer.input_capacity())?;
                 page = 0;
                 selected = 0;
                 focused_profile = None;

@@ -43,6 +43,7 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     invoked_objective, parse_submission, skill_invocation, transcript_agents,
 };
+pub use composer::MAX_DRAFT_BYTES;
 pub use composer::{CompletionLayout, Composer, ComposerDraft, ComposerEdit};
 use history::History;
 use input::TerminalReader;
@@ -452,7 +453,7 @@ pub struct AttachedTerminal {
     agent_panel: Option<AgentPanel>,
     agent_chat: Option<AgentChat>,
     child_drafts: Vec<agent_chat::ChildDraft>,
-    primary_draft_bytes: usize,
+    primary_input_capacity: usize,
     help_selected: Option<usize>,
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
@@ -766,7 +767,7 @@ impl AttachedTerminal {
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
-            primary_draft_bytes: 0,
+            primary_input_capacity: crate::terminal::MAX_DRAFT_BYTES,
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,
@@ -1164,7 +1165,7 @@ impl AttachedTerminal {
     pub fn set_mode(
         &mut self,
         mode: TerminalMode,
-        draft_bytes: usize,
+        input_capacity: usize,
     ) -> Result<(), TerminalError> {
         if self.is_linear() {
             return Err(TerminalError::Io(io::Error::new(
@@ -1178,7 +1179,7 @@ impl AttachedTerminal {
         self.release()?;
         self.mode = mode;
         self.reacquire_after_output()?;
-        self.restore_draft_input(draft_bytes)
+        self.restore_draft_input(input_capacity)
     }
 
     #[must_use]
@@ -1452,19 +1453,19 @@ impl AttachedTerminal {
                 self.input
                     .as_mut()
                     .expect("active terminal input")
-                    .restore_draft_bytes(composer.text().len())
-                    .expect("admitted Composer draft length");
+                    .restore_input_capacity(composer.input_capacity())
+                    .expect("admitted Composer input capacity");
                 self.clipboard_preview = self.is_linear() && edit == ComposerEdit::Changed;
                 Ok(edit)
             }
         }
     }
 
-    pub fn restore_draft_input(&mut self, bytes: usize) -> Result<(), TerminalError> {
+    pub fn restore_draft_input(&mut self, capacity: usize) -> Result<(), TerminalError> {
         self.input
             .as_mut()
             .expect("active terminal input")
-            .restore_draft_bytes(bytes)
+            .restore_input_capacity(capacity)
             .map_err(TerminalError::Io)
     }
 
@@ -1495,7 +1496,7 @@ impl AttachedTerminal {
     }
 
     #[cfg(unix)]
-    pub fn suspend_and_resume(&mut self, draft_bytes: usize) -> Result<(), TerminalError> {
+    pub fn suspend_and_resume(&mut self, input_capacity: usize) -> Result<(), TerminalError> {
         let screen_reader = self.requested_screen_reader;
         let secret_input = self.secret_echo.is_some();
         let mut panel = self.agent_panel.take();
@@ -1517,7 +1518,7 @@ impl AttachedTerminal {
             .input
             .as_mut()
             .expect("active terminal input")
-            .restore_draft_bytes(draft_bytes)?;
+            .restore_input_capacity(input_capacity)?;
         self.replace_released(resumed);
         if reading_panel {
             self.transcript_open = true;
@@ -1527,7 +1528,7 @@ impl AttachedTerminal {
     }
 
     #[cfg(not(unix))]
-    pub fn suspend_and_resume(&mut self, _draft_bytes: usize) -> Result<(), TerminalError> {
+    pub fn suspend_and_resume(&mut self, _input_capacity: usize) -> Result<(), TerminalError> {
         Err(TerminalError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             "terminal suspension is unavailable",
@@ -2663,7 +2664,7 @@ impl AttachedTerminal {
         replacement.dialog_armed = self.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
-        replacement.primary_draft_bytes = self.primary_draft_bytes;
+        replacement.primary_input_capacity = self.primary_input_capacity;
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {

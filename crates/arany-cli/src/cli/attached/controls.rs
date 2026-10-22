@@ -500,7 +500,7 @@ async fn choose_settings(
                 return Ok(None);
             }
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(answer.text().len())
+                .suspend_and_resume(answer.input_capacity())
                 .map_err(|error| error.to_string())?,
             TerminalInput::Shutdown(signal) => {
                 return Err(format!("terminated by {}", signal.name()));
@@ -537,7 +537,7 @@ pub(super) async fn settings(
                     .map_err(|error| error.to_string())?;
                 if !linear && view_changed {
                     terminal
-                        .set_mode(chosen.view, composer.text().len())
+                        .set_mode(chosen.view, composer.input_capacity())
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
@@ -564,7 +564,7 @@ pub(super) async fn settings(
         },
     };
     terminal
-        .restore_draft_input(composer.text().len())
+        .restore_draft_input(composer.input_capacity())
         .map_err(|error| error.to_string())?;
     Ok(notice)
 }

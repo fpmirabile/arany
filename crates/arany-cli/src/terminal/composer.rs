@@ -9,7 +9,7 @@ use arany::{ImageAttachment, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ModelEntry};
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
-pub(super) const MAX_DRAFT_BYTES: usize = 8 * 1024;
+pub const MAX_DRAFT_BYTES: usize = 8 * 1024;
 pub(super) const MAX_PASTE_BYTES: usize = 64 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,12 +39,64 @@ pub struct ComposerDraft {
 }
 
 impl ComposerDraft {
+    pub fn from_steering_note(note: String, offered: &[Self]) -> Self {
+        let mut pastes = Vec::new();
+        let mut end = note.len();
+        for draft in offered.iter().rev() {
+            if end == 0 {
+                break;
+            }
+            let text = if draft.pastes.is_empty() && draft.text.starts_with("//") {
+                &draft.text[1..]
+            } else {
+                &draft.text
+            };
+            assert!(
+                note[..end].ends_with(text),
+                "withdrawn note matches offered drafts"
+            );
+            let offset = end - text.len();
+            for paste in &draft.pastes {
+                let mut paste = paste.clone();
+                paste.range.start += offset;
+                paste.range.end += offset;
+                pastes.push(paste);
+            }
+            end = offset.saturating_sub(2);
+        }
+        assert_eq!(end, 0, "withdrawn note has retained provenance");
+        pastes.sort_by_key(|paste| paste.range.start);
+        for index in 0..pastes.len() {
+            if pastes[..index].iter().any(|paste| {
+                paste.characters == pastes[index].characters && paste.suffix == pastes[index].suffix
+            }) {
+                pastes[index].suffix = pastes[..index]
+                    .iter()
+                    .filter(|paste| paste.characters == pastes[index].characters)
+                    .map(|paste| paste.suffix)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+            }
+        }
+        Self {
+            cursor: note.len(),
+            text: note,
+            pastes,
+            images: Vec::new(),
+        }
+    }
+
     pub fn images(&self) -> &[ImageAttachment] {
         &self.images
     }
     pub fn editable_text(&self) -> String {
         editable_text(&self.text, &self.pastes)
     }
+}
+
+fn editable_bytes(text: &str, pastes: &[TextPaste]) -> usize {
+    text.len() - pastes.iter().map(|paste| paste.range.len()).sum::<usize>()
 }
 
 fn editable_text(text: &str, pastes: &[TextPaste]) -> String {
@@ -124,7 +176,17 @@ impl Composer {
 
     pub fn restore_prompt(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
         let literal = (!self.text_only && text.starts_with('/')).then(|| format!("/{text}"));
-        self.insert_text(literal.as_deref().unwrap_or(text), false)
+        self.insert_literal(literal.as_deref().unwrap_or(text))
+    }
+
+    pub fn insert_literal(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
+        self.insert_text(text, false)
+    }
+
+    pub fn input_capacity(&self) -> usize {
+        MAX_DRAFT_BYTES
+            .saturating_sub(editable_bytes(&self.text, &self.pastes))
+            .min(MAX_PASTE_BYTES.saturating_sub(self.text.len()))
     }
     pub fn remember_and_clear(&mut self) -> bool {
         if self.recalled_pending {
@@ -153,6 +215,10 @@ impl Composer {
             MAX_PASTE_BYTES
         };
         if self.text.len() + draft.text.len() + separator > limit
+            || editable_bytes(&self.text, &self.pastes)
+                + editable_bytes(&draft.text, &draft.pastes)
+                + separator
+                > MAX_DRAFT_BYTES
             || self.images.len() + draft.images.len() > MAX_MESSAGE_IMAGES
             || self
                 .images
@@ -975,13 +1041,7 @@ impl Composer {
     }
 
     fn can_type(&self, bytes: usize) -> bool {
-        let editable = self.text.len()
-            - self
-                .pastes
-                .iter()
-                .map(|paste| paste.range.len())
-                .sum::<usize>();
-        editable + bytes <= MAX_DRAFT_BYTES && self.text.len() + bytes <= MAX_PASTE_BYTES
+        bytes <= self.input_capacity()
     }
 
     fn shift_pastes(&mut self, bytes: usize) {
@@ -1388,6 +1448,81 @@ mod tests {
             Ok(ComposerEdit::AtCapacity)
         );
         assert_eq!(composer.text(), "prefix");
+    }
+
+    #[test]
+    fn withdrawn_notes_preserve_typed_and_pasted_provenance_after_prior_delivery() {
+        let mut composer = Composer::default();
+        composer.insert_literal("already delivered").unwrap();
+        let mut offered = vec![composer.take_draft()];
+        let typed = format!("{} @src/lib.rs", "typed ".repeat(200));
+        composer.insert_literal(&typed).unwrap();
+        offered.push(composer.take_draft());
+        let restored = ComposerDraft::from_steering_note(typed.clone(), &offered);
+        assert_eq!(restored.editable_text(), typed);
+        assert!(restored.pastes.is_empty());
+        let pasted = format!("@private.txt {}", "paste ".repeat(200));
+        composer.insert_paste(&pasted).unwrap();
+        composer.insert_literal(" @visible.txt").unwrap();
+        let second = composer.text().to_owned();
+        offered.push(composer.take_draft());
+        let combined = format!("{typed}\n\n{second}");
+        let restored = ComposerDraft::from_steering_note(combined.clone(), &offered);
+        assert_eq!(restored.text, combined);
+        assert_eq!(
+            arany::mention_paths(&restored.editable_text()).unwrap(),
+            vec![
+                std::path::PathBuf::from("src/lib.rs"),
+                std::path::PathBuf::from("visible.txt")
+            ]
+        );
+        assert_eq!(restored.pastes.len(), 1);
+        offered.push(offered.last().unwrap().clone());
+        let duplicated =
+            ComposerDraft::from_steering_note(format!("{combined}\n\n{second}"), &offered);
+        assert_eq!(duplicated.pastes.len(), 2);
+        assert_eq!(duplicated.pastes[0].suffix, 1);
+        assert_eq!(duplicated.pastes[1].suffix, 2);
+        assert!(composer.restore_draft(restored));
+        assert!(composer.has_text_pastes());
+        composer.clear();
+        composer.insert_literal("//literal").unwrap();
+        offered.push(composer.take_draft());
+        let restored = ComposerDraft::from_steering_note("/literal".into(), &offered);
+        assert_eq!(restored.editable_text(), "/literal");
+        assert!(restored.pastes.is_empty());
+    }
+
+    #[test]
+    fn literal_restoration_keeps_long_notes_editable_and_merge_limits_preserve_both() {
+        let note = format!("{} @src/lib.rs", "typed ".repeat(300));
+        let mut composer = Composer::default();
+        composer.insert_literal(&note).unwrap();
+        assert_eq!(composer.editable_text(), note);
+        assert!(!composer.has_text_pastes());
+        assert_eq!(
+            arany::mention_paths(&composer.editable_text()).unwrap(),
+            vec![std::path::PathBuf::from("src/lib.rs")]
+        );
+
+        for newer in [2191, 2192] {
+            let mut composer = Composer::default();
+            composer.insert_literal(&"a".repeat(6000)).unwrap();
+            let held = composer.take_draft();
+            composer.insert_literal(&"b".repeat(newer)).unwrap();
+            if newer == 2191 {
+                assert!(composer.restore_draft(held));
+                assert_eq!(composer.text().len(), MAX_DRAFT_BYTES);
+                assert_eq!(composer.input_capacity(), 0);
+            } else {
+                assert!(!composer.restore_draft(held));
+                assert_eq!(composer.text(), "b".repeat(newer));
+                composer.clear();
+                composer.apply(TerminalInput::Up);
+                assert_eq!(composer.text(), "a".repeat(6000));
+                assert!(!composer.has_text_pastes());
+            }
+        }
     }
 
     #[test]

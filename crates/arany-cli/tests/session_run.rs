@@ -727,14 +727,14 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     terminal.draw(&view, &draft, None).unwrap();
                     terminal.toggle_transcript(&details).unwrap();
                     terminal
-                        .set_mode(TerminalMode::Fullscreen, draft.text().len())
+                        .set_mode(TerminalMode::Fullscreen, draft.input_capacity())
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
                     terminal
                         .handle_history_input(TerminalInput::PageUp, &view, &draft, false)
                         .await;
                     terminal
-                        .set_mode(TerminalMode::Classic, draft.text().len())
+                        .set_mode(TerminalMode::Classic, draft.input_capacity())
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
                     assert_eq!(draft.text(), "retained 🚀 draft");

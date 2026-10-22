@@ -200,21 +200,21 @@ impl TerminalReader {
         }
     }
 
-    pub(super) fn restore_draft_bytes(&mut self, bytes: usize) -> io::Result<()> {
+    pub(super) fn restore_input_capacity(&mut self, capacity: usize) -> io::Result<()> {
         #[cfg(unix)]
         {
-            if bytes > MAX_PASTE_BYTES {
+            if capacity > MAX_DRAFT_BYTES {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
-                    "draft too long",
+                    "input capacity too large",
                 ));
             }
             if let Self::Lines(reader) = self {
-                reader.draft_bytes = bytes;
+                reader.remaining_bytes = capacity;
             }
         }
         #[cfg(not(unix))]
-        let _ = bytes;
+        let _ = capacity;
         Ok(())
     }
 }
@@ -233,7 +233,7 @@ pub(super) struct LineReader {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     pending: VecDeque<TerminalInput>,
-    draft_bytes: usize,
+    remaining_bytes: usize,
     epoch: u64,
     #[cfg(unix)]
     admission: InputAdmission,
@@ -289,7 +289,7 @@ impl LineReader {
             shutdown,
             thread: Some(thread),
             pending: VecDeque::new(),
-            draft_bytes: 0,
+            remaining_bytes: MAX_DRAFT_BYTES,
             epoch: 0,
             admission,
         })
@@ -321,13 +321,13 @@ impl LineReader {
         bytes: Vec<u8>,
         submitted: bool,
     ) -> Result<TerminalInput, TerminalError> {
-        let Some(line) = validate_segment(bytes, self.draft_bytes) else {
+        let Some(line) = validate_segment(bytes, self.remaining_bytes) else {
             return Ok(TerminalInput::LineRejected);
         };
-        self.draft_bytes = if submitted {
-            0
+        self.remaining_bytes = if submitted {
+            MAX_DRAFT_BYTES
         } else {
-            self.draft_bytes + line.len()
+            self.remaining_bytes - line.len()
         };
         self.pending
             .extend(line.chars().map(TerminalInput::Character));
@@ -343,7 +343,7 @@ impl LineReader {
     }
 
     fn reset_draft(&mut self) {
-        self.draft_bytes = 0;
+        self.remaining_bytes = MAX_DRAFT_BYTES;
         self.pending.clear();
     }
 
@@ -480,11 +480,9 @@ fn decode_line(bytes: &[u8]) -> LineEvent {
 }
 
 #[cfg(unix)]
-fn validate_segment(bytes: Vec<u8>, draft_bytes: usize) -> Option<String> {
+fn validate_segment(bytes: Vec<u8>, remaining_bytes: usize) -> Option<String> {
     let line = String::from_utf8(bytes).ok()?;
-    if line.chars().any(char::is_control)
-        || (!line.is_empty() && draft_bytes + line.len() > MAX_DRAFT_BYTES)
-    {
+    if line.chars().any(char::is_control) || line.len() > remaining_bytes {
         return None;
     }
     Some(line)
@@ -850,7 +848,7 @@ mod tests {
                 shutdown: Arc::new(AtomicBool::new(false)),
                 thread: None,
                 pending: VecDeque::new(),
-                draft_bytes: 0,
+                remaining_bytes: MAX_DRAFT_BYTES,
                 epoch: 1,
                 admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
             });
@@ -874,6 +872,51 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn canonical_text_beside_chips_rejects_whole_segments_at_either_limit() {
+        use crate::terminal::{Composer, ComposerEdit};
+        for (paste_bytes, prefix_bytes, capacity) in [
+            (9600, 0, MAX_DRAFT_BYTES),
+            (9600, MAX_DRAFT_BYTES - 5, 5),
+            (MAX_PASTE_BYTES - 5, 0, 5),
+        ] {
+            let mut composer = Composer::default();
+            composer.insert_paste(&"p".repeat(paste_bytes)).unwrap();
+            composer.insert_literal(&"t".repeat(prefix_bytes)).unwrap();
+            assert_eq!(composer.input_capacity(), capacity);
+            let (_, receiver) = mpsc::channel(1);
+            let mut reader = LineReader {
+                receiver,
+                shutdown: Arc::new(AtomicBool::new(false)),
+                thread: None,
+                pending: VecDeque::new(),
+                remaining_bytes: composer.input_capacity(),
+                epoch: 0,
+                admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
+            };
+            let before = composer.text().to_owned();
+            let suffix = format!("{}🙂", "x".repeat(capacity - 4));
+            assert_eq!(
+                reader
+                    .accept_segment(format!("{suffix}x").into_bytes(), true)
+                    .unwrap(),
+                TerminalInput::LineRejected
+            );
+            assert!(reader.pending.is_empty());
+            assert_eq!(reader.remaining_bytes, capacity);
+            let first = reader
+                .accept_segment(suffix.as_bytes().to_vec(), true)
+                .unwrap();
+            for event in std::iter::once(first).chain(reader.pending.drain(..)) {
+                if event != TerminalInput::Submit {
+                    assert_eq!(composer.apply(event), ComposerEdit::Changed);
+                }
+            }
+            assert_eq!(composer.text(), format!("{before}{suffix}"));
+            assert_eq!(composer.input_capacity(), 0);
+        }
+    }
+
     #[tokio::test]
     async fn canonical_segments_distinguish_submit_continue_and_reject_before_egress() {
         assert!(
@@ -890,8 +933,8 @@ mod tests {
             LineEvent::Rejected
         ));
         assert!(matches!(decode_line(b"a\0b\n"), LineEvent::Rejected));
-        assert!(validate_segment(vec![b'x'; 1000], MAX_DRAFT_BYTES - 1000).is_some());
-        assert!(validate_segment(vec![b'x'; 1001], MAX_DRAFT_BYTES - 1000).is_none());
+        assert!(validate_segment(vec![b'x'; 1000], 1000).is_some());
+        assert!(validate_segment(vec![b'x'; 1001], 1000).is_none());
         assert!(validate_segment(b"bad\x1b[31m".to_vec(), 0).is_none());
         assert!(validate_segment(vec![0xff], 0).is_none());
 
@@ -901,14 +944,14 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             thread: None,
             pending: VecDeque::new(),
-            draft_bytes: 0,
+            remaining_bytes: MAX_DRAFT_BYTES,
             epoch: 0,
             admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         };
-        for expected in [3000, 6000] {
+        for expected in [MAX_DRAFT_BYTES - 3000, MAX_DRAFT_BYTES - 6000] {
             let first = reader.accept_segment(vec![b'x'; 3000], false).unwrap();
             assert_eq!(first, TerminalInput::Character('x'));
-            assert_eq!(reader.draft_bytes, expected);
+            assert_eq!(reader.remaining_bytes, expected);
             assert_eq!(reader.pending.back(), Some(&TerminalInput::LineContinued));
             let mut terminal_reader = TerminalReader::Lines(reader);
             let mut delivered = vec![first];
@@ -940,19 +983,17 @@ mod tests {
             reader.accept_segment(vec![b'x'; 2193], true).unwrap(),
             TerminalInput::LineRejected
         );
-        assert_eq!(reader.draft_bytes, 6000);
+        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES - 6000);
         assert!(reader.pending.is_empty());
         assert_eq!(
             reader.accept_segment(vec![b'x'; 2192], true).unwrap(),
             TerminalInput::Character('x')
         );
-        assert_eq!(reader.draft_bytes, 0);
+        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES);
         assert_eq!(reader.pending.back(), Some(&TerminalInput::Submit));
         reader.pending.clear();
         let mut terminal_reader = TerminalReader::Lines(reader);
-        terminal_reader
-            .restore_draft_bytes(MAX_DRAFT_BYTES)
-            .unwrap();
+        terminal_reader.restore_input_capacity(0).unwrap();
         let TerminalReader::Lines(mut reader) = terminal_reader else {
             unreachable!("Unix line reader")
         };
@@ -960,11 +1001,11 @@ mod tests {
             reader.accept_segment(b"x".to_vec(), true).unwrap(),
             TerminalInput::LineRejected
         );
-        assert_eq!(reader.draft_bytes, MAX_DRAFT_BYTES);
+        assert_eq!(reader.remaining_bytes, 0);
         reader.reset_draft();
         reader.accept_segment(b"draft".to_vec(), true).unwrap();
         reader.reset_draft();
-        assert_eq!(reader.draft_bytes, 0);
+        assert_eq!(reader.remaining_bytes, MAX_DRAFT_BYTES);
         assert!(reader.pending.is_empty());
 
         let mut terminal_reader = TerminalReader::Lines(reader);
@@ -977,14 +1018,16 @@ mod tests {
         );
         assert!(
             terminal_reader
-                .restore_draft_bytes(MAX_PASTE_BYTES + 1)
+                .restore_input_capacity(MAX_DRAFT_BYTES + 1)
                 .is_err()
         );
-        terminal_reader.restore_draft_bytes(6000).unwrap();
+        terminal_reader
+            .restore_input_capacity(MAX_DRAFT_BYTES - 6000)
+            .unwrap();
         let TerminalReader::Lines(mut resumed_reader) = terminal_reader else {
             unreachable!("Unix line reader")
         };
-        assert_eq!(resumed_reader.draft_bytes, 6000);
+        assert_eq!(resumed_reader.remaining_bytes, MAX_DRAFT_BYTES - 6000);
         assert_eq!(
             resumed_reader
                 .accept_segment(vec![b'x'; 2193], true)

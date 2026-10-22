@@ -484,11 +484,19 @@ pub(super) async fn submit_objective(
     let mut stop = ActiveStop::Running;
     let mut user_recorded = false;
     let mut offered: Option<String> = None;
+    let mut linear_offers = Vec::new();
     let mut held: Option<HeldDraft> = None;
     let mut seen_delivered = 0u64;
     let mut shown_retries = (None, 0usize);
     let mut exit_after_run = false;
     let shutdown_reason = loop {
+        if pending.is_none()
+            && terminal
+                .restore_selected_draft_input(composer.input_capacity())
+                .is_err()
+        {
+            break "terminal input cleanup failed".to_owned();
+        }
         let approval_more = match &pending {
             Some(approval) => match terminal.draw_tool_approval(
                 approval,
@@ -562,12 +570,10 @@ pub(super) async fn submit_objective(
                 let withdrawn = note.is_some();
                 let mut restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
                 if let Some(note) = note {
-                    let mut note_draft = Composer::default();
-                    note_draft.insert_paste(&note).expect("admitted steering note");
-                    restored &= composer.restore_draft(note_draft.take_draft());
+                    restored &= composer.restore_draft(ComposerDraft::from_steering_note(note, &linear_offers));
                 }
                 if (result.is_err() || had_offer || sent || had_held)
-                    && terminal.restore_draft_input(composer.text().len()).is_err()
+                    && terminal.restore_draft_input(composer.input_capacity()).is_err()
                 {
                     return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
                 }
@@ -613,7 +619,7 @@ pub(super) async fn submit_objective(
                     user_recorded = true;
                 }
                 let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
-                if sent && terminal.restore_draft_input(composer.text().len()).is_err() {
+                if sent && terminal.restore_draft_input(composer.input_capacity()).is_err() {
                     break "terminal input failed".to_owned();
                 }
                 let retry = view
@@ -632,7 +638,7 @@ pub(super) async fn submit_objective(
                     retry.as_deref().map(TerminalNotice::Transient)
                 };
                 let child_changed = terminal.settle_child_notes(view, &steering, stop != ActiveStop::Running);
-                if child_changed && terminal.restore_selected_draft_input(composer.text().len()).is_err() {
+                if child_changed && terminal.restore_selected_draft_input(composer.input_capacity()).is_err() {
                     break "terminal input failed".to_owned();
                 }
                 let follow = match terminal.follow_agent_chat(view).await {
@@ -672,7 +678,7 @@ pub(super) async fn submit_objective(
                         }
                         TerminalInput::Escape | TerminalInput::EndOfInput => {
                             pending.take().expect("pending action").decide(arany::ApprovalReply::Deny);
-                            terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                            terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
                         }
                         TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % choices.len(),
                         TerminalInput::Up if !approval_more && approval_choice == 0 && approval_page > 0 => approval_page -= 1,
@@ -682,7 +688,7 @@ pub(super) async fn submit_objective(
                         TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); }
                         TerminalInput::Resize => { approval_page = 0; approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 }; approval_review_notice = false; }
                         TerminalInput::Suspend => {
-                            terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
+                            terminal.suspend_and_resume(composer.input_capacity()).map_err(|error| error.to_string())?;
                             approval_page = 0;
                             approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 };
                         }
@@ -714,7 +720,7 @@ pub(super) async fn submit_objective(
                             approvals.set_mode(arany::ApprovalMode::AutoEdits);
                         }
                         pending.take().expect("pending action").decide(choice.reply());
-                        terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                        terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
                     }
                     continue;
                 }
@@ -862,7 +868,7 @@ pub(super) async fn submit_objective(
                         Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
                     }
                     TerminalInput::LineContinued if held.is_some() => {
-                        if terminal.restore_draft_input(composer.text().len()).is_err() {
+                        if terminal.restore_draft_input(composer.input_capacity()).is_err() {
                             break "terminal input failed".to_owned();
                         }
                         Some(Feedback::Transient("Both drafts retained; wait for the Run to finish".into()))
@@ -874,7 +880,7 @@ pub(super) async fn submit_objective(
                         Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
                     }
                     TerminalInput::Submit if terminal.clipboard_loading() && !terminal.is_linear() => {
-                        if terminal.restore_draft_input(composer.text().len()).is_err() {
+                        if terminal.restore_draft_input(composer.input_capacity()).is_err() {
                             break "terminal input failed".to_owned();
                         }
                         Some(Feedback::Transient("Clipboard loading; press Enter after paste to submit".into()))
@@ -889,7 +895,7 @@ pub(super) async fn submit_objective(
                     TerminalInput::Submit if exits_after_settled_run(composer, view, starting_sequence) => {
                         abandon_drafts_for_exit(composer, &mut held, &steering);
                         offered = None;
-                        if terminal.restore_draft_input(0).is_err() {
+                        if terminal.restore_draft_input(crate::terminal::MAX_DRAFT_BYTES).is_err() {
                             break "terminal input failed".to_owned();
                         }
                         terminal.defer_input(TerminalInput::EndOfInput);
@@ -911,7 +917,7 @@ pub(super) async fn submit_objective(
                                         Ok(()) => {
                                             offered = Some(composer.text().to_owned());
                                             if terminal.is_linear() {
-                                                composer.take();
+                                                linear_offers.push(composer.take_draft());
                                                 Feedback::Transient("Steering note waits for the agent's next step".into())
                                             } else {
                                                 Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
@@ -926,7 +932,7 @@ pub(super) async fn submit_objective(
                                 {
                                     held = Some(draft);
                                 }
-                                if terminal.restore_draft_input(composer.text().len()).is_err() {
+                                if terminal.restore_draft_input(composer.input_capacity()).is_err() {
                                     break "terminal input failed".to_owned();
                                 }
                                 Some(feedback)
@@ -999,7 +1005,7 @@ pub(super) async fn submit_objective(
                         None
                     }
                     TerminalInput::Suspend => {
-                        if terminal.suspend_and_resume(composer.text().len()).is_err() {
+                        if terminal.suspend_and_resume(composer.input_capacity()).is_err() {
                             break "terminal resume failed".to_owned();
                         }
                         if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
@@ -1245,7 +1251,7 @@ pub(super) async fn compact_current(
                         None
                     }
                     TerminalInput::Suspend => {
-                        terminal.suspend_and_resume(composer.text().len())
+                        terminal.suspend_and_resume(composer.input_capacity())
                             .map_err(|error| error.to_string())?;
                         terminal.draw_busy(view, composer, None)
                             .map_err(|error| error.to_string())?;
@@ -1255,7 +1261,7 @@ pub(super) async fn compact_current(
                         return Ok(CompactionOutcome::Shutdown(signal));
                     }
                     TerminalInput::Submit | TerminalInput::EndOfInput => {
-                        terminal.restore_draft_input(composer.text().len())
+                        terminal.restore_draft_input(composer.input_capacity())
                             .map_err(|error| error.to_string())?;
                         Some(Feedback::Transient("Draft retained; press Enter after compaction to submit".into()))
                     }

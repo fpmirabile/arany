@@ -2,8 +2,8 @@ use super::provider::select::ProviderArg;
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{
-    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
-    Submission, TerminalInput, invoked_objective, transcript_agents,
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
+    InteractiveCommand, Submission, TerminalInput, invoked_objective, transcript_agents,
 };
 use arany::{
     CollaborationPolicy, Effort, Engine, EngineError, RunOutcome, RunStatus, SessionDefaults,
@@ -720,6 +720,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .map(|error| {
                 Feedback::History(format!("Error: {error}; the archive notice may show again"))
             });
+        terminal
+            .restore_selected_draft_input(composer.input_capacity())
+            .map_err(|error| error.to_string())?;
         let input = loop {
             let input = terminal
                 .next_input()
@@ -906,7 +909,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     "Clipboard loading; press Enter after paste to submit".into(),
                 ));
                 terminal
-                    .restore_draft_input(composer.text().len())
+                    .restore_draft_input(composer.input_capacity())
                     .map_err(|error| error.to_string())?;
                 empty_interrupt = None;
             }
@@ -1023,9 +1026,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     }
                     result => result.expect("validated submission"),
                 };
-                if matches!(submission, Submission::Command { .. }) {
-                    composer.take();
-                }
+                consume_local_command(&mut composer, &submission);
                 match submission {
                     Submission::Objective(_) | Submission::Skill { .. } => {
                         let (objective, skill) = match submission {
@@ -1045,7 +1046,6 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             GoalStart::Plain,
                             objective,
                             skill,
-                            line,
                         )
                         .await?;
                     }
@@ -1070,7 +1070,6 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             start,
                             objective,
                             None,
-                            line,
                         )
                         .await?;
                     }
@@ -1134,7 +1133,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             match permissions::choose_area(&mut terminal).await? {
                                 None => {
                                     terminal
-                                        .restore_draft_input(composer.text().len())
+                                        .restore_draft_input(composer.input_capacity())
                                         .map_err(|error| error.to_string())?;
                                     notice =
                                         Some(Feedback::History("Permissions unchanged".into()));
@@ -1148,7 +1147,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     )
                                     .await?;
                                     terminal
-                                        .restore_draft_input(composer.text().len())
+                                        .restore_draft_input(composer.input_capacity())
                                         .map_err(|error| error.to_string())?;
                                     notice = Some(Feedback::History(summary));
                                     continue;
@@ -1357,7 +1356,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             TerminalInput::Resize => {}
             TerminalInput::Suspend => {
                 terminal
-                    .suspend_and_resume(composer.text().len())
+                    .suspend_and_resume(composer.input_capacity())
                     .map_err(|error| error.to_string())?;
                 notice = Some(Feedback::Transient("Terminal resumed".into()));
             }
@@ -1533,6 +1532,15 @@ fn retained_draft_notice(composer: &Composer) -> Option<Feedback> {
     })
 }
 
+fn consume_local_command(composer: &mut Composer, submission: &Submission<'_>) {
+    if let Submission::Command { command, argument } = submission
+        && !(*command == InteractiveCommand::Goal
+            && argument.is_some_and(|argument| argument != "pause"))
+    {
+        composer.take();
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "submission carries independent Run inputs"
@@ -1547,17 +1555,15 @@ async fn submit_idle_run(
     start: GoalStart,
     objective: String,
     skill: Option<String>,
-    draft: String,
 ) -> Result<Option<Feedback>, String> {
     materialize_session(admission, session_id, view).await?;
     let starting_sequence = view.last_sequence;
-    if composer.is_empty()
-        && !draft.is_empty()
-        && matches!(start, GoalStart::Plain | GoalStart::Autonomous)
-    {
-        composer.insert_paste(&draft).map_err(str::to_owned)?;
-    }
-    let submitted = composer.take_draft();
+    let submitted = if matches!(start, GoalStart::Resume | GoalStart::Continue) {
+        composer.take();
+        ComposerDraft::default()
+    } else {
+        composer.take_draft()
+    };
     match submit_objective(
         engine,
         terminal,
@@ -1756,7 +1762,7 @@ async fn finish_submission(
             .map_err(|error| error.to_string())?;
     }
     terminal
-        .restore_draft_input(composer.text().len())
+        .restore_draft_input(composer.input_capacity())
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
@@ -2543,6 +2549,46 @@ fn print_run_answer(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn goal_submission_keeps_editable_mentions_images_and_waiting_drafts() {
+        use super::*;
+        for image in [false, true] {
+            let command = format!("/goal {} @src/lib.rs", "fix ".repeat(300));
+            let mut composer = Composer::default();
+            composer.insert_literal(&command).unwrap();
+            if image {
+                composer
+                    .attach_image(arany::test_support::test_image())
+                    .unwrap();
+            }
+            let mut held = Composer::default();
+            held.insert_paste(&"s".repeat(64 * 1024)).unwrap();
+            assert!(!composer.restore_draft(held.take_draft()));
+            let submission = composer.parse_submission(&command).unwrap();
+            consume_local_command(&mut composer, &submission);
+            let submitted = composer.take_draft();
+            assert_eq!(submitted.editable_text(), command);
+            assert_eq!(submitted.images().len(), usize::from(image));
+            assert_eq!(
+                arany::mention_paths(&submitted.editable_text()).unwrap(),
+                vec![PathBuf::from("src/lib.rs")]
+            );
+            assert!(composer.restore_draft(submitted));
+            assert_eq!(composer.text(), command);
+            assert!(!composer.has_text_pastes());
+            composer.clear();
+            composer.apply(TerminalInput::Up);
+            assert_eq!(composer.text(), "s".repeat(64 * 1024));
+        }
+        let mut composer = Composer::default();
+        composer.insert_literal("/help").unwrap();
+        consume_local_command(
+            &mut composer,
+            &crate::terminal::parse_submission("/help").unwrap(),
+        );
+        assert!(composer.is_empty());
+    }
+
     #[test]
     fn archive_notice_survives_every_setup_outcome_and_gates_acknowledgement() {
         let archive = "History from an incompatible version archived intact to /state/archive/history-20261021T000000.000Z";
