@@ -102,4 +102,7 @@ prost = "=0.14.4"
 tempfile = "3.27.0"
 
 [workspace.lints.rust]
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(arany_ci)', 'cfg(arany_guard)'] }
+unexpected_cfgs = { level = "warn", check-cfg = [
+  'cfg(arany_ci)',
+  'cfg(arany_guard)',
+] }

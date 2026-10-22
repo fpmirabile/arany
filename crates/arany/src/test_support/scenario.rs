@@ -817,7 +817,16 @@ printf retained > "$CARGO_TARGET_DIR/prior-marker"
 "#,
             true,
         ),
-        ("warm", "cargo test --locked --lib --verbose", true),
+        (
+            "warm",
+            // macOS gives each command a new source path, invalidating Cargo fingerprints.
+            r#"set -eu
+test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained
+cargo test --locked --lib --no-run
+cargo test --locked --lib --verbose
+"#,
+            true,
+        ),
         (
             "failed-test",
             r#"printf discarded > "$CARGO_TARGET_DIR/prior-marker"; ARANY_FIXTURE_FAIL=1 cargo test --locked --lib"#,
