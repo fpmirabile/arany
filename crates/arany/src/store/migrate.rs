@@ -67,9 +67,7 @@ pub(super) struct Registry<'a> {
     pub(super) event_steps: &'a [EventStep],
 }
 
-// The glob Tool and the typed Git writes only added call variants (glob also a worker Tool
-// label), so older payloads keep their bytes; one naming a variant its version lacked is forged
-// and refuses.
+// Enum-only steps preserve canonical bytes and refuse variants their source version lacked.
 macro_rules! variant_step {
     ($kind:literal, $from:literal, $before:path) => {
         EventStep {
@@ -149,10 +147,26 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
-        expiry_step!("ToolStarted", 15),
-        expiry_step!("ToolFinished", 21),
-        expiry_step!("HookStarted", 5),
-        expiry_step!("HookFinished", 10),
+        variant_step!("ToolStarted", 15, crate::session::pre_multiedit_payload),
+        variant_step!("ToolFinished", 21, crate::session::pre_multiedit_payload),
+        variant_step!("HookStarted", 5, crate::session::pre_multiedit_payload),
+        variant_step!("HookFinished", 10, crate::session::pre_multiedit_payload),
+        variant_step!(
+            "GoalPlanContractRecorded",
+            8,
+            crate::session::pre_multiedit_payload
+        ),
+        variant_step!(
+            "ProviderCallRecorded",
+            15,
+            crate::session::pre_multiedit_payload
+        ),
+        variant_step!("RunStarted", 20, crate::session::pre_multiedit_payload),
+        variant_step!("AgentSpawned", 12, crate::session::pre_multiedit_payload),
+        expiry_step!("ToolStarted", 16),
+        expiry_step!("ToolFinished", 22),
+        expiry_step!("HookStarted", 6),
+        expiry_step!("HookFinished", 11),
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),

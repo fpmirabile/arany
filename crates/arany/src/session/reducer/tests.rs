@@ -4383,12 +4383,18 @@ mod goal_replay_tests {
     }
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
-        let output = if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Edit { .. }) {
+        let output = if matches!(
+            intent.call,
+            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. }
+        ) {
             let expected = match &intent.call {
                 ToolCall::Write {
                     expected_digest, ..
                 } => expected_digest.clone(),
                 ToolCall::Edit {
+                    expected_digest, ..
+                }
+                | ToolCall::MultiEdit {
                     expected_digest, ..
                 } => Some(expected_digest.clone()),
                 _ => unreachable!(),
@@ -7947,79 +7953,148 @@ mod goal_replay_tests {
     #[test]
     fn checkpoint_replay_requires_publication_status_and_tracks_first_touch_and_gaps() {
         use crate::{Checkpoint, CheckpointReason, CheckpointStatus};
-        let (mut view, goal, run, agent) = primary_tool_session(true);
-        view.goals[0].plan_contract.as_mut().unwrap().paths = vec!["src".into()];
-        for (before, after, status) in [
-            ("original", "one", CheckpointStatus::Captured),
-            ("one", "two", CheckpointStatus::NotNeeded),
-            ("external", "three", CheckpointStatus::Captured),
-        ] {
-            let intent = child_intent(
-                run,
-                agent,
-                ToolCall::Write {
-                    path: "src/lib.rs".into(),
-                    expected_digest: Some(crate::tools::types::hex_digest(before.as_bytes())),
-                    content: after.into(),
-                },
-            );
-            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
-            let observation = observation_for(intent, after.as_bytes());
-            let finish = |checkpoint| Event::ToolFinished {
-                run_id: run,
-                agent_run_id: agent,
-                observation: observation.clone(),
-                checkpoint,
-            };
-            assert!(
-                rejected(&view, finish(None)),
-                "a GO publication requires checkpoint metadata"
-            );
-            let invalid = Checkpoint {
-                status: if status == CheckpointStatus::Captured {
-                    CheckpointStatus::NotNeeded
-                } else {
-                    CheckpointStatus::Captured
-                },
-                reason: None,
-                pruned_before_run: None,
-            };
-            assert!(rejected(&view, finish(Some(invalid))));
-            assert!(rejected(
-                &view,
-                finish(Some(Checkpoint {
-                    status,
-                    reason: Some(CheckpointReason::Quota),
-                    pruned_before_run: None
-                }))
-            ));
-            assert!(rejected(
-                &view,
-                finish(Some(Checkpoint {
+        for multiedit in [false, true] {
+            let (mut view, goal, run, agent) = primary_tool_session(true);
+            view.goals[0].plan_contract.as_mut().unwrap().paths = vec!["src".into()];
+            for (before, after, status) in [
+                ("original", "one", CheckpointStatus::Captured),
+                ("one", "two", CheckpointStatus::NotNeeded),
+                ("external", "three", CheckpointStatus::Captured),
+            ] {
+                let intent = child_intent(
+                    run,
+                    agent,
+                    if multiedit {
+                        ToolCall::MultiEdit {
+                            file_path: "src/lib.rs".into(),
+                            expected_digest: crate::tools::types::hex_digest(before.as_bytes()),
+                            edits: vec![crate::LiteralEdit {
+                                old_string: before.into(),
+                                new_string: after.into(),
+                                replace_all: false,
+                            }],
+                        }
+                    } else {
+                        ToolCall::Write {
+                            path: "src/lib.rs".into(),
+                            expected_digest: Some(crate::tools::types::hex_digest(
+                                before.as_bytes(),
+                            )),
+                            content: after.into(),
+                        }
+                    },
+                );
+                apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+                apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+                apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+                let observation = observation_for(intent, after.as_bytes());
+                let finish = |checkpoint| Event::ToolFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: observation.clone(),
+                    checkpoint,
+                };
+                assert!(
+                    rejected(&view, finish(None)),
+                    "a GO publication requires checkpoint metadata"
+                );
+                let invalid = Checkpoint {
+                    status: if status == CheckpointStatus::Captured {
+                        CheckpointStatus::NotNeeded
+                    } else {
+                        CheckpointStatus::Captured
+                    },
+                    reason: None,
+                    pruned_before_run: None,
+                };
+                assert!(rejected(&view, finish(Some(invalid))));
+                assert!(rejected(
+                    &view,
+                    finish(Some(Checkpoint {
+                        status,
+                        reason: Some(CheckpointReason::Quota),
+                        pruned_before_run: None
+                    }))
+                ));
+                assert!(rejected(
+                    &view,
+                    finish(Some(Checkpoint {
+                        status,
+                        reason: None,
+                        pruned_before_run: Some(RunId::new()),
+                    }))
+                ));
+                for field in ["before", "bytes", "sha256"] {
+                    let mut forged = observation.clone();
+                    let mut output: serde_json::Value =
+                        serde_json::from_str(&forged.output).unwrap();
+                    output.as_object_mut().unwrap().remove(field);
+                    forged.output = output.to_string();
+                    assert!(rejected(
+                        &view,
+                        Event::ToolFinished {
+                            run_id: run,
+                            agent_run_id: agent,
+                            observation: forged,
+                            checkpoint: Some(Checkpoint {
+                                status,
+                                reason: None,
+                                pruned_before_run: None
+                            })
+                        }
+                    ));
+                }
+                let mut forged = observation.clone();
+                if let Some(crate::tools::Attestation::Guard(receipt)) = &mut forged.attestation {
+                    receipt.intent_digest = [0; 32];
+                }
+                assert!(rejected(
+                    &view,
+                    Event::ToolFinished {
+                        run_id: run,
+                        agent_run_id: agent,
+                        observation: forged,
+                        checkpoint: Some(Checkpoint {
+                            status,
+                            reason: None,
+                            pruned_before_run: None
+                        })
+                    }
+                ));
+                let event = finish(Some(Checkpoint {
                     status,
                     reason: None,
-                    pruned_before_run: Some(RunId::new()),
-                }))
-            ));
-            apply(
-                &mut view,
-                finish(Some(Checkpoint {
-                    status,
-                    reason: None,
-                    pruned_before_run: Some(run),
-                })),
-            )
-            .unwrap();
+                    pruned_before_run: None,
+                }));
+                assert_eq!(
+                    Event::decode(
+                        event.kind(),
+                        crate::session::payload_version(event.kind()).unwrap(),
+                        &event.payload().unwrap(),
+                        Some(run),
+                        Some(agent)
+                    )
+                    .unwrap(),
+                    event
+                );
+                apply(
+                    &mut view,
+                    finish(Some(Checkpoint {
+                        status,
+                        reason: None,
+                        pruned_before_run: Some(run),
+                    })),
+                )
+                .unwrap();
+            }
+            let last = view.runs[0]
+                .tools
+                .last()
+                .unwrap()
+                .checkpoint
+                .as_ref()
+                .unwrap();
+            assert_eq!(last.status, CheckpointStatus::Captured);
         }
-        let last = view.runs[0]
-            .tools
-            .last()
-            .unwrap()
-            .checkpoint
-            .as_ref()
-            .unwrap();
-        assert_eq!(last.status, CheckpointStatus::Captured);
     }
 }

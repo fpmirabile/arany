@@ -1563,22 +1563,23 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 20),
-        ("AgentSpawned", 12),
-        ("ProviderCallRecorded", 15),
-        ("AgentFinished", 10),
-        ("ToolStarted", 16),
-        ("ToolFinished", 22),
-        ("WorkerStopObserved", 1),
-        ("WorkerHandoverDiscarded", 1),
-        ("WorkerDataChunk", 1),
-        ("WorkerDataSealed", 1),
-        ("WorkerHandoverRecorded", 2),
-        ("WorkerIntegrationRecorded", 1),
-        ("WorkerLeaseReleased", 1),
-        ("WorkerVerificationRecorded", 1),
+        "RunStarted",
+        "AgentSpawned",
+        "ProviderCallRecorded",
+        "AgentFinished",
+        "ToolStarted",
+        "ToolFinished",
+        "WorkerStopObserved",
+        "WorkerHandoverDiscarded",
+        "WorkerDataChunk",
+        "WorkerDataSealed",
+        "WorkerHandoverRecorded",
+        "WorkerIntegrationRecorded",
+        "WorkerLeaseReleased",
+        "WorkerVerificationRecorded",
     ];
-    for (kind, version) in expected {
+    for kind in expected {
+        let version = crate::session::payload_version(kind).unwrap();
         let e = f
             .envelopes()
             .into_iter()

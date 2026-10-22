@@ -865,8 +865,8 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(20));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+        assert_eq!(payload_version("RunStarted"), Some(21));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -1106,10 +1106,18 @@ mod subscription_compaction_tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<CompactionRecord>(missing).is_err());
         }
-        for compiler_version in [1, 2, 4] {
-            let mut invalid = record.clone();
-            invalid.compiler_version = compiler_version;
-            assert!(invalid.validate().is_err());
+        for (field, current) in [
+            ("prompt_version", 1),
+            ("schema_version", 1),
+            ("compiler_version", 3),
+        ] {
+            assert_eq!(encoded[field], current);
+            for version in (0..=4).filter(|version| *version != current) {
+                let mut invalid = encoded.clone();
+                invalid[field] = serde_json::json!(version);
+                let invalid: CompactionRecord = serde_json::from_value(invalid).unwrap();
+                assert!(invalid.validate().is_err(), "{field}={version}");
+            }
         }
         record.provider = "chatgpt".into();
         record.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {
@@ -1533,7 +1541,7 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(12));
+        assert_eq!(payload_version(child.kind()), Some(13));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1837,7 +1845,7 @@ mod payload_version_tests {
             )
             .is_err()
         );
-        for previous in [21, 20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in 7..finished.version() {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -2034,12 +2042,7 @@ mod payload_version_tests {
         for event in bumped {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
-            let version = match event {
-                Event::RunStarted { .. } => 20,
-                Event::ToolStarted { .. } => 16,
-                Event::RunFinished { .. } => 9,
-                _ => 7,
-            };
+            let version = payload_version(event.kind()).expect("registered kind");
             assert_eq!(event.version(), version, "{}", event.kind());
             assert_eq!(
                 Event::decode(event.kind(), version, &payload, run_id, agent_run_id)
@@ -2356,7 +2359,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(20));
+    assert_eq!(payload_version("RunStarted"), Some(21));
 }
 
 #[test]
@@ -2364,7 +2367,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,
@@ -2393,8 +2396,8 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
-    assert!(decode_call(&valid, 15).is_ok());
-    assert!(decode_call(&valid, 14).is_err());
+    assert!(decode_call(&valid, 16).is_ok());
+    assert!(decode_call(&valid, 15).is_err());
     for (field, value) in [
         ("refusal", serde_json::Value::Null),
         ("failure_reason", serde_json::Value::Null),
@@ -2415,17 +2418,17 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     ] {
         let mut invalid = valid.clone();
         invalid[field] = value;
-        assert!(decode_call(&invalid, 15).is_err(), "field {field}");
+        assert!(decode_call(&invalid, 16).is_err(), "field {field}");
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
-    assert!(decode_call(&worker_phase, 15).is_err());
+    assert!(decode_call(&worker_phase, 16).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
-    assert!(decode_call(&synthesis, 15).is_ok());
+    assert!(decode_call(&synthesis, 16).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
-    assert!(decode_call(&missing, 15).is_err());
+    assert!(decode_call(&missing, 16).is_err());
     for (disposition, failure, accepted) in [
         ("failed", serde_json::json!("proposal_refused"), true),
         ("failed", serde_json::Value::Null, false),
@@ -2485,8 +2488,8 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
             Some(AgentRunId::new()),
         )
     };
-    assert!(decode(&value, 15).is_ok());
-    assert!(decode(&value, 14).is_err());
+    assert!(decode(&value, 16).is_ok());
+    assert!(decode(&value, 15).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
         ("phase", serde_json::json!("tool_review")),
@@ -2499,7 +2502,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, 15).is_err(), "{key}");
+        assert!(decode(&malformed, 16).is_err(), "{key}");
     }
 }
 

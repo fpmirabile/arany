@@ -9,30 +9,47 @@ use std::path::Path;
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// One (kind, from, input, expected) row per production step. The glob and Git write steps keep
-// payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 21] = [
+// One canonical (kind, from, input, expected) fixture per production step.
+const EVENT_FIXTURES: [EventFixture<'static>; 29] = [
+    ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 10, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        8,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        15,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
+    ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     (
         "ToolStarted",
-        15,
+        16,
         GLOB_TOOLSTARTED,
         include_str!("toolstarted-without-expiry.json"),
     ),
     (
         "ToolFinished",
-        21,
+        22,
         GLOB_TOOLFINISHED,
         include_str!("toolfinished-without-expiry.json"),
     ),
     (
         "HookStarted",
-        5,
+        6,
         GLOB_HOOKSTARTED,
         include_str!("hookstarted-without-expiry.json"),
     ),
     (
         "HookFinished",
-        10,
+        11,
         GLOB_HOOKFINISHED,
         include_str!("hookfinished-without-expiry.json"),
     ),
@@ -74,6 +91,60 @@ const EVENT_FIXTURES: [EventFixture<'static>; 21] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
 ];
+
+#[test]
+fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
+    for (kind, from, input, expected) in &EVENT_FIXTURES[..8] {
+        let step = REGISTRY.event_step(kind, *from).unwrap();
+        let value: Value = serde_json::from_str(input).unwrap();
+        assert_eq!(
+            (step.canonical)(input).as_deref(),
+            Some(*expected),
+            "{kind}"
+        );
+        assert_eq!(
+            (step.transform)(value),
+            Some(serde_json::from_str(expected).unwrap())
+        );
+    }
+    let mut started: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    started["intent"]["call"] = serde_json::json!({"operation":"multiedit","file_path":"src/lib.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"a","new_string":"b","replace_all":false}]});
+    let step = REGISTRY.event_step("ToolStarted", 15).unwrap();
+    assert!((step.canonical)(&started.to_string()).is_none());
+    assert!((step.transform)(started.clone()).is_none());
+    let expiry = REGISTRY.event_step("ToolStarted", 16).unwrap();
+    let started = (expiry.transform)(started).unwrap();
+    let (run, agent) = intent_scope(&started).unwrap();
+    let current = Event::decode(
+        "ToolStarted",
+        payload_version("ToolStarted").unwrap(),
+        &started.to_string(),
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&current.payload().unwrap()).unwrap(),
+        started
+    );
+    for tool in ["edit", "multiedit"] {
+        let mut source: Value = serde_json::from_str(GLOBAL_RUNSTARTED).unwrap();
+        source["config"]["worker_policy"] = serde_json::json!({
+            "parent_grant":{"read_paths":["src"],"write_paths":["src"],"tools":[tool],"skills":[],"mcp_servers":[],"commands":[],"permission_mode":null},
+            "concurrency":1,"max_turns":4,"max_tools":3,"data_bytes":1024
+        });
+        let step = REGISTRY.event_step("RunStarted", 20).unwrap();
+        assert_eq!(
+            (step.canonical)(&source.to_string()).is_some(),
+            tool == "edit"
+        );
+        let upgraded = (step.transform)(source.clone());
+        assert_eq!(upgraded.is_some(), tool == "edit");
+        if let Some(upgraded) = upgraded {
+            assert_eq!(upgraded, source);
+        }
+    }
+}
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
 const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
 const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
@@ -568,7 +639,7 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
     assert_eq!(stored_rows(&upgraded), current);
     assert_eq!(fork_digests(&upgraded), digests);
     let started = first_of(&upgraded, "RunStarted");
-    assert_eq!(started.version, 20);
+    assert_eq!(started.version, 21);
     assert!(
         started
             .payload

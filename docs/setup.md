@@ -160,10 +160,38 @@ Generic Messages routes require a private version-2 `provider-profiles.json` in
 environment key is used; native Anthropic accounts and workspace headers do not
 supply credentials. Keep the file private (`0600` on Unix).
 
-**DeepSeek is UNAVAILABLE until strict compaction is proven.** It lacks evidence
-for the provider-enforced compaction schema Arany requires. Ordinary answers,
-delegation and plausible summary JSON cannot establish that support. Do not
-configure DeepSeek or relax compaction to enable it.
+All routes below require the exact text-compaction conformance check before use.
+Checks establish bounded protocol behavior, not live vendor compatibility or
+summary accuracy. Custom primary/child routes are read-only, without Workspace
+Tools or images. If AI Tool review is needed, select a native review route in
+[provider-routing.json](./specs/provider.md#per-role-selection-and-fallback);
+text compaction does not attest a strict review verdict.
+
+DeepSeek API keys can use this private `STATE/provider-profiles.json`:
+
+```json
+{
+  "version": 2,
+  "profiles": [{
+    "name": "deepseek",
+    "protocol": "anthropic-messages",
+    "base_url": "https://api.deepseek.com/anthropic",
+    "auth": "x-api-key",
+    "model": "deepseek-flash",
+    "credential_env": "ARANY_PROVIDER_DEEPSEEK_KEY",
+    "outcome_encoding": "native_tools",
+    "privacy": "user_authorized",
+    "max_output_tokens": 4096,
+    "capability_evidence_version": 2,
+    "efforts": []
+  }]
+}
+```
+
+Supply the API key privately through `ARANY_PROVIDER_DEEPSEEK_KEY`, then run
+`arany provider check custom:deepseek --state-dir STATE`. Only a successful
+check permits `arany exec --state-dir STATE --provider custom:deepseek --model deepseek-flash "Your task"`.
+No DeepSeek subscription route is included.
 
 Kimi platform API keys use the following complete document in
 `STATE/provider-profiles.json`, outside the Workspace, with mode `0600`:
@@ -190,9 +218,8 @@ Kimi platform API keys use the following complete document in
 ```
 
 Supply your platform key through `ARANY_PROVIDER_KIMI_API_KEY`, using your
-private environment outside the repository. The platform documents
-schema-constrained output, but the exact endpoint/model must still pass Arany's
-unchanged conformance check. Checks send synthetic data only and may be billable:
+private environment outside the repository. The exact endpoint/model must pass
+Arany's text-compaction conformance check. Checks send synthetic data only and may be billable:
 
 ```sh
 arany provider check custom:kimi-api --state-dir STATE
@@ -209,11 +236,9 @@ An empty effort list omits the override. Explicit platform efforts
 defaults or translate unsupported values. The platform base sends to
 `https://api.moonshot.ai/anthropic/v1/messages`.
 
-**Kimi Code is UNAVAILABLE pending endpoint-specific strict-compaction evidence.**
-Its console keys belong to a separate subscription service and billing route.
-Platform schema documentation does not establish Code support; this is unknown,
-not proof that Code cannot enforce schemas. Keep this candidate separate from
-the usable platform document; it grants no admission:
+Kimi Code requires its own exact check and subscription entitlement. Its console
+keys belong to a separate subscription service and billing route. Platform
+compatibility does not establish Code support. Use this separate candidate:
 
 ```json
 {
@@ -252,12 +277,9 @@ valid version-1 Responses profiles migrate automatically and require a fresh
 check. Live acceptance and native platform evidence remain
 [owner checks](../NEXT_STEPS.md#daily-use-first).
 
-**GLM Standard API is UNAVAILABLE pending Messages strict-compaction evidence.**
-Z.ai's [structured-output guide](https://docs.z.ai/guides/capabilities/struct-output)
-documents Chat Completions JSON mode, prompt-defined structure and client-side
-schema validation; it does not establish provider-enforced Messages JSON schema.
-Keep these candidates separate from the usable Kimi platform recipe; neither a
-synthetic pass nor plausible summary JSON establishes vendor support.
+GLM Standard API candidates require their exact text-compaction checks. Ordinary
+Messages text needs no provider-enforced response schema. Synthetic fixtures do
+not establish live vendor support.
 
 Candidate document for `STATE/provider-profiles.json`, outside the Workspace,
 with mode `0600`:
@@ -313,12 +335,11 @@ key, ZCode OAuth identity or another client's User-Agent. Arany sends its honest
 `arany/<version>` identity and never falls back to native or Kimi credentials.
 
 Keep `efforts: []` to omit native Claude overrides. Chat `reasoning_content`
-and JSON mode do not establish Messages thinking or schema support. Before
-promoting either candidate, obtain Messages-specific provider-enforced schema
-evidence, then run the exact `arany provider check custom:glm-api` or
-`custom:glm-flash` with `--state-dir STATE`. These checks use synthetic data,
-may be billable and must retain the schema-only nonce challenge. Each model
-needs its own passing check before a Run; failure leaves it unadmitted.
+and JSON mode do not establish Messages thinking support. Run the exact
+`arany provider check custom:glm-api --state-dir STATE` or
+`arany provider check custom:glm-flash --state-dir STATE`. These checks use
+synthetic data and may be billable. Each model needs its own passing check
+before a Run; failure leaves it unadmitted.
 [Vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#glm-standard-api-key-subscription-excluded)
 owns the source review; [owner checks](../NEXT_STEPS.md#daily-use-first) own live
 billing, compatibility and native evidence.

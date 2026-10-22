@@ -113,7 +113,7 @@ fn startup_upper_bound_two_files_on_named_host() {
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                     }
-                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                    _ => serde_json::json!(r#"synthetic summary"#),
                 }
             } else {
                 assert_eq!(input["phase"], "root_plan");
@@ -137,7 +137,6 @@ fn startup_upper_bound_two_files_on_named_host() {
                 }
                 serde_json::json!("startup answer")
             };
-            let text = arany::semantic::compaction_probe_reply(&wire, text);
             send_response_for(&mut stream, index, text, wire["stream"] == true);
         }
     });

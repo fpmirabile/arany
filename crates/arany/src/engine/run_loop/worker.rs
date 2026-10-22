@@ -344,6 +344,7 @@ impl RunLoop<'_> {
             ToolCall::PrepareWorker { preparation } => usize::from(preparation.max_chunks),
             ToolCall::Write { .. }
             | ToolCall::Edit { .. }
+            | ToolCall::MultiEdit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::Command { .. } => {
                 (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
