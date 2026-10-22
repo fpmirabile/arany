@@ -76,56 +76,6 @@ pub async fn check_native_model_from_env(
     .await
 }
 
-/// Makes up to three potentially billable synthetic inference calls with the selected API key.
-/// `account_id` binds a saved account; `None` binds an environment-backed selection.
-/// The caller must obtain explicit cost consent before invoking this function.
-pub async fn check_native_model_with_api_key(
-    root: StateRoot,
-    profile: &str,
-    model: &str,
-    effort: Effort,
-    key: String,
-    account_id: Option<Uuid>,
-) -> Result<CheckView, NativeCheckError> {
-    if !matches!(profile, "openai" | "anthropic")
-        || !valid_model_id(model)
-        || !valid_saved_api_account_id(profile, account_id)
-    {
-        return Err(NativeCheckError::InvalidSelection);
-    }
-    let credentials =
-        NativeApiCredentials::new(profile, key, None).map_err(|error| match error {
-            ProviderError::Rejected => NativeCheckError::InvalidSelection,
-            _ => NativeCheckError::CredentialUnavailable,
-        })?;
-    check_native_model_with_credentials(root, profile, model, effort, credentials, account_id).await
-}
-
-/// Checks one explicitly selected native credential scope after the caller obtains cost consent.
-pub async fn check_native_model_with_credentials(
-    root: StateRoot,
-    profile: &str,
-    model: &str,
-    effort: Effort,
-    credentials: NativeApiCredentials,
-    account_id: Option<Uuid>,
-) -> Result<CheckView, NativeCheckError> {
-    let refreshed = credentials.clone();
-    check_native_model(
-        root,
-        NativeCheckRequest {
-            profile: profile.into(),
-            model: model.into(),
-            effort,
-            credentials,
-            account_id,
-        },
-        crate::RunCancellation::new(),
-        std::future::ready(Ok(refreshed)),
-    )
-    .await
-}
-
 pub struct NativeCheckRequest {
     pub profile: String,
     pub model: String,

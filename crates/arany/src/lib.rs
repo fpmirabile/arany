@@ -39,10 +39,10 @@ pub use engine::{
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
+pub(crate) use journal::check::CheckJournal;
 pub use journal::check::{
-    CHECK_FORMATS, CheckCallKind, CheckCallToken, CheckDisposition, CheckEvent, CheckId,
-    CheckJournal, CheckOpenError, CheckProbe, CheckReceipt, CheckStart, CheckTarget, CheckUsage,
-    CheckView,
+    CHECK_FORMATS, CheckCallKind, CheckDisposition, CheckEvent, CheckId, CheckOpenError,
+    CheckProbe, CheckReceipt, CheckStart, CheckTarget, CheckUsage, CheckView,
 };
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
@@ -62,8 +62,7 @@ pub use provider::{
     ProviderWireProvenance, Providers, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot,
     RunInput, ToolUseId, UnansweredStatus, Usage, WorkspaceGuidance, admitted_context_window,
     check_custom_profile, check_custom_profile_with_cancellation, check_native_model,
-    check_native_model_from_env, check_native_model_with_api_key,
-    check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
+    check_native_model_from_env, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
     resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,
     validate_native_model_id,

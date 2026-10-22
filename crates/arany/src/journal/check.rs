@@ -340,7 +340,7 @@ impl CheckView {
     }
 }
 
-pub struct CheckJournal {
+pub(crate) struct CheckJournal {
     store: Store,
     _lease: crate::store::ProviderCheckLock,
     view: CheckView,
@@ -372,7 +372,7 @@ pub(crate) enum CheckOp {
 }
 
 impl CheckJournal {
-    pub async fn start(root: StateRoot, start: CheckStart) -> Result<Self, CheckOpenError> {
+    pub(crate) async fn start(root: StateRoot, start: CheckStart) -> Result<Self, CheckOpenError> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(LIFETIME_MS);
         let lease = root.lock_provider_check()?;
         let store = Store::open(root)?;
@@ -400,10 +400,11 @@ impl CheckJournal {
             confirmed: true,
         })
     }
-    pub fn view(&self) -> &CheckView {
+    #[cfg(test)]
+    pub(crate) fn view(&self) -> &CheckView {
         &self.view
     }
-    pub fn request_deadline(&self) -> tokio::time::Instant {
+    pub(crate) fn request_deadline(&self) -> tokio::time::Instant {
         self.deadline - Duration::from_millis(SETTLEMENT_MS)
     }
     async fn write(&mut self, op: CheckOp) -> Result<(), StoreError> {
@@ -425,7 +426,7 @@ impl CheckJournal {
         })
         .await
     }
-    pub async fn call_started(
+    pub(crate) async fn call_started(
         &mut self,
         kind: CheckCallKind,
     ) -> Result<CheckCallToken, StoreError> {
@@ -450,7 +451,7 @@ impl CheckJournal {
             ordinal,
         })
     }
-    pub async fn call_finished(
+    pub(crate) async fn call_finished(
         &mut self,
         token: CheckCallToken,
         disposition: CheckDisposition,
@@ -511,13 +512,16 @@ impl CheckJournal {
         }
         Ok(())
     }
-    pub fn receipt(&self) -> CheckReceipt {
+    pub(crate) fn receipt(&self) -> CheckReceipt {
         CheckReceipt {
             id: self.view.id,
             disposition: self.confirmed.then_some(self.view.disposition).flatten(),
         }
     }
-    pub async fn finish(&mut self, mut disposition: CheckDisposition) -> Result<(), StoreError> {
+    pub(crate) async fn finish(
+        &mut self,
+        mut disposition: CheckDisposition,
+    ) -> Result<(), StoreError> {
         if let Some((ordinal, _)) = self.view.pending {
             disposition = CheckDisposition::Uncertain;
             self.append(CheckEvent::ProviderCheckCallFinished {
@@ -538,7 +542,7 @@ impl CheckJournal {
         })
         .await
     }
-    pub async fn close(self) -> Result<CheckView, StoreError> {
+    pub(crate) async fn close(self) -> Result<CheckView, StoreError> {
         self.store.close().await?;
         Ok(self.view)
     }
@@ -582,7 +586,7 @@ impl std::fmt::Display for CheckReceipt {
         }
     }
 }
-pub struct CheckCallToken {
+pub(crate) struct CheckCallToken {
     id: CheckId,
     ordinal: u8,
 }

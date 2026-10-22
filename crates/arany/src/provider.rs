@@ -50,7 +50,6 @@ pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{ImageAttachment, ImageOrigin, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ProviderImage};
 pub use native_check::{
     NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
-    check_native_model_with_api_key, check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 pub(crate) use render::instructions_text;
