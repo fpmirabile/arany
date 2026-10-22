@@ -1735,6 +1735,8 @@ mod tests {
         let mut view = crate::presentation::team_view();
         let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
         view.runs[0].agents[2].steering_notes = vec!["guidance".into()];
+        view.runs[0].agents[2].result = None;
+        view.runs[0].agents[2].summary = None;
         let transcript =
             crate::presentation::AgentTranscript::from_session(&view, run, child).unwrap();
         let mut history = History::agent();
@@ -1742,12 +1744,24 @@ mod tests {
         history.record_notice(super::super::TerminalNotice::History("After the note"));
         history.dirty = true;
         history.sync(&transcript.view, 80, 4096);
-        assert!(
-            history
-                .messages
-                .iter()
-                .any(|message| message.kind == MessageKind::Notice)
-        );
+        let kinds: Vec<_> = history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect();
+        let note = kinds
+            .iter()
+            .position(|kind| *kind == MessageKind::SteeringNote)
+            .expect("steering note row");
+        assert!(matches!(
+            history.messages[note].source,
+            MessageSource::Steering(_, 0)
+        ));
+        assert!(matches!(
+            history.notices.back().and_then(|notice| notice.after),
+            Some(MessageSource::Steering(_, 0))
+        ));
+        assert_eq!(kinds.get(note + 1), Some(&MessageKind::Notice));
     }
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
