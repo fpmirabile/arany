@@ -1277,6 +1277,7 @@ async fn bounded_writer_preserves_messages_and_backpressures_at_256() {
 fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertain() {
     use arany::{CacheUpdate, ToolCall, ToolDisposition, ToolObservation};
     let intent = arany::EffectIntent {
+        host: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),

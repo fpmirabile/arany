@@ -68,6 +68,7 @@ pub struct RewindPlan {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NonRewindable {
+    Host,
     UnguardedCommand,
     Mcp,
     Cache,
@@ -549,6 +550,9 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
                 }
             }
             let seq = t.finished_sequence.unwrap_or(started);
+            if t.ran_host() {
+                non_rewindable.push((seq, NonRewindable::Host));
+            }
             if t.ran_unguarded() {
                 non_rewindable.push((seq, NonRewindable::UnguardedCommand));
             }

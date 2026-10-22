@@ -456,6 +456,10 @@ async fn run_on_engine(
             if unguarded > 0 {
                 receipt.push_str(&format!("unguarded effects: {unguarded}\n"));
             }
+            let host: usize = goal_runs.iter().map(|run| run.host_tools()).sum();
+            if host > 0 {
+                receipt.push_str(&format!("host effects: {host}\n"));
+            }
             if let Some(notice) = crate::presentation::render_goal_provider_attempts(goal_runs) {
                 receipt.push_str(&notice);
                 receipt.push('\n');
@@ -1565,17 +1569,7 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            let version = match line["kind"].as_str() {
-                Some("RunStarted") => 21,
-                Some("AgentSpawned") => 13,
-                Some("AgentFinished") => 10,
-                Some("ProviderCallRecorded") => 16,
-                Some("RunFinished") => 9,
-                Some("GoalProviderCallReserved") => 7,
-                Some("MessageAccepted") => 7,
-                _ => 6,
-            };
-            assert_eq!(line["event_version"], version);
+            assert_eq!(line["event_version"], event.event.version());
         }
         store.close().await.expect("closed store");
 

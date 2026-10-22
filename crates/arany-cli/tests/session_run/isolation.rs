@@ -228,7 +228,7 @@ pub fn native_account_isolated_test_command_with_timeout(
         .args([
             "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
             "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
-            "root=$1; uid=$2; gid=$3; duration=$4; shift 4; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s \"$duration\" /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
+            "root=$1; uid=$2; gid=$3; duration=$4; shift 4; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s \"$duration\" /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" XDG_CONFIG_HOME=\"$root/home/.config\" GH_CONFIG_DIR=\"$root/home/.config/gh\" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
             "arany-native-account-fixture",
         ])
         .arg(root)
@@ -300,7 +300,7 @@ fn account_command(
     ]);
     command.args([
         "--", "/usr/bin/sh", "-c",
-        "HOME=${HOME:-\"$1\"}; XDG_STATE_HOME=${XDG_STATE_HOME:-\"$1/fixture-state\"}; XDG_DATA_HOME=${XDG_DATA_HOME:-\"$1/fixture-data\"}; export HOME XDG_STATE_HOME XDG_DATA_HOME; shift; exec \"$@\"",
+        "HOME=${HOME:-\"$1\"}; XDG_STATE_HOME=${XDG_STATE_HOME:-\"$1/fixture-state\"}; XDG_DATA_HOME=${XDG_DATA_HOME:-\"$1/fixture-data\"}; XDG_CONFIG_HOME=\"$HOME/.config\"; GH_CONFIG_DIR=\"$HOME/.config/gh\"; GIT_CONFIG_GLOBAL=/dev/null; GIT_CONFIG_NOSYSTEM=1; unset SSH_AUTH_SOCK; export HOME XDG_STATE_HOME XDG_DATA_HOME XDG_CONFIG_HOME GH_CONFIG_DIR GIT_CONFIG_GLOBAL GIT_CONFIG_NOSYSTEM; shift; exec \"$@\"",
         "arany-account-fixture",
     ]).arg(home);
     command
