@@ -1867,6 +1867,7 @@ mod tests {
     #[test]
     fn fallback_command_deadlines_reserve_selection_without_widening_active_windows() {
         let mut intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
