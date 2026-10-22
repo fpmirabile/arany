@@ -1487,6 +1487,37 @@ fn messages_preview_cancellation_discards_secret_tail() {
     );
 }
 
+// An answer row alone is not settled: the agents panel and pending rows show the same text
+// while the Run is active, and `ready` can be drawn before the answer row is printed.
+#[cfg(target_os = "linux")]
+#[track_caller]
+fn wait_settled(
+    output: &mut impl std::io::Read,
+    input: &mut impl std::io::Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut super::session_picker::PtyResponses,
+    from: usize,
+    answer: &str,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        super::session_picker::pump(output, input, transcript, answered);
+        let rows = super::screen_rows(transcript, 100, 30);
+        if transcript.len() > from
+            && rows.iter().any(|row| row.trim() == answer)
+            && rows.iter().any(|row| row.trim_start().starts_with("ready"))
+        {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{answer} never settled: {}",
+            super::session_picker::tail(transcript)
+        );
+        std::thread::yield_now();
+    }
+}
+
 #[cfg(target_os = "linux")]
 fn messages_attached_case(cancel: bool, case: RouteCase) {
     use super::active_terminal::{ProductGuard, product_child_of};
@@ -1639,56 +1670,34 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         thread::yield_now();
     };
     let _product = ProductGuard::new(product_child_of(shell_pid), state.clone());
-    wait_for_screen(
-        &mut output,
-        &mut input,
-        &mut transcript,
-        &mut answered,
-        (0, 100, 30),
-        if cancel {
-            "safe preview"
-        } else {
-            "verified answer"
-        },
-    );
-    if !cancel {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while !super::screen_rows(&transcript, 100, 30)
-            .join(" ")
-            .contains("ready")
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(
-                Instant::now() < deadline,
-                "completed answer returns to ready composer"
-            );
-            thread::yield_now();
-        }
-    }
-    if !cancel {
-        let from = transcript.len();
-        input.write_all(b"delegate once\r").unwrap();
+    if cancel {
         wait_for_screen(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            (from, 100, 30),
+            (0, 100, 30),
+            "safe preview",
+        );
+    } else {
+        wait_settled(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            0,
+            "verified answer",
+        );
+        let from = transcript.len();
+        input.write_all(b"delegate once\r").unwrap();
+        wait_settled(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
             "team answer",
         );
-        let deadline = Instant::now() + Duration::from_secs(10);
-        // The agents panel also shows "team answer" while the Run is still active.
-        while !super::screen_rows(&transcript, 100, 30)
-            .iter()
-            .any(|row| row.trim() == "team answer")
-            || !super::screen_rows(&transcript, 100, 30)
-                .join(" ")
-                .contains("ready")
-        {
-            pump(&mut output, &mut input, &mut transcript, &mut answered);
-            assert!(Instant::now() < deadline, "team returns to ready composer");
-            thread::yield_now();
-        }
     }
     let from = transcript.len();
     input
