@@ -1535,7 +1535,6 @@ mod tests {
                 "/model",
                 "Model: claude-sonnet-5 · low; /model changes are unavailable while a Run is active; Ctrl+C cancels".to_owned(),
             ),
-            ("/status", "Preparing message · Ctrl+C cancels".to_owned()),
         ] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
@@ -1546,6 +1545,25 @@ mod tests {
                 panic!("admission inspection must remain local")
             };
             assert_eq!(notice, expected, "{command} before current Run progress");
+            assert!(composer.is_empty());
+            assert_eq!(view.defaults, defaults);
+        }
+        for (command, expected_status) in [("/status", true), ("/usage", false)] {
+            composer.insert_paste(command).unwrap();
+            let ActiveSubmission::OpenUsage { status } =
+                handle_active_submission(&mut composer, &view, starting_sequence)
+            else {
+                panic!("admission inspection must open the local usage report")
+            };
+            assert_eq!(status, expected_status);
+            let report =
+                crate::presentation::usage_pages(&view, status, Some(starting_sequence)).concat();
+            assert_eq!(
+                report.contains("Preparing message · Ctrl+C cancels"),
+                expected_status
+            );
+            assert!(!report.contains("Task:"));
+            assert!(!report.contains("Request:"));
             assert!(composer.is_empty());
             assert_eq!(view.defaults, defaults);
         }
