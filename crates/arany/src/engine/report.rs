@@ -285,6 +285,22 @@ fn push_unguarded_facts(
     goal: &crate::session::GoalView,
     omitted_facts: &mut bool,
 ) {
+    let host: usize = view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .map(|run| run.host_tools())
+        .sum();
+    if host > 0 {
+        push_goal_report_item(
+            report,
+            GoalReportSection::Unresolved,
+            &format!(
+                "{host} host Git operation(s) may have remote effects; rewind cannot undo them."
+            ),
+            omitted_facts,
+        );
+    }
     let count = view
         .runs
         .iter()
@@ -592,6 +608,12 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         crate::tools::ToolCall::GitStatus { path } => format!("Git status {path}"),
         crate::tools::ToolCall::GitDiff { path, .. } => format!("Git diff {path}"),
         crate::tools::ToolCall::GitLog { path, .. } => format!("Git log {path}"),
+        crate::tools::ToolCall::GitPush { remote, branch } => {
+            format!("host Git push {branch} to {remote}")
+        }
+        crate::tools::ToolCall::GhPrCreate { repository, .. } => {
+            format!("host PR creation in {repository}")
+        }
         crate::tools::ToolCall::GitCommit { .. } => "Git commit".into(),
         crate::tools::ToolCall::GitBranch { name: None, .. } => "Git branch list".into(),
         crate::tools::ToolCall::GitBranch {
@@ -608,6 +630,7 @@ fn goal_report_evidence(
 ) -> String {
     let attester = match attestation {
         Some(crate::tools::Attestation::InProcess { .. }) => "The Engine",
+        Some(crate::tools::Attestation::Host(_)) => "A human-approved host run",
         Some(crate::tools::Attestation::Unguarded(_)) => "An unguarded host run",
         _ => "Guard",
     };

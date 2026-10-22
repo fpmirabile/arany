@@ -1498,6 +1498,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     let agent = crate::session::AgentRunId::new();
     let mut observation = crate::tools::ToolObservation {
         intent: crate::tools::EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run,
@@ -2378,4 +2379,42 @@ fn a_typed_allow_keeps_its_provenance_when_an_ordinary_allow_also_matches() {
         ordinary_only.decision_with_source(&commit_call()),
         (Decision::Allow, PermissionSource::Rule)
     );
+}
+
+#[test]
+fn host_git_modes_and_prefixes_never_replace_human_approval() {
+    let calls = [
+        ToolCall::GitPush {
+            remote: "https://github.com/o/r.git".into(),
+            branch: "main".into(),
+        },
+        ToolCall::GhPrCreate {
+            repository: "github.com/o/r".into(),
+            base: "main".into(),
+            head: "topic".into(),
+            title: "T".into(),
+            body: String::new(),
+            draft: false,
+        },
+    ];
+    for mode in ["default", "acceptEdits", "auto", "plan", "dontAsk"] {
+        for decision in ["allow", "ask", "deny"] {
+            for call in &calls {
+                let prefix = TypedGitPrefix::of_call(call).unwrap();
+                let config =
+                    typed_config(mode, vec![typed(prefix.tokens(), decision, Value::Null)])
+                        .unwrap();
+                let (verdict, _, approval) = config.evaluate(call);
+                if decision == "deny" || matches!(mode, "plan" | "dontAsk") {
+                    assert_eq!(verdict, Decision::Deny, "{mode} {decision}");
+                    assert_eq!(approval, None);
+                } else {
+                    assert_eq!(verdict, Decision::Ask, "{mode} {decision}");
+                    assert_eq!(approval, Some(ApprovalMode::Request));
+                }
+                let (channel, _) = crate::tools::ToolApprovals::new(ApprovalMode::Auto);
+                assert!(!channel.without_human_only().admits_human_only(call, false));
+            }
+        }
+    }
 }

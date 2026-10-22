@@ -212,6 +212,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     };
     let runtime = ToolRuntime {
         git_writes_available: false,
+        host_authentication: Default::default(),
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -1553,6 +1554,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         assert!(bytes > MAX_ORDINARY_TOOL_ARGUMENT_BYTES && bytes <= MAX_TOOL_ARGUMENT_BYTES);
     }
     let intent = EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1808,6 +1810,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     );
 
     let intent = EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1834,6 +1837,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 #[test]
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1946,6 +1950,7 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
 async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
     fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
         let mut intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::new(),
@@ -2342,6 +2347,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
 
     let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
         git_writes_available,
+        host_authentication: Default::default(),
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -2499,6 +2505,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
     });
     let runtime = ToolRuntime {
         git_writes_available: true,
+        host_authentication: Default::default(),
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -2563,6 +2570,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
         git_writes_available: false,
+        host_authentication: Default::default(),
         worker: None,
         handover: None,
         definitions: Default::default(),

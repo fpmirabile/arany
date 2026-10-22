@@ -2810,6 +2810,7 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
@@ -3560,6 +3561,7 @@ mod tests {
                 handover: None,
                 config: config.clone(),
                 intent: EffectIntent {
+                    host: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: crate::session::RunId::new(),

@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step.
-const EVENT_FIXTURES: [EventFixture<'static>; 29] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 35] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -29,27 +29,43 @@ const EVENT_FIXTURES: [EventFixture<'static>; 29] = [
     ),
     ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
     ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    ("ToolStarted", 16, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 22, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 6, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 11, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        9,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        16,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
     (
         "ToolStarted",
-        16,
+        17,
         GLOB_TOOLSTARTED,
         include_str!("toolstarted-without-expiry.json"),
     ),
     (
         "ToolFinished",
-        22,
+        23,
         GLOB_TOOLFINISHED,
         include_str!("toolfinished-without-expiry.json"),
     ),
     (
         "HookStarted",
-        6,
+        7,
         GLOB_HOOKSTARTED,
         include_str!("hookstarted-without-expiry.json"),
     ),
     (
         "HookFinished",
-        11,
+        12,
         GLOB_HOOKFINISHED,
         include_str!("hookfinished-without-expiry.json"),
     ),
@@ -1696,4 +1712,58 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
             assert_eq!(actual, expected, "{name}, interrupted={interrupted}");
         }
     }
+}
+
+#[test]
+fn host_git_migrations_reject_new_authority_in_old_rows() {
+    let step = REGISTRY.event_step("ToolStarted", 16).unwrap();
+    let source: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let mut multiedit = source.clone();
+    multiedit["intent"]["call"] = serde_json::json!({"operation":"multiedit","file_path":"src/lib.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"before","new_string":"after","replace_all":false}]});
+    assert!(
+        (REGISTRY.event_step("ToolStarted", 15).unwrap().transform)(multiedit.clone()).is_none()
+    );
+    assert_eq!((step.transform)(multiedit.clone()), Some(multiedit.clone()));
+    let canonical = (step.canonical)(&multiedit.to_string()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&canonical).unwrap(),
+        multiedit
+    );
+    for field in ["call", "host", "network"] {
+        let mut forged = source.clone();
+        match field {
+            "call" => {
+                forged["intent"]["call"] = serde_json::json!({"operation":"git_push", "remote":"https://github.com/o/r", "branch":"main"})
+            }
+            "host" => {
+                forged["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))})
+            }
+            "network" => forged["intent"]["limits"]["network"] = serde_json::json!("host"),
+            _ => unreachable!(),
+        }
+        assert!((step.canonical)(&forged.to_string()).is_none(), "{field}");
+        assert!((step.transform)(forged).is_none(), "{field}");
+    }
+    assert_eq!(
+        (step.canonical)(GLOB_TOOLSTARTED).unwrap(),
+        GLOB_TOOLSTARTED
+    );
+    let mut host = source;
+    host["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))});
+    host["intent"]["call"] = serde_json::json!({"operation":"git_push","remote":"https://github.com/o/r","branch":"main"});
+    host["intent"]["limits"]["network"] = serde_json::json!("host");
+    let expiry = REGISTRY
+        .event_step("ToolStarted", payload_version("ToolStarted").unwrap() - 1)
+        .unwrap();
+    assert!((expiry.canonical)(&host.to_string()).is_some());
+    let migrated = (expiry.transform)(host.clone()).unwrap();
+    assert!(migrated["intent"].get("expires_at_ms").is_none());
+    host["intent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expires_at_ms");
+    assert_eq!(
+        migrated, host,
+        "host approval loses only the shared clock expiry"
+    );
 }

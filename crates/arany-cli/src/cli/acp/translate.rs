@@ -1564,7 +1564,11 @@ async fn permission_request(
                 && !a.cancelled
                 && a.completion.is_none()
         });
-        if !valid || state.permission.is_some() || intent.call.is_unguarded() {
+        if !valid
+            || state.permission.is_some()
+            || intent.call.is_unguarded()
+            || intent.call.is_host()
+        {
             None
         } else {
             let cwd = &state
