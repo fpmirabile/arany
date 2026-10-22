@@ -16,6 +16,7 @@ mod output;
 pub mod permissions;
 mod process;
 mod search;
+mod selection;
 mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;

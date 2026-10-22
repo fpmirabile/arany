@@ -18,6 +18,7 @@ base64.workspace = true
 cap-fs-ext.workspace = true
 cap-std.workspace = true
 directories.workspace = true
+ignore.workspace = true
 opentelemetry.workspace = true
 opentelemetry-http.workspace = true
 opentelemetry_sdk.workspace = true
@@ -51,6 +52,7 @@ security-framework.workspace = true
 cc.workspace = true
 
 [dev-dependencies]
+globset.workspace = true
 arany = { path = ".", features = ["test-support"] }
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }

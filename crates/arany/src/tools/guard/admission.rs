@@ -496,6 +496,17 @@ impl Permit {
         replace_record(&self.dir, &self.seed_name(), &seed)
     }
 
+    pub(super) fn prepared(&self) -> Result<(), ToolError> {
+        let mut seed = self
+            .seed_record()?
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let SeedPhase::LaunchRequested { root } = seed.phase else {
+            return Err(ToolError::ProtectionUnavailable);
+        };
+        seed.phase = SeedPhase::Ready { root };
+        replace_record(&self.dir, &self.seed_name(), &seed)
+    }
+
     pub(super) fn terminated(&self) -> Result<(), ToolError> {
         let mut seed = self
             .seed_record()?
@@ -1000,6 +1011,7 @@ pub(super) async fn acquire_in(
     queued: impl Fn(bool),
     now: impl Fn() -> u64,
 ) -> Result<Permit, ToolError> {
+    let expires_at_ms = expires_at_ms.min(now().saturating_add(30_000));
     let mut ticket: Option<Ticket> = None;
     let mut recovery = RecoveryBudget {
         remaining: Duration::from_secs(30),

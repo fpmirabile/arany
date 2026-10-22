@@ -166,8 +166,8 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 5),
     ("HookStarted", 5),
-    ("HookFinished", 10),
-    ("ToolFinished", 21),
+    ("HookFinished", 11),
+    ("ToolFinished", 22),
     ("RunStarted", 20),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
@@ -1600,4 +1600,58 @@ fn required_skill<'de, D: serde::Deserializer<'de>>(
         return Err(serde::de::Error::custom("invalid Skill name"));
     }
     Ok(skill)
+}
+
+pub(crate) fn pre_command_selection_payload(kind: &str, payload: &str) -> Option<String> {
+    let text = before_operations(kind, payload, &[], None)?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let observation = if kind == "HookFinished" {
+        &value["observation"]
+    } else {
+        &value
+    };
+    let output = observation["output"].as_str()?;
+    if matches!(
+        observation["intent"]["call"]["operation"].as_str(),
+        Some("command" | "command_unguarded")
+    ) && serde_json::from_str::<serde_json::Value>(output)
+        .is_ok_and(|value| value.get("selection").is_some())
+    {
+        return None;
+    }
+    Some(text)
+}
+
+pub(crate) fn add_command_selection(
+    kind: &str,
+    mut value: serde_json::Value,
+) -> Option<serde_json::Value> {
+    pre_command_selection_payload(kind, &value.to_string())?;
+    let observation = if kind == "HookFinished" {
+        value.get_mut("observation")?
+    } else {
+        &mut value
+    };
+    if !matches!(
+        observation["intent"]["call"]["operation"].as_str(),
+        Some("command" | "command_unguarded")
+    ) {
+        return Some(value);
+    }
+    let output = observation.get_mut("output")?;
+    let Ok(mut result) = serde_json::from_str::<serde_json::Value>(output.as_str()?) else {
+        return Some(value);
+    };
+    if result.get("changeset").is_some() {
+        result.as_object_mut()?.insert(
+            "selection".into(),
+            serde_json::to_value(crate::tools::types::CommandSelectionSummary::default()).ok()?,
+        );
+        let result: crate::tools::types::CommandResult = serde_json::from_value(result).ok()?;
+        if !result.valid() {
+            return None;
+        }
+        *output = serde_json::to_string(&result).ok()?.into();
+    }
+    Some(value)
 }

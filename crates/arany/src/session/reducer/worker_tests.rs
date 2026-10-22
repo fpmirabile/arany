@@ -1568,7 +1568,7 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("ProviderCallRecorded", 15),
         ("AgentFinished", 10),
         ("ToolStarted", 15),
-        ("ToolFinished", 21),
+        ("ToolFinished", 22),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2889,6 +2889,7 @@ fn worker_protocol_command_criterion_requires_both_command_and_its_publication()
         ToolDisposition::Succeeded,
         Some(Attestation::for_site(&command)),
         &serde_json::to_string(&crate::tools::types::CommandResult {
+            selection: Default::default(),
             exit_code: Some(0),
             stdout: String::new(),
             stderr: String::new(),
@@ -3409,9 +3410,9 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                 ToolDisposition::Failed
             },
             output: if site == "stopped" {
-                serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string()
+                serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string()
             } else {
-                serde_json::json!({"exit_code":2,"stdout":"","stderr":"blocked","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset":{"files":[]}}).to_string()
+                serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":2,"stdout":"","stderr":"blocked","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset":{"files":[]}}).to_string()
             },
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
@@ -3792,7 +3793,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             ),
         };
         let observation = ToolObservation {
-            intent: intent.clone(), disposition, output: serde_json::json!({"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
+            intent: intent.clone(), disposition, output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
             attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(crate::LimitCause::Resource),
             cache_update: if result == "stopped_unknown" { CacheUpdate::Uncertain } else { CacheUpdate::NotApplicable },

@@ -62,6 +62,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-monotonic-action-deadline-memory512m-wait30s-oversize-omission-full-output-validation");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -601,6 +602,7 @@ pub(super) async fn hold_seed_unit(permit: &super::admission::Permit, seed: &Pat
 }
 
 struct UnitFilesystem<'a> {
+    preparation: bool,
     seed_path: &'a Path,
     seed_dir: &'a cap_std::fs::Dir,
     runtime_directories: Vec<PathBuf>,
@@ -615,14 +617,20 @@ fn unit_command(
     filesystem: UnitFilesystem<'_>,
 ) -> Command {
     let UnitFilesystem {
+        preparation,
         seed_path,
         seed_dir,
         runtime_directories,
         mounts,
     } = filesystem;
-    let memory_max = format!("--property=MemoryMax={}", intent.limits.memory_bytes);
-    let tasks_max = format!("--property=TasksMax={}", intent.limits.max_processes);
-    let cpu_quota = if intent.limits.resource_class == ToolResourceClass::Build {
+    let phase_limits = if preparation || primary_command(intent) {
+        selection_limits(&intent.limits)
+    } else {
+        intent.limits.clone()
+    };
+    let memory_max = format!("--property=MemoryMax={}", phase_limits.memory_bytes);
+    let tasks_max = format!("--property=TasksMax={}", phase_limits.max_processes);
+    let cpu_quota = if phase_limits.resource_class == ToolResourceClass::Build {
         "--property=CPUQuota=100%"
     } else {
         "--property=CPUQuota=25%"
@@ -673,10 +681,14 @@ fn unit_command(
     ) || intent.call.is_git();
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
-        .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
+        .filter(|folder| !preparation && seed_dir.symlink_metadata(folder).is_ok())
         .collect::<Vec<_>>();
-    let workspace_mount = (native && runtime.worker.is_none())
-        .then(|| (runtime.workspace.as_path(), intent.call.mutates()));
+    let workspace_mount = ((native || preparation) && runtime.worker.is_none()).then(|| {
+        (
+            runtime.workspace.as_path(),
+            !preparation && intent.call.mutates(),
+        )
+    });
     profile_arguments(
         &mut command,
         runtime_path,
@@ -686,6 +698,9 @@ fn unit_command(
         &intent.limits,
         &runtime.guard_executable,
     );
+    if preparation {
+        command.args(["--bind"]).arg(seed_path).arg("/prepared");
+    }
     for directory in runtime_directories {
         command.args(["--dir"]).arg(directory);
     }
@@ -854,21 +869,32 @@ fn guard_config<'a>(
     }
 }
 
-fn prepare_seed(
-    permit: &super::admission::Permit,
-    workspace: &cap_std::fs::Dir,
-    config: &super::Config,
+async fn prepare_seed(
+    runtime: &ToolRuntime,
     intent: &EffectIntent,
-) -> Result<(std::path::PathBuf, cap_std::fs::Dir), ToolError> {
-    permit.prepare_seed(
-        workspace,
-        config,
-        intent.call.is_process()
-            && !matches!(
-                intent.target,
-                crate::session::worker::EffectTarget::WorkerView { .. }
-            ),
-    )
+    permit: &super::admission::Permit,
+    deadline: tokio::time::Instant,
+    cancellation: &mut Cancellation,
+) -> Result<(PathBuf, cap_std::fs::Dir), ToolError> {
+    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
+    let (path, directory) = permit.prepare_seed(
+        &workspace,
+        &guard_config(runtime, intent),
+        intent.call.is_process() && !primary_command(intent) && runtime.worker.is_none(),
+    )?;
+    if primary_command(intent) {
+        prepare_inputs(
+            runtime,
+            intent,
+            permit,
+            &path,
+            &directory,
+            deadline,
+            cancellation,
+        )
+        .await?;
+    }
+    Ok((path, directory))
 }
 
 async fn worker_input<W: tokio::io::AsyncWrite + Unpin, R: tokio::io::AsyncBufRead + Unpin>(
@@ -922,6 +948,7 @@ fn task_bytes(
     parent_namespaces: profile::Namespaces,
 ) -> Result<Vec<u8>, ToolError> {
     encode_task(&Task {
+        preparation: false,
         definition: runtime.definitions.payload(&intent.call)?,
         worker: runtime.worker.as_ref().map(|a| a.transfer.clone()),
         handover: runtime
@@ -969,19 +996,28 @@ pub(super) async fn execute_inner(
     let (runtime_directories, mounts) =
         runtime_mounts(runtime_grants, intent.limits.cache_bytes > 0)?;
     let runtime_path = super::runtime_path(runtime_grants)?;
-    let workspace = crate::tools::fs::open_directory(&runtime.workspace)?;
-    let task_config = guard_config(runtime, intent);
     let mut cache = super::build_cache_session(runtime, intent)?;
-    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    let (seed_path, seed_dir) = prepare_seed(&permit, &workspace, &task_config, intent)?;
+    let (seed_path, seed_dir) = prepare_seed(
+        runtime,
+        intent,
+        &permit,
+        preparation_deadline,
+        &mut cancellation,
+    )
+    .await?;
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
         group: None,
         kill: None,
-        limits: Some(intent.limits.clone()),
+        limits: Some(if primary_command(intent) {
+            selection_limits(&intent.limits)
+        } else {
+            intent.limits.clone()
+        }),
     };
     let filesystem = UnitFilesystem {
+        preparation: false,
         seed_path: &seed_path,
         seed_dir: &seed_dir,
         runtime_directories,
@@ -1006,79 +1042,58 @@ pub(super) async fn execute_inner(
     let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
     let go_cancellation = cancellation.clone();
     let execution = async {
-        let task = task_bytes(runtime, intent, cache_transfer, parent_namespaces.clone())?;
-        let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
-            stdin
-                .write_all(&task)
-                .await
-                .map_err(|_| ToolError::Operation)?;
-            read_line_capped(&mut stdout, 2048).await
-        })
-        .await
-        .map_err(|_| ToolError::Limit)??;
-        if ready_bytes == b"CACHE_READY\n" {
-            let session = cache.as_ref().ok_or(ToolError::Operation)?;
-            let transfer_deadline = super::cache_transfer_deadline(intent, Some(go_deadline));
-            tokio::time::timeout_at(
-                transfer_deadline,
-                super::send_cache_archive(&mut stdin, &session.lease),
-            )
-            .await
-            .map_err(|_| ToolError::Limit)??;
-            ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stdout, 2048))
-                .await
-                .map_err(|_| ToolError::Limit)??;
-        }
-        ready_bytes =
-            worker_input(runtime, &mut stdin, &mut stdout, ready_bytes, go_deadline).await?;
+        let ready_bytes = prepare_ready(
+            runtime,
+            intent,
+            cache.as_ref(),
+            &seed_dir,
+            (&mut stdin, &mut stdout),
+            (preparation_deadline, go_deadline),
+            parent_namespaces.clone(),
+        )
+        .await?;
         admit_ready(&mut unit, &ready_bytes, intent, &parent_namespaces).await?;
         runtime
             .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
             .await?;
+        if primary_command(intent) {
+            unit.set_limits(intent.limits.clone()).await?;
+        }
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
+        if primary_command(intent) {
+            capture_phase(&mut unit, intent, &mut stdin, &mut stdout, deadline).await?;
+        }
         drop(stdin);
-        let (observation, candidate) =
-            if let Some(session) = cache.as_ref().filter(|_| runtime.worker.is_none()) {
-                let observation = super::read_observation_line(&mut stdout, intent).await?;
-                let update_deadline = super::cache_transfer_deadline(
-                    intent,
-                    active_window.map(|window| window.completion_deadline),
-                );
-                let candidate = match tokio::time::timeout_at(
-                    update_deadline,
-                    super::receive_cache_candidate(&mut stdout, &session.lease),
-                )
+        let capture = async {
+            let (observation, candidate) = receive_result(
+                &mut stdout,
+                runtime,
+                intent,
+                cache.as_ref(),
+                active_window.map(|window| window.completion_deadline),
+            )
+            .await?;
+            if candidate == super::CacheCandidate::Uncertain {
+                return Ok((observation, candidate));
+            }
+            if !child
+                .wait()
                 .await
-                {
-                    Ok(Ok(candidate)) => candidate,
-                    Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
-                };
-                if candidate == super::CacheCandidate::Uncertain {
-                    return Ok((observation, candidate));
-                }
-                (observation, candidate)
-            } else {
-                (
-                    read_effect_observation(&mut stdout, runtime, intent).await?,
-                    super::CacheCandidate::Received,
-                )
-            };
-        if !child
-            .wait()
-            .await
-            .map_err(|_| ToolError::Operation)?
-            .success()
-        {
-            return Err(ToolError::Operation);
-        }
-        if cache.is_some() && !read_capped(&mut stdout, 1).await?.is_empty() {
-            return Err(ToolError::Operation);
-        }
-        Ok((observation, candidate))
+                .map_err(|_| ToolError::Operation)?
+                .success()
+            {
+                return Err(ToolError::Operation);
+            }
+            if cache.is_some() && !read_capped(&mut stdout, 1).await?.is_empty() {
+                return Err(ToolError::Operation);
+            }
+            Ok((observation, candidate))
+        };
+        capture.await
     };
     let result = tokio::select! {
         biased;
@@ -1097,7 +1112,7 @@ pub(super) async fn execute_inner(
     .await
 }
 
-const PROFILE_MOUNT_TARGETS: [&str; 13] = [
+const PROFILE_MOUNT_TARGETS: [&str; 14] = [
     RUNTIME_ROOT,
     "/lib",
     "/lib64",
@@ -1107,6 +1122,7 @@ const PROFILE_MOUNT_TARGETS: [&str; 13] = [
     "/cache",
     "/workspace",
     "/seed",
+    "/seed/workspace",
     "/programs",
     "/inputs",
     "/skills",
@@ -1218,7 +1234,10 @@ fn profile_arguments(
             .arg(limits.cache_bytes.to_string())
             .args(["--tmpfs", "/cache"]);
     }
-    command.args(["--ro-bind"]).arg(seed_path).arg("/seed");
+    command
+        .args(["--dir", "/seed", "--ro-bind"])
+        .arg(seed_path.join("workspace"))
+        .arg("/seed/workspace");
     for folder in folders {
         command
             .args(["--ro-bind"])
@@ -1428,8 +1447,318 @@ fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
     Ok(path)
 }
 
+fn primary_command(intent: &EffectIntent) -> bool {
+    matches!(intent.call, ToolCall::Command { .. })
+        && intent.target == crate::session::worker::EffectTarget::Workspace
+}
+
+fn selection_limits(limits: &ToolLimits) -> ToolLimits {
+    let defaults = ToolLimits::default();
+    let mut limits = limits.clone();
+    limits.memory_bytes = limits.memory_bytes.min(defaults.memory_bytes);
+    limits.max_processes = limits.max_processes.min(defaults.max_processes);
+    limits.resource_class = ToolResourceClass::Default;
+    limits
+}
+
+impl Unit {
+    async fn set_limits(&mut self, limits: ToolLimits) -> Result<(), ToolError> {
+        let directory = self
+            .group
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let cpu = if limits.resource_class == ToolResourceClass::Build {
+            "100000 100000"
+        } else {
+            "25000 100000"
+        };
+        for (name, value) in [
+            ("memory.max", limits.memory_bytes.to_string()),
+            ("pids.max", limits.max_processes.to_string()),
+            ("cpu.max", cpu.into()),
+        ] {
+            let mut options = cap_std::fs::OpenOptions::new();
+            options.write(true);
+            directory
+                .open_with(name, &options)
+                .and_then(|mut file| file.write_all(value.as_bytes()))
+                .map_err(|_| ToolError::ProtectionUnavailable)?;
+        }
+        self.limits = Some(limits);
+        self.admit().await
+    }
+}
+
+pub(super) fn prepare_main(task: &Task, stdin: &mut impl Read) -> Result<(), ToolError> {
+    let source = crate::tools::fs::open_directory(Path::new("/workspace"))?;
+    if crate::tools::fs::identity(&source)?
+        != (task.intent.workspace_device, task.intent.workspace_inode)
+    {
+        return Err(ToolError::ChangedInput);
+    }
+    harden()?;
+    profile::install_non_spawning()?;
+    let ready = super::Ready {
+        digest: task.intent.digest(),
+        pid: std::process::id(),
+        namespaces: profile::Namespaces::read()?,
+        profile_digest: task.enforcement_digest()?,
+    };
+    if !ready.namespaces.isolated_from(&task.parent_namespaces) {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut stdout = std::io::stdout().lock();
+    serde_json::to_writer(&mut stdout, &ready).map_err(|_| ToolError::Operation)?;
+    stdout
+        .write_all(b"\n")
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)?;
+    let mut go = [0; 3];
+    stdin
+        .read_exact(&mut go)
+        .map_err(|_| ToolError::Operation)?;
+    if go != *b"GO\n" {
+        return Err(ToolError::Configuration);
+    }
+    let mut frame = [0; 8];
+    stdin
+        .read_exact(&mut frame)
+        .map_err(|_| ToolError::Operation)?;
+    let deadline = super::selection_phase::decode_deadline(frame)?;
+    let target = crate::tools::fs::open_directory(Path::new("/prepared/workspace"))?;
+    let resources = crate::tools::fs::open_directory(Path::new("/prepared"))?;
+    let result =
+        crate::tools::fs::prepare_command(&source, &target, &resources, &task.config, deadline);
+    let message = super::selection_phase::response(&result);
+    stdout
+        .write_all(message)
+        .and_then(|()| stdout.flush())
+        .map_err(|_| ToolError::Operation)
+}
+
+async fn prepare_inputs(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    permit: &super::admission::Permit,
+    seed_path: &Path,
+    seed_dir: &cap_std::fs::Dir,
+    deadline: tokio::time::Instant,
+    cancellation: &mut Cancellation,
+) -> Result<(), ToolError> {
+    let mut unit = Unit {
+        name: format!("arany-tool-{}.service", permit.id),
+        invocation: None,
+        group: None,
+        kill: None,
+        limits: Some(selection_limits(&intent.limits)),
+    };
+    let filesystem = UnitFilesystem {
+        preparation: true,
+        seed_path,
+        seed_dir,
+        runtime_directories: Vec::new(),
+        mounts: Vec::new(),
+    };
+    let mut command = unit_command(runtime, intent, &unit.name, "/usr/bin:/bin", filesystem);
+    permit.launching()?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => {
+            permit.terminated()?;
+            return Err(ToolError::ProtectionUnavailable);
+        }
+    };
+    let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
+    let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
+    let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
+    let mut drain = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
+    let deadline = deadline.min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
+    let execution = async {
+        let namespaces = profile::Namespaces::read()?;
+        let mut task: Task =
+            serde_json::from_slice(&task_bytes(runtime, intent, None, namespaces.clone())?)
+                .map_err(|_| ToolError::Operation)?;
+        task.preparation = true;
+        stdin
+            .write_all(&encode_task(&task)?)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        let ready = read_line_capped(&mut stdout, 2048).await?;
+        admit_ready(&mut unit, &ready, intent, &namespaces).await?;
+        stdin
+            .write_all(b"GO\n")
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        stdin
+            .write_all(&super::selection_phase::encode_deadline(deadline)?)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        drop(stdin);
+        let result = super::selection_phase::receive(&mut stdout, deadline).await;
+        if !child
+            .wait()
+            .await
+            .map_err(|_| ToolError::Operation)?
+            .success()
+        {
+            return Err(ToolError::Operation);
+        }
+        result
+    };
+    let result = super::selection_phase::wait(deadline, cancellation, execution).await;
+    let cleanup = tokio::time::Instant::now() + super::TEARDOWN_WAIT;
+    tokio::time::timeout_at(cleanup, unit.stop())
+        .await
+        .map_err(|_| ToolError::ProtectionUnavailable)??;
+    let _ = child.start_kill();
+    tokio::time::timeout_at(cleanup, child.wait())
+        .await
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+        .map_err(|_| ToolError::Operation)?;
+    drain_stderr(&mut drain, cleanup)
+        .await
+        .ok_or(ToolError::Operation)?;
+    permit.prepared()?;
+    result
+}
+
+async fn capture_phase(
+    unit: &mut Unit,
+    intent: &EffectIntent,
+    stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
+    stdout: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    deadline: tokio::time::Instant,
+) -> Result<(), ToolError> {
+    use tokio::io::AsyncBufReadExt;
+    let handshake = async {
+        if stdout
+            .fill_buf()
+            .await
+            .map_err(|_| ToolError::Operation)?
+            .first()
+            == Some(&b'C')
+        {
+            if read_line_capped(stdout, 64).await? != b"CAPTURE_READY\n" {
+                return Err(ToolError::Operation);
+            }
+            unit.set_limits(selection_limits(&intent.limits)).await?;
+            stdin
+                .write_all(b"CAPTURE\n")
+                .await
+                .map_err(|_| ToolError::Operation)?;
+            stdin
+                .write_all(&super::selection_phase::encode_deadline(deadline)?)
+                .await
+                .map_err(|_| ToolError::Operation)?;
+        }
+        Ok(())
+    };
+    tokio::time::timeout(
+        Duration::from_millis(u64::from(intent.limits.runtime_ms)) + Duration::from_secs(3),
+        handshake,
+    )
+    .await
+    .map_err(|_| ToolError::Limit)?
+}
+
+async fn receive_result(
+    stdout: &mut (impl tokio::io::AsyncBufRead + Unpin),
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    cache: Option<&super::BuildCacheSession>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<(ToolObservation, super::CacheCandidate), ToolError> {
+    if let Some(session) = cache.filter(|_| runtime.worker.is_none()) {
+        let read = super::read_observation_line(stdout, intent);
+        let observation = if primary_command(intent) {
+            tokio::time::timeout(crate::tools::selection::PHASE_TIME, read)
+                .await
+                .map_err(|_| ToolError::Timeout(String::new()))??
+        } else {
+            read.await?
+        };
+        let candidate = match tokio::time::timeout_at(
+            super::cache_transfer_deadline(intent, deadline),
+            super::receive_cache_candidate(stdout, &session.lease),
+        )
+        .await
+        {
+            Ok(Ok(candidate)) => candidate,
+            Ok(Err(_)) | Err(_) => super::CacheCandidate::Uncertain,
+        };
+        Ok((observation, candidate))
+    } else {
+        let read = read_effect_observation(stdout, runtime, intent);
+        let observation = if primary_command(intent) {
+            tokio::time::timeout(crate::tools::selection::PHASE_TIME, read)
+                .await
+                .map_err(|_| ToolError::Timeout(String::new()))??
+        } else {
+            read.await?
+        };
+        Ok((observation, super::CacheCandidate::Received))
+    }
+}
+
+async fn prepare_ready(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    cache: Option<&super::BuildCacheSession>,
+    seed_dir: &cap_std::fs::Dir,
+    (stdin, stdout): (
+        &mut (impl tokio::io::AsyncWrite + Unpin),
+        &mut (impl tokio::io::AsyncBufRead + Unpin),
+    ),
+    (preparation_deadline, go_deadline): (tokio::time::Instant, tokio::time::Instant),
+    parent_namespaces: profile::Namespaces,
+) -> Result<Vec<u8>, ToolError> {
+    let cache_transfer = cache.map(|session| session.transfer.clone());
+    let task = task_bytes(runtime, intent, cache_transfer, parent_namespaces)?;
+    let mut ready_bytes = tokio::time::timeout_at(preparation_deadline, async {
+        stdin
+            .write_all(&task)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+        read_line_capped(stdout, 2048).await
+    })
+    .await
+    .map_err(|_| ToolError::Limit)??;
+    if ready_bytes == b"CACHE_READY\n" {
+        let session = cache.ok_or(ToolError::Operation)?;
+        let transfer_deadline = super::cache_transfer_deadline(intent, Some(go_deadline));
+        tokio::time::timeout_at(
+            transfer_deadline,
+            super::send_cache_archive(stdin, &session.lease),
+        )
+        .await
+        .map_err(|_| ToolError::Limit)??;
+        ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    }
+    if ready_bytes == b"SELECTION_READY\n" {
+        tokio::time::timeout_at(
+            go_deadline,
+            crate::tools::fs::CommandSelection::send(seed_dir, stdin),
+        )
+        .await
+        .map_err(|_| ToolError::Limit)??;
+        ready_bytes = tokio::time::timeout_at(go_deadline, read_line_capped(stdout, 2048))
+            .await
+            .map_err(|_| ToolError::Limit)??;
+    }
+    ready_bytes = worker_input(runtime, stdin, stdout, ready_bytes, go_deadline).await?;
+
+    Ok(ready_bytes)
+}
+
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn selection_protocol_preserves_outcomes_and_deadline() {
+        crate::tools::guard::selection_phase::tests::protocol_outcomes().await;
+    }
+
     use super::*;
 
     #[test]

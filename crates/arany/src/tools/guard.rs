@@ -66,6 +66,7 @@ pub(super) use macos::{
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
+pub(super) mod selection_phase;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     check_available()?;
@@ -106,6 +107,7 @@ pub(super) use macos::RESERVATION_OVERHEAD;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
+    preparation: bool,
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
@@ -664,6 +666,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
+                preparation: false,
                 config: runtime.config.clone(),
                 intent: intent.clone(),
                 cache: None,
@@ -1407,6 +1410,8 @@ fn bootstrap_locations(
 }
 
 pub(super) struct GuardContext<'a> {
+    #[cfg(target_os = "linux")]
+    pub(super) command_before: Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>,
     pub(super) intent: &'a EffectIntent,
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
@@ -1456,6 +1461,13 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
+    if task.preparation
+        && (!cfg!(target_os = "linux")
+            || task.worker.is_some()
+            || !matches!(task.intent.call, ToolCall::Command { .. }))
+    {
+        return Err(ToolError::Configuration);
+    }
     if let Some(cache) = &task.cache {
         cache.validate(&task.intent, &task.config)?;
     }
@@ -1764,6 +1776,10 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         validate_task(&task)?;
+        #[cfg(target_os = "linux")]
+        if task.preparation {
+            return linux::prepare_main(&task, &mut stdin);
+        }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_runtime_mounts(
             &task.intent.call,
@@ -1801,6 +1817,8 @@ pub(super) fn helper_main() -> ExitCode {
                 profile::install_non_spawning()?;
             }
         }
+        #[cfg(target_os = "linux")]
+        let command_before = prepare_command_baseline(&task, workspace, &mut stdin)?;
         stage = BootstrapStage::Handshake;
         let ready = Ready {
             digest: task.intent.digest(),
@@ -1854,7 +1872,10 @@ pub(super) fn helper_main() -> ExitCode {
             super::worker::materialize(image, &super::fs::open_directory(workspace)?)?;
         }
         #[cfg(not(target_os = "macos"))]
-        if task.intent.call.is_process() && task.worker.is_none() {
+        if task.intent.call.is_process()
+            && task.worker.is_none()
+            && !matches!(task.intent.call, ToolCall::Command { .. })
+        {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1862,6 +1883,8 @@ pub(super) fn helper_main() -> ExitCode {
             .build()
             .map_err(|_| ToolError::Operation)?;
         let site = GuardContext {
+            #[cfg(target_os = "linux")]
+            command_before,
             intent: &task.intent,
             config: &task.config,
             root: &root,
@@ -2096,6 +2119,29 @@ pub(super) fn payload(
     Ok(command)
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_command_baseline(
+    task: &Task,
+    workspace: &Path,
+    stdin: &mut impl Read,
+) -> Result<Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>, ToolError> {
+    let command_before =
+        if task.worker.is_none() && matches!(task.intent.call, ToolCall::Command { .. }) {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(b"SELECTION_READY\n")
+                .and_then(|()| stdout.flush())
+                .map_err(|_| ToolError::Operation)?;
+            let selection = super::fs::CommandSelection::receive(stdin)?;
+            super::fs::copy_seed()?;
+            Some((super::fs::command_snapshot(workspace)?, selection))
+        } else {
+            None
+        };
+
+    Ok(command_before)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2153,6 +2199,7 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
+            preparation: false,
             config,
             intent: intent(call),
             cache: None,
@@ -2214,6 +2261,7 @@ mod tests {
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
+            preparation: false,
             config,
             intent: intent(call.clone()),
             cache: None,
@@ -2245,6 +2293,7 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
+            preparation: false,
             config,
             intent: intent(ToolCall::Write {
                 path: "\"".repeat(512),
@@ -2722,7 +2771,7 @@ mod tests {
                 .unwrap();
         assert_eq!(status.code(), Some(1));
         let output = serde_json::json!({
-            "exit_code": status.code(),
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": status.code(),
             "stdout": String::from_utf8(stdout).unwrap(),
             "stderr": String::from_utf8(stderr).unwrap(),
             "enforcement_cause": "filesystem_denied",
@@ -3027,7 +3076,7 @@ mod tests {
             limit_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
+            output: r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
             cache_update: CacheUpdate::NotAttempted,
@@ -3553,6 +3602,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                preparation: false,
                 definition: None,
                 worker: None,
                 handover: None,

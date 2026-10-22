@@ -43,7 +43,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         intent: command_intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "",
             "stderr": "",
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
@@ -698,7 +698,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         attestation: Some(Attestation::for_site(&intent)),
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
-        output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
+        output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
         cache_update: CacheUpdate::NotApplicable,
     };
     assert_eq!(
@@ -894,7 +894,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
             attestation: Some(Attestation::for_site(&intent)),
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
-            output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
+            output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
             cache_update: CacheUpdate::NotApplicable,
         }),
         intent,

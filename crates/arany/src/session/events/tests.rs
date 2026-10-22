@@ -97,7 +97,7 @@ mod goal_success_tests {
         let passed = observation(
             call,
             ToolDisposition::Succeeded,
-            serde_json::json!({"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+            serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
         );
         assert!(matches_success(&contract, std::slice::from_ref(&passed)));
         let switch = observation(
@@ -1739,9 +1739,16 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(21));
+        assert_eq!(payload_version("ToolFinished"), Some(finished.version()));
         assert_eq!(
-            Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode(
+                "ToolFinished",
+                finished.version(),
+                &payload,
+                Some(run),
+                Some(agent)
+            )
+            .expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1749,7 +1756,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1761,14 +1768,14 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 21, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", finished.version(), &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1781,14 +1788,14 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &unknown.to_string(),
                 Some(run),
                 Some(agent)
             )
             .is_err()
         );
-        for previous in [20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [21, 20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)

@@ -366,8 +366,24 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         }
         count.push(character);
     }
+    let selection = &result["selection"];
+    let counts = [
+        "ignored_entries",
+        "pruned_directories",
+        "oversized_inputs",
+        "discarded_outputs",
+    ]
+    .map(|key| selection[key].as_u64().unwrap_or(0));
+    let omissions = if counts.iter().any(|count| *count > 0) {
+        format!(
+            " · {} ignored entries ({} pruned roots), {} oversized inputs, {} discarded outputs",
+            counts[0], counts[1], counts[2], counts[3]
+        )
+    } else {
+        String::new()
+    };
     Some(format!(
-        "exit {exit} · {count} {}{}",
+        "exit {exit} · {count} {}{}{omissions}",
         if lines == 1 { "line" } else { "lines" },
         if truncated { " (truncated)" } else { "" }
     ))
@@ -2520,7 +2536,7 @@ mod peer_row_tests {
     #[test]
     fn command_rows_use_typed_line_totals_and_mark_truncation() {
         let output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
             "stderr": "", "stdout_total": {"bytes":123408,"lines":12340},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -2543,7 +2559,7 @@ mod peer_row_tests {
         );
         let mut tool = tool;
         tool.observation.as_mut().unwrap().output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "x lines omitted; 45 bytes, 1 lines total]…\n",
             "stderr": "", "stdout_total": {"bytes":45,"lines":1},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -2553,6 +2569,16 @@ mod peer_row_tests {
         assert_eq!(
             plain_tool_summary(&tool_summary(&tool)),
             "Command(sh )\nResult: exit 0 · 1 line"
+        );
+        let observation = tool.observation.as_mut().unwrap();
+        let mut result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        result["selection"] = serde_json::json!({
+            "ignored_entries":7,"pruned_directories":2,"oversized_inputs":1,"discarded_outputs":3
+        });
+        observation.output = result.to_string();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized inputs, 3 discarded outputs"
         );
     }
 
