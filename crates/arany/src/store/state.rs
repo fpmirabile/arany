@@ -427,9 +427,17 @@ impl StateRoot {
             if record.is_some() {
                 self.dir.remove_file(name)?;
             }
+            // The unlink may already be durable, so a failed or faulted sync is unconfirmed, not unchanged.
+            let unconfirmed = |_| StoreError::ReplaceUnconfirmed;
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
+                return Err(StoreError::ReplaceUnconfirmed);
+            }
             self.dir
-                .open_with(".", OpenOptions::new().read(true))?
-                .sync_all()?;
+                .open_with(".", OpenOptions::new().read(true))
+                .map_err(unconfirmed)?
+                .sync_all()
+                .map_err(unconfirmed)?;
             Ok(())
         }
         #[cfg(not(unix))]
@@ -873,6 +881,24 @@ mod tests {
                 .extension()
                 .is_none_or(|e| e != "pending")
         }));
+    }
+
+    #[test]
+    fn a_record_removal_whose_directory_sync_fails_is_unconfirmed_not_unchanged() {
+        let temp = tempfile::tempdir().expect("test root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private state");
+        state
+            .record(RecordKind::Permissions)
+            .replace(br#"{"permissions":{}}"#)
+            .unwrap();
+        crate::fault::FaultPlan::fail_record_sync(path.clone(), "permissions.json");
+        assert!(matches!(
+            state.record(RecordKind::Permissions).remove(),
+            Err(StoreError::ReplaceUnconfirmed)
+        ));
+        assert!(!path.join("permissions.json").exists());
+        state.record(RecordKind::Permissions).remove().unwrap();
     }
 
     #[test]

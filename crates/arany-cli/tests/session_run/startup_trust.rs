@@ -1868,6 +1868,37 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         "rule menu",
         &shows("Remove rule"),
     );
+    // Change the decision to ask before removing the rule.
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "changed rule",
+        &|_| {
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains(r#""decision":"ask""#)
+        },
+    );
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "listed changed rule",
+        &shows("ask git commit"),
+    );
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "second rule menu",
+        &shows("Remove rule"),
+    );
     input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
     until(
         &mut output,
