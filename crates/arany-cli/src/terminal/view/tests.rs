@@ -676,7 +676,7 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
                     &["Newline shortcut: Shift+Enter".into()],
                     0,
                     true,
-                    Some("Modifiers may be lost; CR submits. Use backslash then Enter"),
+                    Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE),
                     Palette { color: false },
                 );
             })
@@ -686,6 +686,19 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
             .collect();
         assert!(rows.iter().any(|row| row.contains("Shift+Enter")));
         assert!(rows[7].contains("↑↓ ←→ Enter") || rows[7].contains("Enter saves"));
+        let guidance = rows
+            .iter()
+            .map(|row| row.trim())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            guidance.contains("\\ then Enter adds a newline."),
+            "{width}: {guidance}"
+        );
+        assert!(guidance.contains("Widen for setup."), "{width}: {guidance}");
+        if width == 80 {
+            assert!(guidance.contains("Manual setup: send CSI-u ESC [ 13 ; M u"));
+        }
     }
 }
 

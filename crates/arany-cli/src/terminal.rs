@@ -57,6 +57,8 @@ use view::{
     session_picker_index,
 };
 
+pub const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
+
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
 // Button, drag and SGR reporting only; any-motion (1003) and urxvt (1015) stay off.
 const MOUSE_CAPTURE: [&[u8]; 2] = [

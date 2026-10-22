@@ -212,7 +212,11 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
                     send_response_for(&mut stream, index, serde_json::json!("child result"), false);
                 }
                 _ => {
-                    assert_eq!(input["steering_notes"], serde_json::json!([NOTE]));
+                    // The semantic wire helper projects each physical line separately.
+                    assert_eq!(
+                        input["steering_notes"],
+                        serde_json::json!(["use the", "smaller fixture"])
+                    );
                     send_response_for(&mut stream, index, serde_json::json!("synthesized"), false);
                 }
             }

@@ -486,9 +486,7 @@ async fn choose_settings(
                 "Modified newline shortcuts apply only to visual sessions; use backslash then Enter here",
             )
         } else if selected_row == 13 {
-            Some(
-                "Modifiers may be lost/intercepted; CR submits. Use backslash then Enter. Manual setup: /help, select /settings",
-            )
+            Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE)
         } else {
             None
         };
