@@ -128,8 +128,10 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     let step = REGISTRY.event_step("ToolStarted", 15).unwrap();
     assert!((step.canonical)(&started.to_string()).is_none());
     assert!((step.transform)(started.clone()).is_none());
-    let expiry = REGISTRY.event_step("ToolStarted", 16).unwrap();
-    let started = (expiry.transform)(started).unwrap();
+    for from in 16..payload_version("ToolStarted").unwrap() {
+        let step = REGISTRY.event_step("ToolStarted", from).unwrap();
+        started = (step.transform)(started).unwrap();
+    }
     let (run, agent) = intent_scope(&started).unwrap();
     let current = Event::decode(
         "ToolStarted",
