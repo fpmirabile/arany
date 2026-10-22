@@ -656,14 +656,126 @@ Install Command Line Tools to enable macOS Git reads; remaining macOS evidence i
 1. **Availability.** Folder trust pins the platform Git when it resolves under the platform root to a root-owned, non-set-ID, non-writable executable of the platform's format (path and SHA-256 per Run): `/usr/bin/git` (ELF) on Linux, `/Library/Developer/CommandLineTools/usr/bin/git` (Mach-O) on macOS. Explicit configuration uses the `git` field (`name` `git`, executable under the platform root, SHA-256, `interpreter: false`, no inputs) and requires `workspace_paths: ["."]`. Without a pin the catalog reports `unavailable`, no Git operation is offered or admitted, and Git is never emulated. Git outside the platform root is unavailable by design: Nix, Homebrew and Guix Git, Xcode.app Git and, on macOS, the `/usr/bin/git` xcrun shim.
 2. **Operations.** `git_status {path}`, `git_diff {path, base, head, staged}` and `git_log {path, revision, max_count}`. `path` is a Workspace-relative literal pathspec, and `.` is the whole repository. `git_diff` compares the working tree with the index, the staged index with `base` (or HEAD when `base` is null), the working tree with `base`, or `base` with `head`; `head` requires `base` and excludes `staged`. A revision is `HEAD`, a ref name or a hex commit name with at most four `~N`/`^N` steps, at most 128 bytes; ranges, `:`, `@{` and options reject. `max_count` is 1 through 50. Results are JSON: `git_status` returns `{"branch":{"oid","head"},"entries":[{"path","state"}],"truncated"}`, `git_diff` returns `{"files":[{"path","added","deleted"}],"patch","truncated"}`, and `git_log` returns `{"commits":[{"oid","parents","author","time","subject"}],"truncated"}`. A failure returns `{"failed"}`, plus `"stderr"` only when bounded diagnostics remain.
 3. **Exclusions and fidelity.** The components `.git`, `.aws`, `.ssh`, `.gnupg`, `.env`, `.env.*`, `.npmrc` and `.pypirc` are excluded case-insensitively (ASCII) through `:(icase)` pathspecs and row and stderr filters, including history, so `.ENV` or `.Env` on a case-insensitive APFS volume is excluded too. Renames are not detected, submodules are ignored, and `.git/info/exclude` is not applied. Git runs with default settings, not the repository's: `core.filemode`, `core.autocrlf`, `core.eol`, `core.ignorecase`, `core.symlinks`, `core.excludesFile`, sparse checkout and `branch.*` are not applied. A WSL2 `/mnt/c` repository with `core.filemode=false` can show mode-only changes, and an `autocrlf` repository can show line-ending changes that your own `git status` hides. The fixed view config omits `core.precomposeunicode` and `core.ignorecase`, so on APFS a non-ASCII or case-variant name can appear as deleted plus untracked. These fail without running Git: a repository rooted in a parent directory, a linked worktree, a submodule checkout or other `.git` file, a symlinked `.git`, a missing `HEAD`, `objects` or `refs`, and `[extensions]`. A split index fails when Git runs.
-4. **Neutralization.** Git never receives the repository's configuration, hooks or attribute-selected drivers; Arany reads repository config only to detect `[extensions]`. It runs against a private view on scratch tmpfs (Linux) or in the unit control root (macOS): a fixed config, copied `HEAD` and `index` files, and linked `objects`, `refs`, `packed-refs` and `shallow`. The index is read without following links, with its mtime from the same open file (Git's racy-stat check compares against it); a linked or hard-linked index is an unsupported layout, and an index over 32 MiB refuses with Limit. It runs with a closed 13-variable environment, fixed argv (`--no-optional-locks`, `--no-ext-diff`, `--no-textconv`, `--no-pager`, `--end-of-options`, `--`), read-only Workspace access (a bind on Linux, a Seatbelt read grant on macOS), no network, the rechecked pinned executable and the default resource profile. Linux stops namespace descendants before the receipt; macOS empties the unit coalition at teardown. Inert vectors include `core.fsmonitor`, hooks, `diff.external`, textconv, filter drivers, `include.path`, pagers, signing programs, credential helpers and lazy fetch.
-5. **Policy and disclosure.** Git reads need the pinned grant and no approval in any mode. They are in the Goal prelude with plan-contract `path` scope, are never success criteria, and are never offered to children. Bounds: 256 KiB stdout and 4 KiB stderr kept per Git invocation, 256 rows, 50 commits, results fitted to the Tool result budget with `truncated`, and at most 20 seconds per read. On macOS the same bounds run under the supervised default profile in [limits](#limits-and-failure-behavior). A nonzero exit is Failed with its status and at most 1 KiB of diagnostics, and the Run may continue. Committed history and changes reach the Provider and the journal as untrusted data. Residual risk: secret-path exclusions are pathspec and output filters, not sandbox enforcement.
+4. **Neutralization.** Git never receives the repository's configuration, hooks or attribute-selected drivers; Arany reads repository config only to detect `[extensions]` and extract the inert upstream metadata described below. It runs against a private view on scratch tmpfs (Linux) or in the unit control root (macOS): a fixed config, copied `HEAD` and `index` files, and linked `objects`, `refs`, `packed-refs` and `shallow`. The index is read without following links, with its mtime from the same open file (Git's racy-stat check compares against it); a linked or hard-linked index is an unsupported layout, and an index over 32 MiB refuses with Limit. It runs with a closed 13-variable environment, fixed argv (`--no-optional-locks`, `--no-ext-diff`, `--no-textconv`, `--no-pager`, `--end-of-options`, `--`), read-only Workspace access (a bind on Linux, a Seatbelt read grant on macOS), no network, the rechecked pinned executable and the default resource profile. Linux stops namespace descendants before the receipt; macOS empties the unit coalition at teardown. Inert vectors include `core.fsmonitor`, hooks, `diff.external`, textconv, filter drivers, `include.path`, pagers, signing programs, credential helpers and lazy fetch.
+5. **Policy and disclosure.** Git reads need the pinned grant and no approval in any mode. They are in the Goal prelude with plan-contract `path` scope, are never success criteria, and are never offered to children. Bounds follow [limits](#limits-and-failure-behavior): the `git_log` commit limit applies to returned log rows; [branch comparison](#branch-discovery) has a separate internal ancestry scan bound. On macOS these limits use the supervised default profile. A nonzero exit is Failed with its status and at most 1 KiB of diagnostics, and the Run may continue. Committed history and changes reach the Provider and the journal as untrusted data. Residual risk: secret-path exclusions are pathspec and output filters, not sandbox enforcement.
 
 macOS trade-offs, known and accepted for this release:
 
 - The private view has no volume quota (`install_git` uses `unit_root`, which skips `storage::verify_storage`), so writes are bounded only by the 20-second cap and fixed argv. The pinned Git has no code-signature or entitlement verdict; its only check is a SHA-256 pin of a root-owned file, and the kernel enforces the platform signature at exec.
 - A TOCTOU window exists between `verify_pin` and spawn-by-path. Linux avoids the equivalent window by executing the pinned file in place; macOS cannot, so exploiting it requires root write access to the Command Line Tools tree. Ancestor directories of the pinned executable are not checked for ownership or writability on either platform; `verify_host_executable` checks only the leaf. This is a known limit.
 - A Command Line Tools update changes the digest, so Git reads fail with `ChangedInput` until folder trust is renewed. The read-only Workspace bind includes `.env`, so a Git memory-corruption bug triggered by a hostile pack could emit Workspace bytes through the bounded output channel, the only exit because there is no network. Encodings are offline-tested only; live evidence is listed in [next steps](../../NEXT_STEPS.md).
+
+### Branch discovery
+
+`git_branch {name:null, start_point:null, scope, base, max_count}` reads local
+and remote-tracking tips through the same primary-only Git grant on Linux and
+macOS, including plan mode. Null `scope` means `local`; the other choices are
+`local`, `remote` and `all`. Null `max_count` means 256, otherwise 1–256.
+Null `base` omits comparison; an explicit base uses the read revision grammar
+and must resolve to a commit. Invalid inputs reject before execution. Creation
+keeps the [write contract](#typed-git-writes) and requires these three fields null.
+
+The JSON result has `branches`, nullable `comparison_base: {revision, oid}`,
+`history_complete`, `truncated` and `timed_out`. Rows are sorted by their full
+ref names before projection, with invalid UTF-8 replaced by U+FFFD and `name`
+capped at 1 KiB on a UTF-8 boundary. `name_truncated` marks clipped or lossy
+names; never treat either as an exact ref identity. A lossy local name has no
+upstream association and reports `upstream_status:unsupported`, so its displayed
+name cannot select another branch's metadata. Rows carry
+`kind: local|remote|non-commit`, captured tip `oid`, `current`,
+nullable `symbolic_target`, nullable `subject`,
+`subject_withheld`, nullable `upstream`, `upstream_status`, nullable
+`ahead`/`behind`, `counts_withheld` and `counts_capped`. Symbolic targets share
+the same replacement and cap, adding `symbolic_target_truncated:true` when
+clipped or lossy. Non-commit refs, including annotated tags stored in branch
+namespaces, remain rows with
+their captured object OID, a null subject and withheld counts; they do not fail
+the listing. Remote symbolic aliases retain their target but have no independent
+subject or counts. Detached or unborn HEAD does not prevent enumeration; an
+empty repository without an explicit base succeeds with no rows.
+
+The base resolves once to a commit OID. Each comparison uses that OID and the
+captured commit tip OID with fixed `rev-list --left-right --max-count=1001
+base_oid...tip_oid`: left is `behind`, right is `ahead`. At most 1,000 emitted
+commits yield exact counts over available history. A lookahead commit withholds
+both counts with `counts_capped:true`; it never reports a partial count as exact.
+The output cap does not bound merge-base traversal, so subject and count work
+also share a one-second per-row deadline. Reaching that deadline keeps the row
+with unobserved fields null and withheld, marks requested counts capped, and
+continues to other rows while the shared action deadline permits it. Any such
+cap returns `truncated:true`. Counts describe whole-history ancestry, not
+permitted-file changes. Null counts mean comparison was not requested, the row
+is an alias or non-commit ref, or `counts_withheld` is true.
+
+Tip subjects are at most 256 characters and require visible-path evidence from
+that exact commit; an older visible commit never supplies the subject. Mandatory
+secret-path exclusions always filter evidence and diagnostics, independently of
+user Read rules; mandatory exclusions do not disable enrichment. Unresolved
+restrictive user Read path rules populate the hidden-path set and suppress
+subject and count enrichment, marking those fields withheld.
+A protected-only tip has a null subject with `subject_withheld:true`. A parentless
+tip in a shallow view also withholds its subject: its apparent root diff cannot
+prove which paths changed. Filters run before persistence and model continuation,
+with the same filtered diagnostics as other reads.
+
+Remote-tracking refs are local observations that may be stale; no fetch or
+network occurs. Shallow repositories return `history_complete:false`, so
+counts describe only available history. Missing objects or an unresolved base
+fail explicitly. A concurrent ref change does not change a captured OID; this
+is not an atomic repository snapshot. One sorted `for-each-ref` enumerates the
+selected namespaces within the [shared read limits](#limits-and-failure-behavior).
+Returned rows are enriched sequentially, with at most one subject and one comparison
+invocation per returned row, plus one base resolution per action. Each capture
+is discarded after projection. All invocations share the action ceiling;
+branch reads reserve one second for teardown and result delivery.
+Reaching the remaining work deadline returns completed rows with `truncated:true`
+and `timed_out:true`, preserving captured OIDs and any already resolved base.
+A deadline during enumeration or base resolution returns an empty truncated
+listing; `comparison_base` is null if resolution never completed, with the
+requested revision still recorded in the intent. A timeout is not an empty
+successful inspection of the whole repository. An overflowing tip capture keeps
+only complete evidence lines; without visible evidence its subject stays withheld.
+Complete rows fit the Tool result budget; overflow
+or clipped or lossy names return `truncated:true`, never partial rows or invented counts.
+Cancellation, teardown and unknown completion follow the existing Guard contract:
+only confirmed cleanup permits another row or a partial result. A failed or
+expired child reap stops the action and leaves remaining processes to Guard
+teardown; a missing receipt remains Uncertain. Replay uses committed rows, flags and OIDs without running Git or
+rereading configuration.
+
+Upstream associations use only direct `branch.<name>.remote`,
+`branch.<name>.merge` and the matching `remote.<name>.fetch`, parsed as inert
+metadata from the existing no-follow, at-most-64-KiB config inspection. Ordinary
+Git-written quoted subsection names and plain or quoted scalars in the admitted
+ref alphabet are supported. Remote `.` names a local ref; another remote needs
+one unambiguous positive literal or single-wildcard fetch mapping, optionally
+prefixed with `+`. Resolved targets are checked through the shared no-follow
+ref reader (1 KiB loose refs, at most 32 MiB packed refs); an unsupported ref
+shape or over-bound lookup is reported unsupported. Requested packed targets are
+read and indexed once per action, with loose refs taking precedence.
+No URL, helper or executable
+setting is loaded or passed as Git configuration. `upstream_status` is:
+
+- `present`: the direct association resolves to a present target ref;
+- `gone`: the supported target ref is missing, with its name retained;
+- `unavailable`: direct metadata is missing; this makes no claim about user-global configuration;
+- `unsupported`: duplicate/ambiguous keys, unsupported syntax or mappings, escapes,
+  continuations, or any include/includeIf declaration; `upstream` is null;
+- `not_applicable`: a remote row has no branch upstream.
+
+Includes are never read; their presence prevents claiming a complete direct
+association. [Decision D-25](../research/next-step-decision-register.md#d-25--branch-reads-use-git-semantics-with-inert-tracking-metadata)
+records the peer behavior and neutralization rationale.
+
+| Acceptance scenario | Evidence owner |
+|---|---|
+| Nine divergent tips, packed/loose refs, colliding local/remote names, non-default upstream mapping, symbolic aliases, detached HEAD and protected-only tip | `branch_discovery_pins_divergence_tracking_aliases_and_disclosure` in [Git corpus](../../crates/arany/src/tools/git.rs) |
+| Empty/unborn HEAD, row/result overflow, shallow history, missing base and missing objects | `branch_discovery_bounds_empty_shallow_and_missing_objects` in the same corpus |
+| Non-commit refs preserve siblings; clipped names have explicit flags; large divergence withholds counts; deadlines preserve completed rows without dispatching another read | `branch_discovery_keeps_non_commit_refs_and_marks_clipped_names`, `branch_divergence_caps_large_histories_without_inventing_counts`, `branch_deadline_returns_the_completed_prefix_without_dispatch` in the same corpus |
+| Literal/wildcard tracking, duplicates, ambiguity, includes, escapes, continuations and unsupported mappings | `upstream_metadata_reports_only_supported_direct_associations` in the same corpus |
+| Mandatory exclusions allow visible-tip enrichment; user Read rules suppress enrichment; children never receive branch reads | `branch_discovery_pins_divergence_tracking_aliases_and_disclosure` in the Git corpus; `child_research_excludes_git_reads` in [Tool tests](../../crates/arany/src/tools/tests.rs), `researchers_get_only_read_only_research_tools_without_plan_contracts` in [Provider Tool specs](../../crates/arany/src/provider/tool_specs.rs) |
+| Validation, schema, byte-preserving default intent and primary/read classification | `git_read_calls_validate_paths_combinations_and_counts` in [Tool tests](../../crates/arany/src/tools/tests.rs), [Provider snapshots](../../crates/arany/src/provider/snapshots), [permission tests](../../crates/arany/src/tools/permissions/tests.rs) |
+| Guarded listing reaches model continuation and exact text/JSONL show after repository removal, without replay execution | [Linux journey][tool-journeys], [macOS journey][macos-git-journey] |
 
 ### Typed prefix rules
 
@@ -708,7 +820,7 @@ Host execution does not enforce Guard filesystem, network, CPU, memory or proces
 Typed Git writes let the primary commit, create branches and switch like [Claude Code](https://code.claude.com/docs/en/permissions#bash) and Codex CLI agents running `git` in the Workspace, while keeping per-effect isolation: Git runs inside the Guard on a neutralized private view, and only Arany's own code publishes the validated result into the real repository. [Human-approved host Git](#human-approved-host-git) owns push and PR creation. [Typed prefix rules](#typed-prefix-rules) remember and revoke approval for the three local verbs.
 
 1. **Availability.** They need the [typed Git read](#typed-git-reads) pin, its whole-Workspace grant, `write: true` and Linux Landlock ABI 3 or later (below); otherwise the catalog lists only the reads, among them `git_branch` with a schema that fixes `name` and `start_point` to null, so branches can still be listed, for example in plan mode. **Git writes are refused on macOS**: they are not offered and a proposal is denied before dispatch, because Seatbelt cannot further restrict a child of the already sandboxed Guard worker; [next steps](../../NEXT_STEPS.md) record the planned separate Git executor. They are offered only to the primary, never to researchers or editors, are never Goal success criteria, and a plan contract admits them only with `.` scope. Unsupported layouts and formats fail as for reads.
-2. **Operations.** `git_commit {message, paths, staged}` commits to the current local branch: either distinct literal Workspace-relative `paths` (`.` for every change, even beside other paths), whose working-tree contents are added (including new and deleted files) and committed with Git's `--only` semantics, or `staged: true` with empty `paths`, committing the staged index. Other staged entries stay staged. The message is non-blank UTF-8 without controls other than newline and tab; Git's default whitespace cleanup applies. In paths mode protected path components are excluded as for reads and stay uncommitted; staged mode commits the index exactly as staged. `git_branch {name, start_point}` with `name: null` lists local branches as `{"branches":[{"name","oid","current"}],"truncated"}`, read-only and without approval; otherwise it creates `name` at `start_point` (a read revision, or HEAD when null) without switching or tracking, and an existing name fails. A start point naming a symbolic ref other than HEAD (any `ref:` content, as Git's files backend parses it), such as `origin/HEAD` or a bare remote name, refuses, and so does a branch while HEAD points to a ref outside `refs/heads`: name the branch it points to, since only direct refs and HEAD's referent are held. Names use the read ref-name grammar without ancestry steps, never `HEAD`, and may not differ only by ASCII case from an existing ref or ref directory. `git_switch {branch}` moves HEAD to an existing local branch; the current branch returns `switched: false` and publishes nothing. There is no amend, signing, force, delete, detach, merge, remote or raw-argument escape.
+2. **Operations.** `git_commit {message, paths, staged}` commits to the current local branch: either distinct literal Workspace-relative `paths` (`.` for every change, even beside other paths), whose working-tree contents are added (including new and deleted files) and committed with Git's `--only` semantics, or `staged: true` with empty `paths`, committing the staged index. Other staged entries stay staged. The message is non-blank UTF-8 without controls other than newline and tab; Git's default whitespace cleanup applies. In paths mode protected path components are excluded as for reads and stay uncommitted; staged mode commits the index exactly as staged. `git_branch {name, start_point, scope, base, max_count}` with `name: null` uses the [branch discovery read](#branch-discovery); creation requires `scope`, `base` and `max_count` null and creates `name` at `start_point` (a read revision, or HEAD when null) without switching or tracking, and an existing name fails. A start point naming a symbolic ref other than HEAD (any `ref:` content, as Git's files backend parses it), such as `origin/HEAD` or a bare remote name, refuses, and so does a branch while HEAD points to a ref outside `refs/heads`: name the branch it points to, since only direct refs and HEAD's referent are held. Names use the read ref-name grammar without ancestry steps, never `HEAD`, and may not differ only by ASCII case from an existing ref or ref directory. `git_switch {branch}` moves HEAD to an existing local branch; the current branch returns `switched: false` and publishes nothing. There is no amend, signing, force, delete, detach, merge, remote or raw-argument escape.
 3. **Results and receipts.** A commit returns `{"commit","branch","publication"}`, a creation `{"branch","oid","publication"}` and a switch `{"branch","switched","files","publication"}`. The receipt `publication` is `{"objects","files"}` plus, as applicable, `"ref": {"name","before","after"}` (object names, `before` null for a new branch), `"index": {"before","after"}` (SHA-256 of the real index bytes, `before` null when absent) and `"head": {"before","after"}`. Failures return `{"failed"}` with filtered diagnostics, as for reads, and publish nothing; under Read-rule result filtering a failure keeps only its message and a switch refusal counts, but never names, a hidden path. Receipts carry object names and branch names, never file paths.
 4. **Neutralized mutable view.** A fresh view in Guard scratch holds a fixed configuration (the read settings plus `logAllRefUpdates`, `commit.gpgSign`, `gc.auto` and `maintenance.auto` off), copies of HEAD, the index with its mtime, `packed-refs`, `shallow` and the `refs` tree (another Git's `*.lock` is skipped), and a private object directory that borrows the real store as an alternate, so every new object stays private until publication. Each Git child is spawned from a thread confined by a Landlock domain (ABI 3 or later, so truncation is mediated) that denies every write, truncation, link, rename and node creation outside Guard scratch and `/dev/null`, and by seccomp filters that deny mode, owner, time, extended-attribute and `file_setattr` changes everywhere, answer `ENOSYS` (an older kernel, to libc) for every syscall newer than the last one the policy knows, so a future metadata setter fails closed, and deny every `ioctl` (answered `ENOTTY`, since inode-flag, fsxattr and filesystem-version requests change metadata through a read-only descriptor and Git without a terminal needs none), which Landlock does not mediate. The child inherits both, so Git can read the Workspace and real `.git` but never change them, while the Guard keeps its access for validated publication. An older kernel or a missing facility fails closed before Git runs. Repository configuration, includes, conditional includes, hooks, aliases, `core.sshCommand`, filter, diff and merge drivers, signing programs and fsmonitor never apply. The closed read environment gains only `GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_COMMITTER_NAME` and `GIT_COMMITTER_EMAIL`; commits use `--no-verify` and `--no-gpg-sign`, and timestamps are UTC. Reflog entries are not written.
 5. **Identity.** Private `tools.json` may set `git_identity` (`name` and `email`, without controls, `<` or `>`, no whitespace in the email). Folder trust reads `user.name` and `user.email` from `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) and then `~/.gitconfig`, the later file winning per key, as data only: other keys, `include`, `includeIf`, escapes and environment overrides are ignored, so a per-directory identity from a conditional include is not applied. Without both values the commit uses `Arany <arany@localhost.invalid>`. Repository configuration never supplies the identity.
@@ -813,7 +925,7 @@ Peer behavior: the replacement field names, false default, match-count checks, i
 | Tool loop | No fixed per-Run Provider-call or Tool-effect count. Each call, result, changeset and continuation faces its per-request, Event, Store, context, Tool and Guard bounds; Goal call, Run and active-time budgets limit the task. Children of a Tool-enabled Run are read-only researchers bounded as the [execution spec](./execution.md#researcher-children) states. |
 | In-process reads | At most 16 concurrent List, Read, Search, Glob and Skill calls per process; a full set records Limit before reading. A read that outlives its runtime keeps its slot until its bounded scan ends |
 | Typed Git writes | Linux only, as [specified](#typed-git-writes): 8 KiB message, 128 distinct commit paths within the 16 KiB call ceiling, 128-byte branch names, 4,096 copied ref entries of at most 1 KiB, 4,096 new objects and 32 MiB of objects plus index, 2,048 switched files of at most 1 MiB, depth 16 and 32 MiB in total, ten listed conflicts, 256-byte identity fields, a 64 KiB lock record, at least a 2 KiB result budget, at most 20 seconds of Git runtime |
-| Typed Git reads | Linux and macOS, each with its pinned platform Git; 256 KiB stdout kept per invocation (then cut off) and 4 KiB stderr kept (the rest drained); 256 status or file rows; 1–50 log commits; 128-byte revisions; results fitted to the Tool result budget with `truncated`; default resource profile (macOS: supervised thresholds, not kernel quotas); at most 20 seconds per read |
+| Typed Git reads | Linux and macOS, each with its pinned platform Git; 256 KiB stdout kept per invocation (then cut off) and 4 KiB stderr kept (the rest drained); 256 status, file or branch rows (branch enumeration has one lookahead); 1–50 log commits; 128-byte revisions; results fitted to the Tool result budget with `truncated`; default resource profile (macOS: supervised thresholds, not kernel quotas); at most 20 seconds per read |
 | Host Git | URL, branch, PR-title and PR-body limits are 2048, 128, 256 and 8192 bytes; host runtime is at most 600 seconds and narrowed by the action/Goal reservation |
 | Skill discovery | 256 top-level entries; 64 Skills; 32 resources per Skill; 8,192 resource entries; depth 16; 32 MiB read; merged grant at most 64 KiB; overflow rejects |
 | Tool context | serialized Tool arguments at most 400 KiB for Write, Edit and MultiEdit (six escaped bytes per content byte plus path, digest and envelope) and 16 KiB for every other operation, selected by operation and applied to the raw native argument text before buffering or parsing, so whitespace or escapes that parsing would compact never widen it, then to the compact form in typed validation; overflow rejects whole; 16 KiB catalog reservation plus bounded observations drawn from the Run's remaining [compiled-context allowance](./session.md#context-and-compaction) after objective, instructions and includes, images, recent history and reserved child context; receipt pins the selected byte budget; per-call rendered result budget at most 64 KiB, narrowed to available context only for Read, List, Search, Glob, Skill and typed Git reads; effectful calls reserve the full result budget before dispatch (internal changeset publication retains its bounded 128-byte applied-count result); [Session clearing and compaction](./session.md#context-and-compaction) make room before continuation; a `ToolFinished` observation is bounded as in [Persistence bounds](execution.md#persistence-bounds) |

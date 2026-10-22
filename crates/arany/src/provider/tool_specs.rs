@@ -239,6 +239,11 @@ mod tests {
 
     #[test]
     fn researchers_get_only_read_only_research_tools_without_plan_contracts() {
+        for role in [PromptRole::Researcher, PromptRole::Editor] {
+            assert!(
+                !names(&specs(&catalog(), role, &Default::default())).contains(&"arany_git_branch")
+            );
+        }
         let researcher = specs(&catalog(), PromptRole::Researcher, &Default::default());
         assert_eq!(
             names(&researcher),

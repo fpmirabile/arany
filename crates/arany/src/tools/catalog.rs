@@ -220,7 +220,7 @@ pub(crate) static ALL: [OperationFacts; 24] = [
     git_write_row(
         "git_branch",
         19,
-        "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
+        "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
     ),
     git_write_row(
         "git_switch",
@@ -434,7 +434,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                     return true;
                 }
                 if facts.name == "git_branch" && listed {
-                    call["properties"]["name"] = json!({"type":"null", "description":"null lists local branches; creating one needs the write grant."});
+                    call["properties"]["name"] = json!({"type":"null", "description":"null lists branch tips; creating one needs the write grant."});
                     call["properties"]["start_point"] = json!({"type":"null"});
                     return true;
                 }
@@ -671,6 +671,9 @@ mod tests {
             ToolCall::GitBranch {
                 name: Some("topic".into()),
                 start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
             },
             ToolCall::GitSwitch {
                 branch: "topic".into(),
