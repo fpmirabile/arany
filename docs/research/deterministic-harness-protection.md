@@ -8,7 +8,7 @@ protected resource, and why does enforcement need a separate boundary?
 and [Tool spec](../specs/tools.md) own the accepted contract. This report
 retains threat-model reasoning and source comparisons. The illustrative no-DB
 property and alternative backends are not available profiles or implementation
-instructions. [Platform research](./effect-guard-platform-base-2026-10.md) and
+instructions. [Platform research](#linux-launch-and-syscall-rationale) and
 [macOS recovery research](./macos-guard-crash-recovery-in-harnesses-2026-10.md)
 contain the later focused investigations; [next steps](../../NEXT_STEPS.md)
 owns missing evidence.
@@ -111,7 +111,7 @@ System-call tracing, eBPF telemetry, audit logs, and model classifiers can revea
 
 ## 4. Enforcement backends and honest portability
 
-### 4.1 Linux native: best first target
+### 4.1 Linux native mechanisms
 
 Linux has complementary primitives, not one magic sandbox:
 
@@ -131,23 +131,27 @@ Apple's supported App Sandbox uses kernel-enforced entitlements to limit files, 
 
 The original comparison left dynamic per-run policy and supportability unresolved. Later Arany-specific evidence lives in [macOS recovery research](./macos-guard-crash-recovery-in-harnesses-2026-10.md); this comparison neither requires a VM fallback nor proves a native guarantee.
 
-### 4.3 Windows
+### Linux launch and syscall rationale
 
-Windows AppContainer/LPAC is a real least-privilege boundary: access to files, registry, processes, credentials, devices, and network is denied unless the necessary capabilities and ACLs are present. [[Microsoft AppContainer isolation](https://learn.microsoft.com/en-us/windows/win32/secauthz/appcontainer-isolation)] [[Launching an AppContainer](https://learn.microsoft.com/en-us/windows/win32/secauthz/implementing-an-appcontainer)] **Fact** Windows Job Objects manage process trees, enforce process/time/memory limits, and can terminate the tree when the owning handle closes. [[Microsoft Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)] **Fact** Windows Filtering Platform provides kernel network enforcement and can classify by application or user identity. [[Windows Filtering Platform](https://learn.microsoft.com/en-us/windows/win32/fwp/about-windows-filtering-platform)] [[Application Layer Enforcement](https://learn.microsoft.com/en-us/windows/win32/fwp/application-layer-enforcement--ale-)] **Fact**
+Source baseline: 2026-10-04; source inspection is not native containment evidence.
 
-Compatibility is the hard part. Codex's reviewed Windows documentation described elevated mode using dedicated lower-privilege sandbox users, filesystem boundaries, firewall rules, and local security policy. Its unelevated fallback instead uses a restricted token and ACLs and provides weaker network isolation. [[Codex Windows sandbox](https://learn.chatgpt.com/docs/windows/windows-sandbox)] **Fact**
+- [systemd 262 lifecycle](https://github.com/systemd/systemd/blob/v262/man/systemd.service.xml)
+  and [termination](https://github.com/systemd/systemd/blob/v262/man/systemd.kill.xml):
+  client exit, output EOF and stop acknowledgement do not prove an empty process
+  tree. Effective cgroup controls and retained invocation identity need their own
+  observation; writable manager-owned controls do not establish delegation.
+- [seccompiler 0.5.0](https://github.com/rust-vmm/seccompiler/blob/v0.5.0/src/backend/bpf.rs)
+  checks architecture but did not reject the x32 bit. `Seccomp=2` alone does not
+  attest the intended filter. [Glibc 2.42](https://github.com/bminor/glibc/blob/glibc-2.42/sysdeps/unix/sysv/linux/clone-internal.c)
+  falls back from `clone3` on `ENOSYS`; pointer arguments prevent classic seccomp
+  from checking its flags, so an `EPERM` substitution can break valid threading.
+- [Hard links](https://man7.org/linux/man-pages/man2/link.2.html) alias an inode:
+  fresh-inode staging avoids modifying an outside alias through a writable bind.
+  Denying `ptrace` alone does not deny [`/proc/pid/mem`](https://man7.org/linux/man-pages/man5/proc_pid_mem.5.html);
+  supervisor dumpability is a separate boundary.
 
-**Gate:** compare LPAC plus brokered resources against a dedicated-principal/WFP design using the same conformance suite. A one-time elevated setup may be required for strong outbound denial. If neither backend satisfies the strict profile on a host, report `ProtectionUnavailable`; do not use proxy variables as a security fallback.
-
-### 4.4 Higher-assurance or multi-tenant execution
-
-A VM, remote worker or hardened application kernel is an alternative for hostile multi-tenant code, with a separate operational cost and threat model. gVisor interposes a userspace application kernel between the workload and host kernel, uses Linux primitives as defense in depth, and documents both its stronger isolation shape and its residual limits. [[gVisor architecture](https://gvisor.dev/docs/architecture_guide/intro/)] [[gVisor security model](https://gvisor.dev/docs/architecture_guide/security/)] **Fact** It also documents workload-dependent overhead, especially for I/O and networking. [[gVisor production guide](https://gvisor.dev/docs/user_guide/production/)] **Fact**
-
-Such an alternative needs a concrete requirement and evidence before adoption; it is not an Arany implementation commitment.
-
-### 4.5 WASI for narrow plugins, not a shell replacement
-
-For plugins compiled to WebAssembly, WASI/Wasmtime provides directory capabilities through preopened directories and denies access outside them. [[Wasmtime WASI tutorial](https://github.com/bytecodealliance/wasmtime/blob/main/docs/WASI-tutorial.md)] **Fact** This is attractive for purpose-built tools, but it cannot run arbitrary existing developer commands unchanged. The reviewed Wasmtime advisories also demonstrate why runtime patching and adversarial conformance tests remain necessary even with a capability design. [[Wasmtime security advisories](https://github.com/bytecodealliance/wasmtime/security/advisories)] **Fact**
+Native Windows is outside the current
+[D-17 platform decision](./next-step-decision-register.md#d-17--product-identity-platforms-and-license).
 
 ## 5. Lessons from the reviewed Codex and Claude Code behavior
 

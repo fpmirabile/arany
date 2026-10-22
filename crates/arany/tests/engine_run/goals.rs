@@ -4013,8 +4013,8 @@ async fn child_note_reaches_only_the_next_target_boundary() {
             "earlier context stays append-only"
         );
         assert_eq!(
-            requests[1].input.tools.as_ref().unwrap().catalog,
-            requests[4].input.tools.as_ref().unwrap().catalog
+            requests[1].input.tools.as_ref().unwrap().catalog(),
+            requests[4].input.tools.as_ref().unwrap().catalog()
         );
         let notes: Vec<_> = events
             .iter()
@@ -4735,7 +4735,7 @@ async fn steering_note_waits_for_the_next_autonomous_run_primary_call() {
 
 fn child_catalog(request: &arany::ProviderRequest) -> serde_json::Value {
     let tools = request.input.tools.as_ref().expect("research catalog");
-    serde_json::from_str(&tools.catalog).expect("catalog JSON")
+    serde_json::from_str(tools.catalog()).expect("catalog JSON")
 }
 
 fn child_tool_starts(events: &[arany::EventEnvelope], child: arany::AgentRunId) -> usize {
@@ -6801,9 +6801,9 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
                 }
                 let tools = input.tools.as_mut().unwrap();
                 // The catalog embeds the wall clock at each Run's start.
-                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog).unwrap();
+                let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog()).unwrap();
                 catalog["host_clock"]["unix_ms"] = 0.into();
-                tools.catalog = catalog.to_string();
+                tools.set_catalog(&catalog);
                 for step in &mut tools.steps {
                     if let Some(facts) = &mut step.facts {
                         normalize_facts(facts);
