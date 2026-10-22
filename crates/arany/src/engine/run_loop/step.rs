@@ -284,7 +284,7 @@ impl RunLoop<'_> {
         };
         loop {
             let intent = match self
-                .prepare_step_intent(&mut grant, runtime, &step, call.clone(), &source_call)
+                .prepare_step_intent(&grant, runtime, &step, call.clone(), &source_call)
                 .await?
             {
                 Ok(intent) => intent,
@@ -418,37 +418,13 @@ impl RunLoop<'_> {
 
     async fn prepare_step_intent(
         &self,
-        grant: &mut Grant<'_>,
+        grant: &Grant<'_>,
         runtime: &ToolRuntime,
         step: &ToolStep,
         call: ToolCall,
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
-        let mut sized = self.sized_intent(grant, runtime, step, call.clone(), post_call)?;
-        if matches!(sized, Err(SizingRefusal::ContextFull))
-            && step.observations.is_empty()
-            && let Grant::Primary { request, .. } = grant
-        {
-            let reserve = ToolRuntime::continuation_reserve(
-                step.turn.len(),
-                Self::maximum_feedback_reserve(runtime),
-            );
-            match self
-                .compact_tool_context_if_needed(request, reserve, None)
-                .await
-            {
-                Ok(()) => {}
-                Err(EngineError::GoalBudgetExhausted) => return Ok(Err(StopCause::ActiveTime)),
-                Err(error) => return Err(error),
-            }
-            if self.hook_requested_stop()? {
-                return Ok(Err(StopCause::HookStop));
-            }
-            if self.controls.cancellation.is_cancelled() {
-                return Ok(Err(StopCause::Cancelled));
-            }
-            sized = self.sized_intent(grant, runtime, step, call.clone(), post_call)?;
-        }
+        let sized = self.sized_intent(grant, runtime, step, call.clone(), post_call)?;
         match sized {
             Ok(intent) => Ok(Ok(intent)),
             Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(

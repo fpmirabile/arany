@@ -3304,6 +3304,73 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 }
 
 #[tokio::test]
+async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "original");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
+    ).expect("write grant");
+    let script = (0..4)
+        .map(|_| crate::tool_outcome(facts_read()))
+        .chain([crate::tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(facts_digest("original")),
+            content: "x".repeat(64 * 1024),
+        })])
+        .collect();
+    let provider = Arc::new(
+        ScriptedProvider::new(script)
+            .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+            .with_context_window(32_768)
+            .with_max_output_tokens(16_384)
+            .with_input_tokens_at(4, 30_000),
+    );
+    let mut input = request(&workspace, "Read four times, then request the write");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("pending request ends with a typed context refusal");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert_eq!(run.tools.len(), 4);
+    assert!(
+        run.tools
+            .iter()
+            .all(|tool| matches!(tool.intent.call, arany::ToolCall::Read { .. }))
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolResultsCleared { .. }
+            | Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. }
+    )));
+    assert!(
+        provider
+            .compact_requests
+            .lock()
+            .expect("compactions")
+            .is_empty()
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 5);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("original file"),
+        "original"
+    );
+}
+
+#[tokio::test]
 async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "original");
@@ -7444,10 +7511,17 @@ async fn each_pressured_report_maintains_context_once() {
 
 #[tokio::test]
 async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
-    for window in [None, Some(32_768), Some(272_000)] {
+    for (window, line_repeats) in [
+        (None, 96),
+        (Some(32_768), 96),
+        (Some(272_000), 96),
+        (Some(32_768), 24),
+    ] {
         let temp = tempfile::tempdir().expect("temporary root");
-        let workspace =
-            facts_workspace(temp.path(), &format!("{}\n", "fact ".repeat(96)).repeat(83));
+        let workspace = facts_workspace(
+            temp.path(),
+            &format!("{}\n", "fact ".repeat(line_repeats)).repeat(83),
+        );
         for index in 0..24 {
             std::fs::write(workspace.join(format!("notes/file-{index}.txt")), "entry")
                 .expect("entry");
@@ -7488,6 +7562,15 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         let mut input = request(&workspace, "Inspect the directory and answer");
         input.session_id = session;
         input.include_paths.clear();
+        if line_repeats == 24 {
+            input.goal = arany::GoalRequest::new(
+                arany::GoalBudget {
+                    max_provider_calls: Some(3),
+                    ..Default::default()
+                },
+                arany::GoalPhase::Implementation,
+            );
+        }
         let outcome = run_with(
             &engine,
             &provider,
@@ -7521,6 +7604,16 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         );
         assert_eq!(run.tools.len(), 2);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        if line_repeats == 24 {
+            assert!(
+                provider
+                    .compact_requests
+                    .lock()
+                    .expect("compactions")
+                    .is_empty(),
+                "an impossible future-turn reserve must not consume the three-call Goal budget"
+            );
+        }
         if window != Some(272_000) {
             assert!(
                 config.excluded_history_runs > 0,

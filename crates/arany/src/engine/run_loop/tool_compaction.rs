@@ -180,10 +180,12 @@ impl RunLoop<'_> {
         deadline: Option<Instant>,
     ) -> Result<PrimaryContext, EngineError> {
         let reserve = self.controls.tools.map_or(0, |runtime| {
-            crate::tools::ToolRuntime::continuation_reserve(
+            let reserve = crate::tools::ToolRuntime::continuation_reserve(
                 crate::provider::max_turn_bytes(request.max_output_tokens),
                 Self::maximum_feedback_reserve(runtime),
-            )
+            );
+            let limit = runtime.context_limit_bytes();
+            if reserve > limit { limit / 2 } else { reserve }
         });
         match self
             .compact_tool_context_if_needed(request, reserve, deadline)
@@ -240,7 +242,7 @@ impl RunLoop<'_> {
         Ok(request)
     }
 
-    pub(super) async fn compact_tool_context_if_needed(
+    async fn compact_tool_context_if_needed(
         &self,
         request: &mut ProviderRequest,
         reserve: usize,
