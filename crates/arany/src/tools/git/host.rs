@@ -19,6 +19,9 @@ const UNKNOWN: &str =
     "host: remote outcome unknown. Inspect remote state; never retry automatically.";
 pub(crate) const NON_FAST_FORWARD: &str = "host: remote reported no ref update (non-fast-forward).";
 const REFUSED: &str = "host: destination, source, authentication, pinned executable or repository layout unavailable (HEAD limit 256 B; repository config 64 KiB); nothing dispatched.";
+const PREPARATION_TIMEOUT: &str =
+    "host: preparation exceeded the runtime deadline; nothing dispatched.";
+const CANCELLED: &str = "host: approval expired or cancelled; nothing dispatched.";
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn valid(call: &ToolCall) -> bool {
@@ -877,57 +880,59 @@ pub(crate) async fn run(
     state: Option<&crate::store::StateRoot>,
     workspace: &Path,
     intent: EffectIntent,
-    cancellation: Cancellation,
+    mut cancellation: Cancellation,
 ) -> ToolObservation {
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(u64::from(intent.effective_timeout_ms()));
     let Some(authentication) = authentication else {
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
     };
     let Some(state) = state else {
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
     };
-    let root = match Scratch::acquire(state) {
-        Ok(root) => Arc::new(root),
-        Err(error) => {
-            return observation(
-                intent,
-                ToolDisposition::Denied,
+    let preparation = async {
+        let state = state.try_clone().map_err(|_| REFUSED)?;
+        let path = workspace.to_owned();
+        let push = matches!(intent.call, ToolCall::GitPush { .. });
+        let (root, backing) = tokio::task::spawn_blocking(move || {
+            let root = Scratch::acquire(&state).map_err(|error| {
                 if matches!(error, ToolError::Limit) {
                     "host: all 64 State scratch slots are in use; nothing dispatched."
                 } else {
                     REFUSED
-                },
-                None,
-            );
-        }
+                }
+            })?;
+            let backing = if push {
+                Some(backing_identity(&path).map_err(|_| REFUSED)?)
+            } else {
+                None
+            };
+            Ok::<_, &'static str>((Arc::new(root), backing))
+        })
+        .await
+        .map_err(|_| REFUSED)??;
+        let (command, executable) = prepare(
+            config,
+            authentication,
+            workspace,
+            &intent,
+            Arc::clone(&root),
+        )
+        .await
+        .map_err(|error| preparation_refusal(&error))?;
+        Ok::<_, &'static str>((root, backing, command, executable))
     };
-    let backing = if matches!(intent.call, ToolCall::GitPush { .. }) {
-        match backing_identity(workspace) {
-            Ok(identity) => Some(identity),
-            Err(_) => return observation(intent, ToolDisposition::Denied, REFUSED, None),
-        }
-    } else {
-        None
+    let prepared = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => Err(CANCELLED),
+        result = tokio::time::timeout_at(deadline, preparation) =>
+            result.unwrap_or(Err(PREPARATION_TIMEOUT)),
     };
-    let (command, executable) = match prepare(
-        config,
-        authentication,
-        workspace,
-        &intent,
-        Arc::clone(&root),
-    )
-    .await
-    {
+    let (_root, backing, command, executable) = match prepared {
         Ok(prepared) => prepared,
-        Err(error) => {
-            return observation(
-                intent,
-                ToolDisposition::Denied,
-                preparation_refusal(&error),
-                None,
-            );
-        }
+        Err(reason) => return observation(intent, ToolDisposition::Denied, reason, None),
     };
-    let mut outcome = supervise(command, intent, executable, cancellation).await;
+    let mut outcome = supervise(deadline, command, intent, executable, cancellation).await;
     if backing.is_some()
         && outcome.attestation.is_some()
         && backing_identity(workspace).ok() != backing
@@ -992,18 +997,17 @@ fn non_fast_forward(intent: &EffectIntent, output: &[u8]) -> bool {
 }
 
 async fn supervise(
+    deadline: tokio::time::Instant,
     mut command: Command,
     intent: EffectIntent,
     executable_sha256: String,
     mut cancellation: Cancellation,
 ) -> ToolObservation {
     if cancellation.is_cancelled() || crate::tools::now_ms() >= intent.expires_at_ms {
-        return observation(
-            intent,
-            ToolDisposition::Denied,
-            "host: approval expired or cancelled; nothing dispatched.",
-            None,
-        );
+        return observation(intent, ToolDisposition::Denied, CANCELLED, None);
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return observation(intent, ToolDisposition::Denied, PREPARATION_TIMEOUT, None);
     }
     let Ok(mut child) = command.spawn() else {
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
@@ -1014,7 +1018,7 @@ async fn supervise(
         tokio::select! {
             biased;
             () = cancellation.cancelled() => None,
-            result = tokio::time::timeout(Duration::from_millis(u64::from(intent.effective_timeout_ms())), async {
+            result = tokio::time::timeout_at(deadline, async {
                 tokio::try_join!(
                     async { crate::tools::guard::reap_owned_child(&mut child).await.map_err(|_| ToolError::Operation) },
                     capture(out, CAPTURE_BYTES), discard(err, STDERR_BYTES)
@@ -1082,6 +1086,17 @@ mod tests {
     use super::*;
     use crate::tools::git::tests::{arm_hostile, fixture, host_git, host_git_output};
     use crate::tools::types::{NetworkGrant, ToolLimits, hex_digest};
+
+    async fn supervise(
+        command: Command,
+        intent: EffectIntent,
+        executable: String,
+        cancellation: Cancellation,
+    ) -> ToolObservation {
+        let deadline = tokio::time::Instant::now()
+            + Duration::from_millis(u64::from(intent.effective_timeout_ms()));
+        super::supervise(deadline, command, intent, executable, cancellation).await
+    }
 
     fn push() -> ToolCall {
         ToolCall::GitPush {
@@ -1956,7 +1971,7 @@ done
     }
 
     #[tokio::test]
-    async fn host_preparation_keeps_scratch_alive_off_executor_after_cancellation() {
+    async fn host_preparation_keeps_scratch_alive_off_executor_after_cancellation_or_timeout() {
         struct GatedRoot {
             directory: tempfile::TempDir,
             entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
@@ -1981,42 +1996,74 @@ done
                 let _ = self.dropped.take().unwrap().send(());
             }
         }
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = fixture(temp.path());
-        let intent = intent(&workspace, pr());
-        let authentication = authentication(temp.path());
-        let (entered, ready) = tokio::sync::oneshot::channel();
-        let (release, receiver) = std::sync::mpsc::channel();
-        let (dropped, finished) = tokio::sync::oneshot::channel();
-        let root = Arc::new(GatedRoot {
-            directory: tempfile::tempdir().unwrap(),
-            entered: std::sync::Mutex::new(Some(entered)),
-            release: std::sync::Mutex::new(receiver),
-            dropped: Some(dropped),
-        });
-        let weak = Arc::downgrade(&root);
-        let task = tokio::spawn(async move {
-            prepare(&config(), &authentication, &workspace, &intent, root).await
-        });
-        tokio::time::timeout(Duration::from_secs(10), ready)
-            .await
-            .unwrap()
-            .unwrap();
-        task.abort();
-        assert!(task.await.unwrap_err().is_cancelled());
-        assert!(
-            weak.upgrade().is_some(),
-            "blocking preparation owns scratch"
-        );
-        release.send(()).unwrap();
-        tokio::time::timeout(Duration::from_secs(10), finished)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(
-            weak.upgrade().is_none(),
-            "scratch released after preparation"
-        );
+        for expire in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let workspace = fixture(temp.path());
+            let intent = intent(&workspace, pr());
+            let authentication = authentication(temp.path());
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let (release, receiver) = std::sync::mpsc::channel();
+            let (dropped, finished) = tokio::sync::oneshot::channel();
+            let root = Arc::new(GatedRoot {
+                directory: tempfile::tempdir().unwrap(),
+                entered: std::sync::Mutex::new(Some(entered)),
+                release: std::sync::Mutex::new(receiver),
+                dropped: Some(dropped),
+            });
+            let weak = Arc::downgrade(&root);
+            let approved = intent.clone();
+            let runtime = Duration::from_millis(u64::from(approved.effective_timeout_ms()));
+            let deadline = tokio::time::Instant::now() + runtime;
+            let task = tokio::spawn(async move {
+                tokio::time::timeout_at(
+                    deadline,
+                    prepare(&config(), &authentication, &workspace, &intent, root),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(10), ready)
+                .await
+                .unwrap()
+                .unwrap();
+            if expire {
+                tokio::time::pause();
+                tokio::time::advance(runtime).await;
+                tokio::time::resume();
+                assert!(task.await.unwrap().is_err());
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", "printf dispatched > effect"])
+                    .current_dir(temp.path());
+                let denied = super::supervise(
+                    deadline,
+                    command,
+                    approved,
+                    "0".repeat(64),
+                    Cancellation::new(),
+                )
+                .await;
+                assert_eq!(denied.disposition, ToolDisposition::Denied);
+                assert_eq!(denied.output, PREPARATION_TIMEOUT);
+                assert!(denied.attestation.is_none());
+                assert!(!temp.path().join("effect").exists());
+            } else {
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+            }
+            assert!(
+                weak.upgrade().is_some(),
+                "blocking preparation owns scratch"
+            );
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(10), finished)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                weak.upgrade().is_none(),
+                "scratch released after preparation"
+            );
+        }
     }
 
     #[tokio::test]
@@ -2161,6 +2208,7 @@ done
                 .kill_on_drop(true);
             let cancellation = Cancellation::new();
             let trigger = cancellation.clone();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(300);
             let gate = async {
                 let mut signal = [0; 5];
                 tokio::time::timeout(Duration::from_secs(30), ready.read_exact(&mut signal))
@@ -2173,12 +2221,18 @@ done
                 } else {
                     // Advance only after the real child has completed its effect; reap on real time.
                     tokio::time::pause();
-                    tokio::time::advance(Duration::from_secs(600)).await;
+                    tokio::time::advance(Duration::from_secs(300)).await;
                     tokio::time::resume();
                 }
             };
             let (observation, ()) = tokio::join!(
-                supervise(command, intent.clone(), "0".repeat(64), cancellation),
+                super::supervise(
+                    deadline,
+                    command,
+                    intent.clone(),
+                    "0".repeat(64),
+                    cancellation
+                ),
                 gate
             );
             let mut eof = [0; 1];
