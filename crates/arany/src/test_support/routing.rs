@@ -86,3 +86,23 @@ pub fn pin_roster(bindings: &mut AdmittedProviders, spare: Option<Vec<Arc<dyn Pr
     assert!(snapshot.valid());
     bindings.roster = Some(crate::AdmittedRoster { snapshot, profiles });
 }
+
+pub fn plan_sample(observed_at: i64) -> crate::RateLimits {
+    crate::RateLimits {
+        primary: Some(crate::PlanWindow {
+            source: crate::LimitSource::Headers,
+            observed_at,
+            used_percent: Some(crate::UsedPercent::try_from(25.5).unwrap()),
+            window_minutes: Some(300),
+            reset_at: Some(2_000_000_000),
+        }),
+        secondary: Some(crate::PlanWindow {
+            source: crate::LimitSource::Headers,
+            observed_at,
+            used_percent: Some(crate::UsedPercent::try_from(70.0).unwrap()),
+            window_minutes: Some(10_080),
+            reset_at: None,
+        }),
+        unavailable: None,
+    }
+}

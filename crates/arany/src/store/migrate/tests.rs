@@ -243,6 +243,7 @@ fn fail_after(steps: Option<usize>) {
 
 fn failed_compaction(run: RunId, covered_sequence: u64, digest: [u8; 32]) -> CompactionRecord {
     CompactionRecord {
+        rate_limits: None,
         covered_run_id: run,
         covered_sequence,
         source_digest: digest,

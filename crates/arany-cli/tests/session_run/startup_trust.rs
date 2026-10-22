@@ -1137,7 +1137,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "trusted startup screen stage missing: {}",
+                "trusted startup screen stage {needle:?} missing: {}",
                 super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
             );
             thread::yield_now();

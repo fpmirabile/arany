@@ -146,6 +146,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: actor,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation,
                 phase,
                 disposition,
@@ -463,6 +464,7 @@ impl Fixture {
             run_id: self.run,
             covered_tool_count: u32::try_from(run.tools.len()).unwrap(),
             record: crate::session::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: self.run,
                 covered_sequence: covered,
                 source_digest,
@@ -1515,6 +1517,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
                     run_id: f.run,
                     agent_run_id: f.primary,
                     record: ProviderCallRecord {
+                        rate_limits: None,
                         delegation: None,
                         phase: AgentPhase::RootSynthesis,
                         disposition: ProviderCallDisposition::Finished,
@@ -2723,6 +2726,7 @@ fn worker_protocol_background_workers_let_the_primary_continue_before_release() 
             run_id: f.run,
             agent_run_id: f.primary,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: AgentPhase::RootSynthesis,
                 disposition: ProviderCallDisposition::ToolRequested,
@@ -2791,6 +2795,7 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
             run_id: f.run,
             agent_run_id: f.primary,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation: Some(vec![ChildAssignment::Editor {
                     assignment: Box::new(request.clone()),
                 }]),
@@ -3221,6 +3226,7 @@ fn worker_protocol_stop_blocks_an_otherwise_admitted_provider_fallback() {
         run_id: f.run,
         agent_run_id: f.child,
         fallback: crate::provider::ProviderFallback {
+            rate_limits: None,
             role: crate::provider::ProviderRole::Child,
             call_index: 0,
             failure: ProviderCallDisposition::Unavailable,

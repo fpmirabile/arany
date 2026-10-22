@@ -182,6 +182,8 @@ An additive optional field that is omitted at its default keeps the payload vers
 
 Command selection summaries are required in current Workspace command results. The ToolFinished 24→25 and HookFinished 13→14 migrations add zero omission/discard counts to prior complete command results; non-command observations are unchanged. Replay never loads ignore controls.
 
+Provider-call, retry, fallback, between-Run compaction and in-Run compaction payloads carry additive optional `rate_limits` metadata, omitted when absent under the compatibility rule above. Existing payload versions, bytes and digests remain unchanged; absence means unreported, with no backfill or compatibility reader. The [Provider contract](./provider.md#passive-plan-limit-observations) owns its closed types and 4 KiB bound. Store admission reserves an additional 4 KiB per Event slot before dispatch, within the unchanged Event payload ceiling. When attaching an optional sample would exceed the Provider-call payload ceiling, the Engine omits the sample before append; required call facts and replay size validation remain unchanged. Every role and both compaction loops settle the observation in their existing fact, including failures and cancellation. Retry/fallback facts describe the failed source attempt, commit before waiting or replacement dispatch, and consume that attempt's slot so a cancelled wait cannot duplicate it. Append failure stops continuation and publishes no uncommitted observation; a crash before commitment leaves no durable sample. Replay reads no clock and never refetches.
+
 Branch discovery's `ToolCall::GitBranch` adds nullable `scope`, `base` and
 `max_count` with omitted null defaults under the additive-field rule above.
 Model-facing calls still include all nullable schema fields explicitly.
@@ -321,3 +323,5 @@ The schema is created only in an empty version-zero database; any other existing
 Refusal continuation, identical-pair exhaustion, Goal call-budget exhaustion and crash-prefix recovery belong to [the Engine corpus](../../crates/arany/tests/engine_run.rs); refused-then-valid Write dispatch and absence of refused Tool intents belong to [the Guard journey](../../crates/arany-cli/tests/guard_runs.rs). [Renderer evidence](../../crates/arany/src/provider/render/tests.rs) owns the bounded closed note and unchanged offered operations.
 
 [Next steps](../../NEXT_STEPS.md) owns remaining native and live checks; scoped security and review records retain necessary reasoning.
+
+The [Event corpus](../../crates/arany/src/session/events/tests.rs) owns optional-field byte preservation and strict non-default decoding. The [Store crash corpus](../../crates/arany/src/store/journal/crash_tests.rs) owns before/after-commit sample survival; the [routing journey](../../crates/arany/tests/engine_run/routing.rs) owns lost acknowledgments and cancellation during retry waits.
