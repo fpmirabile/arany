@@ -170,7 +170,7 @@ fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
             "No room for more steering notes this Run. {}",
             draft_retained_notice(autonomous)
         ),
-        SteeringRefused::TooLarge => "Steering note exceeds 8 KiB; draft retained".into(),
+        SteeringRefused::TooLarge => "Steering note exceeds 8.0 KB; draft retained".into(),
         SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
         SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
         SteeringRefused::ChildLimit => {
@@ -2002,7 +2002,7 @@ mod goal_request_tests {
     fn steering_refusals_name_the_retained_draft_without_echoing_text() {
         assert_eq!(
             steering_refusal(SteeringRefused::TooLarge, false),
-            "Steering note exceeds 8 KiB; draft retained"
+            "Steering note exceeds 8.0 KB; draft retained"
         );
         assert_eq!(
             steering_refusal(SteeringRefused::Unavailable, true),
