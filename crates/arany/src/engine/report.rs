@@ -61,6 +61,9 @@ pub(super) fn goal_report(
             &mut omitted_facts,
         );
     }
+    if goal.budget_refusal.is_some() {
+        push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    }
     let mut workers: Vec<_> = view
         .runs
         .iter()
@@ -172,13 +175,26 @@ fn fit_report_summary(report: &mut GoalReport, raw_summary: &str, omitted_facts:
 }
 
 pub fn budget_refusal_summary(goal: &crate::session::GoalView) -> Option<String> {
-    use crate::session::{BudgetAction, BudgetChargeBasis, BudgetRefusalCause, GoalLimit};
     let refusal = goal.budget_refusal.as_ref()?;
-    let (dimension, final_used) = match refusal.dimension {
-        GoalLimit::Calls => ("Provider calls", u64::from(goal.provider_calls)),
-        GoalLimit::Tokens => ("tokens", goal.known_tokens),
-        GoalLimit::ActiveTime => ("active time (ms)", goal.active_ms),
-        GoalLimit::Runs => ("Runs", goal.run_ids.len() as u64),
+    let final_used = match refusal.dimension {
+        crate::session::GoalLimit::Calls => u64::from(goal.provider_calls),
+        crate::session::GoalLimit::Tokens => goal.known_tokens,
+        crate::session::GoalLimit::ActiveTime => goal.active_ms,
+        crate::session::GoalLimit::Runs => goal.run_ids.len() as u64,
+    };
+    Some(format!(
+        "Goal budget refused {}; final settled usage {final_used}.",
+        budget_refusal_details(refusal)
+    ))
+}
+
+pub(super) fn budget_refusal_details(refusal: &crate::session::BudgetRefusal) -> String {
+    use crate::session::{BudgetAction, BudgetChargeBasis, BudgetRefusalCause, GoalLimit};
+    let dimension = match refusal.dimension {
+        GoalLimit::Calls => "Provider calls",
+        GoalLimit::Tokens => "tokens",
+        GoalLimit::ActiveTime => "active time (ms)",
+        GoalLimit::Runs => "Runs",
     };
     let action = match refusal.action {
         BudgetAction::Provider => "Provider",
@@ -194,7 +210,7 @@ pub fn budget_refusal_summary(goal: &crate::session::GoalView) -> Option<String>
         BudgetRefusalCause::InsufficientHeadroom => "insufficient headroom",
     };
     let mut fact = format!(
-        "Goal budget refused {action}: {dimension}; {cause}; used at refusal {}, pinned limit {}",
+        "{action}: {dimension}; {cause}; used at refusal {}, pinned limit {}",
         refusal.used, refusal.limit
     );
     if let Some(requested) = refusal.requested {
@@ -212,8 +228,7 @@ pub fn budget_refusal_summary(goal: &crate::session::GoalView) -> Option<String>
     if refusal.charge_basis == BudgetChargeBasis::Conservative {
         fact.push_str("; conservatively charged");
     }
-    fact.push_str(&format!("; final settled usage {final_used}."));
-    Some(fact)
+    fact
 }
 
 fn push_budget_tool_facts(
@@ -562,6 +577,12 @@ fn push_unresolved_tool_facts(
                 continue;
             };
             match observation.disposition {
+                crate::tools::ToolDisposition::Denied
+                | crate::tools::ToolDisposition::Failed
+                | crate::tools::ToolDisposition::Conflict
+                | crate::tools::ToolDisposition::Limit
+                    if goal.budget_refusal.is_some() => {}
+
                 crate::tools::ToolDisposition::Succeeded
                     if observation.attested_for(&tool.intent) => {}
                 crate::tools::ToolDisposition::Denied

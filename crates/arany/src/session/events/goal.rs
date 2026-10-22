@@ -89,7 +89,10 @@ impl BudgetRefusal {
                     requested >= minimum
                         && (minimum > STORE_ACTION_OVERHEAD_MS
                             || requested.checked_sub(minimum) == Some(STORE_ACTION_OVERHEAD_MS - 1)
-                                && self.action == BudgetAction::Tool)
+                                && matches!(
+                                    self.action,
+                                    BudgetAction::Tool | BudgetAction::Delegation
+                                ))
                 }
                 (None, Some(minimum)) => minimum == STORE_ACTION_OVERHEAD_MS + 1,
                 (Some(_), None) => false,

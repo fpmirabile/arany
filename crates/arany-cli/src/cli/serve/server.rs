@@ -619,10 +619,14 @@ pub(in crate::cli) async fn run_configured(
                         && let Some(id) = turn.pending_start.take()
                     {
                         let error = result.expect_err("failed Run");
+                        let committed_budget = matches!(error, EngineError::GoalBudgetExhausted);
                         let mut fault = Fault::engine(error);
-                        if fault.reason == Some(Reason::GoalBudgetExhausted)
+                        if committed_budget
                             && let Ok(view) = threads::load_view(&state, turn.thread_id).await
-                            && let Some(run) = view.runs.last()
+                            && let Some(run) = view.runs.last().filter(|run| {
+                                view.budget_stop_goal(run)
+                                    .is_some_and(|goal| goal.budget_refusal.is_some())
+                            })
                             && let Some(feedback) =
                                 crate::presentation::session_run_feedback(&view, run)
                         {

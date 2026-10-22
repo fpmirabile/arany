@@ -1082,7 +1082,29 @@ fn budget_refusal_schema(_: &mut SchemaGenerator) -> Schema {
     })
 }
 
-// Keep this exhaustive match and the serialized-variant schema test in sync.
+// Keep these exhaustive matches and the serialized-variant schema test in sync.
+const _: fn(arany::GoalLimit) = |limit| match limit {
+    arany::GoalLimit::Calls
+    | arany::GoalLimit::Tokens
+    | arany::GoalLimit::ActiveTime
+    | arany::GoalLimit::Runs => {}
+};
+const _: fn(arany::BudgetRefusalCause) = |cause| match cause {
+    arany::BudgetRefusalCause::Exhausted
+    | arany::BudgetRefusalCause::UnknownUsage
+    | arany::BudgetRefusalCause::InsufficientHeadroom => {}
+};
+const _: fn(arany::BudgetAction) = |action| match action {
+    arany::BudgetAction::Provider
+    | arany::BudgetAction::Tool
+    | arany::BudgetAction::Delegation
+    | arany::BudgetAction::Compaction
+    | arany::BudgetAction::Run
+    | arany::BudgetAction::Resume => {}
+};
+const _: fn(arany::BudgetChargeBasis) = |basis| match basis {
+    arany::BudgetChargeBasis::Observed | arany::BudgetChargeBasis::Conservative => {}
+};
 const _: fn(arany::RunFailure) = |failure| match failure {
     arany::RunFailure::ProviderCall
     | arany::RunFailure::ProposalRefused

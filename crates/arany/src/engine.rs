@@ -106,7 +106,7 @@ pub enum EngineError {
     GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
-    #[error("Goal budget refusal is uncommitted: {dimension:?} ({cause:?}); used {used}, pinned limit {limit}, requested {requested:?}, required minimum {minimum:?}, token usage unknown {unknown}, charge basis {basis:?}; inspect Session history before retrying", dimension = .refusal.dimension, cause = .refusal.cause, used = .refusal.used, limit = .refusal.limit, requested = .refusal.requested, minimum = .refusal.required_minimum, unknown = .refusal.token_usage_unknown, basis = .refusal.charge_basis)]
+    #[error("Goal budget refusal is uncommitted: {details}; inspect Session history before retrying", details = report::budget_refusal_details(.refusal))]
     GoalBudgetUncommitted {
         refusal: Box<crate::session::BudgetRefusal>,
         #[source]

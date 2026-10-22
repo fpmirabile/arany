@@ -258,6 +258,7 @@ Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `fa
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | append refused |
+| `GoalFinished` | [Goal report bound](./goals.md#lifecycle-budgets-and-recovery) + [budget refusal bound](./goals.md#budget-refusal-feedback) + 512 bytes | append refused |
 | `ToolStarted` | 512 KiB: the complete intent, including Write or Edit arguments at the [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves one observation slot for each intent it admits | append refused |
 | `HookFinished` | 528 KiB: twice the [Tool result ceiling](tools.md#limits-and-failure-behavior) plus the 400 KiB [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves an observation slot per matched handler | append refused |
 | `ToolFinished` | 528 KiB + 512 bytes of checkpoint metadata: twice the [Tool result ceiling](tools.md#limits-and-failure-behavior) plus the 400 KiB [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves it only for the `ToolFinished` slots an action may append | append refused |

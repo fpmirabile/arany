@@ -263,6 +263,55 @@ fn goal_stop_failure_schema_lists_every_serialized_run_failure() {
         serde_json::from_value::<GoalSummary>(value.clone()).unwrap(),
         goal
     );
+    for (field, variants) in [
+        (
+            "dimension",
+            serde_json::to_value([
+                arany::GoalLimit::Calls,
+                arany::GoalLimit::Tokens,
+                arany::GoalLimit::ActiveTime,
+                arany::GoalLimit::Runs,
+            ])
+            .unwrap(),
+        ),
+        (
+            "cause",
+            serde_json::to_value([
+                arany::BudgetRefusalCause::Exhausted,
+                arany::BudgetRefusalCause::UnknownUsage,
+                arany::BudgetRefusalCause::InsufficientHeadroom,
+            ])
+            .unwrap(),
+        ),
+        (
+            "action",
+            serde_json::to_value([
+                arany::BudgetAction::Provider,
+                arany::BudgetAction::Tool,
+                arany::BudgetAction::Delegation,
+                arany::BudgetAction::Compaction,
+                arany::BudgetAction::Run,
+                arany::BudgetAction::Resume,
+            ])
+            .unwrap(),
+        ),
+        (
+            "charge_basis",
+            serde_json::to_value([
+                arany::BudgetChargeBasis::Observed,
+                arany::BudgetChargeBasis::Conservative,
+            ])
+            .unwrap(),
+        ),
+    ] {
+        for variant in variants.as_array().unwrap() {
+            let mut encoded = value.clone();
+            encoded["budgetRefusal"][field] = variant.clone();
+            validate(&schema, &json!({"$ref":"#/$defs/GoalSummary"}), &encoded);
+            let decoded: GoalSummary = serde_json::from_value(encoded.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        }
+    }
     for field in ["dimension", "cause", "action", "charge_basis"] {
         let mut unknown = value.clone();
         unknown["budgetRefusal"][field] = json!("unknown");

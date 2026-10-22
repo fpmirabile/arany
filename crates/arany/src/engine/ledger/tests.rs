@@ -159,11 +159,15 @@ fn unlimited_goal_admits_a_finite_build_action_above_the_default_usage_ceiling()
 
 #[tokio::test(start_paused = true)]
 async fn active_admission_distinguishes_store_headroom_from_elapsed_exhaustion() {
-    for (used, carried, admitted, elapsed) in [
-        (4_999, 0, true, false),
-        (5_000, 0, false, false),
-        (5_000, 10, false, false),
-        (10_000, 0, false, true),
+    for (used, carried, action_ms, action, admitted, elapsed) in [
+        (4_999, 0, 600_000, BudgetAction::Provider, true, false),
+        (5_000, 0, 600_000, BudgetAction::Provider, false, false),
+        (5_000, 10, 600_000, BudgetAction::Provider, false, false),
+        (10_000, 0, 600_000, BudgetAction::Provider, false, true),
+        (10_000, 0, 0, BudgetAction::Delegation, false, true),
+        (9_990, 10, 0, BudgetAction::Delegation, false, true),
+        (10_000, 0, 0, BudgetAction::Tool, false, true),
+        (9_990, 0, 0, BudgetAction::Delegation, true, false),
     ] {
         let ledger = ledger(GoalBudget {
             max_active_ms: Some(10_000),
@@ -176,9 +180,7 @@ async fn active_admission_distinguishes_store_headroom_from_elapsed_exhaustion()
         tokio::time::advance(Duration::from_millis(carried)).await;
         assert_eq!(ledger.spent_active_time_exhausted(), elapsed);
         assert_eq!(
-            ledger
-                .reserve_active(600_000, BudgetAction::Provider, None)
-                .is_ok(),
+            ledger.reserve_active(action_ms, action, None).is_ok(),
             admitted
         );
         let refusal = ledger.budget_refusal().unwrap();
@@ -186,9 +188,17 @@ async fn active_admission_distinguishes_store_headroom_from_elapsed_exhaustion()
         if let Some(refusal) = refusal {
             assert_eq!(refusal.used, used + carried);
             assert_eq!(refusal.limit, 10_000);
-            assert_eq!(refusal.requested, Some(605_000 + carried));
-            assert_eq!(refusal.required_minimum, Some(5_001 + carried));
+            assert_eq!(refusal.requested, Some(action_ms + 5_000 + carried));
+            assert_eq!(
+                refusal.required_minimum,
+                Some(carried + if action_ms == 0 { 1 } else { 5_001 })
+            );
             refusal.validate().expect("valid captured reservation");
+            if action_ms == 0 {
+                let mut forged = refusal;
+                forged.action = BudgetAction::Provider;
+                assert!(forged.validate().is_err());
+            }
             assert_eq!(
                 refusal.cause,
                 if elapsed {
@@ -232,6 +242,23 @@ fn refusal_snapshot_uses_pinned_dimensions_and_canonical_simultaneous_order() {
         assert_eq!(refusal.map(|r| r.dimension), expected);
         if let Some(refusal) = refusal {
             refusal.validate().unwrap();
+            let error = EngineError::GoalBudgetUncommitted {
+                refusal: Box::new(refusal),
+                source: Box::new(EngineError::GoalBudgetExhausted),
+            }
+            .to_string();
+            assert!(error.starts_with("Goal budget refusal is uncommitted:"));
+            assert!(
+                !error.contains("Some(") && !error.contains("None") && !error.contains("Observed")
+            );
+            assert!(error.contains(&format!(
+                "used at refusal {}, pinned limit {}",
+                refusal.used, refusal.limit
+            )));
+            assert_eq!(
+                error.contains("token usage unknown"),
+                refusal.token_usage_unknown
+            );
         }
     }
 }

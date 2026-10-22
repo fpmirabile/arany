@@ -324,6 +324,7 @@ async fn run_on_engine(
     let (objective, skill) = invoked_skill(&args, &admission)?;
     let mut goal = admission.goal;
     apply_saved_limits(&mut goal, goal_budget, resource_settings);
+    let resumed_goal = goal.id;
     let end = run_signalled(
         &engine,
         providers,
@@ -362,9 +363,7 @@ async fn run_on_engine(
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
         Err(EngineError::GoalBudgetExhausted) => {
-            if let (Some(session), Some(goal_id)) =
-                (admission.session_id, args.resume_goal.as_ref())
-            {
+            if let (Some(session), Some(goal_id)) = (admission.session_id, resumed_goal) {
                 let root = StateRoot::open_existing(&admission.state_dir)
                     .map_err(|_| "state directory unavailable or unsafe")?;
                 let store = Store::open_read_only(root).map_err(|_| "state store unavailable")?;
@@ -376,7 +375,7 @@ async fn run_on_engine(
                 if let Some(view) = view
                     && let Some(run) = view.runs.iter().rev().find(|run| {
                         view.budget_stop_goal(run)
-                            .is_some_and(|goal| goal.id.to_string() == *goal_id)
+                            .is_some_and(|goal| goal.id == goal_id)
                     })
                     && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
                 {
@@ -1350,7 +1349,7 @@ mod tests {
         let mut resume = args(state_dir.clone(), workspace.clone(), "unused");
         resume.prompt = None;
         resume.session_id = Some(paused.session_id.to_string());
-        resume.resume_goal = Some(paused.goal_id.to_string());
+        resume.resume_goal = Some(paused.goal_id.to_string().to_uppercase());
         let admission = resume.admit().expect("valid resume");
         let error = run_with_provider(
             resume,

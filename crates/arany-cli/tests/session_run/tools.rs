@@ -75,7 +75,7 @@ async fn budget_incident_failed_reads_then_next_action_has_distinct_terminal_fee
         if exhausted {
             let feedback = feedback.unwrap();
             assert!(feedback.starts_with("Arany status: Goal budget refused Tool: Provider calls; exhausted; used at refusal 3, pinned limit 3; requested 1; required minimum 1; final settled usage 3."));
-            assert_eq!(feedback.matches("primary: Read failed").count(), 2);
+            assert_eq!(feedback.matches("primary: read failed").count(), 2);
             assert!(
                 feedback
                     .ends_with("No answer was committed; completed actions remain in the Session.")

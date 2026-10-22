@@ -440,13 +440,13 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     child_view.runs[0].agents.push(child);
     let child_report = goal_report(&child_view, &child_view.runs[0], &budget_goal);
     assert_eq!(child_report.unresolved[0], report.unresolved[0]);
-    assert!(
+    assert_eq!(
         child_report
             .unresolved
             .iter()
             .find(|item| item.starts_with("primary:") || item.starts_with("child "))
-            .unwrap()
-            .starts_with("child 1: Command limited; limit resource")
+            .map(String::as_str),
+        Some("child 1: command limited; limit resource")
     );
     assert!(
         child_report
@@ -454,6 +454,49 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             .iter()
             .any(|item| item == "9 earlier Tool failure(s) omitted.")
     );
+    for disposition in [
+        None,
+        Some(ToolDisposition::Uncertain),
+        Some(ToolDisposition::Cancelled),
+    ] {
+        let mut interrupted_view = budget_view.clone();
+        interrupted_view.runs[0].status = RunStatus::Interrupted;
+        let tool = &mut interrupted_view.runs[0].tools[0];
+        tool.intent.call = ToolCall::Write {
+            path: "notes/pending.txt".into(),
+            expected_digest: None,
+            content: "pending".into(),
+        };
+        tool.observation = disposition.map(|disposition| {
+            let mut observation = tool.observation.clone().unwrap();
+            observation.intent = tool.intent.clone();
+            observation.disposition = disposition;
+            observation.attestation = None;
+            observation.output.clear();
+            observation.cache_update = CacheUpdate::NotApplicable;
+            observation
+        });
+        let interrupted_report =
+            goal_report(&interrupted_view, &interrupted_view.runs[0], &budget_goal);
+        let warning = if disposition.is_some() {
+            "write notes/pending.txt has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+        } else {
+            "write notes/pending.txt has no committed Tool outcome."
+        };
+        let warning_index = interrupted_report
+            .unresolved
+            .iter()
+            .position(|item| item == warning)
+            .unwrap();
+        let details_index = interrupted_report
+            .unresolved
+            .iter()
+            .position(|item| item.starts_with("primary:"))
+            .unwrap();
+        assert!(warning_index < details_index);
+        assert_eq!(interrupted_report.unresolved[0], report.unresolved[0]);
+        interrupted_report.validate().unwrap();
+    }
 
     let mut checkpoint_view = view.clone();
     let tool = &mut checkpoint_view.runs[0].tools[1];

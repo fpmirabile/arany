@@ -656,6 +656,12 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
                 reason(&exhausted),
                 (&json!(-32000), &json!("goalBudgetExhausted"))
             );
+            assert!(
+                exhausted["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Arany status: Goal budget refused resume:")
+            );
             let again = wire.call(41, "goal/resume", params).await;
             assert_eq!(reason(&again), (&json!(-32000), &json!("goalUnavailable")));
             assert!(wire.seen.iter().all(|m| m["method"] != "turn/started"));
