@@ -2,22 +2,36 @@ use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
     MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PromptRole, Provider,
     ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
-    list_native_models_with_credentials, valid_saved_api_account_id, validate_native_api_key,
+    valid_saved_api_account_id, validate_native_api_key,
 };
 use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::{StateRoot, Store};
+use crate::{
+    CheckCallKind, CheckDisposition, CheckJournal, CheckProbe, CheckStart, CheckTarget, CheckUsage,
+    CheckView,
+};
 use aws_lc_rs::hmac;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use sha2::{Digest, Sha256};
+use std::time::Duration;
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v36";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
 pub enum NativeCheckError {
+    #[error("Provider check could not start: {0}")]
+    Journal(Box<crate::CheckOpenError>),
+    #[error("{source}\n{receipt}")]
+    Check {
+        source: Box<NativeCheckError>,
+        receipt: crate::CheckReceipt,
+    },
     #[error("native Provider, model, or effort is invalid")]
     InvalidSelection,
     #[error("selected native API key is unavailable or invalid")]
@@ -38,90 +52,99 @@ pub async fn check_native_model_from_env(
     profile: &str,
     model: &str,
     effort: Effort,
-) -> Result<(), NativeCheckError> {
+) -> Result<CheckView, NativeCheckError> {
     if !matches!(profile, "openai" | "anthropic") || !valid_model_id(model) {
         return Err(NativeCheckError::InvalidSelection);
     }
     let credentials = NativeApiCredentials::from_env(profile)
         .map_err(|_| NativeCheckError::CredentialUnavailable)?;
-    check_native_model_with_credentials(root, profile, model, effort, credentials, None).await
+    check_native_model(
+        root,
+        NativeCheckRequest {
+            profile: profile.into(),
+            model: model.into(),
+            effort,
+            credentials,
+            account_id: None,
+        },
+        crate::RunCancellation::new(),
+        async {
+            NativeApiCredentials::from_env(profile)
+                .map_err(|_| NativeCheckError::CredentialUnavailable)
+        },
+    )
+    .await
 }
 
-/// Makes up to three potentially billable synthetic inference calls with the selected API key.
-/// `account_id` binds a saved account; `None` binds an environment-backed selection.
-/// The caller must obtain explicit cost consent before invoking this function.
-pub async fn check_native_model_with_api_key(
-    root: StateRoot,
-    profile: &str,
-    model: &str,
-    effort: Effort,
-    key: String,
-    account_id: Option<Uuid>,
-) -> Result<(), NativeCheckError> {
-    if !matches!(profile, "openai" | "anthropic")
-        || !valid_model_id(model)
-        || !valid_saved_api_account_id(profile, account_id)
-    {
-        return Err(NativeCheckError::InvalidSelection);
-    }
-    let credentials =
-        NativeApiCredentials::new(profile, key, None).map_err(|error| match error {
-            ProviderError::Rejected => NativeCheckError::InvalidSelection,
-            _ => NativeCheckError::CredentialUnavailable,
-        })?;
-    check_native_model_with_credentials(root, profile, model, effort, credentials, account_id).await
+pub struct NativeCheckRequest {
+    pub profile: String,
+    pub model: String,
+    pub effort: Effort,
+    pub credentials: NativeApiCredentials,
+    pub account_id: Option<Uuid>,
 }
 
-/// Checks one explicitly selected native credential scope after the caller obtains cost consent.
-pub async fn check_native_model_with_credentials(
+pub async fn check_native_model(
     root: StateRoot,
-    profile: &str,
-    model: &str,
-    effort: Effort,
-    credentials: NativeApiCredentials,
-    account_id: Option<Uuid>,
-) -> Result<(), NativeCheckError> {
+    request: NativeCheckRequest,
+    mut cancellation: crate::RunCancellation,
+    revalidate: impl std::future::Future<Output = Result<NativeApiCredentials, NativeCheckError>>,
+) -> Result<CheckView, NativeCheckError> {
+    let NativeCheckRequest {
+        profile,
+        model,
+        effort,
+        credentials,
+        account_id,
+    } = request;
+    let (profile, model) = (profile.as_str(), model.as_str());
     let fingerprint = fingerprint_credentials(profile, model, effort, &credentials, account_id)?;
-    let store = Store::open(root).map_err(|_| NativeCheckError::EvidenceUnavailable)?;
-    let result = async {
-        store
-            .clear_native_evidence(fingerprint)
-            .await
-            .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
-        tokio::time::timeout(TOTAL_DEADLINE, async move {
-            let catalog = list_native_models_with_credentials(profile, &credentials)
+    let target = CheckTarget::Native {
+        profile: profile.into(),
+        account: account_id,
+        model: model.into(),
+        effort,
+        workspace: credentials.anthropic_workspace_id().map(str::to_owned),
+    };
+    let manifest = start(target, fingerprint)?;
+    let mut journal = CheckJournal::start(root, manifest)
+        .await
+        .map_err(|error| NativeCheckError::Journal(Box::new(error)))?;
+    let deadline = (tokio::time::Instant::now() + TOTAL_DEADLINE).min(journal.request_deadline());
+    let mut cancelled = false;
+    let result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => { cancelled = true; Err(NativeCheckError::ConformanceFailed) },
+        result = tokio::time::timeout_at(deadline, async {
+        let catalog =
+            super::catalog::list_native_models_checked(profile, &credentials, &mut journal)
                 .await
                 .map_err(|_| NativeCheckError::CatalogUnavailable)?;
-            if !catalog.iter().any(|entry| entry.id == model) {
-                return Err(NativeCheckError::ModelUnavailable);
+        if !catalog.iter().any(|entry| entry.id == model) {
+            return Err(NativeCheckError::ModelUnavailable);
+        }
+        match profile {
+            "openai" => {
+                let provider = OpenAiProvider::for_conformance(
+                    model.to_owned(),
+                    effort,
+                    credentials.into_api_key(),
+                )
+                .map_err(|_| NativeCheckError::ConformanceFailed)?;
+                probe(&provider, &mut journal).await?;
             }
-            match profile {
-                "openai" => {
-                    let provider = OpenAiProvider::for_conformance(
-                        model.to_owned(),
-                        effort,
-                        credentials.into_api_key(),
-                    )
-                    .map_err(|_| NativeCheckError::ConformanceFailed)?;
-                    probe(&provider).await
-                }
-                "anthropic" => {
-                    let provider =
-                        AnthropicProvider::for_conformance(model.to_owned(), effort, credentials)
-                            .map_err(|_| NativeCheckError::ConformanceFailed)?;
-                    probe(&provider).await
-                }
-                _ => Err(NativeCheckError::InvalidSelection),
+            "anthropic" => {
+                let provider =
+                    AnthropicProvider::for_conformance(model.to_owned(), effort, credentials)
+                        .map_err(|_| NativeCheckError::ConformanceFailed)?;
+                probe(&provider, &mut journal).await?;
             }
-        })
-        .await
-        .map_err(|_| NativeCheckError::ConformanceFailed)??;
-        let checked_at_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| NativeCheckError::EvidenceUnavailable)?
-            .as_millis();
+            _ => return Err(NativeCheckError::InvalidSelection),
+        }
+        let refreshed = revalidate.await?;
+        if fingerprint_credentials(profile, model, effort, &refreshed, account_id)? != fingerprint { return Err(NativeCheckError::EvidenceUnavailable); }
         let checked_at_ms =
-            i64::try_from(checked_at_ms).map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+            crate::journal::check::now_ms().map_err(|_| NativeCheckError::EvidenceUnavailable)?;
         let record = NativeEvidenceRecord {
             fingerprint,
             checked_at_ms,
@@ -129,24 +152,116 @@ pub async fn check_native_model_with_credentials(
                 .checked_add(EVIDENCE_AGE_MS)
                 .ok_or(NativeCheckError::EvidenceUnavailable)?,
         };
-        store
-            .record_native_evidence(record.clone())
+        let digest = crate::store::check::native_digest(&record)
+            .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+        journal
+            .evidence_started(digest, fingerprint)
             .await
             .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
-        if store
-            .load_native_evidence(fingerprint)
+        journal
+            .publish_native(record)
             .await
-            .map_err(|_| NativeCheckError::EvidenceUnavailable)?
-            != Some(record)
-        {
-            return Err(NativeCheckError::EvidenceUnavailable);
-        }
-        Ok(())
+            .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+        Ok::<_, NativeCheckError>(())
+    }) => result.map_err(|_| NativeCheckError::ConformanceFailed).and_then(|result| result),
+    };
+    if result.is_err() {
+        let _ = journal
+            .finish(if cancelled {
+                CheckDisposition::Cancelled
+            } else {
+                CheckDisposition::Failed
+            })
+            .await;
     }
-    .await;
-    let closed = store.close().await;
-    result?;
-    closed.map_err(|_| NativeCheckError::EvidenceUnavailable)
+    let receipt = journal.receipt();
+    let closed = journal.close().await;
+    match (result, closed) {
+        (Ok(()), Ok(view)) => Ok(view),
+        (Err(source), _) => Err(NativeCheckError::Check {
+            source: Box::new(source),
+            receipt,
+        }),
+        (Ok(()), Err(_)) => Err(NativeCheckError::Check {
+            source: Box::new(NativeCheckError::EvidenceUnavailable),
+            receipt,
+        }),
+    }
+}
+
+fn start(target: CheckTarget, fingerprint: [u8; 32]) -> Result<CheckStart, NativeCheckError> {
+    let (profile, effort) = match &target {
+        CheckTarget::Native {
+            profile, effort, ..
+        } => (profile.as_str(), *effort),
+        _ => return Err(NativeCheckError::InvalidSelection),
+    };
+    let probes = [
+        CheckCallKind::Answer,
+        CheckCallKind::Delegate,
+        CheckCallKind::Compaction,
+    ]
+    .into_iter()
+    .map(|kind| CheckProbe {
+        kind,
+        effort: Some(effort),
+        output_tokens: PROBE_OUTPUT_CAP,
+    })
+    .collect();
+    let destination = Sha256::digest(profile.as_bytes()).into();
+    let pages = if profile == "openai" { 1 } else { 16 };
+    let model = match &target {
+        CheckTarget::Native { model, .. } => model.clone(),
+        _ => return Err(NativeCheckError::InvalidSelection),
+    };
+    CheckStart::new(target, model, fingerprint, destination, pages, probes)
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)
+}
+
+pub(super) fn disposition(error: &ProviderError) -> CheckDisposition {
+    match error {
+        ProviderError::Unavailable
+        | ProviderError::Transport
+        | ProviderError::PartialTransport
+        | ProviderError::CallTimedOut
+        | ProviderError::StreamEnded
+        | ProviderError::InvalidStream => CheckDisposition::Uncertain,
+        ProviderError::Rejected
+        | ProviderError::InvalidOutcome
+        | ProviderError::InvalidResponseContract
+        | ProviderError::InvalidOutcomeContract
+        | ProviderError::LocalOutputLimit
+        | ProviderError::HttpServerUnavailable(_)
+        | ProviderError::RemoteServerError(_, _)
+        | ProviderError::RateLimited(_)
+        | ProviderError::QuotaExceeded
+        | ProviderError::RemoteHttp(_)
+        | ProviderError::RemoteStreamCode(_) => CheckDisposition::Rejected,
+    }
+}
+async fn rejected(journal: &mut CheckJournal) -> NativeCheckError {
+    if journal
+        .reject_pending(CheckDisposition::Rejected)
+        .await
+        .is_err()
+    {
+        NativeCheckError::EvidenceUnavailable
+    } else {
+        NativeCheckError::ConformanceFailed
+    }
+}
+async fn provider_failure(journal: &mut CheckJournal, error: ProviderError) -> NativeCheckError {
+    if journal.reject_pending(disposition(&error)).await.is_err() {
+        NativeCheckError::EvidenceUnavailable
+    } else {
+        NativeCheckError::ConformanceFailed
+    }
+}
+fn usage(usage: &crate::Usage) -> Option<CheckUsage> {
+    Some(CheckUsage {
+        input_tokens: usage.input_tokens?,
+        output_tokens: usage.output_tokens?,
+    })
 }
 
 pub(super) async fn verify_for_run(
@@ -188,7 +303,10 @@ pub(super) async fn verify_credentials_for_run(
     closed.map_err(|_| ProviderError::Unavailable)
 }
 
-async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
+async fn probe<P: Provider>(
+    provider: &P,
+    journal: &mut CheckJournal,
+) -> Result<(), NativeCheckError> {
     let model = provider.identity().model.to_owned();
     let session_id = SessionId::new();
     let direct = ProviderRequest {
@@ -202,18 +320,34 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = super::ResponsePreview::new();
-    let response = provider
-        .invoke_with_preview(direct.clone(), preview)
+    let token = journal
+        .call_started(CheckCallKind::Answer)
         .await
-        .map_err(|_| NativeCheckError::ConformanceFailed)?;
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+    let response = provider.invoke_with_preview(direct.clone(), preview).await;
+    let response = match response {
+        Ok(value) => value,
+        Err(error) => return Err(provider_failure(journal, error).await),
+    };
     if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer) && !value.text.trim().is_empty() && value.text.len() <= 8 * 1024)
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
-        return Err(NativeCheckError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
-    let direct_id = response
-        .response_id
-        .ok_or(NativeCheckError::ConformanceFailed)?;
+    let direct_id = response.response_id.clone();
+    let Some(direct_id) = direct_id else {
+        return Err(rejected(journal).await);
+    };
+
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
 
     let delegate = ProviderRequest {
         collaboration: crate::session::CollaborationPolicy::Team { max_active_children: 1 },
@@ -222,21 +356,37 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
         ..direct
     };
-    let response = provider
-        .invoke(delegate)
+    let token = journal
+        .call_started(CheckCallKind::Delegate)
         .await
-        .map_err(|_| NativeCheckError::ConformanceFailed)?;
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+    let response = provider.invoke(delegate).await;
+    let response = match response {
+        Ok(value) => value,
+        Err(error) => return Err(provider_failure(journal, error).await),
+    };
     if !matches!(&response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none())
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
     {
-        return Err(NativeCheckError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
-    let delegate_id = response
-        .response_id
-        .ok_or(NativeCheckError::ConformanceFailed)?;
+    let delegate_id = response.response_id.clone();
+    let Some(delegate_id) = delegate_id else {
+        return Err(rejected(journal).await);
+    };
     if delegate_id == direct_id {
-        return Err(NativeCheckError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
+
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
 
     let compact = CompactionRequest {
         session_id,
@@ -249,10 +399,15 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         })],
         max_output_tokens: PROBE_OUTPUT_CAP,
     };
-    let response = provider
-        .compact(compact)
+    let token = journal
+        .call_started(CheckCallKind::Compaction)
         .await
-        .map_err(|_| NativeCheckError::ConformanceFailed)?;
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+    let response = provider.compact(compact).await;
+    let response = match response {
+        Ok(value) => value,
+        Err(error) => return Err(provider_failure(journal, error).await),
+    };
     if response.summary.trim().is_empty()
         || response.summary.len() > 8 * 1024
         || !valid_usage(response.usage.input_tokens, response.usage.output_tokens)
@@ -260,8 +415,18 @@ async fn probe<P: Provider>(provider: &P) -> Result<(), NativeCheckError> {
         || response.response_id.as_deref() == Some(&delegate_id)
         || response.response_id.is_none()
     {
-        return Err(NativeCheckError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| NativeCheckError::EvidenceUnavailable)?;
+
     Ok(())
 }
 
@@ -692,7 +857,29 @@ mod tests {
                 case,
                 calls: AtomicUsize::new(0),
             };
-            assert_eq!(probe(&fixture).await.is_ok(), expected);
+            let temp = tempfile::tempdir().expect("check state");
+            let target = CheckTarget::Native {
+                profile: "openai".into(),
+                account: None,
+                model: fixture.identity().model.to_owned(),
+                effort: Effort::High,
+                workspace: None,
+            };
+            let mut journal = CheckJournal::start(
+                StateRoot::admit(&temp.path().join("state")).expect("state"),
+                start(target, [1; 32]).expect("manifest"),
+            )
+            .await
+            .expect("journal");
+            let token = journal
+                .call_started(CheckCallKind::Catalog)
+                .await
+                .expect("catalog intent");
+            journal
+                .call_finished(token, CheckDisposition::Succeeded, None, true)
+                .await
+                .expect("catalog result");
+            assert_eq!(probe(&fixture, &mut journal).await.is_ok(), expected);
             assert_eq!(fixture.calls.load(Ordering::SeqCst), calls);
         }
         assert!(!valid_usage(Some(1), Some(PROBE_OUTPUT_CAP + 1)));

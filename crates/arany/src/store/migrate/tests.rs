@@ -699,10 +699,7 @@ fn every_interrupted_migration_step_ends_original_or_upgraded_and_recovers() {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
         let History { root, sessions } = forked_history(&path);
-        Connection::open(path.join(DATABASE_FILE))
-            .unwrap()
-            .execute_batch("DROP TABLE migrations; PRAGMA user_version=4;")
-            .unwrap();
+        restore_pre_check_schema(&Connection::open(path.join(DATABASE_FILE)).unwrap(), 4);
         let database = path.join(DATABASE_FILE);
         let original = std::fs::read(&database).unwrap();
         let original_rows = stored_rows(&Connection::open(&database).unwrap());
@@ -820,9 +817,7 @@ fn a_later_migration_keeps_only_its_own_backup() {
     let path = temp.path().join("state");
     let History { root, sessions } = forked_history(&path);
     let database = Connection::open(path.join(DATABASE_FILE)).unwrap();
-    database
-        .execute_batch("DROP TABLE migrations; PRAGMA user_version=4;")
-        .unwrap();
+    restore_pre_check_schema(&database, 4);
     drop(database);
     assert!(root.archive_incompatible_history().unwrap().is_none());
     let [first] = entries(&path.join(DIR)).try_into().unwrap();
@@ -883,10 +878,7 @@ fn a_writable_open_racing_an_interrupted_migration_recovers_before_admission() {
     let path = temp.path().join("state");
     let History { root, sessions } = forked_history(&path);
     let database = path.join(DATABASE_FILE);
-    Connection::open(&database)
-        .unwrap()
-        .execute_batch("DROP TABLE migrations; PRAGMA user_version=4;")
-        .unwrap();
+    restore_pre_check_schema(&Connection::open(&database).unwrap(), 4);
     let original = std::fs::read(&database).unwrap();
     let (entered_sender, entered) = std::sync::mpsc::sync_channel(0);
     let (release, release_receiver) = std::sync::mpsc::sync_channel(0);
@@ -1180,6 +1172,43 @@ fn schema_of(sql: &str) -> Vec<[String; 4]> {
 
 #[test]
 fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
+    use crate::journal::check::{CHECK_FORMATS, tests::fixture};
+    let check_floors: Vec<_> = CHECK_FORMATS
+        .iter()
+        .map(|(kind, floor, _)| (*kind, *floor))
+        .collect();
+    let mut check_versions: Vec<_> = CHECK_FORMATS
+        .iter()
+        .map(|(kind, _, version)| (*kind, *version))
+        .collect();
+    let check_registry = Registry {
+        schema: SchemaFormat {
+            floor: SCHEMA_VERSION,
+            current: SCHEMA_VERSION,
+            schema: SCHEMA_SQL,
+            steps: &[],
+        },
+        event_floor: &check_floors,
+        event_steps: &[],
+    };
+    assert_eq!(
+        uncovered(&check_registry, &check_versions, SCHEMA_VERSION, &[]),
+        Vec::<String>::new()
+    );
+    for (kind, floor, version) in CHECK_FORMATS {
+        let event = fixture()
+            .1
+            .into_iter()
+            .find(|event| event.kind() == *kind)
+            .expect("canonical check identity fixture");
+        assert_eq!(*floor, 1);
+        assert_eq!(event.version(), *version);
+    }
+    check_versions[0].1 += 1;
+    assert_eq!(
+        uncovered(&check_registry, &check_versions, SCHEMA_VERSION, &[]),
+        ["ProviderCheckStarted 1 -> 2 has no step and fixture"]
+    );
     assert_eq!(
         uncovered(
             &REGISTRY,
@@ -1295,7 +1324,7 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         [
             "SessionRenamed 6 -> 7 has no step and fixture",
             "SyntheticKind declares no migration floor",
-            "schema 5 -> 6 has no step and fixture",
+            "schema 6 -> 7 has no step and fixture",
         ]
     );
 }
@@ -1749,6 +1778,71 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
             assert_eq!(actual, expected, "{name}, interrupted={interrupted}");
         }
     }
+}
+
+#[test]
+fn diagnostic_schema_upgrade_preserves_sessions_and_discards_unproven_evidence() {
+    for source_version in [4, 5] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let History { root, sessions } = forked_history(&path);
+        let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+        let original = stored_rows(&connection);
+        let digests = fork_digests(&connection);
+        restore_pre_check_schema(&connection, source_version);
+        assert!(exact_schema(&connection, &REGISTRY.schema, source_version).unwrap());
+        connection
+            .execute(
+                "INSERT INTO provider_evidence VALUES ('local', ?1, '[\"127.0.0.1:9321\"]', 1, 2)",
+                [[1_u8; 32].as_slice()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO native_provider_evidence VALUES (?1, 1, 2)",
+                [[2_u8; 32].as_slice()],
+            )
+            .unwrap();
+        drop(connection);
+        assert!(root.archive_incompatible_history().unwrap().is_none());
+        let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
+        assert!(exact_schema(&upgraded, &REGISTRY.schema, SCHEMA_VERSION).unwrap());
+        assert_eq!(stored_rows(&upgraded), original);
+        assert_eq!(fork_digests(&upgraded), digests);
+        for table in [
+            "provider_evidence",
+            "native_provider_evidence",
+            "provider_check_events",
+        ] {
+            assert_eq!(
+                upgraded
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+        drop(upgraded);
+        replays(&root, &sessions);
+    }
+}
+
+fn restore_pre_check_schema(connection: &Connection, source_version: i64) {
+    connection.execute_batch("DROP TABLE provider_check_events; DROP TABLE provider_evidence; DROP TABLE native_provider_evidence;").unwrap();
+    for statement in include_str!("schema_v5.sql").split(';').map(str::trim) {
+        if statement.starts_with("CREATE TABLE provider_evidence ")
+            || statement.starts_with("CREATE TABLE native_provider_evidence ")
+        {
+            connection.execute_batch(statement).unwrap();
+        }
+    }
+    if source_version == 4 {
+        connection.execute_batch("DROP TABLE migrations;").unwrap();
+    }
+    connection
+        .pragma_update(None, "user_version", source_version)
+        .unwrap();
+    assert!(exact_schema(connection, &REGISTRY.schema, source_version).unwrap());
 }
 
 #[test]

@@ -10,7 +10,7 @@ mod check;
 mod destination;
 mod transport;
 pub use adapter::CustomProvider;
-pub use check::{CustomProfileCheck, check_custom_profile};
+pub use check::{CustomProfileCheck, check_custom_profile, check_custom_profile_with_cancellation};
 use destination::PinnedDestination;
 
 const MAX_PROFILES: usize = 32;
@@ -29,6 +29,13 @@ pub struct CustomProfile {
 
 #[derive(Debug, thiserror::Error)]
 pub enum CustomProfileError {
+    #[error("Provider check could not start: {0}")]
+    Journal(Box<crate::CheckOpenError>),
+    #[error("{source}\n{receipt}")]
+    Check {
+        source: Box<CustomProfileError>,
+        receipt: crate::CheckReceipt,
+    },
     #[error("custom Provider profile file is unavailable")]
     Unavailable,
     #[error("custom Provider profile file is unsafe")]

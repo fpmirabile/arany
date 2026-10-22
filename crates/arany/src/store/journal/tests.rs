@@ -1384,3 +1384,265 @@ fn listing_reads_earlier_boundary_forks_at_the_watermark() {
     let listed = page.items.iter().find(|item| item.id == child).unwrap();
     assert_eq!(listed.title, "Earlier");
 }
+
+#[tokio::test]
+async fn check_evidence_requires_atomic_publication_and_the_latest_successful_attempt() {
+    use crate::journal::check::{
+        CheckDisposition, CheckEvent, CheckJournal,
+        tests::{fixture, start_fixture},
+    };
+    use crate::provider::evidence::ProviderEvidenceRecord;
+    use crate::store::Store;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let mut journal = CheckJournal::start(StateRoot::admit(&path).unwrap(), start_fixture())
+        .await
+        .unwrap();
+    let id = journal.view().id;
+    for event in &fixture().1[2..8] {
+        journal.append(event.clone()).await.unwrap();
+    }
+    let now = crate::journal::check::now_ms().unwrap();
+    let record = ProviderEvidenceRecord {
+        name: "local".into(),
+        digest: [1; 32],
+        addresses: vec!["127.0.0.1:9321".parse().unwrap()],
+        checked_at_ms: now,
+        expires_at_ms: now + 60_000,
+    };
+    let digest = crate::store::check::provider_digest(&record).unwrap();
+    journal
+        .evidence_started(digest, record.digest)
+        .await
+        .unwrap();
+    journal.publish_provider(record.clone()).await.unwrap();
+    let view = journal.close().await.unwrap();
+    assert_eq!(view.disposition, Some(CheckDisposition::Succeeded));
+    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+    assert_eq!(store.load_check(id).await.unwrap(), Some(view));
+    assert_eq!(
+        store.load_provider_evidence("local".into()).await.unwrap(),
+        Some(record.clone())
+    );
+    store.close().await.unwrap();
+
+    let mut next = CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start_fixture())
+        .await
+        .unwrap();
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| row
+                .get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    // A resurrected cache row cannot overrule the newer attempt.
+    connection.execute("INSERT INTO provider_evidence VALUES ('local', ?1, '[\"127.0.0.1:9321\"]', ?2, ?3, ?4)", params![record.digest.as_slice(), record.checked_at_ms, record.expires_at_ms, id.to_string()]).unwrap();
+    drop(connection);
+    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+    assert!(
+        store
+            .load_provider_evidence("local".into())
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.close().await.unwrap();
+    next.finish(CheckDisposition::Cancelled).await.unwrap();
+    next.close().await.unwrap();
+
+    for forged in [
+        CheckEvent::ProviderCheckEvidenceCleared,
+        CheckEvent::ProviderCheckFinished {
+            disposition: CheckDisposition::Succeeded,
+            evidence: Some(digest),
+        },
+    ] {
+        let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+        connection.execute("UPDATE provider_check_events SET kind=?1, event_version=?2, payload=?3 WHERE sequence=(SELECT MAX(sequence) FROM provider_check_events)", params![forged.kind(), forged.version(), serde_json::to_string(&forged).unwrap()]).unwrap();
+        drop(connection);
+        assert!(matches!(
+            Store::open_read_only(StateRoot::open_existing(&path).unwrap()),
+            Err(StoreError::InvalidHistory)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn check_capacity_and_refused_appends_preserve_the_committed_prefix() {
+    use crate::journal::check::{
+        CheckDisposition, CheckEvent, CheckId, CheckJournal, CheckOp, CheckOpenError, MAX_CHECKS,
+        tests::start_fixture,
+    };
+    use crate::store::Store;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let mut journal = CheckJournal::start(StateRoot::admit(&path).unwrap(), start_fixture())
+        .await
+        .unwrap();
+    let id = journal.view().id;
+    let before = journal.view().clone();
+    assert!(
+        journal
+            .append(CheckEvent::ProviderCheckEvidenceStarted {
+                digest: [3; 32],
+                snapshot: [1; 32]
+            })
+            .await
+            .is_err()
+    );
+    assert!(journal.receipt().disposition.is_none());
+    assert!(
+        matches!(
+            journal.call_started(crate::CheckCallKind::Answer).await,
+            Err(StoreError::Closed)
+        ),
+        "an unconfirmed journal refuses further dispatch"
+    );
+    drop(journal);
+    let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
+    assert_eq!(store.load_check(id).await.unwrap(), Some(before));
+    store.check(CheckOp::Recover).await.unwrap();
+    let now = crate::journal::check::now_ms().unwrap();
+    let retained = crate::provider::evidence::ProviderEvidenceRecord {
+        name: "retained".into(),
+        digest: [7; 32],
+        addresses: vec!["127.0.0.1:9321".parse().unwrap()],
+        checked_at_ms: now,
+        expires_at_ms: now + 60_000,
+    };
+    store
+        .record_provider_evidence(retained.clone())
+        .await
+        .unwrap();
+    store.close().await.unwrap();
+    let mut connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    let transaction = connection.transaction().unwrap();
+    let start = start_fixture();
+    let key = start.target.key().unwrap();
+    let events = [
+        CheckEvent::ProviderCheckStarted { start },
+        CheckEvent::ProviderCheckFinished {
+            disposition: CheckDisposition::Failed,
+            evidence: None,
+        },
+    ];
+    for _ in 2..MAX_CHECKS {
+        let id = CheckId::new().to_string();
+        for event in &events {
+            transaction.execute("INSERT INTO provider_check_events (check_id,target_key,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,1)", params![id, key.as_slice(), event.kind(), event.version(), serde_json::to_string(event).unwrap()]).unwrap();
+        }
+    }
+    transaction.commit().unwrap();
+    let count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut invalid = start_fixture();
+    invalid.cost_consent = false;
+    assert!(matches!(
+        CheckJournal::start(StateRoot::open_existing(&path).unwrap(), invalid).await,
+        Err(CheckOpenError {
+            source: StoreError::InvalidHistory,
+            receipt: None,
+        })
+    ));
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .unwrap(),
+        count,
+        "refused Start rolls back pruning"
+    );
+    for _ in 0..2 {
+        let mut next =
+            CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start_fixture())
+                .await
+                .unwrap();
+        assert_eq!(next.view().completed_calls, 0);
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(DISTINCT check_id) FROM provider_check_events",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            MAX_CHECKS as i64
+        );
+        next.finish(CheckDisposition::Cancelled).await.unwrap();
+        next.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+        assert!(
+            store.load_check(id).await.unwrap().is_none(),
+            "oldest unreferenced check was pruned"
+        );
+        assert_eq!(
+            store
+                .load_provider_evidence("retained".into())
+                .await
+                .unwrap(),
+            Some(retained.clone()),
+            "referenced proof survives pruning and reopen"
+        );
+        store.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_new_native_attempt_invalidates_prior_credentials_for_the_same_target() {
+    use crate::journal::check::{CheckDisposition, CheckJournal};
+    use crate::provider::evidence::NativeEvidenceRecord;
+    use crate::store::Store;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let store = Store::open(StateRoot::admit(&path).unwrap()).unwrap();
+    let now = crate::journal::check::now_ms().unwrap();
+    let record = NativeEvidenceRecord {
+        fingerprint: [7; 32],
+        checked_at_ms: now,
+        expires_at_ms: now + 60_000,
+    };
+    store.record_native_evidence(record.clone()).await.unwrap();
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    let id: String = connection
+        .query_row("SELECT check_id FROM native_provider_evidence", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut start = store
+        .load_check(id.parse().unwrap())
+        .await
+        .unwrap()
+        .unwrap()
+        .start;
+    start.fingerprint = [8; 32];
+    store.close().await.unwrap();
+    let mut next = CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start)
+        .await
+        .unwrap();
+    assert_eq!(
+        connection
+            .query_row("SELECT COUNT(*) FROM native_provider_evidence", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+        0
+    );
+    next.finish(CheckDisposition::Failed).await.unwrap();
+    next.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&path).unwrap()).unwrap();
+    assert!(
+        store
+            .load_native_evidence(record.fingerprint)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    store.close().await.unwrap();
+}
