@@ -22,6 +22,8 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
+const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
+
 pub(super) mod hooks;
 
 use hooks::{HookFold, HookStop};
@@ -281,29 +283,13 @@ impl RunLoop<'_> {
             hook_feedback: Default::default(),
         };
         loop {
-            let intent =
-                match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
-                    Ok(intent) => intent,
-                    Err(refusal @ SizingRefusal::DelegationDeadline) => {
-                        return Ok(StepEnd::Stopped(
-                            match self
-                                .record_delegation_deadline(&grant, runtime, call)
-                                .await?
-                            {
-                                Ok(()) => refusal.into(),
-                                Err(admission) => admission.into(),
-                            },
-                        ));
-                    }
-                    Err(refusal @ SizingRefusal::ActiveTime) => {
-                        self.active_time_floor
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                    Err(refusal @ SizingRefusal::ContextFull) => {
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                };
+            let intent = match self
+                .prepare_step_intent(&mut grant, runtime, &step, call.clone(), &source_call)
+                .await?
+            {
+                Ok(intent) => intent,
+                Err(cause) => return Ok(StepEnd::Stopped(cause)),
+            };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
             let source_intent_digest = intent.digest();
@@ -430,6 +416,59 @@ impl RunLoop<'_> {
         }
     }
 
+    async fn prepare_step_intent(
+        &self,
+        grant: &mut Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        post_call: &ToolCall,
+    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+        let mut sized = self.sized_intent(grant, runtime, step, call.clone(), post_call)?;
+        if matches!(sized, Err(SizingRefusal::ContextFull))
+            && step.observations.is_empty()
+            && let Grant::Primary { request, .. } = grant
+        {
+            let reserve = ToolRuntime::continuation_reserve(
+                step.turn.len(),
+                Self::maximum_feedback_reserve(runtime),
+            );
+            match self
+                .compact_tool_context_if_needed(request, reserve, None)
+                .await
+            {
+                Ok(()) => {}
+                Err(EngineError::GoalBudgetExhausted) => return Ok(Err(StopCause::ActiveTime)),
+                Err(error) => return Err(error),
+            }
+            if self.hook_requested_stop()? {
+                return Ok(Err(StopCause::HookStop));
+            }
+            if self.controls.cancellation.is_cancelled() {
+                return Ok(Err(StopCause::Cancelled));
+            }
+            sized = self.sized_intent(grant, runtime, step, call.clone(), post_call)?;
+        }
+        match sized {
+            Ok(intent) => Ok(Ok(intent)),
+            Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
+                match self
+                    .record_delegation_deadline(grant, runtime, call)
+                    .await?
+                {
+                    Ok(()) => refusal.into(),
+                    Err(admission) => admission.into(),
+                },
+            )),
+            Err(refusal @ SizingRefusal::ActiveTime) => {
+                self.active_time_floor
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(Err(refusal.into()))
+            }
+            Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
+        }
+    }
+
     fn sized_intent(
         &self,
         grant: &Grant<'_>,
@@ -504,11 +543,20 @@ impl RunLoop<'_> {
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
-        } else {
-            if capacity < MAX_TOOL_RESULT_BYTES {
-                return Ok(Err(SizingRefusal::ContextFull));
-            }
+        } else if matches!(
+            intent.call,
+            ToolCall::Read { .. }
+                | ToolCall::List { .. }
+                | ToolCall::Search { .. }
+                | ToolCall::Glob { .. }
+                | ToolCall::Skill { .. }
+        ) || intent.call.is_git() && !intent.call.mutates()
+        {
+            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
+        } else if capacity >= MAX_TOOL_RESULT_BYTES {
             MAX_TOOL_RESULT_BYTES as u32
+        } else {
+            return Ok(Err(SizingRefusal::ContextFull));
         };
         Ok(Ok(intent))
     }
@@ -2738,10 +2786,23 @@ impl RunLoop<'_> {
                 crate::session::RunFailure::ToolStopped,
             ));
         }
-        let intent = match self.primary_intent(runtime, call.clone())? {
+        let mut intent = match self.primary_intent(runtime, call.clone())? {
             None => return Ok(SkillInitialization::Stopped),
             Some(intent) => intent,
         };
+        let tools = request
+            .input
+            .tools
+            .as_ref()
+            .ok_or(EngineError::InvalidRequest)?;
+        let Some(capacity) =
+            runtime.result_capacity(tools.rendered_len(), INVOKED_SKILL_ENVELOPE_BYTES)
+        else {
+            return Ok(SkillInitialization::Failed(
+                crate::session::RunFailure::ToolContextFull,
+            ));
+        };
+        intent.limits.result_bytes = capacity.min(MAX_TOOL_RESULT_BYTES) as u32;
         let grant = Grant::Primary {
             request,
             review_allowed: false,
