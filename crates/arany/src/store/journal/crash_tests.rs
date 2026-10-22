@@ -119,7 +119,7 @@ fn seed_interrupted_run(state: &Path) -> (SessionId, RunId) {
                     compaction_content_digest: None,
                     tool_policy: None,
                 },
-                active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+                active_deadline_ms: None,
             },
             Event::AgentSpawned {
                 profile: None,

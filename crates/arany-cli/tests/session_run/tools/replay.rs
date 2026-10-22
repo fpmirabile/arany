@@ -161,7 +161,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         Event::RunStarted {
             run_id: run,
             config,
-            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
+            active_deadline_ms: None,
         },
         Event::AgentSpawned {
             profile: None,
@@ -1066,8 +1066,15 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         replay(forged_out_of_plan_publication).is_err(),
         "an out-of-plan integration cannot carry a dispatched or successful receipt"
     );
-    for (count, accepted) in [(63, true), (64, false)] {
+    for (limit, count, accepted) in [
+        (None, 64, true),
+        (Some(64), 63, true),
+        (Some(64), 64, false),
+    ] {
         let mut rows = prefix[..AGENT_SPAWNED + 1].to_vec();
+        if let Event::GoalStarted { budget, .. } = &mut rows[1] {
+            budget.max_provider_calls = limit;
+        }
         for _ in 0..count {
             let mut start = prefix[TOOL_STARTED].clone();
             let Event::ToolStarted { intent, .. } = &mut start else {
@@ -1095,11 +1102,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             rows.extend([start, result]);
         }
         rows.extend(suffix.clone());
-        assert_eq!(
-            replay(rows).is_ok(),
-            accepted,
-            "aggregate Tool journal bound"
-        );
+        assert_eq!(replay(rows).is_ok(), accepted, "explicit Goal call bound");
     }
 }
 

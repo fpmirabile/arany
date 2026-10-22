@@ -1118,6 +1118,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exec_defaults_complete_past_64_calls_and_30_active_minutes() {
+        use arany::test_support::goals::{
+            assert_long_turn, facts_workspace, long_turn_provider, replayed,
+        };
+        use std::os::unix::fs::PermissionsExt;
+        for finite in [false, true] {
+            let temp = tempfile::tempdir().expect("private root");
+            let workspace = facts_workspace(temp.path(), "Fact");
+            let state_dir = temp.path().join("state");
+            let root = StateRoot::admit(&state_dir).expect("state");
+            let config = state_dir.join("tools.json");
+            std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+                .expect("private config");
+            if finite {
+                let preferences = serde_json::json!({"version":4,"preferences":{
+                    "completion":"tabs","view":"fullscreen",
+                    "goal_budget":GoalBudget { max_provider_calls:Some(1), ..Default::default() },
+                    "resources":arany::ToolResourceSettings::default(),"mouse":"wheel_and_clicks","copy_on_select":true
+                }});
+                root.record(arany::RecordKind::UiPreferences)
+                    .replace(&serde_json::to_vec(&preferences).expect("settings"))
+                    .expect("finite settings");
+            }
+            drop(root);
+            let provider = Arc::new(long_turn_provider());
+            let mut exec = args(state_dir.clone(), workspace, "Inspect the folder");
+            exec.tools = true;
+            let admission = exec.admit().expect("exec admission");
+            let report =
+                run_with_provider(exec, admission, provider.clone(), Telemetry::disabled())
+                    .await
+                    .expect("long exec");
+            assert_eq!(report.success, !finite);
+            assert_eq!(
+                report.stdout,
+                if finite {
+                    ""
+                } else {
+                    "Answer:\n  Long turn completed\n"
+                }
+            );
+            let receipt: Vec<_> = report.stderr.lines().collect();
+            assert_eq!(receipt.len(), 3);
+            let id = SessionId::from_str(
+                receipt[0]
+                    .strip_prefix("Session: ")
+                    .expect("Session receipt"),
+            )
+            .expect("Session ID");
+            let (events, view) = replayed(&state_dir, id).await;
+            assert_eq!(
+                report.stderr,
+                format!(
+                    "Session: {id}\nRun: {}\nStatus: {}\n",
+                    view.runs[0].id,
+                    if finite { "failed" } else { "finished" }
+                )
+            );
+            if finite {
+                assert_eq!(view.goals[0].budget.max_provider_calls, Some(1));
+                assert_eq!(view.goals[0].provider_calls, 1);
+                assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+                assert!(matches!(
+                    events.last().expect("receipt").event,
+                    arany::Event::GoalFinished {
+                        exhausted: true,
+                        ..
+                    }
+                ));
+                assert!(view.runs[0].tools.is_empty());
+            } else {
+                assert_long_turn(&events, &view);
+                assert!(provider.responses.lock().expect("script").is_empty());
+            }
+            assert_eq!(
+                provider.requests.lock().expect("requests").len(),
+                if finite { 1 } else { 65 }
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn exec_rejects_malformed_and_unsafe_settings_before_dispatch() {
+        use std::os::unix::fs::PermissionsExt;
+        for unsafe_record in [false, true] {
+            let temp = tempfile::tempdir().expect("private root");
+            let workspace = temp.path().join("workspace");
+            std::fs::create_dir(&workspace).expect("Workspace");
+            let state = temp.path().join("state");
+            let root = StateRoot::admit(&state).expect("State");
+            root.record(arany::RecordKind::UiPreferences)
+                .replace(b"malformed")
+                .expect("record");
+            if unsafe_record {
+                std::fs::set_permissions(
+                    state.join("ui-preferences.json"),
+                    std::fs::Permissions::from_mode(0o644),
+                )
+                .expect("unsafe fixture");
+            }
+            drop(root);
+            let observed = Arc::new(Mutex::new(Vec::new()));
+            let exec = args(state.clone(), workspace.clone(), "Never dispatched");
+            let admission = exec.admit().expect("arguments");
+            let error = run_with_provider(
+                exec,
+                admission,
+                Arc::new(scripted(Err(ProviderError::Unavailable), &observed)),
+                Telemetry::disabled(),
+            )
+            .await
+            .err()
+            .expect("settings refusal");
+            assert_eq!(
+                error,
+                if unsafe_record {
+                    "display settings unavailable or unsafe"
+                } else {
+                    "invalid display settings; use /settings to replace them"
+                }
+            );
+            assert!(observed.lock().expect("observations").is_empty());
+            assert!(
+                arany::list_sessions(StateRoot::open_existing(&state).expect("State"), workspace)
+                    .await
+                    .expect("history")
+                    .is_empty()
+            );
+            assert_eq!(
+                std::fs::read(state.join("ui-preferences.json")).expect("unchanged record"),
+                b"malformed"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn exec_resume_of_an_exhausted_goal_closes_it_and_names_the_reason() {
         let temp = tempfile::tempdir().expect("private test root");
         let workspace = temp.path().join("workspace");

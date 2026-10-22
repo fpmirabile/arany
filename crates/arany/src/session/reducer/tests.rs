@@ -328,7 +328,7 @@ mod goal_replay_tests {
             Event::RunStarted {
                 run_id,
                 config,
-                active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+                active_deadline_ms: None,
             },
             Event::AgentSpawned {
                 profile,
@@ -3284,12 +3284,6 @@ mod goal_replay_tests {
             AgentRunId::new(),
             config(CollaborationPolicy::Single, false),
         ));
-        if let Some(Event::RunStarted {
-            active_deadline_ms, ..
-        }) = resumed.iter_mut().rev().nth(1)
-        {
-            *active_deadline_ms = Some(crate::session::MAX_GOAL_ACTIVE_MS - 7_000);
-        }
         let view = SessionView::replay_open(session_id, &journal(session_id, resumed))
             .expect("resume continues with time left")
             .expect("Session");
@@ -4898,8 +4892,7 @@ mod goal_replay_tests {
                     },
                 )
                 .unwrap();
-                view.goals[0].active_deadline =
-                    Some((run, Some(crate::session::MAX_GOAL_ACTIVE_MS)));
+                view.goals[0].active_deadline = Some((run, None));
                 apply(
                     &mut view,
                     Event::RunFinished {
@@ -7792,8 +7785,7 @@ mod goal_replay_tests {
                     AgentStatus::StoppedByHook
                 );
                 if event == HookEvent::Stop {
-                    stopped_view.goals[0].active_deadline =
-                        Some((run, Some(crate::session::MAX_GOAL_ACTIVE_MS)));
+                    stopped_view.goals[0].active_deadline = Some((run, None));
                     let terminal = Event::RunFinished {
                         run_id: run,
                         disposition: RunDisposition::StoppedByHook,

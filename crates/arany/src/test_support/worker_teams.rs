@@ -1283,6 +1283,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
     .unwrap();
     let budget = GoalBudget {
         max_provider_calls: Some(48),
+        max_active_ms: Some(30 * 60 * 1000),
         ..Default::default()
     };
     let provider = Arc::new(ForegroundWorkerProvider::new(&workspace, case, budget));

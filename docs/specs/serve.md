@@ -127,7 +127,7 @@ to disabled; enabled Tools use the same private configured grant as `exec`.
 Absolute `includePaths` must lie under `cwd` and are translated to
 Workspace-relative include paths before Engine admission. Goal and resource
 settings come from the existing private settings owner and are pinned per
-loaded thread. Plain input starts a new Goal; `goal.autonomous:true` uses the
+loaded thread. Absent settings use the shared [Goal defaults](./goals.md#lifecycle-budgets-and-recovery); resume retains the Goal's committed budget. Plain input starts a new Goal; `goal.autonomous:true` uses the
 Engine's existing autonomous lifecycle. `resumeGoalId` is reserved and rejected;
 use `goal/resume`. Steering and pause add no notification: their effects appear as
 the following committed Events and turn completion.

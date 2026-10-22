@@ -49,9 +49,15 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Approvals wait for the human](./approvals-wait/README.md) | `Ready`: A1 non-host primary approvals now; A2 transition-driven child wait accounting; A3 host expiry after #279 |
+| [Rewind confirmation](./rewind-confirmation/README.md) | `Ready`: R1 live preview confirmation without wall-clock expiry, after approvals A1 |
+| [Budget feedback](./budget-feedback/README.md) | `Ready`: G1 reproduce/classify budget refusal, persist its reservation detail and render deterministic explanations; independent of approvals |
+| [Tool failure continuation](./failure-feedback/README.md) | `Ready`: C1 primary failure/decline results and sanitized continuation after approvals A1; C2 delegated feedback |
+| [Arany-owned storage report](./arany-storage/README.md) | `Ready`: independent two-slice feature for user-local aggregated sizes/counts/paths via `arany storage`/`/storage`, then recorded native Guard storage; metadata-only lead default, no automatic model disclosure |
 | [Portable compaction](./portable-compaction/README.md) | `Ready`: one PR for bounded text compaction and exact custom checks |
+| [Provider check journal](./provider-check-journal/README.md) | `Ready`: C1 standalone custom/native check streams and SQLite migration; C2 ChatGPT checks and account-index migration; prerequisite for setup UI |
+| [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
-| [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Ready: one PR for peer defaults across attached, exec and serve, retaining durable accounting and finite action/storage bounds |
 | [Large draft attachments](./large-draft-attachments/README.md) | Ready: three PRs for durable pasted text, full-capacity typed/restored drafts and clipboard/path image chips |
 | [Composer newline keys](./composer-newline-keys/README.md) | Ready: two PRs for portable newline entry and saved shortcuts, then negotiated modifier keys with capability-aware guidance |
 | [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
@@ -63,6 +69,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 | [Git branch reads](./git-branch-reads/README.md) | Ready; S1 local/remote-tracking branch metadata and divergence, S2 bounded range history and endpoint diffs |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
+| [Primary host commands](./primary-host-commands/README.md) | `Ready`: guarantee wording and H1 approved; S1 primary escalation, session approval and privilege-tool refusal, S2 user-owned host prefixes, S3 serve/ACP/exec |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Ready: typed discovery/suggestions, then Git disclosure; depends on snapshot PR1 (selector and enforced preparation) |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
