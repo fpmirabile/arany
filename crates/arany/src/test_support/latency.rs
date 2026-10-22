@@ -23,8 +23,63 @@ fn operation(call: &ToolCall) -> Operation {
         ToolCall::Read { .. } => Operation::Read,
         ToolCall::Edit { .. } => Operation::Edit,
         ToolCall::Command { .. } => Operation::Command,
-        _ => Operation::Other,
+        ToolCall::ParseAgentDefinition { .. }
+        | ToolCall::List { .. }
+        | ToolCall::Search { .. }
+        | ToolCall::Mkdir { .. }
+        | ToolCall::Write { .. }
+        | ToolCall::MultiEdit { .. }
+        | ToolCall::CommandUnguarded { .. }
+        | ToolCall::ApplyChangeset { .. }
+        | ToolCall::PrepareWorker { .. }
+        | ToolCall::Skill { .. }
+        | ToolCall::McpList { .. }
+        | ToolCall::McpCall { .. }
+        | ToolCall::GitStatus { .. }
+        | ToolCall::GitDiff { .. }
+        | ToolCall::GitLog { .. }
+        | ToolCall::GitCommit { .. }
+        | ToolCall::GitBranch { .. }
+        | ToolCall::GitSwitch { .. }
+        | ToolCall::Glob { .. } => Operation::Other,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, thiserror::Error)]
+#[serde(rename_all = "snake_case")]
+pub enum LatencyError {
+    #[error("overlapping receipt")]
+    Overlap,
+    #[error("capture overflow")]
+    Overflow,
+    #[error("finish without Provider receipt")]
+    FinishWithoutReceipt,
+    #[error("missing finish before next Provider record")]
+    MissingFinishBeforeProviderRecord,
+    #[error("mismatched intent")]
+    MismatchedIntent,
+    #[error("unmatched finish")]
+    UnmatchedFinish,
+    #[error("missing Provider record")]
+    MissingProviderRecord,
+    #[error("mismatched Provider receipt")]
+    MismatchedProviderReceipt,
+    #[error("wrong start Event")]
+    WrongStartEvent,
+    #[error("mismatched start")]
+    MismatchedStart,
+    #[error("missing start")]
+    MissingStart,
+    #[error("wrong finish Event")]
+    WrongFinishEvent,
+    #[error("finish without start")]
+    FinishWithoutStart,
+    #[error("mismatched finish or missing permission")]
+    MismatchedFinishOrPermission,
+    #[error("missing finish")]
+    MissingFinish,
+    #[error("invalid sample count")]
+    InvalidSampleCount,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,7 +107,7 @@ struct Pending {
 struct State {
     pending: Option<Pending>,
     samples: Vec<Sample>,
-    invalid: Option<&'static str>,
+    invalid: Option<LatencyError>,
 }
 
 pub struct Recorder(Mutex<State>);
@@ -81,8 +136,12 @@ impl Receipt<'_> {
             return;
         };
         let mut state = self.recorder.state();
-        if state.pending.is_some() || state.samples.len() == MAX_SAMPLES {
-            state.invalid = Some("overlap or capture overflow");
+        if state.pending.is_some() {
+            state.invalid = Some(LatencyError::Overlap);
+            return;
+        }
+        if state.samples.len() == MAX_SAMPLES {
+            state.invalid = Some(LatencyError::Overflow);
             return;
         }
         let call = (requests.len() == 1).then(|| &requests[0].call);
@@ -113,7 +172,7 @@ impl Recorder {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    pub fn samples(&self) -> Result<Vec<Sample>, &'static str> {
+    pub fn samples(&self) -> Result<Vec<Sample>, LatencyError> {
         let state = self.state();
         if let Some(reason) = state.invalid {
             return Err(reason);
@@ -141,7 +200,7 @@ impl Recorder {
         let mut state = self.state();
         let Some(pending) = &mut state.pending else {
             if matches!(envelope.event, Event::ToolFinished { .. }) {
-                state.invalid = Some("finish without Provider receipt");
+                state.invalid = Some(LatencyError::FinishWithoutReceipt);
             }
             return;
         };
@@ -155,7 +214,7 @@ impl Recorder {
         match &envelope.event {
             Event::ProviderCallRecorded { record, .. } => {
                 if sample.provider_sequence.is_some() {
-                    state.invalid = Some("missing finish before next Provider record");
+                    state.invalid = Some(LatencyError::MissingFinishBeforeProviderRecord);
                     return;
                 }
                 sample.provider_sequence = Some(envelope.sequence);
@@ -168,7 +227,7 @@ impl Recorder {
             Event::ToolStarted { intent, .. } => {
                 if sample.started_sequence.is_some() || sample.operation != operation(&intent.call)
                 {
-                    state.invalid = Some("mismatched intent");
+                    state.invalid = Some(LatencyError::MismatchedIntent);
                     return;
                 }
                 sample.intent_id = Some(intent.id);
@@ -176,7 +235,7 @@ impl Recorder {
             }
             Event::ToolFinished { observation, .. } => {
                 if sample.intent_id != Some(observation.intent.id) {
-                    state.invalid = Some("unmatched finish");
+                    state.invalid = Some(LatencyError::UnmatchedFinish);
                     return;
                 }
                 sample.finished_sequence = Some(envelope.sequence);
@@ -214,7 +273,7 @@ impl Sample {
             && self.tool_receipt_to_commit_us.is_some()
     }
 
-    pub fn audit(&self, events: &[EventEnvelope]) -> Result<JournalIntervals, &'static str> {
+    pub fn audit(&self, events: &[EventEnvelope]) -> Result<JournalIntervals, LatencyError> {
         let scoped = |event: &&EventEnvelope| {
             event.session_id == self.session_id
                 && event.run_id == Some(self.run_id)
@@ -227,14 +286,14 @@ impl Sample {
             .collect();
         let provider = calls
             .get(self.call_index)
-            .ok_or("missing Provider record")?;
+            .ok_or(LatencyError::MissingProviderRecord)?;
         let Event::ProviderCallRecorded { record, .. } = &provider.event else {
             unreachable!("filtered Provider records");
         };
         if Some(provider.sequence) != self.provider_sequence
             || Some(record.disposition) != self.provider_disposition
         {
-            return Err("mismatched Provider receipt");
+            return Err(LatencyError::MismatchedProviderReceipt);
         }
         let find = |sequence| {
             events
@@ -245,7 +304,7 @@ impl Sample {
         let finished = find(self.finished_sequence);
         if let Some(started) = started {
             let Event::ToolStarted { intent, .. } = &started.event else {
-                return Err("wrong start Event");
+                return Err(LatencyError::WrongStartEvent);
             };
             if Some(intent.id) != self.intent_id
                 || operation(&intent.call) != self.operation
@@ -253,16 +312,16 @@ impl Sample {
                 || record.disposition != ProviderCallDisposition::ToolRequested
                 || provider.sequence >= started.sequence
             {
-                return Err("mismatched start");
+                return Err(LatencyError::MismatchedStart);
             }
         } else if self.started_sequence.is_some() || self.intent_id.is_some() {
-            return Err("missing start");
+            return Err(LatencyError::MissingStart);
         }
         if let Some(finished) = finished {
             let Event::ToolFinished { observation, .. } = &finished.event else {
-                return Err("wrong finish Event");
+                return Err(LatencyError::WrongFinishEvent);
             };
-            let started = started.ok_or("finish without start")?;
+            let started = started.ok_or(LatencyError::FinishWithoutStart)?;
             if Some(observation.intent.id) != self.intent_id
                 || Some(observation.disposition) != self.disposition
                 || started.sequence >= finished.sequence
@@ -276,13 +335,13 @@ impl Sample {
                         && event.sequence > started.sequence && event.sequence < finished.sequence)
                 })
             {
-                return Err("mismatched finish or missing permission");
+                return Err(LatencyError::MismatchedFinishOrPermission);
             }
         } else if self.finished_sequence.is_some()
             || self.disposition.is_some()
             || self.tool_receipt_to_commit_us.is_some()
         {
-            return Err("missing finish");
+            return Err(LatencyError::MissingFinish);
         }
         let interval = |start: &EventEnvelope| {
             finished.and_then(|end| end.created_at_ms.checked_sub(start.created_at_ms))
@@ -301,9 +360,9 @@ impl Sample {
     }
 }
 
-pub fn percentiles(samples: &[u64]) -> Result<[u64; 3], &'static str> {
+pub fn percentiles(samples: &[u64]) -> Result<[u64; 3], LatencyError> {
     if samples.is_empty() || samples.len() > MAX_SAMPLES {
-        return Err("invalid sample count");
+        return Err(LatencyError::InvalidSampleCount);
     }
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
@@ -350,7 +409,16 @@ mod tests {
                     recorder.dispose(run);
                 }
             }
-            assert!(recorder.samples().is_err());
+            let expected = if overlap {
+                LatencyError::Overlap
+            } else {
+                LatencyError::Overflow
+            };
+            assert_eq!(recorder.samples(), Err(expected));
+            assert_eq!(
+                serde_json::to_value(recorder.samples()).unwrap(),
+                serde_json::json!({"Err":if overlap { "overlap" } else { "overflow" }})
+            );
             let state = recorder.state();
             assert_eq!(state.samples.len(), if overlap { 0 } else { MAX_SAMPLES });
             assert_eq!(state.pending.is_some(), overlap);

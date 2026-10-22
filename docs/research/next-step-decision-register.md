@@ -282,10 +282,10 @@ is not native crash-recovery or release evidence.
 
 ### D-23 — Tool latency measures durable acknowledgement
 
-The owner accepted a monotonic complete-Provider-receipt to result-acknowledgement
-metric on 2026-10-22. Journal timestamps precede validation/insertion/commit, while
-the subscriber ring is lossy; neither can time the exact durable endpoint. Keep
-bounded local samples, audit their scoped identities against closed history and
+The owner accepted a monotonic metric from complete Provider receipt to result
+acknowledgement on 2026-10-22. Journal timestamps precede validation, insertion and
+commit, and the subscriber ring is lossy; neither can time the exact durable
+endpoint. Keep bounded local samples, audit their scoped identities against closed history and
 report journal wall-time intervals separately. No new canonical Event or stored
 format migration is justified for benchmark-only timing.
 

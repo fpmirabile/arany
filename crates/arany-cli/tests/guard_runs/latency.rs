@@ -1,5 +1,5 @@
 use super::*;
-use arany::test_support::latency::{JournalIntervals, Sample, percentiles};
+use arany::test_support::latency::{JournalIntervals, LatencyError, Sample, percentiles};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -144,10 +144,18 @@ async fn measure(root: &Path, ordinal: usize) {
     assert_eq!(samples.len(), 1);
     assert!(!recorder.has_pending());
     assert!(samples[0].successful());
+    let audit = samples[0].audit(&events);
+    if let Err(error) = &audit {
+        private_file(
+            &root.join("capture.json"),
+            &serde_json::to_vec(&serde_json::json!({"samples":samples,"audit_error":error}))
+                .unwrap(),
+        );
+    }
     let audited = AuditedSample {
         ordinal,
         warmup: ordinal < WARMUPS,
-        journal_interval_ms: samples[0].audit(&events).unwrap(),
+        journal_interval_ms: audit.unwrap(),
         sample: samples[0].clone(),
         effective_bounds: serde_json::json!({"goal_budget":view.goals[0].budget,"resource_settings":view.goals[0].resource_settings,"tool_limits":view.runs[0].tools[0].intent.limits,"grant":{"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]},"permission_mode":"acceptEdits","checkpoint":"Read has no publication"}),
     };
@@ -191,6 +199,42 @@ fn audit_show(root: &Path, sample: &Sample, remaining: Duration) {
         .collect();
     assert_eq!(output.stdout, expected_bytes);
     assert_eq!(shown, expected);
+}
+
+fn load_failed_capture(path: &Path) -> Option<serde_json::Value> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    if !file
+        .metadata()
+        .is_ok_and(|metadata| metadata.is_file() && metadata.len() <= REPORT_CAP)
+    {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(REPORT_CAP + 1).read_to_end(&mut bytes).ok()?;
+    if bytes.len() as u64 > REPORT_CAP {
+        return None;
+    }
+    serde_json::from_slice(&bytes).ok()
+}
+
+#[test]
+fn failed_capture_preserves_partial_files_without_losing_report_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("capture.json");
+    assert!(load_failed_capture(&path).is_none());
+    for (bytes, expected) in [
+        (
+            br#"{"Err":"overflow"}"#.as_slice(),
+            Some(serde_json::json!({"Err":"overflow"})),
+        ),
+        (br#"{"Err":"over"#.as_slice(), None),
+        (&vec![b' '; REPORT_CAP as usize + 1], None),
+    ] {
+        private_file(&path, bytes);
+        assert_eq!(load_failed_capture(&path), expected);
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
 }
 
 fn executable_digest(path: &Path) -> String {
@@ -426,13 +470,7 @@ pub(super) fn corpus() {
     let summary = valid.then(|| percentiles(&measured).unwrap());
     let failed_capture = if failure.is_some() && attempted > samples.len() {
         let path = root.join(format!("sample-{:03}/capture.json", attempted - 1));
-        if path.is_file() && path.metadata().unwrap().len() <= REPORT_CAP {
-            Some(
-                serde_json::from_slice::<serde_json::Value>(&std::fs::read(path).unwrap()).unwrap(),
-            )
-        } else {
-            None
-        }
+        load_failed_capture(&path)
     } else {
         None
     };
@@ -553,7 +591,7 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
             }
             let mut wrong = samples[0].clone();
             wrong.intent_id = Some(Uuid::now_v7());
-            assert!(wrong.audit(&events).is_err());
+            assert_eq!(wrong.audit(&events), Err(LatencyError::MismatchedStart));
             let mut shifted = events.clone();
             let finish = shifted
                 .iter_mut()
@@ -569,7 +607,7 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
             );
             let mut missing = events.clone();
             missing.retain(|event| Some(event.sequence) != samples[0].finished_sequence);
-            assert!(samples[0].audit(&missing).is_err());
+            assert_eq!(samples[0].audit(&missing), Err(LatencyError::MissingFinish));
         } else {
             assert!(result.is_err());
             assert!(samples[0].finished_sequence.is_none());
@@ -586,8 +624,11 @@ async fn read_timing_waits_for_acknowledgement_and_audits_closed_history() {
         [50, 95, 100]
     );
     assert_eq!(percentiles(&[7]).unwrap(), [7, 7, 7]);
-    assert!(percentiles(&[]).is_err());
-    assert!(percentiles(&[0; 331]).is_err());
+    assert_eq!(percentiles(&[]), Err(LatencyError::InvalidSampleCount));
+    assert_eq!(
+        percentiles(&[0; 331]),
+        Err(LatencyError::InvalidSampleCount)
+    );
 }
 
 #[tokio::test]
