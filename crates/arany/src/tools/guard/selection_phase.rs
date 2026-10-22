@@ -91,6 +91,13 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
             | ToolError::ProtectionUnavailable
             | ToolError::QueueFull
             | ToolError::Path
+            | ToolError::AtPath { .. }
+            | ToolError::OutsideWorkspace
+            | ToolError::ProtectedPath
+            | ToolError::SymbolicLink
+            | ToolError::FilesystemBoundary
+            | ToolError::NotDirectory
+            | ToolError::UnterminatedQuotedPath
             | ToolError::OutputCeiling
             | ToolError::Conflict
             | ToolError::Pattern(_)
@@ -210,6 +217,13 @@ pub(in crate::tools::guard) mod tests {
             (Err(ToolError::Limit), "limit"),
             (Err(ToolError::Timeout(String::new())), "timeout"),
             (Err(ToolError::Path), "rejected"),
+            (Err(ToolError::Path.at_path("nested/file")), "rejected"),
+            (Err(ToolError::OutsideWorkspace), "rejected"),
+            (Err(ToolError::ProtectedPath), "rejected"),
+            (Err(ToolError::SymbolicLink), "rejected"),
+            (Err(ToolError::FilesystemBoundary), "rejected"),
+            (Err(ToolError::NotDirectory), "rejected"),
+            (Err(ToolError::UnterminatedQuotedPath), "rejected"),
             (Err(ToolError::ChangedInput), "changed"),
             (Err(ToolError::Configuration), "configuration"),
             (Err(ToolError::Operation), "operation"),
@@ -217,6 +231,9 @@ pub(in crate::tools::guard) mod tests {
             (Err(ToolError::FilesystemDenied), "filesystem-denied"),
         ] {
             let mut bytes = response(&result);
+            if expected == "rejected" {
+                assert_eq!(bytes, b"SELECT_REJECTED\n");
+            }
             let result = receive(&mut bytes, tokio::time::Instant::now() + PHASE_TIME).await;
             assert!(match expected {
                 "done" => result.is_ok(),
