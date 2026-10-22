@@ -23,7 +23,8 @@ is not the private ChatGPT backend. Its [preview limits](https://developers.open
 exclude remote output-token caps: stopping local reading does not stop or price
 all remote work. [D-18](./next-step-decision-register.md#d-18--explicitly-accepted-chatgpt-plan-route-is-beta-scope)
 owns acceptance of that weaker guarantee; [ChatGPT](../specs/chatgpt.md) owns the
-implemented account, consent, catalog and inference contract. Login and catalog
+account, consent, catalog and route-specific behavior, while [Provider](../specs/provider.md)
+admission and [execution](../specs/execution.md) outcome rules own the rest. Login and catalog
 visibility alone establish neither model conformance nor live billing evidence.
 
 ## Claude plan: policy boundary, Pi comparison, and public alternative
@@ -49,8 +50,9 @@ not a current vulnerability finding or a native-store result.
 - [`webbrowser` 1.2.4](https://github.com/amodm/webbrowser-rs/blob/v1.2.4/src/unix.rs)
   selected Linux executables through ambient settings, PATH and desktop config.
   Scheme validation therefore did not establish executable provenance.
-- Apple's [Protected Data backend](https://docs.rs/apple-native-keyring-store/1.0.2/apple_native_keyring_store/)
-  required provisioning entitlements; that is distinct from the unsigned-CLI
+- Apple's [Protected Data backend](https://docs.rs/apple-native-keyring-store/1.0.2/apple_native_keyring_store/protected/index.html)
+  documents provisioning profiles as required for its full feature set and the iCloud
+  capability for the cloud-synchronized store; that is distinct from the unsigned-CLI
   Keychain backend reviewed in [native credential evidence](../security/beta-macos-credential-source-review.md).
   Neither backend selection nor a successful service connection proves writable
   storage or rollback after a timeout; [D-11](./next-step-decision-register.md#d-11--configuration-credentials-and-custom-endpoints)
