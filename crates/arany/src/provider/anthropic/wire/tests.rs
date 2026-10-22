@@ -599,6 +599,27 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
     assert_eq!(usage.cache_creation_input_tokens, None);
     assert_eq!(usage.input_tokens, Some(12));
     assert_eq!(usage.output_tokens, Some(8));
+    for (field, other) in [
+        ("cache_read_input_tokens", "cache_creation_input_tokens"),
+        ("cache_creation_input_tokens", "cache_read_input_tokens"),
+    ] {
+        let mut partial = missing.clone();
+        partial["usage"][field] = json!(0);
+        let usage = decode(&read_only_request(MODEL), &partial).unwrap().usage;
+        assert_eq!(usage.input_tokens, Some(12));
+        assert_eq!(
+            (
+                usage.cache_read_input_tokens,
+                usage.cache_creation_input_tokens
+            ),
+            if field == "cache_read_input_tokens" {
+                (Some(0), None)
+            } else {
+                (None, Some(0))
+            }
+        );
+        assert!(partial["usage"].get(other).is_none());
+    }
     for model in [MODEL, "kimi-k3"] {
         let request = read_only_request(model);
         for flat in [None, Some(3)] {
