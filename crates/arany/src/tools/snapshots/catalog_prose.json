@@ -1,6 +1,6 @@
 {
   "primary": {
-    "command_contract": "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded re-runs an identical failed command on the host only after the user approves it.",
+    "command_contract": "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded requests a primary host command with justification and explicit human approval; no prior failure is required.",
     "commands": [
       {
         "inputs": [],
@@ -14,6 +14,7 @@
       "timezone": "UTC",
       "unix_ms": 0
     },
+    "host_commands": true,
     "mcp_servers": [
       {
         "name": "local",

@@ -407,6 +407,133 @@ fn verdict_of(view: &SessionView, run: usize) -> arany::permissions::PermissionV
 }
 
 #[tokio::test]
+async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift() {
+    for drift in [false, true] {
+        let repo = Repo::new();
+        let path = repo.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let find = std::fs::canonicalize("/usr/bin/find").unwrap();
+        config["commands"] = json!([{
+            "name":"find", "executable":find,
+            "sha256":Sha256::digest(std::fs::read(&find).unwrap()).iter()
+                .map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "interpreter":false, "inputs":[]
+        }]);
+        std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let engine = engine_support::open(
+            StateRoot::open_existing(&repo.state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut input = request(&repo.workspace, "Inspect after remembering a commit rule");
+        input.include_paths.clear();
+        let budget = arany::GoalBudget {
+            max_runs: 3,
+            ..Default::default()
+        };
+        input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+        let plan = arany::GoalPlanContract {
+            mission: input.objective.clone(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec![".".into()],
+            commands: vec!["find".into()],
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/a.txt".into(),
+                content: "unreached criterion".into(),
+            },
+            budget,
+        };
+        let settings = repo.state.join("permissions.json");
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                plan_outcome(plan),
+                answer(),
+                tool_outcome(commit("third")),
+                answer(),
+                tool_outcome(ToolCall::CommandUnguarded {
+                    program: "find".into(),
+                    args: vec![".".into()],
+                    cwd: String::new(),
+                    justification: "Inspect after saving the approved typed rule".into(),
+                }),
+                answer(),
+            ])
+            .with_before_call(3, move || {
+                if drift {
+                    let mut bytes = std::fs::read(&settings).unwrap();
+                    bytes.push(b' ');
+                    std::fs::write(&settings, bytes).unwrap();
+                }
+            }),
+        );
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompted = 0;
+        let outcome = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        prompted += 1;
+                        if approval.unguarded.is_some() {
+                            approval.decide(arany::ApprovalReply::AllowOnce);
+                        } else {
+                            assert_eq!(approval.remember_prefix, Some(arany::permissions::TypedGitPrefix::Commit));
+                            approval.decide(arany::ApprovalReply::AllowPrefixInFolder);
+                        }
+                    }
+                }
+            }
+        };
+        assert_eq!(provider.requests.lock().unwrap().len(), 6);
+        assert_eq!(prompted, if drift { 1 } else { 2 });
+        let (_, view) = repo.reopen(engine, outcome.session_id).await;
+        assert_eq!(view.runs.len(), 3);
+        let observation = view.runs[2].tools[0].observation.as_ref().unwrap();
+        if drift {
+            assert_eq!(observation.disposition, ToolDisposition::Denied);
+            assert!(observation.attestation.is_none());
+            assert!(
+                observation
+                    .output
+                    .contains("permission settings changed outside admission")
+            );
+        } else {
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Unguarded(_))
+            ));
+        }
+        let digest = |index: usize| {
+            view.runs[index]
+                .config
+                .as_ref()
+                .unwrap()
+                .tool_policy
+                .as_ref()
+                .unwrap()
+                .permissions_digest
+        };
+        assert_eq!(digest(0), digest(1));
+        assert_eq!(digest(1) == digest(2), drift);
+        assert_eq!(repo.saved_rules().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart() {
     use arany::permissions::{
         Decision, PermissionMode, PermissionSource, TypedGitPrefix, TypedPrefixEdit,
@@ -417,6 +544,12 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .run_replying(
             vec![
                 tool_outcome(commit("third")),
+                tool_outcome(ToolCall::CommandUnguarded {
+                    program: "find".into(),
+                    args: vec![".".into()],
+                    cwd: String::new(),
+                    justification: "Inspect after saving the approved typed rule".into(),
+                }),
                 tool_outcome(commit("again")),
                 answer(),
             ],
@@ -433,11 +566,75 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .await;
     let first = outcome.unwrap();
     assert_eq!(asked, 2, "the saved rule applies only from the next Run");
+    let refused = first.run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(refused.disposition, ToolDisposition::Denied);
+    assert!(
+        refused
+            .output
+            .contains("permission settings changed outside admission")
+    );
+    assert!(refused.attestation.is_none());
     assert_eq!(
         offered,
         [Some(TypedGitPrefix::Commit), Some(TypedGitPrefix::Commit)]
     );
+    for drift in [false, true] {
+        if drift {
+            let path = repo.state.join("permissions.json");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.push(b' ');
+            std::fs::write(path, bytes).unwrap();
+        }
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(ToolCall::CommandUnguarded {
+                program: "find".into(),
+                args: vec![
+                    repo.workspace.to_string_lossy().into_owned(),
+                    "-maxdepth".into(),
+                    "0".into(),
+                ],
+                cwd: String::new(),
+                justification: "Inspect the repository after saving the approved typed rule".into(),
+            }),
+            answer(),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let mut input = request(&repo.workspace, "Inspect the repository");
+        input.session_id = Some(first.session_id);
+        input.title = None;
+        input.include_paths.clear();
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompted = 0;
+        let next = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        assert!(approval.unguarded.is_some());
+                        prompted += 1;
+                        approval.decide(arany::ApprovalReply::Deny);
+                    }
+                }
+            }
+        };
+        assert_eq!(prompted, usize::from(!drift));
+        let observation = next.run.tools.last().unwrap().observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(observation.output.contains(if drift {
+            "permission settings changed outside admission"
+        } else {
+            "Approval was not granted"
+        }));
+        assert_eq!(next.run.unguarded_tools(), 0);
+    }
     let (_, view) = repo.reopen(engine, first.session_id).await;
+    assert_eq!(view.runs[0].tools[1].observation.as_ref(), Some(refused));
     let verdict = verdict_of(&view, 0);
     assert_eq!(
         (verdict.source, verdict.basis, verdict.approved),

@@ -1119,6 +1119,7 @@ mod tests {
     fn intent(workspace: &Path, call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: Some(pin(workspace, &call).unwrap()),
+            host_command: None,
             target: crate::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::RunId::new(),
@@ -2173,6 +2174,7 @@ done
                     source_oid: "1".repeat(40),
                     refspec: format!("{}:refs/heads/main", "1".repeat(40)),
                 }),
+                host_command: None,
                 target: crate::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
                 run_id: crate::RunId::new(),
