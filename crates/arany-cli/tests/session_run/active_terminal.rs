@@ -395,7 +395,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         }
         if expect_help {
             patterns.push(if inline {
-                b"Enter/Esc close"
+                // Only armed help has this token; cursor moves can replace the space before close.
+                b"Enter/Esc"
             } else {
                 b"Command: /exit; Exit Session; during Run: view-only\r\n"
             });
