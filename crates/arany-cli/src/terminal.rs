@@ -64,6 +64,7 @@ struct UsagePanel {
     status: bool,
     starting_sequence: Option<u64>,
     rows: usize,
+    visible: usize,
 }
 
 pub const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
@@ -2334,6 +2335,7 @@ impl AttachedTerminal {
             status,
             starting_sequence,
             rows: 0,
+            visible: 0,
         });
         self.draw_help(0, session)?;
         self.arm_dialog().await?;
@@ -2371,6 +2373,7 @@ impl AttachedTerminal {
             return;
         };
         if let Some(panel) = &mut self.usage_panel {
+            let max_scroll = panel.rows.saturating_sub(panel.visible.max(1));
             match input {
                 TerminalInput::Left => {
                     panel.page = panel.page.saturating_sub(1);
@@ -2384,14 +2387,12 @@ impl AttachedTerminal {
                     *selected = selected.saturating_sub(1)
                 }
                 TerminalInput::Down | TerminalInput::PointerScrollDown { .. } => {
-                    *selected = (*selected + 1).min(panel.rows.saturating_sub(1))
+                    *selected = (*selected + 1).min(max_scroll)
                 }
                 TerminalInput::PageUp => *selected = selected.saturating_sub(10),
-                TerminalInput::PageDown => {
-                    *selected = (*selected + 10).min(panel.rows.saturating_sub(1))
-                }
+                TerminalInput::PageDown => *selected = (*selected + 10).min(max_scroll),
                 TerminalInput::Home => *selected = 0,
-                TerminalInput::End => *selected = panel.rows.saturating_sub(1),
+                TerminalInput::End => *selected = max_scroll,
                 TerminalInput::Escape
                 | TerminalInput::Submit
                 | TerminalInput::Interrupt
@@ -2439,7 +2440,12 @@ impl AttachedTerminal {
             panel.rows = lines.len();
             let page = panel.page;
             let pages = panel.pages.len();
-            self.draw_dialog(Some(session), 20, |frame, area| {
+            let height = if self.mode == TerminalMode::Classic {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(u16::MAX)
+            } else {
+                20
+            };
+            let area = self.draw_dialog(Some(session), height, |frame, area| {
                 view::draw_usage_frame(
                     frame,
                     area,
@@ -2450,6 +2456,10 @@ impl AttachedTerminal {
                     palette,
                 );
             })?;
+            let panel = self.usage_panel.as_mut().expect("open usage panel");
+            panel.visible = usize::from(area.height.saturating_sub(2));
+            self.help_selected =
+                Some(selected.min(panel.rows.saturating_sub(panel.visible.max(1))));
             return Ok(());
         }
         // Classic shows the header, the capped command rows, the focused description and the

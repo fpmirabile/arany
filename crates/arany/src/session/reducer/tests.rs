@@ -1049,7 +1049,7 @@ mod goal_replay_tests {
         assert_eq!(view.goals[0].provider_calls, 4);
         assert!(view.goals[0].token_usage_unknown);
         assert_eq!(view.runs[0].provider_retries.len(), 3);
-        assert_eq!(view.usage.groups[0].input.unreported, 3);
+        assert_eq!(view.usage.groups[0].input.unreported, 4);
         assert!(view.usage.pending.is_empty());
         for (end, _) in valid
             .iter()

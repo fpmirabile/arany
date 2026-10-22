@@ -4298,3 +4298,48 @@ fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
         }
     }
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
+    let mut attached = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+    let lines: Vec<_> = (0..30).map(|index| format!("row-{index:02}")).collect();
+    attached.help_selected = Some(0);
+    attached.usage_panel = Some(crate::terminal::UsagePanel {
+        pages: vec![lines.join("\n")],
+        page: 0,
+        sequence: 0,
+        status: false,
+        starting_sequence: None,
+        rows: lines.len(),
+        visible: 6,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+    for (input, expected) in [
+        (TerminalInput::End, 24),
+        (TerminalInput::Down, 24),
+        (TerminalInput::PageDown, 24),
+        (TerminalInput::Up, 23),
+    ] {
+        attached.help_input(input);
+        let scroll = attached.help_selected.unwrap();
+        assert_eq!(scroll, expected);
+        terminal
+            .draw(|frame| {
+                draw_usage_frame(
+                    frame,
+                    frame.area(),
+                    &lines,
+                    scroll,
+                    (0, 1),
+                    true,
+                    Palette { color: false },
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            buffer_row(terminal.backend().buffer(), 1).trim(),
+            lines[expected]
+        );
+    }
+}

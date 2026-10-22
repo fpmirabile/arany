@@ -1754,21 +1754,22 @@ mod tests {
             assert!(composer.is_empty());
             assert_eq!(view.defaults, defaults);
         }
-        for command in ["/usage", "/status"] {
+        for (command, expected_status) in [("/status", true), ("/usage", false)] {
             composer.insert_paste(command).unwrap();
             let ActiveSubmission::OpenUsage { status } =
                 handle_active_submission(&mut composer, &view, starting_sequence)
             else {
-                panic!("admission usage inspection must open the local report")
+                panic!("admission inspection must open the local usage report")
             };
-            assert_eq!(status, command == "/status");
+            assert_eq!(status, expected_status);
             let report =
                 crate::presentation::usage_pages(&view, status, Some(starting_sequence)).concat();
             assert_eq!(
                 report.contains("Preparing message · Ctrl+C cancels"),
-                status
+                expected_status
             );
             assert!(!report.contains("Task:"));
+            assert!(!report.contains("Request:"));
             assert!(composer.is_empty());
             assert_eq!(view.defaults, defaults);
         }
