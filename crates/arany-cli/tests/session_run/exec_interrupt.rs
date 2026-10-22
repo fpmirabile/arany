@@ -53,7 +53,7 @@ fn interrupted_exec_leaves_its_goal_resumable(
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                _ => serde_json::json!(r#"synthetic summary"#),
             };
             super::loopback::send_response_for(&mut stream, index, text, streaming);
         }

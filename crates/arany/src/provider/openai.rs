@@ -403,7 +403,7 @@ mod tests {
             provider.decode_run(bytes, &request, &read_only_conversation)
         };
         let good_run = synthetic_reply(r#"answer"#);
-        let good_compaction = synthetic_reply(r#"{"summary":"safe"}"#);
+        let good_compaction = synthetic_reply(r#"safe"#);
         for (case, cap, usage, accepted) in [
             ("reported output at requested cap", 8, Some((12, 8)), true),
             ("request 7 reports 8 output tokens", 7, Some((12, 8)), false),
@@ -504,7 +504,10 @@ mod tests {
         }
 
         assert!(provider.decode_compaction(&good_compaction, 1024).is_ok());
-        let reflected_compaction = synthetic_reply(r#"{"summary":"\u0073ynthetic-native-secret"}"#);
+        let reflected_compaction = String::from_utf8(synthetic_reply(secret))
+            .unwrap()
+            .replace(secret, r#"\u0073ynthetic-native-secret"#)
+            .into_bytes();
         assert!(!raw_reflects_secret(&reflected_compaction, secret));
         assert!(matches!(
             provider.decode_compaction(&reflected_compaction, 1024),
