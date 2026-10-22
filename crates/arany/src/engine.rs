@@ -1935,9 +1935,23 @@ impl Engine {
             &request.images,
             &inputs,
             request.policy,
-            tools
-                .as_ref()
-                .map_or(0, |_| crate::tools::types::MIN_TOOL_CONTEXT_BYTES),
+            tools.as_ref().map_or(0, |_| {
+                crate::tools::types::MAX_TOOL_CATALOG_BYTES
+                    + crate::tools::ToolRuntime::continuation_reserve(
+                        submission
+                            .providers
+                            .primary
+                            .iter()
+                            .map(|provider| {
+                                crate::provider::max_turn_bytes(
+                                    provider.identity().limits.max_output_tokens,
+                                )
+                            })
+                            .max()
+                            .unwrap_or(0),
+                        feedback_reserved,
+                    )
+            }),
             goal_metadata_reserved,
             context_window_tokens,
         )
