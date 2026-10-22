@@ -1011,7 +1011,7 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
         )),
     }
     lines.push(String::new());
-    lines.push("Allow once for this exact action · expires within one minute".into());
+    lines.push("Allow once for this exact action".into());
     lines
 }
 
@@ -2517,7 +2517,7 @@ mod peer_row_tests {
                 "Insert:",
                 "+ \\u{001b}[2J",
                 "",
-                "Allow once for this exact action · expires within one minute",
+                "Allow once for this exact action",
             ]
         );
     }

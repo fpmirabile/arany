@@ -1415,6 +1415,15 @@ async fn late_approval_keeps_file_and_executable_preconditions() {
             arany::ToolDisposition::Succeeded,
             "{case}"
         );
+        if case == "file" {
+            assert_eq!(observed.disposition, arany::ToolDisposition::Conflict);
+            assert!(matches!(
+                observed.attestation,
+                Some(arany::Attestation::Guard(_))
+            ));
+        } else {
+            assert!(observed.attestation.is_none(), "{case}");
+        }
     }
 }
 

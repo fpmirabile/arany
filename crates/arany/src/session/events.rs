@@ -1494,6 +1494,12 @@ pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], 
     }
 }
 
+fn restore_expiry(mut text: String, expiry: u64) -> Option<String> {
+    let at = text.find(",\"use_count\":")?;
+    text.insert_str(at, &format!(",\"expires_at_ms\":{expiry}"));
+    Some(text)
+}
+
 pub(crate) fn expiring_intent_text(value: &serde_json::Value) -> Option<String> {
     let mut value = value.clone();
     let expiry = value.as_object_mut()?.remove("expires_at_ms")?.as_u64()?;
@@ -1502,11 +1508,7 @@ pub(crate) fn expiring_intent_text(value: &serde_json::Value) -> Option<String> 
     }
     let intent: crate::tools::EffectIntent = serde_json::from_value(value).ok()?;
     let text = serialize(&intent).ok()?;
-    Some(text.replacen(
-        ",\"use_count\":",
-        &format!(",\"expires_at_ms\":{expiry},\"use_count\":"),
-        1,
-    ))
+    restore_expiry(text, expiry)
 }
 
 pub(crate) fn expiring_payload(kind: &str, payload: &str) -> Option<String> {
@@ -1547,11 +1549,7 @@ pub(crate) fn expiring_payload(kind: &str, payload: &str) -> Option<String> {
         _ => return None,
     };
     let text = text.replacen(",\"approval_cause\":null", "", 1);
-    Some(text.replacen(
-        ",\"use_count\":",
-        &format!(",\"expires_at_ms\":{expiry},\"use_count\":"),
-        1,
-    ))
+    restore_expiry(text, expiry)
 }
 
 // The typed text a payload had before its kind only gained the glob variants, or `None`
