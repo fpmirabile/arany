@@ -59,7 +59,8 @@ fn run_case(position: Position) {
     assert!(
         matches!(
             WorkspaceInputs::load(&workspace, &state, None, &include),
-            Err(InputError::Io(_))
+            Err(InputError::AtPath { source, .. })
+                if matches!(source.as_ref(), InputError::Include(crate::ToolError::SymbolicLink))
         ),
         "{position:?}: stable symlink must be rejected"
     );
@@ -99,7 +100,17 @@ fn run_case(position: Position) {
                     );
                     safe_count += 1;
                 }
-                Err(InputError::Io(_)) => rejected_count += 1,
+                Err(InputError::AtPath { source, .. })
+                    if matches!(
+                        source.as_ref(),
+                        InputError::Io(_)
+                            | InputError::Include(
+                                crate::ToolError::SymbolicLink | crate::ToolError::NotDirectory
+                            )
+                    ) =>
+                {
+                    rejected_count += 1
+                }
                 Err(error) => panic!("{position:?}: unexpected input error {error:?}"),
             }
             if swaps.load(Ordering::Acquire) > before {

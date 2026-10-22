@@ -71,6 +71,12 @@ const STORE_ACTION_OVERHEAD: std::time::Duration =
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("{path:?}: {source}")]
+    InputPath {
+        path: String,
+        #[source]
+        source: Box<EngineError>,
+    },
     #[error("rewind is blocked; inspect the preview paths and uncertain publications")]
     RewindBlocked,
     #[error("rewind preview changed or expired; preview again")]
@@ -164,6 +170,10 @@ pub enum EngineError {
 impl From<InputError> for EngineError {
     fn from(error: InputError) -> Self {
         match error {
+            InputError::AtPath { path, source } => Self::InputPath {
+                path,
+                source: Box::new(Self::from(*source)),
+            },
             InputError::InvalidPath => Self::InvalidWorkspacePath,
             InputError::NotRegular => Self::InputNotRegular,
             InputError::UnsafeLinkCount => Self::WorkspaceUnavailable,

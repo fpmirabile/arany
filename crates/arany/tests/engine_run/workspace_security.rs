@@ -47,34 +47,24 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         )
         .expect("Engine");
 
-        for path in [
-            "",
-            ".",
-            "..",
-            "/outside.txt",
-            "notes//facts.txt",
-            "notes/./facts.txt",
-            "notes/../facts.txt",
-            "notes/facts.txt/",
+        for (path, reason) in [
+            ("", "Workspace input path is invalid"),
+            (".", "Workspace input path is invalid"),
+            ("..", "path is outside workspace"),
+            ("/outside.txt", "path is outside workspace"),
+            ("notes//facts.txt", "Workspace input path is invalid"),
+            ("notes/./facts.txt", "Workspace input path is invalid"),
+            ("notes/../facts.txt", "path is outside workspace"),
+            ("notes/facts.txt/", "not a directory"),
+            ("linked/secret.txt", "path is a symbolic link"),
+            ("notes/linked.txt", "path is a symbolic link"),
         ] {
             let mut candidate = request(&workspace, "Question");
             candidate.include_paths = vec![path.into()];
             let outcome = run_to_end(&engine, &provider, candidate).await;
-            assert!(
-                matches!(&outcome, Err(EngineError::InvalidWorkspacePath)),
-                "invalid include spelling {path:?}: expected InvalidWorkspacePath, observed {:?}",
-                outcome.err()
-            );
-        }
-
-        for path in ["linked/secret.txt", "notes/linked.txt"] {
-            let mut candidate = request(&workspace, "Question");
-            candidate.include_paths = vec![path.into()];
-            let outcome = run_to_end(&engine, &provider, candidate).await;
-            assert!(
-                matches!(&outcome, Err(EngineError::WorkspaceUnavailable)),
-                "symlinked include {path}: expected WorkspaceUnavailable, observed {:?}",
-                outcome.err()
+            assert_eq!(
+                outcome.expect_err("include rejected").to_string(),
+                format!("{path:?}: {reason}"),
             );
         }
 
@@ -84,7 +74,9 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         assert!(
             matches!(
                 &outcome,
-                Err(EngineError::WorkspaceUnavailable | EngineError::InputNotRegular)
+                Err(EngineError::InputPath { source, .. }) if matches!(
+                    source.as_ref(), EngineError::WorkspaceUnavailable | EngineError::InputNotRegular
+                )
             ),
             "socket include: expected rejected special object, observed {:?}",
             outcome.err()
@@ -94,7 +86,8 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
         linked_include.include_paths = vec!["notes/hardlink.txt".into()];
         let outcome = run_to_end(&engine, &provider, linked_include).await;
         assert!(
-            matches!(&outcome, Err(EngineError::WorkspaceUnavailable)),
+            matches!(&outcome, Err(EngineError::InputPath { source, .. })
+                if matches!(source.as_ref(), EngineError::WorkspaceUnavailable)),
             "hard-linked include: expected WorkspaceUnavailable, observed {:?}",
             outcome.err()
         );
@@ -146,7 +139,8 @@ fn fifo_include_child() {
         candidate.include_paths = vec!["notes/fifo".into()];
         let outcome = run_to_end(&engine, &provider, candidate).await;
         assert!(
-            matches!(&outcome, Err(EngineError::InputNotRegular)),
+            matches!(&outcome, Err(EngineError::InputPath { source, .. })
+                if matches!(source.as_ref(), EngineError::InputNotRegular)),
             "FIFO include: expected InputNotRegular, observed {:?}",
             outcome.err()
         );

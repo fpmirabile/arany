@@ -2629,8 +2629,19 @@ fn screen_reader_rejected_command_does_not_join_the_next_line() {
             "Notice: Model: gpt-5.4 · low\r\nInput:\r\n".as_bytes(),
         );
         for (objective, error) in [
-            ("Check @../outside", "Tool path is not admitted"),
-            ("Check @missing.txt", "explicit include does not exist"),
+            (
+                "Check @../outside",
+                "\"../outside\": path is outside workspace",
+            ),
+            (
+                "Check @missing.txt",
+                "\"missing.txt\": explicit include does not exist",
+            ),
+            (
+                "Check @\"unfinished",
+                "\"\\\"unfinished\": unterminated quoted path",
+            ),
+            ("Check @\".ENV/\"", "\".ENV/\": protected path"),
         ] {
             let from = transcript.len();
             input

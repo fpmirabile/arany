@@ -31,17 +31,21 @@ pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
         }
         let (path, used) = if tail.starts_with('"') {
             let mut stream = serde_json::Deserializer::from_str(tail).into_iter::<String>();
-            let path = stream
-                .next()
-                .ok_or(ToolError::Path)?
-                .map_err(|_| ToolError::Path)?;
+            let path = stream.next().ok_or(ToolError::Path)?.map_err(|error| {
+                if error.is_eof() {
+                    ToolError::UnterminatedQuotedPath.at_path(tail)
+                } else {
+                    ToolError::Path.at_path(tail)
+                }
+            })?;
             (path, stream.byte_offset())
         } else {
             let used = tail.find(char::is_whitespace).unwrap_or(tail.len());
             (tail[..used].to_owned(), used)
         };
         if !path.is_empty() {
-            super::types::validate_mention_path(path.strip_suffix('/').unwrap_or(&path), false)?;
+            super::types::validate_mention_path(path.strip_suffix('/').unwrap_or(&path), false)
+                .map_err(|error| error.at_path(&path))?;
             let path = PathBuf::from(path);
             if !paths.contains(&path) {
                 paths.push(path);
@@ -886,11 +890,25 @@ mod tests {
         }
         assert_eq!(
             mention_paths("@../outside").unwrap_err().to_string(),
-            "path is outside workspace"
+            "\"../outside\": path is outside workspace"
         );
         assert_eq!(
             mention_paths("@.git").unwrap_err().to_string(),
-            "protected path"
+            "\".git\": protected path"
+        );
+        for tail in ["\"unfinished", "\"docs/with spaces/", "\"docs/trailing\\"] {
+            assert_eq!(
+                mention_paths(&format!("Inspect @README.md @{tail}"))
+                    .unwrap_err()
+                    .to_string(),
+                format!("{tail:?}: unterminated quoted path"),
+            );
+        }
+        assert_eq!(
+            mention_paths("Inspect @README.md @\".ENV/\"")
+                .unwrap_err()
+                .to_string(),
+            "\".ENV/\": protected path",
         );
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
@@ -929,8 +947,8 @@ mod tests {
             );
             for (folder, reason) in [
                 ("missing", "Tool file or directory not found"),
-                ("../outside", "path is outside workspace"),
-                (".git", "protected path"),
+                ("../outside", "\"../outside\": path is outside workspace"),
+                (".git", "\".git\": protected path"),
             ] {
                 assert_eq!(
                     fs::workspace_entries(&workspace, folder, "")

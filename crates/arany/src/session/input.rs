@@ -21,6 +21,12 @@ const DIRECTORY_TRUNCATED: &str = "[truncated]\n";
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum InputError {
+    #[error("{path:?}: {source}")]
+    AtPath {
+        path: String,
+        #[source]
+        source: Box<InputError>,
+    },
     #[error("Workspace input path is invalid")]
     InvalidPath,
     #[error("Workspace input must be a regular file")]
@@ -169,14 +175,19 @@ impl WorkspaceInputs {
         let mut includes = Vec::with_capacity(include_paths.len());
         let mut total_bytes = 0_usize;
         for path in include_paths {
-            let snapshot =
-                read_relative(&root, path, MAX_INCLUDE_BYTES)?.ok_or(InputError::MissingInclude)?;
-            total_bytes = total_bytes
-                .checked_add(snapshot.content.len())
-                .ok_or(InputError::TooLarge)?;
-            if total_bytes > MAX_INCLUDE_TOTAL_BYTES {
-                return Err(InputError::TooLarge);
-            }
+            let snapshot = read_relative(&root, path, MAX_INCLUDE_BYTES)
+                .and_then(|snapshot| {
+                    let snapshot = snapshot.ok_or(InputError::MissingInclude)?;
+                    total_bytes = total_bytes
+                        .checked_add(snapshot.content.len())
+                        .filter(|total| *total <= MAX_INCLUDE_TOTAL_BYTES)
+                        .ok_or(InputError::TooLarge)?;
+                    Ok(snapshot)
+                })
+                .map_err(|source| InputError::AtPath {
+                    path: path.to_string_lossy().into_owned(),
+                    source: Box::new(source),
+                })?;
             includes.push(snapshot);
         }
         Ok(Self {
@@ -200,24 +211,23 @@ fn read_relative(
         .ok_or(InputError::InvalidPath)?
         .to_owned();
     let normalized = path.strip_suffix('/').unwrap_or(&path);
+    if Path::new(&path).is_absolute() || normalized.split('/').any(|part| part == "..") {
+        return Err(crate::tools::ToolError::OutsideWorkspace.into());
+    }
     let names = relative_components(Path::new(normalized))?;
     if normalized.split('/').any(crate::tools::types::forbidden) {
         return Err(crate::tools::ToolError::ProtectedPath.into());
     }
     let mut directory = root.try_clone()?;
     for name in &names[..names.len() - 1] {
-        let next = directory.open_dir_nofollow(name).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                InputError::MissingInclude
-            } else {
-                InputError::Io(error)
-            }
-        })?;
+        let next = directory
+            .open_dir_nofollow(name)
+            .map_err(|error| include_io_error(&directory, name, error))?;
         #[cfg(unix)]
         {
             use cap_std::fs::MetadataExt;
             if next.dir_metadata()?.dev() != directory.dir_metadata()?.dev() {
-                return Err(InputError::InvalidPath);
+                return Err(crate::tools::ToolError::FilesystemBoundary.into());
             }
         }
         directory = next;
@@ -229,6 +239,29 @@ fn read_relative(
         limit,
         true,
     )
+}
+
+fn include_io_error(directory: &Dir, name: &std::ffi::OsStr, error: io::Error) -> InputError {
+    #[cfg(unix)]
+    {
+        if error.raw_os_error() == Some(nix::libc::EXDEV) {
+            return crate::tools::ToolError::FilesystemBoundary.into();
+        }
+        if error.raw_os_error() == Some(nix::libc::ELOOP) {
+            return crate::tools::ToolError::SymbolicLink.into();
+        }
+    }
+    if directory
+        .symlink_metadata(name)
+        .is_ok_and(|metadata| metadata.is_symlink())
+    {
+        return crate::tools::ToolError::SymbolicLink.into();
+    }
+    match error.kind() {
+        io::ErrorKind::NotFound => InputError::MissingInclude,
+        io::ErrorKind::NotADirectory => crate::tools::ToolError::NotDirectory.into(),
+        _ => InputError::Io(error),
+    }
 }
 
 // The launch directory relative to the Workspace root, or the root when it lies outside.
@@ -326,6 +359,7 @@ fn read_file(
     }
     let file = match directory.open_with(name, &options) {
         Ok(file) => file,
+        Err(error) if include => return Err(include_io_error(directory, name, error)),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(InputError::Io(error)),
     };
@@ -335,14 +369,14 @@ fn read_file(
         {
             use cap_std::fs::MetadataExt;
             if metadata.dev() != directory.dir_metadata()?.dev() {
-                return Err(InputError::InvalidPath);
+                return Err(crate::tools::ToolError::FilesystemBoundary.into());
             }
         }
         if metadata.is_dir() {
             return read_directory(Dir::from_std_file(file.into_std()), path).map(Some);
         }
         if path.ends_with('/') {
-            return Err(InputError::InvalidPath);
+            return Err(crate::tools::ToolError::NotDirectory.into());
         }
     }
     if !metadata.is_file() {
@@ -409,6 +443,7 @@ fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputEr
     }
     let mut content = String::new();
     for name in names {
+        // Serializing a String to an in-memory JSON string has no fallible values or I/O.
         let line = serde_json::to_string(&name).expect("serializable entry") + "\n";
         if content.len() + line.len() + DIRECTORY_TRUNCATED.len() > MAX_DIRECTORY_BYTES {
             truncated = true;

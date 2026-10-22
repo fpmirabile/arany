@@ -27,21 +27,51 @@ fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
         );
         assert!(loaded.includes[0].model_include().starts_with("Directory:"));
     }
-    assert!(matches!(
-        load("docs/with spaces/.git"),
-        Err(input::InputError::Include(
-            crate::tools::ToolError::ProtectedPath
-        ))
-    ));
-    assert!(matches!(
-        load("docs/with spaces/outside"),
-        Err(input::InputError::Io(_))
-    ));
-    assert!(matches!(
-        load("docs/with spaces/b.txt/"),
-        Err(input::InputError::InvalidPath)
-    ));
-    for (folder, count, name_len) in [("entry-cap", 70, 10), ("byte-cap", 64, 255)] {
+    for (path, reason) in [
+        ("docs/with spaces/.git", "protected path"),
+        ("docs/with spaces/.ENV/", "protected path"),
+        ("docs/../outside/", "path is outside workspace"),
+        ("docs/with spaces/outside", "path is a symbolic link"),
+        ("docs/with spaces/outside/", "path is a symbolic link"),
+        ("docs/with spaces/b.txt/", "not a directory"),
+        ("docs/with spaces/b.txt/child", "not a directory"),
+    ] {
+        assert_eq!(
+            load(path).err().expect("include rejected").to_string(),
+            format!("{path:?}: {reason}"),
+        );
+    }
+    let unicode = "docs/資料";
+    std::fs::create_dir(workspace.join(unicode)).unwrap();
+    std::fs::write(
+        workspace.join(unicode).join("résumé.md"),
+        "OMITTED_BODY_CANARY",
+    )
+    .unwrap();
+    for objective in ["Inspect @docs/資料", "Inspect @\"docs/資料/\""] {
+        let paths = crate::tools::mention_paths(objective).unwrap();
+        let loaded = input::WorkspaceInputs::load(&workspace, &state, None, &paths).unwrap();
+        assert_eq!(loaded.includes[0].path, "docs/資料/");
+        assert_eq!(loaded.includes[0].content, "\"résumé.md\"\n");
+    }
+    let missing = "docs/missing \"quoted\"path";
+    let paths = crate::tools::mention_paths(&format!(
+        "Inspect @\"docs/with spaces/\" @{}",
+        serde_json::to_string(missing).unwrap()
+    ))
+    .unwrap();
+    assert_eq!(
+        input::WorkspaceInputs::load(&workspace, &state, None, &paths)
+            .err()
+            .expect("second include rejected")
+            .to_string(),
+        format!("{missing:?}: explicit include does not exist"),
+    );
+    for (folder, count, name_len) in [
+        ("entry-cap", 70, 10),
+        ("exact-cap", 64, 10),
+        ("byte-cap", 64, 255),
+    ] {
         let directory = workspace.join(folder);
         std::fs::create_dir(&directory).unwrap();
         for index in 0..count {
@@ -51,10 +81,10 @@ fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
         let loaded = load(folder).unwrap();
         let listing = &loaded.includes[0].content;
         assert!(listing.len() <= 16 * 1024);
-        assert!(listing.ends_with("[truncated]\n"));
+        assert_eq!(listing.ends_with("[truncated]\n"), folder != "exact-cap");
         let entries = listing.lines().filter(|line| line.starts_with('"')).count();
         assert!(entries <= 64);
-        if folder == "entry-cap" {
+        if folder != "byte-cap" {
             assert_eq!(entries, 64);
         } else {
             assert!(entries < 64);

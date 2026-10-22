@@ -3685,7 +3685,8 @@ fn workspace_paths_fail_closed_before_a_run_is_accepted() {
         traversal.include_paths = vec!["../outside".into()];
         assert!(matches!(
             run_to_end(&engine, &provider, traversal).await,
-            Err(EngineError::InvalidWorkspacePath)
+            Err(EngineError::InputPath { source, .. })
+                if matches!(source.as_ref(), EngineError::Tool(arany::ToolError::OutsideWorkspace))
         ));
         assert!(
             requests.lock().expect("requests lock").is_empty(),
@@ -3799,7 +3800,8 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         .expect("oversized include");
         assert!(matches!(
             run_to_end(&engine, &provider, request(&workspace, "Question")).await,
-            Err(EngineError::InputTooLarge)
+            Err(EngineError::InputPath { source, .. })
+                if matches!(source.as_ref(), EngineError::InputTooLarge)
         ));
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("restore include");
 

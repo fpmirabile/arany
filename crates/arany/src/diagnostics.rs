@@ -338,6 +338,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         return;
     }
     let cause = match error {
+        EngineError::InputPath { source, .. } => return engine_failure(source),
         EngineError::RosterSelectionMismatch | EngineError::InvalidRequest => "InvalidRequest",
         EngineError::IncompatibleProviderChain => "IncompatibleProviderChain",
         EngineError::MissingSession => "MissingSession",
