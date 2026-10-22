@@ -487,11 +487,15 @@ impl LinearState {
             #[cfg(unix)]
             writeln!(
                 writer,
-                "Input: Enter submits; Ctrl+D after text continues; empty Ctrl+D exits",
+                "Input: Enter submits; backslash then Enter adds a newline; empty Ctrl+D exits",
             )?;
             writeln!(
                 writer,
-                "Commands: /help lists local controls; type arguments literally; Tab and Ctrl+J are inline-only"
+                "Modified newline shortcuts apply only to visual sessions; use backslash then Enter here"
+            )?;
+            writeln!(
+                writer,
+                "Paste: /paste safely inserts multiline clipboard text; unframed paste can submit lines and consumes trailing backslashes"
             )?;
             self.announced = true;
         }
@@ -1169,8 +1173,9 @@ mod tests {
             String::from_utf8(output.clone()).expect("UTF-8"),
             format!(
                 "Presentation: screen-reader\n\
-                 Input: Enter submits; Ctrl+D after text continues; empty Ctrl+D exits\n\
-                 Commands: /help lists local controls; type arguments literally; Tab and Ctrl+J are inline-only\n\
+                 Input: Enter submits; backslash then Enter adds a newline; empty Ctrl+D exits\n\
+                 Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\n\
+                 Paste: /paste safely inserts multiline clipboard text; unframed paste can submit lines and consumes trailing backslashes\n\
                  Session: {}\n\
                  Title: bad\\u{{001b}}[31m\\u{{000a}}Session: forged\n\
                  State: ready\n\
@@ -1296,7 +1301,7 @@ mod tests {
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
                 "Command: /storage; Report owned storage metadata; during Run: locked\n",
-                "Command: /settings; Slash menu and chat view; during Run: locked\n",
+                "Command: /settings; Slash menu, chat view and newline shortcut; during Run: locked\n",
                 "Command: /transcript [agents [number]]; Write or toggle transcript details; agents lists this Run's agent chats; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
             ).as_bytes()

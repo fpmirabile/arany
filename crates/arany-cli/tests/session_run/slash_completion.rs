@@ -322,6 +322,8 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 11: Build cache bytes: 8589934592\r\n\
           Choice 12: Mouse: wheel and clicks (wheel and clicks|wheel only|off)\r\n\
           Choice 13: Copy on select: on (on|off)\r\n\
+          Choice 14: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
+          Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n",
     );
     for rejected in [&b"combined\r"[..], b"12 combined\r", b"1 classic\r"] {
@@ -1244,8 +1246,20 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let newline_at = transcript.len();
     input
-        .write_all(b"alpha\x1b[13;2u")
-        .expect("encoded Shift+Enter continues the chat draft");
+        .write_all(b"alpha\\\r")
+        .expect("portable backslash-Enter continues the chat draft");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        newline_at,
+        3,
+    );
+    let newline_at = transcript.len();
+    input
+        .write_all(b"beta\x1b[13;2u")
+        .expect("distinct Shift+Enter adds another newline");
     wait_for_caret(
         &mut output,
         &mut input,
@@ -1566,8 +1580,8 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         tabs_at,
     );
     input
-        .write_all(b"\x1b[C\r")
-        .expect("tabs selected with Right in the settings window");
+        .write_all(format!("\x1b[C{}\x1b[C\x1b[C\r", "\x1b[B".repeat(13)).as_bytes())
+        .expect("save tabs and Ctrl+Enter in the settings window");
     wait_for_caret(
         &mut output,
         &mut input,
@@ -1576,6 +1590,12 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         tabs_at,
         3,
     );
+    let record = |view: &str| {
+        String::from_utf8(saved_ui_preferences("tabs", view))
+            .unwrap()
+            .replace("shift_enter", "ctrl_enter")
+            .into_bytes()
+    };
     assert_eq!(
         StateRoot::open_existing(&state)
             .unwrap()
@@ -1583,9 +1603,30 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .read()
             .unwrap()
             .unwrap(),
-        saved_ui_preferences("tabs", "fullscreen")
+        record("fullscreen")
     );
-    let record = |view: &str| saved_ui_preferences("tabs", view);
+    let shortcut_at = transcript.len();
+    input
+        .write_all(b"saved\x1b[13;5u")
+        .expect("use saved Ctrl+Enter immediately");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        shortcut_at,
+        3,
+    );
+    let clear_at = transcript.len();
+    input.write_all(b"\x03").expect("clear newline draft");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_at,
+        3,
+    );
     for (view, pinned) in [("classic", false), ("fullscreen", true), ("classic", false)] {
         fresh_capture(&mut transcript, &mut answered);
         let chosen_at = transcript.len();
@@ -1682,6 +1723,28 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         "saved classic starts on the primary screen"
     );
     let _viewed_product = ProductGuard::new(product_child_of(shell_pid), state.clone());
+    let shortcut_at = transcript.len();
+    input
+        .write_all(b"saved\x1b[13;5u")
+        .expect("use saved Ctrl+Enter after a fresh process restores it");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        shortcut_at,
+        3,
+    );
+    let clear_at = transcript.len();
+    input.write_all(b"\x03").expect("clear newline draft");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_at,
+        3,
+    );
     fresh_capture(&mut transcript, &mut answered);
     let switched_at = transcript.len();
     input

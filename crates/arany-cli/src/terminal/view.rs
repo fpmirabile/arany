@@ -1192,7 +1192,7 @@ pub(super) fn draw_frame_with_history(
             [
                 "Arany",
                 "Describe a task to begin.",
-                "/help commands · Ctrl+K actions · Ctrl+J newline",
+                "/help commands · Ctrl+K actions · \\ then Enter newline",
             ]
         };
         let top = history_top + history_height.saturating_sub(4);
@@ -1636,9 +1636,9 @@ fn draw_composer(
                 " Draft kept · Esc returns "
             }
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 40 {
-            " Enter keeps draft · Ctrl+J newline "
+            "Enter keeps draft · \\ then Enter newline"
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 24 {
-            " Enter keeps · Ctrl+J "
+            " Enter keeps · \\ Enter "
         } else if model.draft_action == DraftAction::Retain && composer_area.width >= 16 {
             " Enter keeps "
         } else if menu_height > 0 && composer_area.width >= 40 {
@@ -1660,19 +1660,19 @@ fn draw_composer(
                 " Tab/Enter Esc "
             }
         } else if command && composer_area.width >= 40 {
-            " Enter command · Ctrl+J newline "
+            " Enter command · \\ then Enter newline "
         } else if command && composer_area.width >= 16 {
             " Enter command "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 40 {
-            " Enter keeps draft · Ctrl+J newline "
+            "Enter keeps draft · \\ then Enter newline"
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 24 {
-            " Enter keeps · Ctrl+J "
+            " Enter keeps · \\ Enter "
         } else if model.draft_action != DraftAction::Submit && composer_area.width >= 16 {
             " Enter keeps "
         } else if composer_area.width >= 40 {
-            " Enter sends · Ctrl+J newline "
+            " Enter sends · \\ then Enter newline "
         } else if composer_area.width >= 16 {
-            " Enter · Ctrl+J "
+            " Enter · \\ Enter "
         } else {
             ""
         };
@@ -1686,18 +1686,21 @@ fn draw_composer(
             24.. if agents_hint => " Alt+←/→ agents ",
             _ => hint,
         };
-        let newline_hint = if composer_area.width >= 80 && menu_height == 0 && !agents_hint {
-            "· Shift+Enter newline "
+        let hint = if composer_area.width >= 40 && composer.newline_hint() != "\\ then Enter" {
+            hint.replace(
+                "\\ then Enter newline",
+                &format!("{} / \\ Enter", composer.newline_hint()),
+            )
+            .replace("Enter keeps draft", "Enter keeps")
         } else {
-            ""
+            hint.to_owned()
         };
-        let rules = usize::from(composer_area.width)
-            .saturating_sub(UnicodeWidthStr::width(hint) + UnicodeWidthStr::width(newline_hint));
+        let rules =
+            usize::from(composer_area.width).saturating_sub(UnicodeWidthStr::width(hint.as_str()));
         frame.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("─".repeat(rules / 2), palette.subtle()),
                 Span::raw(hint),
-                Span::raw(newline_hint),
                 Span::styled("─".repeat(rules - rules / 2), palette.subtle()),
             ])),
             Rect::new(
@@ -1833,6 +1836,10 @@ pub(super) fn settings_height(rows: &[String], width: u16, max_rows: usize) -> u
     u16::try_from(rows.len().min(max_rows) * lines_per_row + 2).unwrap_or(u16::MAX)
 }
 
+pub(super) fn guidance_height(text: &str, width: u16) -> u16 {
+    u16::try_from(wrap_cells(text, usize::from(width.max(1)), 0).len()).unwrap_or(u16::MAX)
+}
+
 pub(super) fn draw_settings_frame(
     frame: &mut Frame,
     area: Rect,
@@ -1854,10 +1861,17 @@ pub(super) fn draw_settings_frame(
     let focus = armed.then_some(selected);
     let stacked = settings_stacked(rows, width);
     let lines_per_row = if stacked { 2 } else { 1 };
-    let visible = usize::from(area.height.saturating_sub(2)) / lines_per_row;
+    let guidance = notice
+        .map(|text| wrap_cells(text, width.max(1), 0))
+        .unwrap_or_default();
+    let guidance_rows = guidance
+        .len()
+        .min(usize::from(area.height.saturating_sub(2 + lines_per_row)));
+    let visible =
+        (usize::from(area.height.saturating_sub(2)) - guidance_rows) / usize::from(lines_per_row);
     let start = session_picker_start(selected, visible);
     for (index, row) in rows.iter().enumerate().skip(start).take(visible) {
-        let y = area.y + 1 + ((index - start) * lines_per_row) as u16;
+        let y = area.y + 1 + ((index - start) * usize::from(lines_per_row)) as u16;
         let (label, value) = match row.split_once(": ") {
             Some((name, value)) if stacked => (name, Some(value)),
             _ => (row.as_str(), None),
@@ -1879,10 +1893,20 @@ pub(super) fn draw_settings_frame(
     }
     // The key hint appears once armed, telling the user that input now counts.
     if area.height >= 2 && (armed || notice.is_some()) {
-        let (footer, style) = match notice {
-            Some(notice) => (notice, palette.attention()),
-            None if area.width < 50 => ("↑↓ ←→ Enter Esc", Style::default()),
-            None => (
+        for (index, line) in guidance.iter().take(guidance_rows).enumerate() {
+            frame.render_widget(
+                Paragraph::new(line.as_str()).style(palette.attention()),
+                Rect::new(
+                    area.x,
+                    area.bottom() - 1 - guidance_rows as u16 + index as u16,
+                    area.width,
+                    1,
+                ),
+            );
+        }
+        let (footer, style) = match area.width {
+            0..50 => ("↑↓ ←→ Enter Esc", Style::default()),
+            _ => (
                 "1-9 or ↑↓ select · ←→ change · Enter saves · Esc",
                 Style::default(),
             ),
@@ -1915,7 +1939,13 @@ pub(super) fn draw_help_frame(
         Paragraph::new(safe_truncate(&header, usize::from(area.width))).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
-    let visible = usize::from(area.height.saturating_sub(3));
+    let description = help_entry(selected)
+        .map(|entry| wrap_cells(entry.description, usize::from(area.width), 0))
+        .unwrap_or_default();
+    let description_rows = description
+        .len()
+        .min(usize::from(area.height.saturating_sub(3)));
+    let visible = usize::from(area.height.saturating_sub(2)) - description_rows;
     let start = session_picker_start(selected, visible);
     for row in 0..visible {
         let index = start + row;
@@ -1949,10 +1979,15 @@ pub(super) fn draw_help_frame(
         );
     }
     if area.height >= 3 {
-        if let Some(entry) = help_entry(selected) {
+        for (index, line) in description.iter().take(description_rows).enumerate() {
             frame.render_widget(
-                Paragraph::new(safe_truncate(entry.description, usize::from(area.width))),
-                Rect::new(area.x, area.bottom() - 2, area.width, 1),
+                Paragraph::new(line.as_str()),
+                Rect::new(
+                    area.x,
+                    area.bottom() - 1 - description_rows as u16 + index as u16,
+                    area.width,
+                    1,
+                ),
             );
         }
         let hint = if area.width < 24 {

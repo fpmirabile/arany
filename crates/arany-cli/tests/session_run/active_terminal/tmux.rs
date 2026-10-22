@@ -554,7 +554,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
         composer + 4 < rows.len()
             && rows[composer + 1] == format!("> {}", &draft[..38])
             && rows[composer + 2].trim_start() == &draft[38..]
-            && rows[composer + 3].contains("Ctrl+J newline")
+            && rows[composer + 3].contains("\\ then Enter newline")
             && rows[composer + 4].contains("ready")
             && rows[composer + 5..].iter().all(|row| row.trim().is_empty())
     };
@@ -673,7 +673,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 && rows[1].contains("Ask Arany")
                 && rows[5].trim() == &edited[56..]
                 && rows[1].contains("5/5")
-                && rows[6].contains("Ctrl+J")
+                && rows[6].contains("\\")
             {
                 eprintln!("16x8 wrapped draft capture:\n{screen}");
                 break;
@@ -756,7 +756,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                     } else {
                         rows[5].contains(expected)
                     }
-                    && rows[6].contains("Ctrl+J")
+                    && rows[6].contains("\\")
                     && !rows[7].trim().is_empty()
                     && position.status.success()
                     && position.stdout == cursor.as_bytes()
