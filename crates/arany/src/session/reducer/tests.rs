@@ -462,7 +462,22 @@ mod goal_replay_tests {
                 .unwrap()
                 .unwrap();
             assert!(view.runs.last().unwrap().config.is_none());
-            assert_eq!(view.host_epoch_floor > 0, resumed);
+            let boundary = envelopes
+                .iter()
+                .find(|envelope| {
+                    if resumed {
+                        matches!(envelope.event, Event::GoalResumed { .. })
+                    } else {
+                        matches!(envelope.event, Event::SessionStarted { .. })
+                    }
+                })
+                .unwrap();
+            assert_eq!(view.host_epoch_floor, boundary.sequence, "{name}");
+            assert_eq!(
+                view.runs[0].accepted_sequence > view.host_epoch_floor,
+                !resumed,
+                "{name}"
+            );
             let sequence = view.last_sequence + 1;
             let (run_id, agent_run_id) = event.scope();
             let result = view.apply_committed(&EventEnvelope {
