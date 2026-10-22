@@ -278,27 +278,31 @@ pub(in crate::tools::guard) mod tests {
             let worker = tokio::task::spawn_blocking(move || {
                 let deadline = Instant::now() + PHASE_TIME;
                 let mut selector = Selector::new(0, deadline);
-                let phase_result = (|| {
+                if phase == "match" {
+                    match selector.add("", b"**/**/**/**/*a*a*a*a*a*a*a*a") {
+                        Ok(()) | Err(ToolError::Timeout(_)) => {}
+                        Err(error) => panic!("unexpected matcher setup failure: {error}"),
+                    }
+                }
+                selector.in_progress = Some(Box::new(move || {
+                    started.send(()).unwrap();
+                    stopped.recv_timeout(Duration::from_secs(30)).unwrap();
+                    assert!(worker_cancel.is_cancelled());
+                }));
+                if phase == "compile" {
                     selector.add(
                         "",
                         b"**/**/**/**/*a*a*a*a*a*a*a*a\n{a,b}{a,b}{a,b}{a,b}[!0-9][a-z]",
-                    )?;
-                    if phase == "compile" {
-                        selector = Selector::new(0, deadline);
-                        selector.add("", b"**/**/**/**/*a*a*a*a*a*a*a*a")?;
-                    } else {
-                        selector.excluded("nested/aaaaaaaa", false)?;
-                    }
-                    Ok::<_, ToolError>(())
-                })();
-                let _ = started.send(phase_result);
-                stopped.recv_timeout(Duration::from_secs(30)).unwrap();
-                worker_cancel.is_cancelled()
+                    )
+                } else {
+                    selector.excluded("nested/aaaaaaaa", false).map(|_| ())
+                }
             });
-            match ready.await.unwrap() {
-                Ok(()) | Err(ToolError::Timeout(_)) => {}
-                Err(error) => panic!("unexpected {phase} failure: {error}"),
-            }
+            ready.await.unwrap();
+            assert!(
+                !worker.is_finished(),
+                "{phase} call must still be in progress"
+            );
             let (mut peer, stream) = tokio::io::duplex(64);
             peer.write_all(b"SELECT_").await.unwrap();
             let mut stream = tokio::io::BufReader::new(stream);
@@ -315,10 +319,10 @@ pub(in crate::tools::guard) mod tests {
             )
             .await;
             assert!(matches!(result, Err(ToolError::Operation)));
-            assert!(
-                worker.await.unwrap(),
-                "{phase} worker observed cancellation"
-            );
+            match worker.await.unwrap() {
+                Ok(()) | Err(ToolError::Timeout(_)) => {}
+                Err(error) => panic!("unexpected {phase} failure: {error}"),
+            }
             assert!(cancellation.is_cancelled());
         }
     }

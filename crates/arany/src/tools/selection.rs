@@ -19,6 +19,8 @@ pub(super) struct Selector {
     expanded: usize,
     calls: u64,
     deadline: Instant,
+    #[cfg(test)]
+    pub(super) in_progress: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Selector {
@@ -30,6 +32,8 @@ impl Selector {
             expanded: 0,
             calls,
             deadline: deadline.min(Instant::now() + PHASE_TIME),
+            #[cfg(test)]
+            in_progress: None,
         }
     }
 
@@ -45,6 +49,10 @@ impl Selector {
     }
 
     pub(super) fn add(&mut self, directory: &str, bytes: &[u8]) -> Result<(), ToolError> {
+        #[cfg(test)]
+        if let Some(checkpoint) = self.in_progress.take() {
+            checkpoint();
+        }
         self.check_time()?;
         self.bytes = self
             .bytes
@@ -98,6 +106,10 @@ impl Selector {
     }
 
     pub(super) fn excluded(&mut self, path: &str, directory: bool) -> Result<bool, ToolError> {
+        #[cfg(test)]
+        if let Some(checkpoint) = self.in_progress.take() {
+            checkpoint();
+        }
         self.check_time()?;
         for (index, _) in path.match_indices('/') {
             if self.match_one(&path[..index], true)? {

@@ -411,9 +411,10 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         serde_json::from_value(result.get("stdout_total")?.clone()).ok()?;
     let stderr: arany::OutputTotal =
         serde_json::from_value(result.get("stderr_total")?.clone()).ok()?;
+    let stderr_text = result.get("stderr")?.as_str()?;
     let truncated = [
         (stdout, result.get("stdout")?.as_str()?),
-        (stderr, result.get("stderr")?.as_str()?),
+        (stderr, stderr_text),
     ]
     .into_iter()
     .any(|(total, text)| {
@@ -450,8 +451,15 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
     } else {
         String::new()
     };
+    let diagnostic = if observation.disposition == arany::ToolDisposition::Failed
+        && !stderr_text.trim().is_empty()
+    {
+        format!(" · stderr: {}", safe_truncate(stderr_text.trim(), 80))
+    } else {
+        String::new()
+    };
     Some(format!(
-        "exit {exit} · {count} {}{}{omissions}",
+        "exit {exit} · {count} {}{}{omissions}{diagnostic}",
         if lines == 1 { "line" } else { "lines" },
         if truncated { " (truncated)" } else { "" }
     ))
@@ -2944,6 +2952,28 @@ mod peer_row_tests {
             plain_tool_summary(&tool_summary(&tool)),
             "Command(sh )\nResult: Error: exit 7 · 1 line · 2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs"
         );
+        for (stderr, lines, preview) in [
+            ("build failed".into(), 2, "build failed".into()),
+            (
+                "\u{1b}[31mfailed\nnext".into(),
+                3,
+                r"\u{001b}[31mfailed\u{000a}next".into(),
+            ),
+            ("界".repeat(80), 2, format!("{}…", "界".repeat(39))),
+        ] {
+            let stderr: String = stderr;
+            result["stderr"] = serde_json::json!(stderr);
+            result["stderr_total"] = serde_json::json!({
+                "bytes":stderr.len(),"lines":stderr.lines().count()
+            });
+            tool.observation.as_mut().unwrap().output = result.to_string();
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!(
+                    "Command(sh )\nResult: Error: exit 7 · {lines} lines · 2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs · stderr: {preview}"
+                )
+            );
+        }
         let incomplete = r#"{"exit_code":7,"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#;
         tool.observation.as_mut().unwrap().output = incomplete.into();
         assert_eq!(
