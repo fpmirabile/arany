@@ -39,6 +39,7 @@ pub struct ScriptedProvider {
     pub cancel_at_compaction: Option<RunCancellation>,
     pub before_call: Vec<(usize, Box<dyn Fn() + Send + Sync>)>,
     pub clock_advance: Option<(usize, Duration)>,
+    pub active_time_per_call: Option<Duration>,
     pub known_input_tokens: bool,
     pub cached_input_tokens: u32,
     pub usage_override: Option<crate::Usage>,
@@ -66,6 +67,7 @@ impl ScriptedProvider {
             cancel_at_compaction: None,
             before_call: Vec::new(),
             clock_advance: None,
+            active_time_per_call: None,
             known_input_tokens: false,
             cached_input_tokens: 0,
             usage_override: None,
@@ -90,6 +92,11 @@ impl ScriptedProvider {
     /// Pauses Tokio time and advances it by `duration` while the zero-based provider call `index` is still in flight.
     pub fn with_clock_advance_before_call(mut self, index: usize, duration: Duration) -> Self {
         self.clock_advance = Some((index, duration));
+        self
+    }
+
+    pub fn with_active_time_per_call(mut self, duration: Duration) -> Self {
+        self.active_time_per_call = Some(duration);
         self
     }
 
@@ -197,6 +204,11 @@ impl Provider for ScriptedProvider {
         {
             tokio::time::pause();
             tokio::time::advance(*duration).await;
+        }
+        if let Some(duration) = self.active_time_per_call {
+            tokio::time::pause();
+            tokio::time::advance(duration).await;
+            tokio::time::resume();
         }
         let outcome = self
             .responses

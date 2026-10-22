@@ -2009,7 +2009,12 @@ mod goal_status_tests {
                     device: 1,
                     inode: 2,
                 },
-                budget: GoalBudget::default(),
+                budget: GoalBudget {
+                    max_provider_calls: Some(64),
+                    max_tokens: None,
+                    max_active_ms: Some(30 * 60 * 1000),
+                    max_runs: 16,
+                },
                 phase: GoalPhase::Implementation,
                 autonomous,
                 resource_settings: arany::ToolResourceSettings::default(),

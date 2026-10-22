@@ -27,9 +27,9 @@ pub struct GoalBudget {
 impl Default for GoalBudget {
     fn default() -> Self {
         Self {
-            max_provider_calls: Some(MAX_GOAL_PROVIDER_CALLS),
+            max_provider_calls: None,
             max_tokens: None,
-            max_active_ms: Some(MAX_GOAL_ACTIVE_MS),
+            max_active_ms: None,
             max_runs: MAX_GOAL_RUNS,
         }
     }

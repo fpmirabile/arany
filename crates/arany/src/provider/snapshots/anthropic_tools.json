@@ -594,12 +594,18 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer of milliseconds of active time, at most 1800000; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
-                "type": "integer"
+                "description": "Positive integer of milliseconds of active time, or null because the Goal sets no ceiling here.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "max_provider_calls": {
-                "description": "Positive integer of Provider calls, at most 64; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
-                "type": "integer"
+                "description": "Positive integer of Provider calls, or null because the Goal sets no ceiling here.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "max_runs": {
                 "description": "Integer 1 through 16 inclusive; the Goal pins this ceiling.",
@@ -1159,12 +1165,18 @@
             "additionalProperties": false,
             "properties": {
               "max_active_ms": {
-                "description": "Positive integer of milliseconds of active time, at most 1800000; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
-                "type": "integer"
+                "description": "Positive integer of milliseconds of active time, or null because the Goal sets no ceiling here.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "max_provider_calls": {
-                "description": "Positive integer of Provider calls, at most 64; the Goal pins this ceiling and null is refused. Prefer a lower value that fits the task.",
-                "type": "integer"
+                "description": "Positive integer of Provider calls, or null because the Goal sets no ceiling here.",
+                "type": [
+                  "integer",
+                  "null"
+                ]
               },
               "max_runs": {
                 "description": "Integer 1 through 16 inclusive; the Goal pins this ceiling.",
