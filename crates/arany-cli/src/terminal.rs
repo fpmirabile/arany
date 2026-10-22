@@ -1104,7 +1104,11 @@ impl AttachedTerminal {
     }
 
     pub fn handle_draft_detail(&mut self, composer: &mut Composer, input: TerminalInput) -> bool {
-        if self.is_linear() {
+        if self.is_linear()
+            || (self.mode == TerminalMode::Fullscreen && self.transcript_open)
+            || self.scrollback_dump
+            || self.history_mut().find_open()
+        {
             return false;
         }
         let limit = composer.paste_detail().and_then(|(_, text, _)| {
@@ -3391,10 +3395,19 @@ mod pointer_tests {
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
+                let mut composer = Composer::default();
+                let payload = "paste ".repeat(200);
+                composer.insert_paste(&payload).unwrap();
+                composer.apply(TerminalInput::Home);
                 // Handled input never reaches the composer, so the hidden draft cannot change.
                 for (pager, dump) in [(true, false), (false, true)] {
                     terminal.transcript_open = pager;
                     terminal.scrollback_dump = dump;
+                    for input in [TerminalInput::Tab, TerminalInput::Submit] {
+                        assert!(!terminal.handle_draft_detail(&mut composer, input));
+                        assert!(composer.paste_detail().is_none());
+                        assert_eq!(composer.text(), payload);
+                    }
                     terminal.clipboard_paste = Some(Ok(ClipboardContent::Text("pasted".into())));
                     assert!(
                         terminal
@@ -3408,6 +3421,17 @@ mod pointer_tests {
                     );
                 }
                 terminal.scrollback_dump = false;
+                assert!(terminal.history.handle(TerminalInput::HistoryFind, &view));
+                assert!(!terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
+                assert!(terminal.history.find_open());
+                assert!(composer.paste_detail().is_none());
+                assert!(terminal.history.handle(TerminalInput::Escape, &view));
+                terminal.mode = TerminalMode::Classic;
+                terminal.transcript_open = true;
+                assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
+                assert!(composer.paste_detail().is_some());
+                assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Escape));
+                assert_eq!(composer.text(), payload);
             });
     }
 

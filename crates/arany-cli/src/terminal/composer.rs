@@ -39,18 +39,15 @@ pub struct ComposerDraft {
 }
 
 impl ComposerDraft {
-    pub fn from_steering_note(note: String, offered: &[Self]) -> Self {
+    pub fn from_steering_note(mut note: String, offered: &[Self]) -> Self {
         let mut pastes = Vec::new();
         let mut end = note.len();
         for draft in offered.iter().rev() {
             if end == 0 {
                 break;
             }
-            let text = if draft.pastes.is_empty() && draft.text.starts_with("//") {
-                &draft.text[1..]
-            } else {
-                &draft.text
-            };
+            let escaped = objective_escape_len(&draft.text, &draft.pastes);
+            let text = &draft.text[escaped..];
             assert!(
                 note[..end].ends_with(text),
                 "withdrawn note matches offered drafts"
@@ -58,14 +55,21 @@ impl ComposerDraft {
             let offset = end - text.len();
             for paste in &draft.pastes {
                 let mut paste = paste.clone();
-                paste.range.start += offset;
-                paste.range.end += offset;
+                paste.range.start = paste.range.start - escaped + offset;
+                paste.range.end = paste.range.end - escaped + offset;
                 pastes.push(paste);
             }
             end = offset.saturating_sub(2);
         }
         assert_eq!(end, 0, "withdrawn note has retained provenance");
         pastes.sort_by_key(|paste| paste.range.start);
+        if note.starts_with('/') && pastes.first().is_none_or(|paste| paste.range.start > 0) {
+            note.insert(0, '/');
+            for paste in &mut pastes {
+                paste.range.start += 1;
+                paste.range.end += 1;
+            }
+        }
         for index in 0..pastes.len() {
             if pastes[..index].iter().any(|paste| {
                 paste.characters == pastes[index].characters && paste.suffix == pastes[index].suffix
@@ -97,6 +101,10 @@ impl ComposerDraft {
 
 fn editable_bytes(text: &str, pastes: &[TextPaste]) -> usize {
     text.len() - pastes.iter().map(|paste| paste.range.len()).sum::<usize>()
+}
+
+fn objective_escape_len(text: &str, pastes: &[TextPaste]) -> usize {
+    usize::from(text.starts_with("//") && pastes.first().is_none_or(|paste| paste.range.start >= 2))
 }
 
 fn editable_text(text: &str, pastes: &[TextPaste]) -> String {
@@ -621,6 +629,10 @@ impl Composer {
 
     pub fn submission(&self) -> Result<Submission<'_>, CommandParseError> {
         if self.has_text_pastes() {
+            let escaped = objective_escape_len(&self.text, &self.pastes);
+            if escaped > 0 {
+                return Ok(Submission::Objective(&self.text[escaped..]));
+            }
             let editable = self.editable_text();
             if editable.trim_start().starts_with('/') {
                 return Err(CommandParseError::Attachments);
@@ -1745,8 +1757,29 @@ mod tests {
         composer.insert_literal("//literal").unwrap();
         offered.push(composer.take_draft());
         let restored = ComposerDraft::from_steering_note("/literal".into(), &offered);
-        assert_eq!(restored.editable_text(), "/literal");
+        assert_eq!(restored.editable_text(), "//literal");
         assert!(restored.pastes.is_empty());
+        assert!(composer.restore_draft(restored));
+        assert_eq!(composer.submission(), Ok(Submission::Objective("/literal")));
+        composer.clear();
+        composer.insert_literal("//literal ").unwrap();
+        composer.insert_paste(&pasted).unwrap();
+        composer.insert_literal(" @visible.txt").unwrap();
+        let escaped = composer.take_draft();
+        let objective = escaped.text[1..].to_owned();
+        offered.push(escaped);
+        for note in [objective.clone(), format!("/literal\n\n{objective}")] {
+            let restored = ComposerDraft::from_steering_note(note.clone(), &offered);
+            assert_eq!(restored.pastes.len(), 1);
+            assert_eq!(restored.text[restored.pastes[0].range.clone()], pasted);
+            assert_eq!(
+                arany::mention_paths(&restored.editable_text()).unwrap(),
+                vec![std::path::PathBuf::from("visible.txt")]
+            );
+            assert!(composer.restore_draft(restored));
+            assert_eq!(composer.submission(), Ok(Submission::Objective(&note)));
+            composer.clear();
+        }
     }
 
     #[test]
@@ -1915,6 +1948,28 @@ mod tests {
         composer.apply(TerminalInput::Home);
         composer.insert_paste("/help ").unwrap();
         assert_eq!(composer.submission(), Err(CommandParseError::Attachments));
+
+        for prefix in ["//help ", "///help ", "/help ", " //help ", "/", ""] {
+            composer.clear();
+            composer.insert_literal(prefix).unwrap();
+            let payload = format!("//hidden @private.txt {}", "paste ".repeat(200));
+            composer.insert_paste(&payload).unwrap();
+            if prefix.starts_with("//") {
+                assert_eq!(
+                    composer.submission(),
+                    Ok(Submission::Objective(&composer.text()[1..]))
+                );
+            } else if prefix.is_empty() {
+                assert_eq!(composer.submission(), Ok(Submission::Objective(&payload)));
+            } else {
+                assert_eq!(composer.submission(), Err(CommandParseError::Attachments));
+            }
+            assert!(
+                arany::mention_paths(&composer.editable_text())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
 
         composer.clear();
         for _ in 0..20 {
