@@ -722,7 +722,7 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
         (2, "Chat view"),
         (3, "Goal provider calls"),
         (4, "Goal tokens"),
-        (5, "Goal active milliseconds"),
+        (5, "Goal active time"),
         (6, "Default command timeout"),
         (7, "Maximum command timeout"),
         (8, "Build memory"),
@@ -2647,7 +2647,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
         "Slash menu: tabs".to_owned(),
         "Chat view: classic".to_owned(),
         "Goal tokens: unlimited".to_owned(),
-        "Build cache bytes: 8589934592".to_owned(),
+        "Build cache: 8.0 GB".to_owned(),
     ];
     let agents = inspector_model(
         Some(1),
@@ -2755,7 +2755,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                     }
                     if name == "settings" {
                         // A visible value is whole, on its own row when the label is wide.
-                        for value in ["tabs", "classic", "unlimited", "8589934592"] {
+                        for value in ["tabs", "classic", "unlimited", "8.0 GB"] {
                             if dialog.iter().any(|row| row.contains(&value[..3])) {
                                 assert!(
                                     dialog.iter().any(|row| row.contains(value)),
@@ -2764,7 +2764,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                             }
                         }
                         assert!(
-                            dialog.iter().any(|row| row.contains("8589934592")),
+                            dialog.iter().any(|row| row.contains("8.0 GB")),
                             "focused value visible in {context}"
                         );
                     }
@@ -3991,7 +3991,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             assert_eq!(buffer_row(buffer, 1).trim_end(), "⏺ Command(sh )");
             assert_eq!(
                 buffer_row(buffer, 2).trim_end(),
-                "  ⎿ limit: timed out after 120 s; /settings raises it"
+                "  ⎿ limit: timed out after 2 min; /settings raises it"
             );
             let output = serde_json::json!({"exit_code":0,
                 "stdout":"head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
