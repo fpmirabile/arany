@@ -61,11 +61,16 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     std::fs::write(workspace.join("src/note.txt"), b"one\ntwo\n").unwrap();
     std::fs::write(workspace.join("private.txt"), b"OMITTED_CANARY").unwrap();
+    let skill = workspace.join(".agents/skills/synthetic");
+    std::fs::create_dir_all(&skill).unwrap();
+    let mut skill_body = "---\nname: synthetic\ndescription: Synthetic guidance\n---\n".to_owned();
+    skill_body.push_str(&"x".repeat(1536 - skill_body.len()));
+    std::fs::write(skill.join("SKILL.md"), skill_body).unwrap();
     let state = root.join("state");
     StateRoot::admit(&state).unwrap();
     crate::private_file(
         &state.join("tools.json"),
-        br#"{"version":1,"workspace_paths":["src"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
+        br#"{"version":1,"workspace_paths":["src",".agents/skills"],"write":false,"commands":[],"skills":[],"mcp":[]}"#,
     );
     let port = {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -114,7 +119,8 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
                     "arany_read",
                     json!({"path":"src/note.txt","offset":null,"limit":1024}),
                 ),
-                2 => call(
+                2 => call("arany_skill", json!({"name":"synthetic","resource":null})),
+                3 => call(
                     "arany_read",
                     json!({"path":"private.txt","offset":null,"limit":1024}),
                 ),
@@ -193,7 +199,9 @@ fn read_group_appends_once_and_denied_read_stays_separate() {
     let result = wait_product(attached.take());
     let transcript = String::from_utf8_lossy(&reader.join().unwrap()).replace("\r\n", "\n");
     let group = transcript
-        .matches("Read 1 file, listed 1 directory\nResult: ")
+        .matches(
+            "Read 1 file, listed 1 directory, loaded 1 Skill\nResult: 1 entry, 2 lines, 1.5 KB",
+        )
         .count();
     let denied = transcript
         .matches("Read(private.txt)\nResult: denied")
