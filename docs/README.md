@@ -20,7 +20,7 @@ Start with the task, then read the owning contract and editing rules. [AGENTS.md
 | Open defects, deferred functionality and user-owned checks | [Next steps](../NEXT_STEPS.md) |
 | Completed changes and check results | Git/PR/CI history and the implementation handoff; no living chronological ledger |
 | Testing design and trade-offs | [Testing strategy](./research/testing-strategy-for-rust-cli-harness.md); working requirements remain in [testing rules](../agents/testing.md) |
-| User instructions | [Account setup](./setup.md), [local tools](./tools.md), [development diagnostics](./development-diagnostics.md) |
+| User instructions | [Account setup](./setup.md), [local tools](./tools.md), [development diagnostics](./specs/diagnostics.md) |
 | Repeatable development procedures | [Project skills](../agents/skills/README.md) |
 | Domain vocabulary | [CONTEXT.md](../CONTEXT.md) |
 
@@ -51,6 +51,6 @@ Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then 
 
 ## Current milestone and evidence
 
-The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
+The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [focused plans](../planning/README.md#active-plans) own proposed implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
 The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session spec](./specs/session.md) and [security rules](../agents/security.md).

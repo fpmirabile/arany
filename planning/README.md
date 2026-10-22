@@ -32,6 +32,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 - `Draft`
 - `Ready` (Research and Plan gates passed; no material open questions)
 - `Ready`
+- `Ready` — Research and Plan gates passed; no material open question remains.
 - `Ready` (Plan gate passed; implementation may depend on a linked slice)
 - `In progress`
 - `Blocked`
@@ -50,10 +51,18 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
 | [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Ready: one PR for peer defaults across attached, exec and serve, retaining durable accounting and finite action/storage bounds |
 | [Large draft attachments](./large-draft-attachments/README.md) | Ready: three PRs for durable pasted text, full-capacity typed/restored drafts and clipboard/path image chips |
+| [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
+| [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
+| [Persistent worker assignment views](./worker-assignment-views/README.md) | Future C3 assignment-long Guard views, read-only assignment-time cache and MCP invocation exclusion; admission gate remains |
+| [Goal RPI](./goal-rpi/README.md) | Proposed durable phases, plan gate, bounded grilling, phase context and explicit headless RPI |
+| [Goal activity presentation](./goal-progress/README.md) | Proposed bounded agent notes and Goal activity/usage/question views |
+| [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
+| [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
+| [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Draft: three command slices; exact parser dependency awaits owner approval; placement decided with implementation gates |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Draft: typed discovery/suggestions, then Git disclosure; shares parser approval and explicitly depends on snapshot PR1 (selector and enforced preparation) |
-| [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
+| [Guarded Cargo tests](./guarded-cargo-test/README.md) | Ready: selected offline Rust environment, Guard-only IPC test ignores, bounded multicore Build profile and exact repository measurement; owner decisions accepted |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
