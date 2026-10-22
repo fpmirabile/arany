@@ -78,9 +78,7 @@ fn continuation_includes(view: &SessionView) -> Result<Vec<std::path::PathBuf>, 
         .include_paths
         .as_ref()
         .map(|paths| paths.iter().map(std::path::PathBuf::from).collect())
-        .ok_or_else(|| {
-            "Goal include paths are unknown; start a new Goal with explicit inputs".into()
-        })
+        .ok_or_else(|| arany::EngineError::GoalIncludesUnavailable.to_string())
 }
 
 pub(super) fn objective_includes(
