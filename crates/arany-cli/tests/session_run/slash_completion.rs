@@ -1107,13 +1107,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let invoke_at = transcript.len();
     input.write_all(b"\r").expect("invoke the focused Skill");
-    wait_for_after(
+    wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
-        invoke_at,
-        b"Choose a model",
+        (invoke_at, 40, 24),
+        "Choose a model",
     );
     wait_for_caret(
         &mut output,
@@ -1122,6 +1122,12 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut answered,
         invoke_at,
         12,
+    );
+    assert!(
+        crate::screen_rows(&transcript, 40, 24)
+            .iter()
+            .any(|row| row.trim() == "> /ask-matt"),
+        "model rejection must retain the complete Skill invocation"
     );
     let clear_at = transcript.len();
     input
