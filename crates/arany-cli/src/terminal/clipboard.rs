@@ -1257,12 +1257,11 @@ pub(super) mod cleanup_tests {
         );
         if case == "full" {
             use std::io::{Read, Seek};
-            use std::os::fd::AsRawFd;
 
             writing.recv_timeout(CLEANUP_TIMEOUT).unwrap();
             // Keep the warning's pipe full while exercising the normal error reporter.
             let mut sink = tempfile::tempfile().unwrap();
-            nix::unistd::dup2(sink.as_raw_fd(), std::io::stderr().as_raw_fd()).unwrap();
+            nix::unistd::dup2_stderr(&sink).unwrap();
             super::super::report_error("clipboard shutdown failed");
             sink.rewind().unwrap();
             let mut reported = String::new();
