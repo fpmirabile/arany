@@ -285,10 +285,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                         return failed_check(*source, Some(receipt));
                     }
                     Err(NativeCheckError::Journal(error)) => {
-                        return failed_check(
-                            format!("Provider check could not start: {}", error.source),
-                            error.receipt,
-                        );
+                        return failed_check_journal(*error);
                     }
                     Err(error) => return Err(error.to_string()),
                 };
@@ -325,10 +322,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     return failed_check(*source, Some(receipt));
                 }
                 Err(CustomProfileError::Journal(error)) => {
-                    return failed_check(
-                        format!("Provider check could not start: {}", error.source),
-                        error.receipt,
-                    );
+                    return failed_check_journal(*error);
                 }
                 Err(error) => return Err(error.to_string()),
             };
@@ -357,6 +351,15 @@ async fn check_signalled<T, E>(
         _ = signals.next() => { cancellation.cancel(); check.await },
         result = &mut check => result,
     })
+}
+
+fn failed_check_journal(error: arany::CheckOpenError) -> Result<CommandOutput, String> {
+    let reason = if error.receipt.is_some() {
+        "Provider check journal failed"
+    } else {
+        "Provider check could not start"
+    };
+    failed_check(format!("{reason}: {}", error.source), error.receipt)
 }
 
 fn failed_check(
