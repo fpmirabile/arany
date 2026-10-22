@@ -3342,7 +3342,7 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         assert_eq!(released.stdout, b"");
         assert_eq!(
             released.stderr,
-            b"error: \"missing.txt\": explicit include does not exist\n"
+            b"error: \"held-include.txt\": explicit include does not exist\n"
         );
 
         let store =
