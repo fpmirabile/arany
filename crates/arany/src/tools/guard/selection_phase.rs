@@ -272,38 +272,38 @@ pub(in crate::tools::guard) mod tests {
             let mut cancellation = Cancellation::new();
             let worker_cancel = cancellation.clone();
             let (started, ready) = tokio::sync::oneshot::channel();
+            let (stop, stopped) = std::sync::mpsc::sync_channel(1);
             let worker = tokio::task::spawn_blocking(move || {
-                let mut started = Some(started);
-                let mut calls = 0;
                 let deadline = Instant::now() + PHASE_TIME;
                 let mut selector = Selector::new(0, deadline);
-                selector
-                    .add(
+                let phase_result = (|| {
+                    selector.add(
                         "",
                         b"**/**/**/**/*a*a*a*a*a*a*a*a\n{a,b}{a,b}{a,b}{a,b}[!0-9][a-z]",
-                    )
-                    .unwrap();
-                while !worker_cancel.is_cancelled() && Instant::now() < deadline {
+                    )?;
                     if phase == "compile" {
                         selector = Selector::new(0, deadline);
-                        selector.add("", b"**/**/**/**/*a*a*a*a*a*a*a*a").unwrap();
+                        selector.add("", b"**/**/**/**/*a*a*a*a*a*a*a*a")?;
                     } else {
-                        selector.excluded("nested/aaaaaaaa", false).unwrap();
+                        selector.excluded("nested/aaaaaaaa", false)?;
                     }
-                    calls += 1;
-                    if let Some(started) = started.take() {
-                        let _ = started.send(());
-                    }
-                }
-                calls
+                    Ok::<_, ToolError>(())
+                })();
+                let _ = started.send(phase_result);
+                stopped.recv_timeout(Duration::from_secs(30)).unwrap();
+                worker_cancel.is_cancelled()
             });
-            ready.await.unwrap();
+            match ready.await.unwrap() {
+                Ok(()) | Err(ToolError::Timeout(_)) => {}
+                Err(error) => panic!("unexpected {phase} failure: {error}"),
+            }
             let (mut peer, stream) = tokio::io::duplex(64);
             peer.write_all(b"SELECT_").await.unwrap();
             let mut stream = tokio::io::BufReader::new(stream);
             let cancel = cancellation.clone();
             let operation = async {
                 cancel.cancel();
+                stop.send(()).unwrap();
                 receive(&mut stream, tokio::time::Instant::now() + PHASE_TIME).await
             };
             let result = wait(
@@ -313,7 +313,10 @@ pub(in crate::tools::guard) mod tests {
             )
             .await;
             assert!(matches!(result, Err(ToolError::Operation)));
-            assert!(worker.await.unwrap() > 0);
+            assert!(
+                worker.await.unwrap(),
+                "{phase} worker observed cancellation"
+            );
             assert!(cancellation.is_cancelled());
         }
     }

@@ -63,7 +63,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-preparation-runtime-grants-ro-attested");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -719,7 +719,10 @@ fn unit_command(
         &runtime.guard_executable,
     );
     if preparation {
-        command.args(["--bind"]).arg(seed_path).arg("/prepared");
+        command
+            .args(["--bind"])
+            .arg(seed_path)
+            .arg(PREPARATION_ROOT);
     }
     for directory in runtime_directories {
         command.args(["--dir"]).arg(directory);
@@ -1136,6 +1139,8 @@ pub(super) async fn execute_inner(
     .await
 }
 
+const PREPARATION_ROOT: &str = "/prepared";
+
 const PROFILE_MOUNT_TARGETS: [&str; 14] = [
     RUNTIME_ROOT,
     "/lib",
@@ -1156,6 +1161,7 @@ const PROFILE_MOUNT_TARGETS: [&str; 14] = [
 fn reject_profile_overlap(target: &Path) -> Result<(), ToolError> {
     if PROFILE_MOUNT_TARGETS
         .iter()
+        .chain(std::iter::once(&PREPARATION_ROOT))
         .map(Path::new)
         .any(|fixed| target.starts_with(fixed) || fixed.starts_with(target))
     {
@@ -1543,6 +1549,10 @@ pub(super) fn prepare_main(task: &Task, stdin: &mut impl Read) -> Result<(), Too
     {
         return Err(ToolError::ChangedInput);
     }
+    verify_runtime_mounts(
+        &task.config.runtime_grants,
+        task.intent.limits.cache_bytes > 0,
+    )?;
     harden()?;
     profile::install_non_spawning()?;
     let ready = super::Ready {
@@ -1599,12 +1609,16 @@ async fn prepare_inputs(
         kill: None,
         limits: Some(selection_limits(&intent.limits)),
     };
+    let (runtime_directories, mounts) = runtime_mounts(
+        &runtime.config.runtime_grants,
+        intent.limits.cache_bytes > 0,
+    )?;
     let filesystem = UnitFilesystem {
         preparation: true,
         seed_path,
         seed_dir,
-        runtime_directories: Vec::new(),
-        mounts: Vec::new(),
+        runtime_directories,
+        mounts,
     };
     let mut command = unit_command(runtime, intent, &unit.name, "/usr/bin:/bin", filesystem);
     permit.launching()?;
@@ -1931,6 +1945,8 @@ mod tests {
             "/dev/shm",
             "/scratch/rust",
             "/workspace",
+            "/prepared",
+            "/prepared/.nvm/versions/node/v22.3.0",
         ] {
             assert!(
                 reject_profile_overlap(Path::new(target)).is_err(),
