@@ -1810,7 +1810,7 @@ done
             command
                 .args([
                     "-c",
-                    "printf once > effect; printf credential-canary; printf ready >&0; read -r release",
+                    "exec 3<&0; (printf once > effect; printf credential-canary; printf ready >&3; read -r release <&3) & exec 0<&- 3<&-; wait",
                 ])
                 .current_dir(root.path())
                 .env_clear()
@@ -1840,6 +1840,14 @@ done
             let (observation, ()) = tokio::join!(
                 supervise(command, intent.clone(), "0".repeat(64), cancellation),
                 gate
+            );
+            let mut eof = [0; 1];
+            assert_eq!(
+                tokio::time::timeout(Duration::from_secs(30), ready.read(&mut eof))
+                    .await
+                    .expect("controlled descendant must close its socket")
+                    .unwrap(),
+                0
             );
             assert_eq!(observation.disposition, ToolDisposition::Uncertain);
             assert!(observation.valid() && observation.stops_run());
