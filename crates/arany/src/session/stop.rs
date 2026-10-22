@@ -46,6 +46,16 @@ impl SessionView {
         let stop = self
             .run_stop(run)
             .or_else(|| run.failure.map(RunStop::Failed))?;
+        if run.status == RunStatus::Finished
+            && stop == RunStop::Paused
+            && self.goals.iter().any(|goal| {
+                goal.autonomous
+                    && goal.status == GoalStatus::Running
+                    && goal.run_ids.contains(&run.id)
+            })
+        {
+            return None;
+        }
         let call = run.primary().and_then(|primary| {
             primary
                 .provider_calls
@@ -531,6 +541,13 @@ mod tests {
                 Some(RunStop::Failed(RunFailure::ProposalRefused)),
             ),
             (RunStatus::Finished, GoalStatus::Completed, false, None),
+            (RunStatus::Finished, GoalStatus::Running, false, None),
+            (
+                RunStatus::Finished,
+                GoalStatus::Interrupted,
+                false,
+                Some(RunStop::Paused),
+            ),
         ] {
             let mut run = unanswered_run(status);
             run.objective = "PRIVATE_OBJECTIVE".into();

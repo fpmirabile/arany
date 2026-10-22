@@ -7246,6 +7246,62 @@ mod goal_replay_tests {
         apply(&mut view, continuation).expect("all declared requests observed");
     }
 
+    #[test]
+    fn compaction_before_outcome_correction_requires_the_first_settled_failure() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let read = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &read)).unwrap();
+        apply(&mut view, tool_finished(run, agent, &read, b"one")).unwrap();
+        let reservation = Event::GoalCompactionCallReserved {
+            goal_id: goal,
+            run_id: run,
+            active_ceiling_ms: 0,
+        };
+        for attempt in 1..=2 {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            let mut failure = record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::InvalidResponse,
+                Some(0),
+            );
+            failure.failure_reason = Some(crate::provider::ProviderFailureReason::OutcomeContract);
+            apply(
+                &mut view,
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: agent,
+                    record: failure,
+                },
+            )
+            .unwrap();
+            if attempt == 1 {
+                let mut compacting = view.clone();
+                apply(&mut compacting, reservation.clone()).expect("compaction before correction");
+                assert_eq!(compacting.goals[0].compaction_call_reserved, Some(run));
+                assert_eq!(
+                    compacting.goals[0].provider_calls,
+                    view.goals[0].provider_calls + 1
+                );
+                assert!(
+                    compacting.runs[0]
+                        .primary()
+                        .unwrap()
+                        .outcome_correction_pending()
+                );
+                let mut unsettled = view.clone();
+                unsettled.runs[0].tools[0].observation = None;
+                assert!(rejected(&unsettled, reservation.clone()));
+            } else {
+                assert!(
+                    rejected(&view, reservation.clone()),
+                    "correction is exhausted"
+                );
+            }
+        }
+    }
+
     fn compacting_session() -> (SessionView, GoalId, RunId) {
         let (mut view, goal, run, agent) = primary_tool_session(true);
         let (first, second) = (
