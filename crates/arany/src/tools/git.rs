@@ -14,6 +14,7 @@ use super::types::{
 use cap_fs_ext::DirExt;
 use cap_std::fs::Dir;
 use serde_json::{Value, json};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
@@ -474,6 +475,25 @@ fn open_optional(git_dir: &Dir, name: &str) -> Result<Option<std::fs::File>, Too
 
 // A branch's object name, from its loose file or else `packed-refs`, never following links.
 fn resolve(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
+    if let Some(oid) = loose_ref(git_dir, name)? {
+        return Ok(Some(oid));
+    }
+    let Some(packed) = read_optional(git_dir, "packed-refs", MAX_SNAPSHOT_BYTES)? else {
+        return Ok(None);
+    };
+    for line in packed.split(|byte| *byte == b'\n') {
+        if let Some((oid, reference)) = std::str::from_utf8(line)
+            .ok()
+            .and_then(|line| line.split_once(' '))
+            && reference == name
+        {
+            return object_id(oid.as_bytes()).map(|oid| Some(oid.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+fn loose_ref(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
     let (parent, leaf) = name.rsplit_once('/').ok_or(ToolError::Operation)?;
     let mut directory = git_dir.try_clone().map_err(|_| ToolError::Operation)?;
     let mut loose = true;
@@ -490,18 +510,6 @@ fn resolve(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
     if loose && let Some(bytes) = read_optional(&directory, leaf, REF_BYTES)? {
         let oid = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
         return object_id(oid).map(|oid| Some(oid.to_owned()));
-    }
-    let Some(packed) = read_optional(git_dir, "packed-refs", MAX_SNAPSHOT_BYTES)? else {
-        return Ok(None);
-    };
-    for line in packed.split(|byte| *byte == b'\n') {
-        if let Some((oid, reference)) = std::str::from_utf8(line)
-            .ok()
-            .and_then(|line| line.split_once(' '))
-            && reference == name
-        {
-            return object_id(oid.as_bytes()).map(|oid| Some(oid.to_owned()));
-        }
     }
     Ok(None)
 }
@@ -1254,7 +1262,59 @@ enum BranchCompletion {
     Failed(Value),
 }
 
+type PackedUpstreams = BTreeMap<String, &'static str>;
+
 impl BranchRead<'_> {
+    fn packed_upstreams(
+        &self,
+        config: Option<&UpstreamConfig>,
+        listed: &[&[u8]],
+    ) -> Result<PackedUpstreams, ToolError> {
+        let mut targets: PackedUpstreams = listed
+            .iter()
+            .filter_map(|record| {
+                let name = std::str::from_utf8(record.split(|byte| *byte == 0).next()?).ok()?;
+                let branch = name.strip_prefix("refs/heads/")?;
+                let target = config?.upstream(branch).ok()??;
+                Some((target, "gone"))
+            })
+            .collect();
+        if targets.is_empty() {
+            return Ok(targets);
+        }
+        if tokio::time::Instant::now() >= self.deadline {
+            return Err(ToolError::Timeout(String::new()));
+        }
+        let packed =
+            match read_optional(&self.repository.git_dir, "packed-refs", MAX_SNAPSHOT_BYTES) {
+                Ok(packed) => packed.unwrap_or_default(),
+                Err(_) => {
+                    targets
+                        .values_mut()
+                        .for_each(|status| *status = "unsupported");
+                    return Ok(targets);
+                }
+            };
+        for line in packed.split(|byte| *byte == b'\n') {
+            if tokio::time::Instant::now() >= self.deadline {
+                return Err(ToolError::Timeout(String::new()));
+            }
+            if let Some((oid, name)) = std::str::from_utf8(line)
+                .ok()
+                .and_then(|line| line.split_once(' '))
+                && let Some(status) = targets.get_mut(name)
+                && *status == "gone"
+            {
+                *status = if object_id(oid.as_bytes()).is_ok() {
+                    "present"
+                } else {
+                    "unsupported"
+                };
+            }
+        }
+        Ok(targets)
+    }
+
     async fn capture(
         &self,
         argv: &[String],
@@ -1347,9 +1407,19 @@ impl BranchRead<'_> {
         comparison: Option<&Value>,
         rows: &mut Rows,
     ) -> Result<BranchCompletion, ToolError> {
+        if tokio::time::Instant::now() >= self.deadline {
+            return Ok(BranchCompletion::TimedOut);
+        }
         let upstreams = upstream_config(&self.repository.config);
         let listed = records(&list.stdout, b'\n', list.overflow)?;
         let mut truncated = list.overflow || listed.len() > max_count as usize;
+        let packed = match self.packed_upstreams(
+            upstreams.as_ref(),
+            &listed[..listed.len().min(max_count as usize)],
+        ) {
+            Err(ToolError::Timeout(_)) => return Ok(BranchCompletion::TimedOut),
+            result => result?,
+        };
         for record in listed.into_iter().take(max_count as usize) {
             if tokio::time::Instant::now() >= self.deadline {
                 return Ok(BranchCompletion::TimedOut);
@@ -1358,6 +1428,7 @@ impl BranchRead<'_> {
                 record,
                 upstreams.as_ref(),
                 &self.repository.git_dir,
+                &packed,
                 comparison.is_some(),
             )?;
             truncated |= row["name_truncated"] == true || row["symbolic_target_truncated"] == true;
@@ -1375,7 +1446,7 @@ impl BranchRead<'_> {
                 break;
             }
             if enrich {
-                match self.enrich(&mut row, comparison).await {
+                match self.enrich(&mut row, comparison, &mut truncated).await {
                     Ok(Some(failed)) => return Ok(BranchCompletion::Failed(failed)),
                     Ok(None) => {}
                     Err(ToolError::Timeout(_)) => {
@@ -1401,6 +1472,7 @@ impl BranchRead<'_> {
         &self,
         row: &mut Value,
         comparison: Option<&Value>,
+        truncated: &mut bool,
     ) -> Result<Option<Value>, ToolError> {
         let deadline = self
             .deadline
@@ -1428,11 +1500,15 @@ impl BranchRead<'_> {
                 deadline,
             )
             .await?;
-        if let Some(failed) = self.failed(&capture) {
+        *truncated |= capture.overflow;
+        if !capture.overflow
+            && let Some(failed) = self.failed(&capture)
+        {
             return Ok(Some(failed));
         }
         let subject = tip_subject(
             &capture.stdout,
+            capture.overflow,
             &oid,
             self.hidden,
             !self.repository.links.contains(&"shallow"),
@@ -1488,6 +1564,7 @@ fn branch_row(
     raw: &[u8],
     config: Option<&UpstreamConfig>,
     git_dir: &Dir,
+    packed: &PackedUpstreams,
     comparison: bool,
 ) -> Result<Value, ToolError> {
     let fields: Vec<_> = raw.split(|byte| *byte == 0).collect();
@@ -1504,7 +1581,7 @@ fn branch_row(
     } else {
         Some(std::str::from_utf8(symbolic).map_err(|_| ToolError::Operation)?)
     };
-    let (upstream, status) = upstream_status(config, git_dir, name);
+    let (upstream, status) = upstream_status(config, git_dir, packed, name);
     let commit = *kind == b"commit";
     let mut row = json!({"name": bounded_ref_name(name), "name_truncated": name.len() > REF_BYTES,
         "kind": if !commit { "non-commit" } else if local { "local" } else { "remote" },
@@ -1547,23 +1624,30 @@ fn branch_counts(raw: &[u8]) -> Result<Option<(u64, u64)>, ToolError> {
 
 fn tip_subject(
     raw: &[u8],
+    overflow: bool,
     oid: &str,
     hidden: &HiddenPaths,
     history_complete: bool,
 ) -> Result<Option<String>, ToolError> {
-    let visible = records(raw, b'\n', false)?
+    let visible = records(raw, b'\n', overflow)?
         .into_iter()
         .filter(|record| !record.contains(&0))
         .any(|path| {
             std::str::from_utf8(path)
                 .is_ok_and(|path| !path.is_empty() && !path.starts_with('"') && shown(path, hidden))
         });
-    let log = log_output(raw, false, CAPTURE_BYTES, 1, hidden)?;
+    let log = log_output(raw, overflow, CAPTURE_BYTES, 1, hidden)?;
     let tip = log["commits"]
         .as_array()
         .and_then(|rows| rows.first())
-        .filter(|tip| tip["oid"] == oid)
-        .ok_or(ToolError::Operation)?;
+        .filter(|tip| tip["oid"] == oid);
+    let Some(tip) = tip else {
+        return if overflow {
+            Ok(None)
+        } else {
+            Err(ToolError::Operation)
+        };
+    };
     let visible = visible
         && (history_complete
             || tip["parents"]
@@ -1576,15 +1660,19 @@ fn tip_subject(
 fn upstream_status(
     config: Option<&UpstreamConfig>,
     git_dir: &Dir,
+    packed: &PackedUpstreams,
     name: &str,
 ) -> (Option<String>, &'static str) {
     let Some(branch) = name.strip_prefix("refs/heads/") else {
         return (None, "not_applicable");
     };
     match config.map(|config| config.upstream(branch)) {
-        Some(Ok(Some(target))) => match resolve(git_dir, &target) {
+        Some(Ok(Some(target))) => match loose_ref(git_dir, &target) {
             Ok(Some(_)) => (Some(target), "present"),
-            Ok(None) => (Some(target), "gone"),
+            Ok(None) => match packed.get(&target).copied().unwrap_or("unsupported") {
+                "unsupported" => (None, "unsupported"),
+                status => (Some(target), status),
+            },
             Err(_) => (None, "unsupported"),
         },
         Some(Ok(None)) => (None, "unavailable"),
@@ -2226,10 +2314,45 @@ pub(super) mod tests {
         let repository = inspect(&workspace).unwrap().ok().unwrap();
         let name = format!("refs/heads/{}", "\u{00e9}".repeat(REF_BYTES));
         let raw = format!("{name}\0{}\0 \0\0commit", main["oid"].as_str().unwrap());
-        let clipped = branch_row(raw.as_bytes(), None, &repository.git_dir, false).unwrap();
+        let clipped = branch_row(
+            raw.as_bytes(),
+            None,
+            &repository.git_dir,
+            &PackedUpstreams::new(),
+            false,
+        )
+        .unwrap();
         assert_eq!(clipped["name_truncated"], true);
         let shown = clipped["name"].as_str().unwrap();
         assert!(shown.len() <= REF_BYTES && name.starts_with(shown));
+    }
+
+    fn import_refs(workspace: &Path, home: &Path, import: &str) {
+        let input = home.join("refs.import");
+        std::fs::write(&input, import).unwrap();
+        let output = std::process::Command::new(discover().unwrap().executable)
+            .args([
+                "-c",
+                "maintenance.auto=false",
+                "-c",
+                "gc.auto=0",
+                "fast-import",
+                "--quiet",
+            ])
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .current_dir(workspace)
+            .stdin(std::fs::File::open(input).unwrap())
+            .bounded_output_with_input()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture import: {:?}",
+            output.status
+        );
     }
 
     #[test]
@@ -2246,31 +2369,7 @@ pub(super) mod tests {
             }
             import.push('\n');
         }
-        let input = temp.path().join("history.import");
-        std::fs::write(&input, import).unwrap();
-        let output = std::process::Command::new(discover().unwrap().executable)
-            .args([
-                "-c",
-                "maintenance.auto=false",
-                "-c",
-                "gc.auto=0",
-                "fast-import",
-                "--quiet",
-            ])
-            .env_clear()
-            .env("HOME", &home)
-            .env("PATH", "/usr/bin:/bin")
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env("GIT_CONFIG_GLOBAL", "/dev/null")
-            .current_dir(&workspace)
-            .stdin(std::fs::File::open(input).unwrap())
-            .bounded_output_with_input()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "fixture import: {:?}",
-            output.status
-        );
+        import_refs(&workspace, &home, &import);
         let result = run_call(
             &workspace,
             &scratch(temp.path(), 509),
@@ -2424,6 +2523,77 @@ pub(super) mod tests {
                 .and_then(|config| config.upstream("topic"));
             assert_eq!(actual, expected, "{label}");
         }
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let home = temp.path().join("home");
+        let head = host_git_output(&workspace, &home, &["rev-parse", "HEAD"]);
+        let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        host_git(
+            &workspace,
+            &home,
+            &["update-ref", "refs/remotes/review/topic", &head],
+        );
+        host_git(&workspace, &home, &["pack-refs", "--all"]);
+        let config = upstream_config(format!("{direct}[remote \"review\"]\nfetch = refs/heads/*:refs/remotes/review/*\n[branch \"alias\"]\nremote = review\nmerge = refs/heads/topic\n").as_bytes()).unwrap();
+        let repository = inspect(&workspace).unwrap().ok().unwrap();
+        let hidden = none();
+        let read = BranchRead {
+            git: Path::new("/no-dispatch"),
+            env: &[],
+            workspace: &workspace,
+            deadline: tokio::time::Instant::now() + MAX_GIT_RUNTIME,
+            hidden: &hidden,
+            repository: &repository,
+            budget: 16 * 1024,
+        };
+        let listed: &[&[u8]] = &[b"refs/heads/topic\0", b"refs/heads/alias\0"];
+        let packed = read.packed_upstreams(Some(&config), listed).unwrap();
+        assert_eq!(packed.len(), 1);
+        std::fs::remove_file(workspace.join(".git/packed-refs")).unwrap();
+        for branch in ["refs/heads/topic", "refs/heads/alias"] {
+            assert_eq!(
+                upstream_status(Some(&config), &repository.git_dir, &packed, branch),
+                (Some("refs/remotes/review/topic".into()), "present")
+            );
+        }
+        std::fs::write(
+            workspace.join(".git/packed-refs"),
+            "invalid refs/remotes/review/topic\n",
+        )
+        .unwrap();
+        let malformed = read.packed_upstreams(Some(&config), listed).unwrap();
+        assert_eq!(
+            upstream_status(
+                Some(&config),
+                &repository.git_dir,
+                &malformed,
+                "refs/heads/topic"
+            ),
+            (None, "unsupported")
+        );
+        let loose = workspace.join(".git/refs/remotes/review/topic");
+        std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
+        std::fs::write(&loose, format!("{head}\n")).unwrap();
+        assert_eq!(
+            upstream_status(
+                Some(&config),
+                &repository.git_dir,
+                &malformed,
+                "refs/heads/topic"
+            ),
+            (Some("refs/remotes/review/topic".into()), "present")
+        );
+        std::fs::remove_file(&loose).unwrap();
+        std::os::unix::fs::symlink(workspace.join("src/main.rs"), &loose).unwrap();
+        assert_eq!(
+            upstream_status(
+                Some(&config),
+                &repository.git_dir,
+                &packed,
+                "refs/heads/topic"
+            ),
+            (None, "unsupported")
+        );
     }
 
     #[test]
@@ -2454,6 +2624,45 @@ pub(super) mod tests {
         host_git(&workspace, &home, &["commit", "-q", "-m", "initial"]);
         let head = host_git_output(&workspace, &home, &["rev-parse", "HEAD"]);
         let head = String::from_utf8(head.stdout).unwrap().trim().to_owned();
+        let mut import = format!(
+            "blob\nmark :1\ndata 8\nvisible\n\ncommit refs/heads/wide\ncommitter Arany Test <test@example.invalid> 1700000000 +0000\ndata 8\nwide tip\nfrom {head}\n"
+        );
+        for index in 0..5000 {
+            import.push_str(&format!(
+                "M 100644 :1 path-{index:05}-{}.txt\n",
+                "a".repeat(64)
+            ));
+        }
+        import.push('\n');
+        import_refs(&workspace, &home, &import);
+        let wide = run_call(
+            &workspace,
+            &scratch(temp.path(), 605),
+            &branches(None, Some("main"), Some(2)),
+        );
+        assert_eq!(wide["truncated"], true);
+        assert_eq!(wide["timed_out"], false);
+        let rows = wide["branches"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0]["subject"], "initial");
+        assert_eq!(rows[1]["name"], "refs/heads/wide");
+        assert_eq!(rows[1]["subject"], "wide tip");
+        assert_eq!(rows[1]["ahead"], 1);
+        assert_eq!(rows[1]["behind"], 0);
+        let prefix = format!(
+            "{head}\0\0Arany\0{}\0private subject\n\n.env\ncut-path",
+            1700000000
+        );
+        assert!(
+            tip_subject(prefix.as_bytes(), true, &head, &none(), true)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            tip_subject(b"cut-header", true, &head, &none(), true)
+                .unwrap()
+                .is_none()
+        );
         for index in 0..257 {
             std::fs::write(
                 workspace.join(format!(".git/refs/heads/branch-{index:03}")),

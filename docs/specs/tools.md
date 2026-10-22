@@ -633,19 +633,20 @@ Remote-tracking refs are local observations that may be stale; no fetch or
 network occurs. Shallow repositories return `history_complete:false`, so
 counts describe only available history. Missing objects or an unresolved base
 fail explicitly. A concurrent ref change does not change a captured OID; this
-is not an atomic repository snapshot. One sorted `for-each-ref` reads at most
-257 rows, including one lookahead, from the selected namespaces. At most 256
-rows are enriched, sequentially, with at most one subject and one comparison
+is not an atomic repository snapshot. One sorted `for-each-ref` enumerates the
+selected namespaces within the [shared read limits](#limits-and-failure-behavior).
+Returned rows are enriched sequentially, with at most one subject and one comparison
 invocation per returned row, plus one base resolution per action. Each capture
-is discarded after projection. All invocations share the existing 20-second
-action ceiling; branch reads reserve one second for teardown and result delivery.
+is discarded after projection. All invocations share the action ceiling;
+branch reads reserve one second for teardown and result delivery.
 Reaching the remaining work deadline returns completed rows with `truncated:true`
 and `timed_out:true`, preserving captured OIDs and any already resolved base.
 A deadline during enumeration or base resolution returns an empty truncated
 listing; `comparison_base` is null if resolution never completed, with the
 requested revision still recorded in the intent. A timeout is not an empty
-successful inspection of the whole repository. Per-invocation capture remains
-256 KiB stdout/4 KiB stderr. Complete rows fit the Tool result budget; overflow
+successful inspection of the whole repository. An overflowing tip capture keeps
+only complete evidence lines; without visible evidence its subject stays withheld.
+Complete rows fit the Tool result budget; overflow
 or clipped names returns `truncated:true`, never partial rows or invented counts.
 Cancellation, teardown and unknown completion follow the existing Guard contract:
 only confirmed cleanup permits a partial result, while a missing receipt remains
@@ -660,7 +661,9 @@ ref alphabet are supported. Remote `.` names a local ref; another remote needs
 one unambiguous positive literal or single-wildcard fetch mapping, optionally
 prefixed with `+`. Resolved targets are checked through the shared no-follow
 ref reader (1 KiB loose refs, at most 32 MiB packed refs); an unsupported ref
-shape or over-bound lookup is reported unsupported. No URL, helper or executable
+shape or over-bound lookup is reported unsupported. Requested packed targets are
+read and indexed once per action, with loose refs taking precedence.
+No URL, helper or executable
 setting is loaded or passed as Git configuration. `upstream_status` is:
 
 - `present`: the direct association resolves to a present target ref;
