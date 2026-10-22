@@ -1572,7 +1572,9 @@ mod tests {
     fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
         use crate::test_process::BoundedOutput;
 
-        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let _native_gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = tempfile::tempdir().unwrap();
         let workspace = fixture.path().join("workspace");
         let home = fixture.path().join("home");
@@ -1658,11 +1660,21 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        std::thread::Builder::new()
-            .spawn(|| ())
+        let worker = std::thread::Builder::new()
+            .spawn(|| std::fs::read_link("/proc/thread-self").expect("probe worker task path"))
             .unwrap()
             .join()
             .unwrap();
+        // Joining can finish before the kernel removes the worker from /proc/self/task.
+        let worker = Path::new("/proc").join(worker);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while worker.try_exists().expect("probe worker task lookup") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "joined probe worker still listed in /proc/self/task after 2 seconds"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
         harden().expect("production Guard hardening");
         let own = thread_status(Path::new("/proc/thread-self/status"))
             .unwrap()
@@ -2257,7 +2269,9 @@ mod tests {
         ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
     )]
     fn native_runtime_mount_attestation() {
-        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let _native_gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
