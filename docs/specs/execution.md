@@ -169,7 +169,8 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | `RunFinished` | 9 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 10 |
-| `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
+| `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
+| `GoalStarted`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 6 |
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
@@ -270,6 +271,8 @@ The complete lifecycle has a 240-second ceiling; requests end at least five seco
 
 ### Journal migration
 
+`GoalFinished` 7 → 8 adds `budget_refusal: null`; version 7 did not record refused quantities. A source payload already containing that field refuses. No runtime compatibility reader or invented historical reservation is introduced.
+
 `store::migrate` registers SQLite schema steps keyed by source version, each with its exact source schema, and JSON-level `Value -> Value` Event payload steps keyed by (kind, source version). Each payload step also declares its source version's canonical serialization. The floors are schema 4 and the payload versions schema 5 shipped with; history below a floor is archived. The glob steps keep each payload's bytes and refuse a source payload that already names `glob`; the Git write steps likewise refuse one naming a typed Git write. The MultiEdit steps preserve the preceding payload bytes and refuse a source row already naming the `multiedit` call or worker capability. `ToolPermissionDecided` 4 → 5 adds `typed_prefix_rule` to its closed `source` and `basis`: source payloads keep their bytes, and a version-4 payload naming it is forged and refuses. The primary generic-host steps follow the typed host Git steps for their shared Event kinds, preserving admitted typed host metadata and receipts; `ToolPermissionDecided` advances from 5 to 6. The generic-host migration steps preserve source payloads without generic-host authority byte-for-byte; histories whose old host or child-hook semantics cannot prove current authority are archived intact with the existing notice, never converted into live grants. `RunStarted` 18 → 19 turns the single root `instruction_digest` into one root source (`directory` empty, `file` null because version 18 did not record which name supplied it) or none, with an empty `launch_directory`, because version 18 read only the root; a source payload that already names sources or a launch directory refuses. `RunStarted` 19 → 20 adds `user_instruction_digest: null`, because version 19 loaded no State `AGENTS.md`; a payload that already names the field refuses, and the step never reads the current file. Steps run only in this upgrade path, never in runtime decoders or the reducer. A step adds a field only with a value the old payload proves, otherwise it refuses; it never adds authority, grants or trust. A test fails when any schema or payload version above its floor lacks a registered step and canonical fixture for each adjacent edge, and a multi-step chain must decode at the current version.
 
 Schema 5 → 6 adds the check stream/indexes and CheckId links to custom/native evidence. Its exact-source fixture and registered step clear these derived caches because they prove no journaled check; no historical diagnostic Events are fabricated. Current Session payload bytes and prefix digests remain identical. The schema-4 chain composes through 5; below-floor and unsupported history retain the archive policy below.
@@ -305,6 +308,7 @@ Finished records its own rewind ID, closed `restored`, `conflict`, `denied`, `fa
 | Event payload, default | 64 KiB | append refused |
 | `MessageAccepted` | 656 KiB, with inline PNG bytes (an empty list for text) | append refused |
 | `GoalStarted` | 400 KiB | append refused |
+| `GoalFinished` | [Goal report bound](./goals.md#lifecycle-budgets-and-recovery) + [budget refusal bound](./goals.md#budget-refusal-feedback) + 512 bytes | append refused |
 | `ToolStarted` | 512 KiB: the complete intent, including Write, Edit or MultiEdit arguments at the [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves one observation slot for each intent it admits | append refused |
 | `HookFinished` | 528 KiB: twice the [Tool result ceiling](tools.md#limits-and-failure-behavior) plus the 400 KiB [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves an observation slot per matched handler | append refused |
 | `ToolFinished` | 528 KiB + 512 bytes of checkpoint metadata: twice the [Tool result ceiling](tools.md#limits-and-failure-behavior) plus the 400 KiB [Tool argument ceiling](tools.md#limits-and-failure-behavior); admission reserves it only for the `ToolFinished` slots an action may append | append refused |

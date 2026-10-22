@@ -319,21 +319,17 @@ impl RunLoop<'_> {
             }
         }
         let mut summary_limit = context_limit.saturating_sub(reserve);
-        let window = self
+        let mut window = self
             .select_compaction_window(request, summary_limit)
             .await?;
-        let window = match window {
-            Some(window) => window,
-            None => {
-                summary_limit = context_limit;
-                let Some(window) = self
-                    .select_compaction_window(request, summary_limit)
-                    .await?
-                else {
-                    return Ok(());
-                };
-                window
-            }
+        if window.is_none() {
+            summary_limit = context_limit;
+            window = self
+                .select_compaction_window(request, summary_limit)
+                .await?;
+        }
+        let Some(window) = window else {
+            return Ok(());
         };
         if !self.ledger().admits(Action::Compaction) {
             return Ok(());
@@ -349,13 +345,15 @@ impl RunLoop<'_> {
             )
             .await?
             .is_some()
+            || self.hook_requested_stop()?
         {
             return Ok(());
         }
-        if self.hook_requested_stop()? {
-            return Ok(());
-        }
-        let reservation = match self.ledger().reserve(Action::Compaction).await {
+        let reservation = match self
+            .ledger()
+            .reserve(Action::Compaction, self.primary_id)
+            .await
+        {
             Ok(reservation) => reservation,
             Err(EngineError::GoalBudgetExhausted) => return Ok(()),
             Err(error) => return Err(error),
@@ -365,7 +363,11 @@ impl RunLoop<'_> {
         }
         let active_segment = match deadline {
             Some(_) => None,
-            None => Some(self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?),
+            None => Some(self.reserve_active_segment(
+                COMPACTION_CALL_DEADLINE,
+                crate::session::BudgetAction::Compaction,
+                self.primary_id,
+            )?),
         };
         let deadline = deadline
             .or_else(|| active_segment.as_ref().map(super::ActiveSegment::deadline))

@@ -182,6 +182,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
         variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
         EventStep {
+            kind: "GoalFinished",
+            from: 7,
+            transform: crate::session::goal_finished_v7_to_v8,
+            canonical: crate::session::goal_finished_v7_payload,
+        },
+        EventStep {
             kind: "ToolFinished",
             from: 24,
             transform: |value| crate::session::add_command_selection("ToolFinished", value),

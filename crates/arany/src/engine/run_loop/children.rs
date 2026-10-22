@@ -920,7 +920,11 @@ impl RunLoop<'_> {
                 .expect("child chain"),
             count.div_ceil(parallel.max(1)),
         );
-        let segment = match self.reserve_active_segment(bound) {
+        let segment = match self.reserve_active_segment(
+            bound,
+            crate::session::BudgetAction::Delegation,
+            self.primary_id,
+        ) {
             Ok(s) => s,
             Err(EngineError::GoalBudgetExhausted) => return Ok(None),
             Err(e) => return Err(e),
@@ -950,9 +954,11 @@ impl RunLoop<'_> {
             if let Some(child) = &mut child {
                 child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
             }
-            *segments = match self
-                .reserve_active_segment(deadline.saturating_duration_since(Instant::now()))
-            {
+            *segments = match self.reserve_active_segment(
+                deadline.saturating_duration_since(Instant::now()),
+                crate::session::BudgetAction::Delegation,
+                self.primary_id,
+            ) {
                 Ok(segment) => Some(segment),
                 Err(EngineError::GoalBudgetExhausted) => {
                     queue.stop.get_or_insert(StopCause::ActiveTime);
@@ -1360,9 +1366,11 @@ impl RunLoop<'_> {
         if wave.queue.stop.is_none() {
             self.verify_workers().await?;
         }
-        *wave.segments = match self
-            .reserve_active_segment(wave.deadline.saturating_duration_since(Instant::now()))
-        {
+        *wave.segments = match self.reserve_active_segment(
+            wave.deadline.saturating_duration_since(Instant::now()),
+            crate::session::BudgetAction::Delegation,
+            self.primary_id,
+        ) {
             Ok(segment) => Some(segment),
             Err(EngineError::GoalBudgetExhausted) => {
                 wave.queue.stop.get_or_insert(StopCause::ActiveTime);
@@ -1606,9 +1614,11 @@ impl RunLoop<'_> {
         }
         self.settle_worker_handover(wave.root_request, &wave.children[index], completed)
             .await?;
-        *wave.segments = match self
-            .reserve_active_segment(wave.deadline.saturating_duration_since(Instant::now()))
-        {
+        *wave.segments = match self.reserve_active_segment(
+            wave.deadline.saturating_duration_since(Instant::now()),
+            crate::session::BudgetAction::Delegation,
+            self.primary_id,
+        ) {
             Ok(segment) => Some(segment),
             Err(EngineError::GoalBudgetExhausted) => {
                 wave.queue.stop.get_or_insert(StopCause::ActiveTime);

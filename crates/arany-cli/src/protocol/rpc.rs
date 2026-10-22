@@ -156,6 +156,13 @@ impl From<&arany::EngineError> for Reason {
             arany::EngineError::WorkspaceBusy => Reason::WorkspaceBusy,
             arany::EngineError::GoalUnavailable => Reason::GoalUnavailable,
             arany::EngineError::GoalAdmissionUncertain => Reason::GoalAdmissionUncertain,
+            arany::EngineError::GoalBudgetUncommitted { source, .. } => {
+                if matches!(source.as_ref(), arany::EngineError::GoalBudgetExhausted) {
+                    Reason::GoalBudgetExhausted
+                } else {
+                    Reason::GoalAdmissionUncertain
+                }
+            }
             arany::EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
             arany::EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
             arany::EngineError::Busy => Reason::Busy,
