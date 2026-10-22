@@ -3894,43 +3894,60 @@ async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
     assert!(runtime.worker_policy().is_none());
     std::fs::create_dir(temp.path().join("src")).unwrap();
     std::fs::write(temp.path().join("src/file.txt"), "file canary").unwrap();
-    for call in [
-        ToolCall::Command {
-            program: "sh".into(),
-            args: vec!["-c".into(), "touch canary".into()],
-            cwd: String::new(),
-        },
-        ToolCall::List { path: "src".into() },
-        ToolCall::Read {
-            path: "src/file.txt".into(),
-            offset: None,
-            limit: None,
-        },
-        ToolCall::Search {
-            path: "src".into(),
-            query: "canary".into(),
-            regex: false,
-            include: None,
-            case_sensitive: true,
-            offset: 0,
-            limit: 100,
-        },
-        ToolCall::Glob {
-            pattern: "src/*".into(),
-            path: ".".into(),
-            limit: 100,
-        },
-        ToolCall::Skill {
-            name: "root".into(),
-            resource: None,
-        },
+    for (call, site) in [
+        (
+            ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "touch canary".into()],
+                cwd: String::new(),
+            },
+            "Guard",
+        ),
+        (ToolCall::List { path: "src".into() }, "Read"),
+        (
+            ToolCall::Read {
+                path: "src/file.txt".into(),
+                offset: None,
+                limit: None,
+            },
+            "Read",
+        ),
+        (
+            ToolCall::Search {
+                path: "src".into(),
+                query: "canary".into(),
+                regex: false,
+                include: None,
+                case_sensitive: true,
+                offset: 0,
+                limit: 100,
+            },
+            "Read",
+        ),
+        (
+            ToolCall::Glob {
+                pattern: "src/*".into(),
+                path: ".".into(),
+                limit: 100,
+            },
+            "Read",
+        ),
+        (
+            ToolCall::Skill {
+                name: "root".into(),
+                resource: None,
+            },
+            "Guard",
+        ),
     ] {
         let result = run_in_process(&runtime, call).await;
         assert!(result.attestation.is_none());
         assert_eq!(result.disposition, ToolDisposition::Failed);
         assert_eq!(
             result.output,
-            "Guard native protection unavailable before dispatch; no operation was dispatched."
+            format!(
+                "{site} native protection unavailable before dispatch; no operation was dispatched."
+            )
         );
     }
     assert!(!temp.path().join("canary").exists());
