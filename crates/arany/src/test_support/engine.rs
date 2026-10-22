@@ -4,6 +4,7 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[must_use = "keep the deadline guard alive until the case completes"]
 pub fn deadline(name: &str, duration: std::time::Duration) -> impl Drop {
     struct Deadline {
         stop: std::sync::mpsc::SyncSender<()>,
