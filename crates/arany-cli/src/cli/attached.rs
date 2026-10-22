@@ -162,6 +162,7 @@ fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
 
 #[derive(Clone, Copy)]
 enum Selector {
+    Usage,
     Models,
     Agents,
     Resume,
@@ -1233,6 +1234,23 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 )
                                 .await?,
                             );
+                        } else if matches!(
+                            command,
+                            InteractiveCommand::Usage | InteractiveCommand::Status
+                        ) {
+                            terminal
+                                .open_usage(&view, command == InteractiveCommand::Status, None)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        } else if command == InteractiveCommand::Storage {
+                            crate::cli::storage::attached(
+                                &mut terminal,
+                                admission.workspace.clone(),
+                                admission.state_dir.clone(),
+                                &view,
+                                &mut composer,
+                            )
+                            .await?;
                         } else if command == InteractiveCommand::Help {
                             terminal
                                 .open_help(&view)
@@ -1395,6 +1413,13 @@ async fn run_selector(
     composer: &mut Composer,
 ) -> Result<Option<Feedback>, LoopError> {
     Ok(Some(match selector {
+        Selector::Usage => {
+            terminal
+                .open_usage(view, false, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(None);
+        }
         Selector::Setup => {
             configure_account(terminal, admission, *session_id, view, composer).await?
         }
@@ -2130,6 +2155,7 @@ fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, me
 
 fn new_conversation(defaults: SessionDefaults) -> SessionView {
     SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: SessionId::new(),
         title: "New Session".into(),

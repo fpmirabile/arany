@@ -431,6 +431,9 @@ impl<'a> RunLoop<'a> {
             Err(EngineError::GoalBudgetExhausted) => PrimaryEnd::Stopped(StopCause::ActiveTime),
             Err(error) => return Err(error),
         };
+        if matches!(end, PrimaryEnd::Failed(RunFailure::ToolContextFull)) {
+            self.record_context_full(&root_request, 0);
+        }
         self.settle_primary(end).await
     }
 
@@ -445,6 +448,7 @@ impl<'a> RunLoop<'a> {
         &self,
         root_request: &mut ProviderRequest,
     ) -> Result<(), EngineError> {
+        let mut pending_turn_bytes = 0;
         let end = loop {
             let phase = root_request.phase;
             if self.pause_at_boundary() {
@@ -500,15 +504,10 @@ impl<'a> RunLoop<'a> {
             };
             match decide_primary_call(PrimarySite::Loop, first, validity, &facts) {
                 PrimaryDecision::Plan(plan, turn) => {
-                    match self.record_plan_step(root_request, *plan, turn).await {
-                        Ok(()) => {}
-                        Err(EngineError::ContextTooLarge) => {
-                            break PrimaryEnd::Stopped(StopCause::ContextFull);
-                        }
-                        Err(error) => return Err(error),
-                    }
+                    self.record_plan_step(root_request, *plan, turn).await?;
                 }
                 PrimaryDecision::Finish(answer, turn) => {
+                    pending_turn_bytes = turn.len();
                     match self.stop_primary(root_request, &answer, turn).await {
                         Ok(true) => {}
                         Ok(false) => break PrimaryEnd::Finished(answer),
@@ -533,6 +532,7 @@ impl<'a> RunLoop<'a> {
                     }
                 }
                 PrimaryDecision::ToolStep(requests, turn) => {
+                    pending_turn_bytes = turn.len();
                     if let Some(end) = self
                         .primary_tools(root_request, requests, turn, phase == AgentPhase::RootPlan)
                         .await?
@@ -561,8 +561,23 @@ impl<'a> RunLoop<'a> {
                 PrimaryDecision::Fail(failure) => break PrimaryEnd::Failed(failure),
                 PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
             }
+            pending_turn_bytes = 0;
         };
+        if matches!(end, PrimaryEnd::Stopped(StopCause::ContextFull)) {
+            self.record_context_full(root_request, pending_turn_bytes);
+        }
         self.settle_primary(end).await
+    }
+
+    fn record_context_full(&self, request: &ProviderRequest, pending_turn_bytes: usize) {
+        crate::diagnostics::tool_context_full(
+            request,
+            self.routing.providers.context_window_tokens(),
+            self.controls
+                .tools
+                .map_or(0, crate::tools::ToolRuntime::context_limit_bytes),
+            pending_turn_bytes,
+        );
     }
 
     fn validate_primary_outcome(
@@ -1055,16 +1070,6 @@ impl<'a> RunLoop<'a> {
             hook_feedback: Default::default(),
         });
 
-        if root.input.tools.as_ref().is_none_or(|tools| {
-            tools.rendered_len()
-                > self
-                    .controls
-                    .tools
-                    .expect("plan runtime")
-                    .context_limit_bytes()
-        }) {
-            return Err(EngineError::ContextTooLarge);
-        }
         Ok(())
     }
 

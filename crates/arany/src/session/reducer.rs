@@ -20,6 +20,8 @@ pub(crate) mod rewind_tests;
 mod run;
 mod session;
 mod tool;
+mod usage;
+pub use usage::{TokenCount, UsageGroup, UsageView};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStatus {
@@ -749,6 +751,7 @@ impl RunView {
 
 #[derive(Clone, Debug)]
 pub(crate) struct ForkInheritance {
+    pub(crate) usage: UsageView,
     pub(crate) workspace_identity: Option<WorkspaceIdentity>,
     pub(crate) rewinds: super::rewind::RewindState,
     pub(crate) runs: Vec<RunView>,
@@ -882,6 +885,7 @@ impl RunView {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionView {
+    pub usage: UsageView,
     pub rewinds: super::rewind::RewindState,
     pub id: SessionId,
     pub title: String,
@@ -974,6 +978,7 @@ impl SessionView {
                     workspace_identity,
                 } if view.is_none() => {
                     view = Some(Self {
+                        usage: UsageView::default(),
                         rewinds: Default::default(),
                         id,
                         title: title.clone(),
@@ -1003,6 +1008,7 @@ impl SessionView {
                     prefix_digest,
                 } if view.is_none() && *source_session_id != id => {
                     view = Some(Self {
+                        usage: inherited.map_or_else(UsageView::default, |i| i.usage.clone()),
                         id,
                         title: title.clone(),
                         title_is_explicit: !crate::session::placeholder_title(title),
@@ -1204,6 +1210,7 @@ impl SessionView {
                     sequence: prior,
                 });
         }
+        usage::apply(current, &envelope.event)?;
         current.rewinds.prefix.update(envelope)?;
         current.last_sequence = prior;
         Ok(())

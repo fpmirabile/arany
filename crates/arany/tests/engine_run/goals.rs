@@ -383,6 +383,13 @@ async fn goal_report_counts_cached_input_tokens() {
         text: "accepted result".into(),
     })])
     .with_cached_input_tokens(7);
+    let mut provider = provider;
+    provider.usage_override = Some(arany::Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(8),
+        cache_read_input_tokens: Some(7),
+        cache_creation_input_tokens: Some(3),
+    });
     let provider = Arc::new(provider);
     let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
@@ -407,6 +414,15 @@ async fn goal_report_counts_cached_input_tokens() {
         .expect("Session");
     let report = view.goals[0].report.as_ref().expect("durable report");
     assert_eq!(report.cached_input_tokens, 7);
+    let usage = &view.usage.groups[0];
+    assert_eq!(usage.cache_read.known, Some(7));
+    assert_eq!(usage.cache_creation.known, Some(3));
+    assert_eq!(usage.cache_creation.unreported, 0);
+    assert_eq!(
+        usage.input.known.unwrap() + usage.output.known.unwrap(),
+        view.goals[0].known_tokens
+    );
+    assert!(view.usage.pending.is_empty());
 }
 
 #[tokio::test]
@@ -546,6 +562,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             usage: arany::Usage {
                 input_tokens: Some(32),
                 output_tokens: Some(12),
+                cache_creation_input_tokens: Some(3),
                 ..Default::default()
             },
             wire_provenance: None,
@@ -786,6 +803,35 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
     let view = SessionView::replay(outcome.session_id, &events)
         .expect("closed replay validates active prefixes")
         .expect("Session");
+    assert_eq!(
+        view.usage
+            .groups
+            .iter()
+            .filter_map(|group| group.cache_creation.known)
+            .sum::<u64>(),
+        compacted
+            .iter()
+            .filter_map(|(_, record)| record.cache_creation_input_tokens)
+            .map(u64::from)
+            .sum::<u64>()
+    );
+    assert!(
+        view.usage
+            .groups
+            .iter()
+            .filter_map(|group| group.cache_creation.known)
+            .sum::<u64>()
+            >= 3
+    );
+    assert_eq!(
+        view.usage
+            .groups
+            .iter()
+            .map(|group| group.input.known.unwrap_or(0) + group.output.known.unwrap_or(0))
+            .sum::<u64>(),
+        view.goals[0].known_tokens
+    );
+    assert!(view.usage.pending.is_empty());
     let run = &view.runs[0];
     assert_eq!(
         run.tools.len(),
@@ -3647,6 +3693,131 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 }
 
 #[tokio::test]
+async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "original");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
+    ).expect("write grant");
+    let script = (0..4)
+        .map(|_| crate::tool_outcome(facts_read()))
+        .chain([crate::tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(facts_digest("original")),
+            content: "x".repeat(64 * 1024),
+        })])
+        .collect();
+    let provider = Arc::new(
+        ScriptedProvider::new(script)
+            .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+            .with_context_window(32_768)
+            .with_max_output_tokens(4096)
+            .with_input_tokens_at(4, 30_000),
+    );
+    let mut input = request(&workspace, "Read four times, then request the write");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("pending request ends with a typed context refusal");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert_eq!(run.tools.len(), 4);
+    assert!(
+        run.tools
+            .iter()
+            .all(|tool| matches!(tool.intent.call, arany::ToolCall::Read { .. }))
+    );
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolResultsCleared { .. }
+            | Event::GoalCompactionCallReserved { .. }
+            | Event::GoalContextCompacted { .. }
+    )));
+    assert!(
+        provider
+            .compact_requests
+            .lock()
+            .expect("compactions")
+            .is_empty()
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 5);
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("original file"),
+        "original"
+    );
+}
+
+#[tokio::test]
+async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "original");
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(32 * 1024)).expect("instructions");
+    for name in ["big1.txt", "big2.txt"] {
+        std::fs::write(workspace.join(name), "b".repeat(127 * 1024)).expect("include");
+    }
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
+    ).expect("write grant");
+    let provider = Arc::new(ScriptedProvider::new(vec![crate::tool_outcome(
+        arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(facts_digest("original")),
+            content: "published only with a complete receipt".into(),
+        },
+    )]));
+    let mut input = request(&workspace, &"x".repeat(60 * 1024));
+    input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("context refusal");
+    engine.close().await.expect("shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    let run = &view.runs[0];
+    let allowance = run
+        .config
+        .as_ref()
+        .expect("config")
+        .tool_policy
+        .as_ref()
+        .expect("Tools")
+        .max_context_bytes;
+    assert!((16 * 1024..64 * 1024).contains(&allowance));
+    assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert!(run.tools.is_empty(), "no effect intent was dispatched");
+    assert!(events.iter().all(|event| !matches!(
+        event.event,
+        Event::ToolStarted { .. } | Event::ToolFinished { .. }
+    )));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("unchanged file"),
+        "original"
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 1);
+}
+
+#[tokio::test]
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
@@ -3660,16 +3831,19 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
         max_provider_calls: Some(30),
         ..arany::GoalBudget::default()
     };
-    let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget;
-    let mut script = vec![
-        arany::test_support::scenario::plan_outcome(plan),
+    let provider = Arc::new(ScriptedProvider::new(vec![
         crate::tool_outcome(facts_read()),
-    ];
-    script.extend((0..11).map(|_| crate::tool_outcome(facts_read())));
-    script.push(finish_with("done"));
-    let provider = Arc::new(ScriptedProvider::new(script));
+        crate::tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(facts_digest(&"f".repeat(40 * 1024))),
+            content: "x".repeat(64 * 1024),
+        }),
+        finish_with("Unexpected continuation after context refusal"),
+    ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
+    ).expect("write grant");
     let mut input = request(&workspace, &"x".repeat(60 * 1024));
     input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
     input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
@@ -3684,11 +3858,77 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
     )
     .await
     .expect("context-full Run");
+    let recovery = Arc::new(ScriptedProvider::new(vec![
+        crate::tool_outcome(facts_read()),
+        crate::tool_outcome(arany::ToolCall::List {
+            path: "notes".into(),
+        }),
+        finish_with("The next message works"),
+    ]));
+    let mut next = request(&workspace, "Inspect the facts and answer this new message");
+    next.session_id = Some(outcome.session_id);
+    next.title = None;
+    next.include_paths.clear();
+    let recovered = run_with(
+        &engine,
+        &recovery,
+        next,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("the failed Session accepts a new message");
+    assert_eq!(recovered.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
-    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
     assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert!(run.assistant_message.is_none());
+    assert_eq!(run.tools.len(), 1, "only the bounded Read was dispatched");
+    let read = run.tools[0].observation.as_ref().expect("Read receipt");
+    assert_eq!(read.disposition, arany::ToolDisposition::Succeeded);
+    let output: serde_json::Value = serde_json::from_str(&read.output).expect("Read result");
+    assert_eq!(output["truncated"], true);
+    assert!(
+        run.config
+            .as_ref()
+            .expect("config")
+            .tool_policy
+            .as_ref()
+            .expect("Tools")
+            .max_context_bytes
+            < 64 * 1024
+    );
+    assert!(events.iter().all(|event| !matches!(&event.event,
+        Event::ToolStarted { intent, .. } if matches!(intent.call, arany::ToolCall::Write { .. })
+    )));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("original facts"),
+        "f".repeat(40 * 1024)
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    assert_eq!(
+        provider.responses.lock().expect("responses").len(),
+        1,
+        "the healthy refusal sentinel was never called"
+    );
+    assert!(
+        provider
+            .compact_requests
+            .lock()
+            .expect("compactions")
+            .is_empty()
+    );
+    assert!(recovery.responses.lock().expect("responses").is_empty());
+    assert_eq!(view.runs.len(), 2);
+    assert_eq!(
+        view.runs[1].assistant_message.as_deref(),
+        Some("The next message works")
+    );
+    assert_eq!(view.runs[1].tools.len(), 2);
 }
 
 #[tokio::test]
@@ -7700,6 +7940,142 @@ async fn each_pressured_report_maintains_context_once() {
 }
 
 #[tokio::test]
+async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
+    for (window, line_repeats) in [
+        (None, 96),
+        (Some(32_768), 96),
+        (Some(272_000), 96),
+        (Some(32_768), 24),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(
+            temp.path(),
+            &format!("{}\n", "fact ".repeat(line_repeats)).repeat(83),
+        );
+        for index in 0..24 {
+            std::fs::write(workspace.join(format!("notes/file-{index}.txt")), "entry")
+                .expect("entry");
+        }
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let seed = Arc::new(ScriptedProvider::new(vec![
+            finish_with("Historical answer");
+            6
+        ]));
+        let mut session = None;
+        for _ in 0..6 {
+            let mut input = request(&workspace, &"x".repeat(60 * 1024));
+            input.session_id = session;
+            input.title = None;
+            input.include_paths.clear();
+            session = Some(
+                run_with(&engine, &seed, input, RunControls::default())
+                    .await
+                    .expect("historical Run")
+                    .session_id,
+            );
+        }
+        let compaction_expected = window == Some(32_768) && line_repeats == 96;
+        let mut provider = ScriptedProvider::new(vec![
+            crate::tool_outcome(facts_read()),
+            crate::tool_outcome(arany::ToolCall::List {
+                path: "notes".into(),
+            }),
+            finish_with("Read 83 lines and listed 25 entries"),
+        ])
+        .with_chatgpt_account(Uuid::now_v7(), [7; 32])
+        .with_profile("chatgpt", "gpt-6-luna")
+        .with_effort(arany::Effort::Medium)
+        .with_max_output_tokens(4096);
+        if let Some(window) = window {
+            provider = provider.with_context_window(window);
+        }
+        if compaction_expected {
+            provider = provider.with_compactions(vec![Ok(CompactionResponse {
+                summary: "Read 83 lines from notes/facts.txt.".into(),
+                response_id: None,
+                usage: arany::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
+                wire_provenance: None,
+            })]);
+        }
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Inspect the directory and answer");
+        input.session_id = session;
+        input.title = None;
+        input.include_paths.clear();
+        if line_repeats == 24 {
+            input.goal = arany::GoalRequest::new(
+                arany::GoalBudget {
+                    max_provider_calls: Some(3),
+                    ..Default::default()
+                },
+                arany::GoalPhase::Implementation,
+            );
+        }
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded continuation");
+        assert_eq!(outcome.run.status, RunStatus::Finished, "window={window:?}");
+        engine.close().await.expect("shutdown");
+        let (_, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[6];
+        let config = run.config.as_ref().expect("pinned context");
+        assert_eq!(config.context_window_tokens, window);
+        let allowance = config
+            .tool_policy
+            .as_ref()
+            .expect("Tool budget")
+            .max_context_bytes;
+        assert!(
+            allowance
+                >= if window == Some(32_768) {
+                    72 * 1024
+                } else {
+                    192 * 1024
+                },
+            "optional history cannot consume continuation room: {allowance}"
+        );
+        assert_eq!(run.tools.len(), 2);
+        assert_eq!(provider.requests.lock().expect("requests").len(), 3);
+        assert_eq!(
+            provider.compact_requests.lock().expect("compactions").len(),
+            usize::from(compaction_expected),
+            "only the large read in the small window needs compaction"
+        );
+        assert!(
+            provider
+                .compact_responses
+                .lock()
+                .expect("summaries")
+                .is_empty()
+        );
+        if window != Some(272_000) {
+            assert!(
+                config.excluded_history_runs > 0,
+                "bounded history selection is explicit"
+            );
+        }
+        assert_eq!(
+            config.history_run_ids.len() + config.excluded_history_runs as usize,
+            6
+        );
+        assert_eq!(view.runs.len(), 7, "canonical history is preserved");
+    }
+}
+
+#[tokio::test]
 async fn primary_fallback_chain_pins_its_smallest_window_or_none() {
     let mut pins = Vec::new();
     for fallback in [Some(200_000), None] {
@@ -7850,18 +8226,18 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
 }
 
 #[tokio::test]
-async fn insufficient_clearing_summarizes_then_stops_context_full_without_a_smaller_call() {
+async fn insufficient_clearing_summarizes_and_uses_remaining_capacity_before_context_full() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "");
     let state_path = temp.path().join("state");
     let provider = Arc::new(
         ScriptedProvider::new(
-            (0..600)
+            (0..2000)
                 .map(|_| crate::tool_outcome(facts_read()))
                 .collect(),
         )
         .with_compactions(
-            (0..600)
+            (0..2000)
                 .map(|_| {
                     Ok(CompactionResponse {
                         summary: String::new(),
@@ -7906,7 +8282,7 @@ async fn insufficient_clearing_summarizes_then_stops_context_full_without_a_smal
         view.runs[0]
             .tools
             .iter()
-            .all(|tool| tool.intent.limits.result_bytes == 64 * 1024)
+            .any(|tool| tool.intent.limits.result_bytes < 64 * 1024)
     );
     let clearing = events
         .iter()
@@ -7937,4 +8313,131 @@ async fn insufficient_clearing_summarizes_then_stops_context_full_without_a_smal
         goal.provider_calls as usize,
         provider.requests.lock().unwrap().len() + provider.compact_requests.lock().unwrap().len()
     );
+}
+
+#[tokio::test]
+async fn skill_reads_continue_under_context_pressure_without_a_guard_executable() {
+    use std::os::unix::fs::PermissionsExt;
+    for compact in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), &"Fact ".repeat(20 * 1024));
+        let mut bodies = Vec::new();
+        for index in 0..5 {
+            let name = format!("skill-{index}");
+            let directory = workspace.join(".agents/skills").join(&name);
+            std::fs::create_dir_all(&directory).expect("Skill directory");
+            let body = format!(
+                "---\nname: {name}\ndescription: Guidance\n---\n{}",
+                "instruction ".repeat(680)
+            );
+            std::fs::write(directory.join("SKILL.md"), &body).expect("Skill body");
+            bodies.push(body);
+        }
+        std::fs::write(workspace.join("AGENTS.md"), "Guidance. ".repeat(6000)).expect("guidance");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).expect("state");
+        let config = state_path.join("tools.json");
+        std::fs::write(&config, br#"{"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}"#).expect("config");
+        std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600))
+            .expect("private config");
+        let engine = engine_support::open(
+            state,
+            EngineConfig {
+                guard_executable: Some(temp.path().join("missing-guard")),
+                ..Default::default()
+            },
+        )
+        .expect("engine");
+        let provider = Arc::new(
+            ScriptedProvider::new(
+                (1..5)
+                    .map(|index| {
+                        tool_outcome(arany::ToolCall::Skill {
+                            name: format!("skill-{index}"),
+                            resource: None,
+                        })
+                    })
+                    .chain([finish_with("Skills read")])
+                    .collect(),
+            )
+            .with_max_output_tokens(if compact { 4096 } else { 16384 })
+            .with_compactions(
+                (0..8)
+                    .map(|_| {
+                        if compact {
+                            Ok(CompactionResponse {
+                                summary: "Earlier Skills were read; no scripts ran.".into(),
+                                response_id: None,
+                                usage: arany::Usage {
+                                    input_tokens: Some(32),
+                                    output_tokens: Some(12),
+                                    ..Default::default()
+                                },
+                                wire_provenance: None,
+                            })
+                        } else {
+                            Err(ProviderError::Rejected)
+                        }
+                    })
+                    .collect(),
+            ),
+        );
+        let mut input = request(&workspace, "Apply the selected Skill");
+        input.skill = Some("skill-0".into());
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("Skill Run");
+        assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(
+            outcome.run.assistant_message.as_deref(),
+            Some("Skills read")
+        );
+        engine.close().await.expect("close");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = view.runs.last().expect("Run");
+        assert_eq!(run.tools.len(), 5);
+        for (tool, body) in run.tools.iter().zip(&bodies) {
+            let observation = tool.observation.as_ref().expect("observation");
+            assert_eq!(&observation.output, body);
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::InProcess { .. })
+            ));
+        }
+        assert_eq!(
+            view.goals.last().expect("Goal").status,
+            arany::GoalStatus::Completed
+        );
+        let requests = provider.requests.lock().expect("requests");
+        assert_eq!(requests.len(), 5);
+        let initial = requests[0].input.tools.as_ref().expect("Tools");
+        assert_eq!(
+            initial.invoked_skill.as_ref().expect("invoked").output,
+            bodies[0]
+        );
+        assert!(!initial.catalog().contains("instruction instruction"));
+        assert!(initial.steps.is_empty());
+        assert!(provider.responses.lock().expect("responses").is_empty());
+        if compact {
+            assert!(
+                !provider
+                    .compact_requests
+                    .lock()
+                    .expect("compactions")
+                    .is_empty()
+            );
+            assert!(events.iter().any(|event| matches!(&event.event,
+                Event::GoalContextCompacted { record, .. }
+                    if matches!(record.status, CompactionStatus::Succeeded { .. }))));
+        }
+        assert_action_bounds(&events, false, false);
+    }
 }

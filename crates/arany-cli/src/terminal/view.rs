@@ -42,7 +42,7 @@ pub(super) struct PermissionFrameProgress {
 const PROFILE_HANGING_INDENT: usize = 6;
 
 // Wraps at spaces; a token wider than the row hard-breaks at the row edge.
-fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
+pub(super) fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
     let indent = indent.min(width.saturating_sub(1));
     let mut rows = Vec::new();
     let mut row = String::new();
@@ -1752,7 +1752,7 @@ pub(super) fn draw_quick_actions_frame(
         Rect::new(area.x, area.y, area.width, 1),
     );
     let labels = if area.width < 24 {
-        ["Models", "Agents", "Resume", "Setup"]
+        ["Models", "Agents", "Resume", "Setup", "Usage"]
     } else if area.width < 40 {
         [
             "Models · choose",
@@ -1763,6 +1763,7 @@ pub(super) fn draw_quick_actions_frame(
                 "Resume · choose"
             },
             "Setup · account",
+            "Usage · inspect",
         ]
     } else {
         [
@@ -1774,6 +1775,7 @@ pub(super) fn draw_quick_actions_frame(
                 "Resume · conversation"
             },
             "Setup · connect an account",
+            "Usage · reported tokens",
         ]
     };
     let visible = usize::from(area.height.saturating_sub(2));
@@ -1803,11 +1805,11 @@ pub(super) fn draw_quick_actions_frame(
                 "Submit or clear draft · Esc return"
             }
         } else if area.width < 20 {
-            "1-4 Enter Esc"
+            "1-5 Enter Esc"
         } else if area.width < 40 {
-            "1-4 Enter:open Esc"
+            "1-5 Enter:open Esc"
         } else {
-            "1-4 or Up/Down · Enter open · Esc return"
+            "1-5 or Up/Down · Enter open · Esc return"
         };
         frame.render_widget(
             Paragraph::new(safe_truncate(hint, usize::from(area.width))),
@@ -1913,6 +1915,51 @@ pub(super) fn draw_settings_frame(
         };
         frame.render_widget(
             Paragraph::new(safe_truncate(footer, usize::from(area.width))).style(style),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+}
+
+pub(super) fn usage_lines(page: &str, width: u16) -> Vec<String> {
+    page.lines()
+        .flat_map(|line| wrap_cells(line, usize::from(width).max(1), 0))
+        .collect()
+}
+
+pub(super) fn draw_usage_frame(
+    frame: &mut Frame,
+    area: Rect,
+    lines: &[String],
+    scroll: usize,
+    page: (usize, usize),
+    armed: bool,
+    palette: Palette,
+) {
+    if area.is_empty() {
+        return;
+    }
+    frame.render_widget(Clear, area);
+    let header = format!("Usage {}/{}", page.0 + 1, page.1);
+    frame.render_widget(
+        Paragraph::new(header).style(palette.selection()),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    let visible = usize::from(area.height.saturating_sub(2));
+    let start = scroll.min(lines.len().saturating_sub(visible));
+    for (index, line) in lines.iter().skip(start).take(visible).enumerate() {
+        frame.render_widget(
+            Paragraph::new(line.as_str()),
+            Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+        );
+    }
+    if armed && area.height > 1 {
+        let hint = if area.width < 40 {
+            "↑↓ ←→ Esc"
+        } else {
+            "Up/Down · Left/Right page · Esc close"
+        };
+        frame.render_widget(
+            Paragraph::new(safe_truncate(hint, usize::from(area.width))),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
     }

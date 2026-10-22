@@ -43,7 +43,9 @@ impl CompiledContext {
         let reserved = child_reserved;
         let budget = ceiling
             .checked_sub(reserved)
-            .and_then(|budget| budget.checked_sub(tool_reserved))
+            .and_then(|budget| {
+                budget.checked_sub(tool_reserved.min(crate::tools::types::MIN_TOOL_CONTEXT_BYTES))
+            })
             .and_then(|budget| budget.checked_sub(goal_metadata_reserved))
             .ok_or(ContextTooLarge)?;
         let mut used = objective.len()
@@ -66,6 +68,13 @@ impl CompiledContext {
             return Err(ContextTooLarge);
         }
         let base_bytes = used;
+        // Optional history must leave room for a continuation; explicit inputs still use the admission budget.
+        let history_budget = ceiling
+            .saturating_sub(child_reserved)
+            .saturating_sub(goal_metadata_reserved)
+            .saturating_sub(tool_reserved)
+            .max(base_bytes)
+            .min(budget);
         let selected_compaction = session
             .into_iter()
             .flat_map(|view| view.compactions.iter().rev())
@@ -75,7 +84,7 @@ impl CompiledContext {
                     content_digest,
                     ..
                 } = &compaction.record.status
-                    && used + summary.len() + 64 <= budget
+                    && used + summary.len() + 64 <= history_budget
                 {
                     return Some((
                         compaction.event_sequence,
@@ -154,7 +163,7 @@ impl CompiledContext {
                 .iter()
                 .map(ImageAttachment::byte_len)
                 .sum::<usize>();
-            if used + size > budget
+            if used + size > history_budget
                 || image_count + run.images.len() > MAX_MESSAGE_IMAGES
                 || image_bytes + turn_image_bytes > MAX_IMAGE_BYTES
             {

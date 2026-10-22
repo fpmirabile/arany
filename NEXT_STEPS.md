@@ -89,6 +89,19 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 
 Child messaging needs native macOS Option-key/PTY and human assistive-technology evidence: open a running child, offer literal text, observe waiting then committed recording, return with the primary draft intact, and verify final-call non-delivery retains the child draft without another call. The [terminal](./docs/specs/terminal.md#agent-chats) and [Goal](./docs/specs/goals.md#steering-notes-and-pause) contracts own the expected behavior.
 
+## Storage report native and live evidence
+
+Before claiming native storage-report support, run `arany storage` and idle
+`/storage` with synthetic private Session/account roots on Linux and macOS; check
+allocated blocks versus sparse logical length, private ACL/foreign-owner refusal,
+mount exclusion (including Linux same-device bind mounts), concurrent cache
+activity and directory replacement, cancellation without mutation, and pager
+navigation at narrow widths in Classic, Fullscreen and a real screen reader.
+On macOS verify metadata-only `O_EVTONLY` descriptors with ACL admission under a
+physical `/private/tmp` fixture. Record native/live results separately from
+synthetic CI evidence. Guard backing/image inventory remains the next
+[storage slice](./planning/arany-storage/README.md), not current coverage.
+
 ## Account recovery and native Guard follow-ups
 
 - **MultiEdit native and live evidence.** Owner: run the MultiEdit Guard permission/cancellation/crash cases, checkpoint/rewind corpus, private-worker handover journey and Linux/macOS Tool journeys outside the sandbox on each native platform. With explicit usage consent, exercise ordered and dependent replacements, replace-all and a 64 KiB batch on each admitted Tool-capable Provider route; confirm late failure leaves the file unchanged and a lost receipt never retries. Synthetic corpora and the macOS source audit do not establish native or live support. [Tools](./docs/specs/tools.md#atomic-single-file-multiedit) owns the behavior and evidence owners. The existing 64 KiB Write/Edit live checks remain outstanding.

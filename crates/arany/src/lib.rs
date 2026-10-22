@@ -74,7 +74,8 @@ pub use session::{
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
     RunFailure, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId, SessionListItem,
-    SessionPage, SessionView, ToolView, WorkspaceIdentity, escape_status_text,
+    SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView, WorkspaceIdentity,
+    escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
@@ -104,3 +105,9 @@ pub use tools::catalog::Site;
 pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {
     view.apply_committed(envelope)
 }
+
+#[cfg(unix)]
+pub use store::{
+    StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
+    collect_storage,
+};
