@@ -416,19 +416,8 @@ fn collect(
             if cache.path.is_none() && cache.status == StorageStatus::Complete {
                 cache.status = StorageStatus::Absent;
             }
-            match private_fs::open_directory_checked(&directory.path, false, || {
-                scan.check().map_err(|_| {
-                    private_fs::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
-                })
-            }) {
-                Ok(current)
-                    if dir_metadata(&current.dir)
-                        .ok()
-                        .zip(dir_metadata(&directory.dir).ok())
-                        .is_some_and(|(current, previous)| {
-                            identity(&current) == identity(&previous)
-                        }) => {}
-                _ => row.partial("root changed during scan"),
+            if let Err(reason) = recheck_root(&directory, || scan.check()) {
+                row.partial(reason);
             }
         }
         if subtotal.add(row.usage).is_err() || subtotal.add(cache.usage).is_err() {
@@ -446,6 +435,29 @@ fn collect(
         categories,
         subtotal,
     })
+}
+
+fn recheck_root(
+    directory: &PrivateDirectory,
+    check: impl Fn() -> Result<(), &'static str>,
+) -> Result<(), &'static str> {
+    let check_reason = std::cell::Cell::new(None);
+    match private_fs::open_directory_checked(&directory.path, false, || {
+        check().map_err(|reason| {
+            check_reason.set(Some(reason));
+            private_fs::Error::Io(std::io::Error::from(std::io::ErrorKind::Interrupted))
+        })
+    }) {
+        Ok(current)
+            if dir_metadata(&current.dir)
+                .ok()
+                .zip(dir_metadata(&directory.dir).ok())
+                .is_some_and(|(current, previous)| identity(&current) == identity(&previous)) =>
+        {
+            Ok(())
+        }
+        _ => Err(check_reason.get().unwrap_or("root changed during scan")),
+    }
 }
 
 fn identity(metadata: &Metadata) -> Identity {
@@ -789,6 +801,32 @@ mod tests {
                     .any(|row| row.status == StorageStatus::Partial)
             );
         }
+        let admitted = private_fs::open_directory(&state, false).expect("admitted storage root");
+        assert_eq!(recheck_root(&admitted, || Ok(())), Ok(()));
+        for reason in ["scan deadline reached", "cancelled"] {
+            let checks = std::cell::Cell::new(0);
+            assert_eq!(
+                recheck_root(&admitted, || {
+                    checks.set(checks.get() + 1);
+                    if checks.get() == 2 {
+                        Err(reason)
+                    } else {
+                        Ok(())
+                    }
+                }),
+                Err(reason)
+            );
+            assert_eq!(checks.get(), 2);
+        }
+        let retained = temp.path().join("retained");
+        std::fs::rename(&state, &retained).expect("retain original root");
+        directory(&state);
+        assert_eq!(
+            recheck_root(&admitted, || Ok(())),
+            Err("root changed during scan")
+        );
+        std::fs::remove_dir(&state).expect("remove empty replacement");
+        std::fs::rename(&retained, &state).expect("restore original fixture root");
         cancelled.store(true, Ordering::Release);
         assert_eq!(
             collect(
