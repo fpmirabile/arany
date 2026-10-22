@@ -317,6 +317,7 @@ mod tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -367,12 +368,24 @@ mod tests {
     fn unguarded_commands_use_the_full_unguarded_warning() {
         let intent = intent(unguarded());
         let prompt = UnguardedPrompt {
+            sensitive: false,
+            inactive_rules: false,
             executable: "/bin/sh".into(),
             attribution: None,
             remember: true,
         };
         let warning = lines(&intent, Some(&prompt));
         assert_eq!(warning[0], "Run outside the Guard? (unguarded)");
+        assert!(
+            warning
+                .iter()
+                .any(|line| line.contains("opaque beyond a lexical privilege-tool check"))
+        );
+        assert!(
+            warning
+                .iter()
+                .any(|line| line.contains("no controlling terminal"))
+        );
         assert_ne!(warning, lines(&intent, None));
     }
 
