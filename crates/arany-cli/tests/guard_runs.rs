@@ -21,6 +21,15 @@ use arany::test_support::{engine as engine_support, scenario::*};
 
 use engine_support::{run_to_end, run_with};
 
+#[path = "guard_runs/latency.rs"]
+mod latency;
+
+#[test]
+#[ignore = "owner-run Linux release latency corpus; never a CI timing gate"]
+fn linux_tool_latency_corpus() {
+    latency::corpus();
+}
+
 #[path = "guard_runs/rewind.rs"]
 mod rewind;
 
