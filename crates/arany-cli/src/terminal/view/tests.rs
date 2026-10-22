@@ -2653,7 +2653,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                     }
                     if name == "settings" {
                         // A visible value is whole, on its own row when the label is wide.
-                        for value in ["tabs", "classic", "unlimited", "8589934592"] {
+                        for value in ["tabs", "classic", "unlimited", "8.0 GB"] {
                             if dialog.iter().any(|row| row.contains(&value[..3])) {
                                 assert!(
                                     dialog.iter().any(|row| row.contains(value)),
@@ -2662,7 +2662,7 @@ fn inline_dialogs_number_rows_at_the_bottom_and_focus_only_once_armed() {
                             }
                         }
                         assert!(
-                            dialog.iter().any(|row| row.contains("8589934592")),
+                            dialog.iter().any(|row| row.contains("8.0 GB")),
                             "focused value visible in {context}"
                         );
                     }
