@@ -38,7 +38,7 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
             vec![edit("aa", "$1\\é", true)],
             Some("$1\\é $1\\é"),
         ),
-        ("nonoverlap", "aaa", vec![edit("aa", "b", true)], Some("ba")),
+        ("nonoverlap", "xxx", vec![edit("xx", "y", true)], Some("yx")),
         (
             "fidelity",
             "é\r\nquote ‘x’\r\n",
