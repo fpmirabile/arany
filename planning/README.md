@@ -33,6 +33,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 - `Ready` (Research and Plan gates passed; no material open questions)
 - `Ready`
 - `Ready` — Research and Plan gates passed; no material open question remains.
+- `Ready` (Research and Plan gates passed; implementation may await a named dependency)
 - `Ready` (Plan gate passed; implementation may depend on a linked slice)
 - `In progress`
 - `Blocked`
@@ -59,6 +60,8 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
+| [Git branch reads](./git-branch-reads/README.md) | Ready; S1 local/remote-tracking branch metadata and divergence, S2 bounded range history and endpoint diffs |
+| [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Ready: typed discovery/suggestions, then Git disclosure; depends on snapshot PR1 (selector and enforced preparation) |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
