@@ -80,7 +80,25 @@ pub(super) fn response<T>(result: &Result<T, ToolError>) -> &'static [u8] {
         Ok(_) => b"SELECT_DONE\n",
         Err(ToolError::Limit) => b"SELECT_LIMIT\n",
         Err(ToolError::Timeout(_)) => b"SELECT_TIMEOUT\n",
-        Err(_) => b"SELECT_REJECTED\n",
+        Err(ToolError::ChangedInput) => b"SELECT_CHANGED\n",
+        Err(ToolError::Configuration) => b"SELECT_CONFIGURATION\n",
+        Err(ToolError::Operation) => b"SELECT_OPERATION\n",
+        Err(ToolError::NotFound) => b"SELECT_NOT_FOUND\n",
+        Err(ToolError::FilesystemDenied) => b"SELECT_FILESYSTEM_DENIED\n",
+        Err(
+            ToolError::MissingConfiguration
+            | ToolError::AccountBusy
+            | ToolError::ProtectionUnavailable
+            | ToolError::QueueFull
+            | ToolError::Path
+            | ToolError::OutputCeiling
+            | ToolError::Conflict
+            | ToolError::Pattern(_)
+            | ToolError::Uncertain
+            | ToolError::StaleGitLocks(_)
+            | ToolError::GuardRejected(_)
+            | ToolError::GuardBootstrap(_),
+        ) => b"SELECT_REJECTED\n",
     }
 }
 
@@ -101,6 +119,11 @@ pub(super) async fn receive(
         b"SELECT_DONE\n" => Ok(()),
         b"SELECT_LIMIT\n" => Err(ToolError::Limit),
         b"SELECT_TIMEOUT\n" => Err(ToolError::Timeout(String::new())),
+        b"SELECT_CHANGED\n" => Err(ToolError::ChangedInput),
+        b"SELECT_CONFIGURATION\n" => Err(ToolError::Configuration),
+        b"SELECT_OPERATION\n" => Err(ToolError::Operation),
+        b"SELECT_NOT_FOUND\n" => Err(ToolError::NotFound),
+        b"SELECT_FILESYSTEM_DENIED\n" => Err(ToolError::FilesystemDenied),
         _ => Err(ToolError::Path),
     }
 }
@@ -185,6 +208,11 @@ pub(in crate::tools::guard) mod tests {
             (Err(ToolError::Limit), "limit"),
             (Err(ToolError::Timeout(String::new())), "timeout"),
             (Err(ToolError::Path), "rejected"),
+            (Err(ToolError::ChangedInput), "changed"),
+            (Err(ToolError::Configuration), "configuration"),
+            (Err(ToolError::Operation), "operation"),
+            (Err(ToolError::NotFound), "not-found"),
+            (Err(ToolError::FilesystemDenied), "filesystem-denied"),
         ] {
             let mut bytes = response(&result);
             let result = receive(&mut bytes, tokio::time::Instant::now() + PHASE_TIME).await;
@@ -193,6 +221,11 @@ pub(in crate::tools::guard) mod tests {
                 "limit" => matches!(result, Err(ToolError::Limit)),
                 "timeout" => matches!(result, Err(ToolError::Timeout(_))),
                 "rejected" => matches!(result, Err(ToolError::Path)),
+                "changed" => matches!(result, Err(ToolError::ChangedInput)),
+                "configuration" => matches!(result, Err(ToolError::Configuration)),
+                "operation" => matches!(result, Err(ToolError::Operation)),
+                "not-found" => matches!(result, Err(ToolError::NotFound)),
+                "filesystem-denied" => matches!(result, Err(ToolError::FilesystemDenied)),
                 _ => unreachable!(),
             });
         }

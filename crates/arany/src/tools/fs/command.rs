@@ -438,12 +438,23 @@ pub(in crate::tools) fn selected_command_changeset(
                 format!("{path}/{name}")
             };
             if !valid_relative(&path, false) {
-                return Err(ToolError::Path);
+                return Err(if path.split('/').any(forbidden) {
+                    ToolError::FilesystemDenied
+                } else {
+                    ToolError::Path
+                });
             }
             if path.split('/').count() > 16 {
                 return Err(ToolError::Limit);
             }
             let file = open_file(&root, &path)?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
+                    return Err(ToolError::FilesystemDenied);
+                }
+            }
             let metadata = safe_metadata(&file)?;
             if selection.omitted.contains(&path) {
                 return Err(ToolError::Conflict);

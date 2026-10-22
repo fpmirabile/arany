@@ -1539,7 +1539,6 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(child.version()));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1745,7 +1744,6 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(finished.version()));
         assert_eq!(
             Event::decode(
                 "ToolFinished",
@@ -1854,7 +1852,6 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(started.version()));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 

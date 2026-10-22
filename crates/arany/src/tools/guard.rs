@@ -2821,30 +2821,66 @@ mod tests {
         }
         let before = model_observation(&observation);
         assert!(before.get("enforcement_cause").is_none());
-        let workspace = tempfile::tempdir().unwrap();
-        let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
-        std::fs::create_dir(workspace.path().join(".git")).unwrap();
-        std::fs::write(
-            workspace.path().join(".git/config"),
-            b"protected fixture content",
-        )
-        .unwrap();
-        let rejected = super::super::fs::command_changeset(workspace.path(), &snapshot);
-        let (disposition, output, cause, limit_cause) =
-            super::super::dispatch::outcome(&observation.intent, rejected.map(|_| String::new()));
-        assert_eq!(cause, Some(EnforcementCause::FilesystemDenied));
-        observation.disposition = disposition;
-        observation.limit_cause = limit_cause;
-        observation.output = output;
-        observation.enforcement_cause = cause;
-        assert!(observation.valid());
-        assert!(!observation.output.contains(".git"));
-        assert!(!observation.output.contains("protected fixture content"));
-        let projected = model_observation(&observation);
-        assert_eq!(
-            projected["enforcement_cause"],
-            "Guard enforcement: protected path or set-ID entry refused"
-        );
+        for path in [
+            ".git/config",
+            "ignored/.git/config",
+            "setuid",
+            "ignored/setuid",
+            "setgid",
+            "ignored/setgid",
+        ] {
+            use std::os::unix::fs::PermissionsExt;
+            let source = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let resources = tempfile::tempdir().unwrap();
+            std::fs::write(source.path().join(".gitignore"), b"ignored/\n").unwrap();
+            let selection = super::super::fs::prepare_command(
+                &super::super::fs::open_directory(source.path()).unwrap(),
+                &super::super::fs::open_directory(workspace.path()).unwrap(),
+                &super::super::fs::open_directory(resources.path()).unwrap(),
+                &config(Vec::new()),
+                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+            )
+            .unwrap();
+            let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
+            let output_path = workspace.path().join(path);
+            std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            std::fs::write(&output_path, b"protected fixture content").unwrap();
+            if !path.ends_with("config") {
+                std::fs::set_permissions(
+                    &output_path,
+                    std::fs::Permissions::from_mode(if path.ends_with("setuid") {
+                        0o4755
+                    } else {
+                        0o2755
+                    }),
+                )
+                .unwrap();
+            }
+            let rejected = super::super::fs::selected_command_changeset(
+                workspace.path(),
+                &snapshot,
+                &selection,
+                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+            );
+            let (disposition, output, cause, limit_cause) = super::super::dispatch::outcome(
+                &observation.intent,
+                rejected.map(|_| String::new()),
+            );
+            assert_eq!(cause, Some(EnforcementCause::FilesystemDenied), "{path}");
+            observation.disposition = disposition;
+            observation.limit_cause = limit_cause;
+            observation.output = output;
+            observation.enforcement_cause = cause;
+            assert!(observation.valid());
+            assert!(!observation.output.contains(".git"));
+            assert!(!observation.output.contains("protected fixture content"));
+            let projected = model_observation(&observation);
+            assert_eq!(
+                projected["enforcement_cause"],
+                "Guard enforcement: protected path or set-ID entry refused"
+            );
+        }
     }
 
     fn node_grant(home: &Path) -> RuntimeGrant {

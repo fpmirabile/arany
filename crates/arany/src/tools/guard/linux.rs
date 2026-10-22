@@ -63,7 +63,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -1658,15 +1658,20 @@ async fn prepare_inputs(
         .await
         .map_err(|_| ToolError::ProtectionUnavailable)??;
     let _ = child.start_kill();
-    tokio::time::timeout_at(cleanup, child.wait())
-        .await
-        .map_err(|_| ToolError::ProtectionUnavailable)?
-        .map_err(|_| ToolError::Operation)?;
-    drain_stderr(&mut drain, cleanup)
-        .await
-        .ok_or(ToolError::Operation)?;
-    // An inactive service can still retain its name until systemd unloads it.
-    unit.wait_unloaded(cleanup).await?;
+    // Observe unloading even if another cleanup step consumes the teardown deadline.
+    let (reaped, drained, unloaded) = tokio::join!(
+        tokio::time::timeout_at(cleanup, child.wait()),
+        drain_stderr(&mut drain, cleanup),
+        unit.wait_unloaded(cleanup),
+    );
+    unloaded?;
+    let reaped = reaped
+        .map_err(|_| ToolError::ProtectionUnavailable)
+        .and_then(|status| status.map_err(|_| ToolError::Operation));
+    if let Err(error) = reaped.and(drained.ok_or(ToolError::Operation)) {
+        permit.terminated()?;
+        return Err(error);
+    }
     permit.prepared()?;
     result
 }
