@@ -40,12 +40,7 @@ mod goal_success_tests {
             enforcement_cause: None,
             limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                 .then_some(crate::tools::LimitCause::Resource),
-            attestation: Some(crate::tools::Attestation::Guard(GuardReceipt {
-                contract_version: 1,
-                intent_digest: intent.digest(),
-                enforcement_digest: intent.enforcement_digest,
-                limits: intent.limits.clone(),
-            })),
+            attestation: Some(crate::tools::Attestation::for_site(&intent)),
             intent,
             disposition,
             output,
@@ -81,6 +76,7 @@ mod goal_success_tests {
             observation(call.clone(), ToolDisposition::Succeeded, "{}".into()),
             observation(call, ToolDisposition::Failed, "".into()),
         ];
+        assert!(matches_success(&contract, &observations[..1]));
         assert!(!matches_success(&contract, &observations));
     }
 
@@ -143,6 +139,19 @@ mod goal_success_tests {
             ToolDisposition::Succeeded,
             "review guidance".into(),
         );
+        assert!(success.valid());
+        assert!(matches!(
+            success.attestation,
+            Some(crate::tools::Attestation::InProcess { .. })
+        ));
+        let mut guarded = success.clone();
+        guarded.attestation = Some(crate::tools::Attestation::Guard(GuardReceipt {
+            contract_version: 1,
+            intent_digest: guarded.intent.digest(),
+            enforcement_digest: guarded.intent.enforcement_digest,
+            limits: guarded.intent.limits.clone(),
+        }));
+        assert!(!matches_success(&contract, &[guarded]));
         assert!(matches_success(&contract, std::slice::from_ref(&success)));
         assert!(!matches_success(
             &contract,
@@ -336,6 +345,7 @@ mod goal_success_tests {
                 .to_string(),
             ),
         ];
+        assert!(matches_success(&contract, &observations[..1]));
         assert!(!matches_success(&contract, &observations));
     }
 
