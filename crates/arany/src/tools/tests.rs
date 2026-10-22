@@ -3860,32 +3860,79 @@ fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
 }
 
 #[tokio::test]
-async fn unavailable_guard_hides_guarded_commands_and_refuses_before_spawn() {
+async fn unavailable_guard_hides_non_host_tools_and_refuses_before_dispatch() {
     let temp = tempfile::tempdir().unwrap();
     let mut runtime = in_process_runtime(temp.path(), config_value());
+    runtime.config.skills.push(super::config::Skill {
+        disable_model_invocation: false,
+        name: "root".into(),
+        description: "root skill".into(),
+        directory: temp.path().to_str().unwrap().to_owned(),
+        files: std::collections::BTreeMap::from([("SKILL.md".into(), "0".repeat(64))]),
+    });
+    assert!(runtime.allows_skill("root"));
+    assert!(runtime.context().unwrap().catalog().contains("root skill"));
     runtime.guard_available = false;
+    assert!(!runtime.allows_skill("root"));
     let context: serde_json::Value =
         serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
     assert_eq!(context["commands"], serde_json::json!([]));
     assert_eq!(context["mcp_servers"], serde_json::json!([]));
+    assert_eq!(context["file_tools"], "");
+    assert_eq!(context["skills"], serde_json::json!([]));
     assert_eq!(context["host_commands"], true);
     assert_eq!(context["write"], false);
+    let calls = catalog_call_schemas(&context);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(
+        calls[0]["properties"]["operation"]["enum"],
+        json!(["command_unguarded"])
+    );
+    let research: Value =
+        serde_json::from_str(runtime.research_context(3).unwrap().catalog()).unwrap();
+    assert!(catalog_call_schemas(&research).is_empty());
     assert!(runtime.worker_policy().is_none());
-    let result = run_in_process(
-        &runtime,
+    std::fs::create_dir(temp.path().join("src")).unwrap();
+    std::fs::write(temp.path().join("src/file.txt"), "file canary").unwrap();
+    for call in [
         ToolCall::Command {
             program: "sh".into(),
             args: vec!["-c".into(), "touch canary".into()],
             cwd: String::new(),
         },
-    )
-    .await;
-    assert!(result.attestation.is_none());
-    assert_eq!(result.disposition, ToolDisposition::Failed);
-    assert_eq!(
-        result.output,
-        "Guard native protection unavailable before dispatch; no operation was dispatched."
-    );
+        ToolCall::List { path: "src".into() },
+        ToolCall::Read {
+            path: "src/file.txt".into(),
+            offset: None,
+            limit: None,
+        },
+        ToolCall::Search {
+            path: "src".into(),
+            query: "canary".into(),
+            regex: false,
+            include: None,
+            case_sensitive: true,
+            offset: 0,
+            limit: 100,
+        },
+        ToolCall::Glob {
+            pattern: "src/*".into(),
+            path: ".".into(),
+            limit: 100,
+        },
+        ToolCall::Skill {
+            name: "root".into(),
+            resource: None,
+        },
+    ] {
+        let result = run_in_process(&runtime, call).await;
+        assert!(result.attestation.is_none());
+        assert_eq!(result.disposition, ToolDisposition::Failed);
+        assert_eq!(
+            result.output,
+            "Guard native protection unavailable before dispatch; no operation was dispatched."
+        );
+    }
     assert!(!temp.path().join("canary").exists());
 }
 

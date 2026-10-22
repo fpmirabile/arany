@@ -1628,20 +1628,59 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
 
 #[test]
 fn pre_host_migrations_never_create_live_authority() {
-    let mut tool: serde_json::Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
-    tool["intent"]["call"]["operation"] = serde_json::json!("command_unguarded");
-    let mut run: serde_json::Value = serde_json::from_str(GLOBAL_RUNSTARTED).unwrap();
-    run["config"]["tool_policy"] = serde_json::json!({"child_unguarded":"human_only"});
-    let mut verdict: serde_json::Value = serde_json::from_str(VERDICT_V4).unwrap();
-    verdict["source"] = serde_json::json!("exact_command_rule");
-    for (kind, value) in [
-        ("ToolStarted", tool),
-        ("RunStarted", run),
-        ("ToolPermissionDecided", verdict),
-    ] {
+    use crate::tools::permissions::{PermissionSource, PermissionVerdict};
+    let tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let (run, agent) = intent_scope(&tool).unwrap();
+    let mut event = Event::decode(
+        "ToolStarted",
+        crate::test_support::payload_version("ToolStarted"),
+        GLOB_TOOLSTARTED,
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+    let control = event.payload().unwrap();
+    assert_eq!(
+        crate::session::pre_host_payload("ToolStarted", &control),
+        Some(control)
+    );
+    let Event::ToolStarted { intent, .. } = &mut event else {
+        unreachable!()
+    };
+    intent.call = crate::tools::ToolCall::CommandUnguarded {
+        program: "find".into(),
+        args: vec![".".into()],
+        cwd: String::new(),
+        justification: "Inspect the Workspace".into(),
+    };
+    assert!(crate::session::pre_host_payload("ToolStarted", &event.payload().unwrap()).is_none());
+
+    let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
+    assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_some());
+    run["config"]["tool_policy"]["child_unguarded"] = serde_json::json!("human_only");
+    serde_json::from_value::<crate::session::RunConfig>(run["config"].clone()).unwrap();
+    assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_none());
+
+    let control: PermissionVerdict = serde_json::from_str(VERDICT_V4).unwrap();
+    let payload = serde_json::to_string(&control).unwrap();
+    assert_eq!(
+        crate::session::pre_host_payload("ToolPermissionDecided", &payload),
+        Some(payload)
+    );
+    for field in ["basis", "source"] {
+        let mut verdict = control.clone();
+        match field {
+            "basis" => verdict.basis = PermissionSource::SessionApproval,
+            "source" => verdict.source = PermissionSource::SessionApproval,
+            _ => unreachable!(),
+        }
         assert!(
-            crate::session::pre_host_payload(kind, &value.to_string()).is_none(),
-            "{kind}"
+            crate::session::pre_host_payload(
+                "ToolPermissionDecided",
+                &serde_json::to_string(&verdict).unwrap()
+            )
+            .is_none(),
+            "{field}"
         );
     }
 }

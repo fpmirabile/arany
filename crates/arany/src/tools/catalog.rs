@@ -420,7 +420,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
         }
         let (key, field, cap) = match facts.family {
             Family::File if facts.mutates => return catalog["write"] == true,
-            Family::File => return true,
+            Family::File => return catalog["file_tools"] != "",
             Family::Process if facts.site == Site::Unguarded => return catalog["host_commands"] == true,
             Family::Process => ("commands", "program", 8),
             Family::Skill => ("skills", "name", MAX_SKILLS),

@@ -867,10 +867,11 @@ impl ToolRuntime {
     }
 
     pub(crate) fn allows_skill(&self, name: &str) -> bool {
-        self.config.allows(&ToolCall::Skill {
-            name: name.to_owned(),
-            resource: None,
-        })
+        self.guard_available
+            && self.config.allows(&ToolCall::Skill {
+                name: name.to_owned(),
+                resource: None,
+            })
     }
 
     pub(crate) fn hides_skill_from_model(&self, name: &str) -> bool {
@@ -881,7 +882,7 @@ impl ToolRuntime {
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {
-        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation
+        self.config.skills.iter().filter(|skill| self.guard_available && !skill.disable_model_invocation
             && !self.skill_file_path(&skill.name, "SKILL.md").is_some_and(|path| self.permissions().is_some_and(|config| config.restricts_read(&path)))).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
@@ -899,7 +900,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": self.config.write && self.guard_available,
-            "file_tools": catalog::FILE_TOOLS,
+            "file_tools": if self.guard_available { catalog::FILE_TOOLS } else { "" },
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
             "host_commands": true,
@@ -991,10 +992,14 @@ impl ToolRuntime {
         let mut catalog: serde_json::Value =
             serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
-        catalog["write"] = serde_json::json!(true);
+        catalog["write"] = serde_json::json!(self.guard_available);
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
-        catalog["file_tools"] = serde_json::json!(catalog::FILE_TOOLS);
+        catalog["file_tools"] = serde_json::json!(if self.guard_available {
+            catalog::FILE_TOOLS
+        } else {
+            ""
+        });
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
         if !grant.commands.is_empty() {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
@@ -1023,7 +1028,7 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": catalog::RESEARCH_FILE_TOOLS,
+            "file_tools": if self.guard_available { catalog::RESEARCH_FILE_TOOLS } else { "" },
             "commands": [],
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
@@ -1163,7 +1168,9 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
-        if intent.call.facts().site == Site::Guard && !self.guard_available {
+        if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
+            && !self.guard_available
+        {
             return unstarted_observation(intent, ToolError::ProtectionUnavailable);
         }
         if matches!(

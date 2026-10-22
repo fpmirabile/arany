@@ -1916,9 +1916,19 @@ impl Engine {
             .tools
             .as_ref()
             .map(|tools| {
+                let permissions = if goal.entry == GoalEntry::Continue {
+                    let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+                    if self.host_settings_match(snapshot.as_ref().map(|snapshot| snapshot.digest)) {
+                        snapshot
+                    } else {
+                        tools.permissions.clone()
+                    }
+                } else {
+                    tools.permissions.clone()
+                };
                 crate::tools::ToolRuntime::admit(
                     tools.config.clone(),
-                    tools.permissions.clone(),
+                    permissions,
                     tools.unguarded_rules.clone(),
                     &request.workspace,
                     &self.state,
@@ -1927,12 +1937,8 @@ impl Engine {
             })
             .transpose()?;
         if let Some(runtime) = &mut tools {
-            runtime.host_settings_admitted = self.host_settings_match(
-                submission
-                    .tools
-                    .as_ref()
-                    .and_then(|tools| tools.permissions.as_ref().map(|snapshot| snapshot.digest)),
-            );
+            runtime.host_settings_admitted =
+                self.host_settings_match(runtime.receipt().permissions_digest);
         }
         if let Some(runtime) = &tools
             && runtime.workspace_identity() != workspace_identity
