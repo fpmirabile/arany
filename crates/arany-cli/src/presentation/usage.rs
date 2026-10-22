@@ -326,7 +326,13 @@ fn format_duration(mut seconds: i64) -> String {
         let count = seconds / size;
         seconds %= size;
         if count > 0 {
-            parts.push(format!("{count} {unit}"));
+            parts.push(if unit == "d" {
+                format!("{count} d")
+            } else {
+                super::format_duration(
+                    u64::try_from(count * size * 1000).expect("bounded sub-day duration"),
+                )
+            });
             if parts.len() == 2 {
                 break;
             }

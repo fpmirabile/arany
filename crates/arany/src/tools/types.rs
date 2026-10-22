@@ -315,6 +315,18 @@ pub enum ToolCall {
     GitSwitch {
         branch: String,
     },
+    GitPush {
+        remote: String,
+        branch: String,
+    },
+    GhPrCreate {
+        repository: String,
+        base: String,
+        head: String,
+        title: String,
+        body: String,
+        draft: bool,
+    },
     // Null or omitted path and limit normalize to their defaults before intent hashing.
     Glob {
         pattern: String,
@@ -390,6 +402,10 @@ pub(crate) fn parse_mcp_arguments(arguments: &str) -> Result<Value, super::ToolE
 impl ToolCall {
     pub(crate) fn is_process(&self) -> bool {
         self.facts().spawns_process
+    }
+
+    pub fn is_host(&self) -> bool {
+        matches!(self, Self::GitPush { .. } | Self::GhPrCreate { .. })
     }
 
     pub fn is_unguarded(&self) -> bool {
@@ -591,6 +607,8 @@ impl ToolPolicyReceipt {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectIntent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostIntent>,
     pub target: EffectTarget,
     pub id: Uuid,
     pub run_id: RunId,
@@ -605,9 +623,17 @@ pub struct EffectIntent {
     pub use_count: u8,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HostIntent {
+    pub source_oid: String,
+    pub refspec: String,
+}
+
 impl EffectIntent {
     pub fn effective_timeout_ms(&self) -> u32 {
         let cap = match self.call {
+            _ if self.call.is_host() => 600_000,
             _ if self.call.is_git() => GIT_TIMEOUT_MS,
             ToolCall::McpList { .. } | ToolCall::McpCall { .. } => MCP_TIMEOUT_MS,
             _ => self.limits.runtime_ms,
@@ -628,6 +654,11 @@ impl EffectIntent {
             && self.expires_at_ms > 0
             && self.use_count == 1
             && self.call.valid()
+            && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
+            && self
+                .host
+                .as_ref()
+                .is_none_or(|host| super::git::host::valid_pin(&self.call, host))
             && self.limits.valid()
     }
 }
@@ -708,6 +739,7 @@ pub(crate) fn command_timeout_limit_message(requested_ms: u32, maximum_ms: u32) 
 #[serde(rename_all = "snake_case")]
 pub enum NetworkGrant {
     None,
+    Host,
 }
 
 impl Default for ToolLimits {
@@ -739,7 +771,6 @@ impl ToolLimits {
         (128..=MAX_TOOL_RESULT_BYTES as u32).contains(&self.result_bytes)
             && (1_000..=MAX_COMMAND_TIMEOUT_MS).contains(&self.runtime_ms)
             && self.scratch_bytes == SCRATCH_BYTES
-            && self.network == NetworkGrant::None
             && match self.resource_class {
                 ToolResourceClass::Default => {
                     self.memory_bytes == MEMORY_BYTES
@@ -865,6 +896,7 @@ pub enum Attestation {
         data: WorkerDataRef,
     },
     Unguarded(UnguardedReceipt),
+    Host(UnguardedReceipt),
 }
 
 impl Attestation {
@@ -886,7 +918,7 @@ impl Attestation {
                     && match intent.call.facts().site {
                         Site::InProcess => guard.is_none(),
                         Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
-                        Site::Unguarded => false,
+                        Site::Unguarded | Site::Host => false,
                     }
             }
             Self::WorkerMutation { receipt, mutation } => {
@@ -914,7 +946,7 @@ impl Attestation {
                     && match intent.call.site() {
                         Site::InProcess => guard.is_none(),
                         Site::Guard => guard.as_ref().is_some_and(|r| r.valid_for(intent)),
-                        Site::Unguarded => false,
+                        Site::Unguarded | Site::Host => false,
                     }
             }
             Self::InProcess {
@@ -932,6 +964,12 @@ impl Attestation {
                 intent.target == EffectTarget::Workspace
                     && !matches!(intent.call, ToolCall::PrepareWorker { .. })
                     && intent.call.facts().site == Site::Guard
+                    && receipt.valid_for(intent)
+            }
+            Self::Host(receipt) => {
+                intent.target == EffectTarget::Workspace
+                    && intent.call.is_host()
+                    && intent.host.is_some()
                     && receipt.valid_for(intent)
             }
             Self::Unguarded(receipt) => {
@@ -956,6 +994,14 @@ impl Attestation {
                 enforcement_digest: intent.enforcement_digest,
                 limits: intent.limits.clone(),
             }),
+            Site::Host => Self::Host(UnguardedReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                executable_sha256: "0".repeat(64),
+                pid: 1,
+                exit_code: Some(0),
+                descendants_confirmed_stopped: true,
+            }),
             Site::Unguarded => Self::Unguarded(UnguardedReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
@@ -972,6 +1018,7 @@ impl Attestation {
             Self::Guard(receipt) => Some(receipt),
             Self::InProcess { .. }
             | Self::Unguarded(_)
+            | Self::Host(_)
             | Self::WorkerCommand { .. }
             | Self::WorkerRead { .. }
             | Self::WorkerMutation { .. }
@@ -1198,6 +1245,25 @@ impl ToolObservation {
                         && self.intent.call.facts().site == super::catalog::Site::Guard
                 }
             }
+            && (!self.intent.call.is_host()
+                || self.cache_update == CacheUpdate::NotApplicable
+                    && self.enforcement_cause.is_none()
+                    && match &self.attestation {
+                        Some(Attestation::Host(receipt)) => {
+                            receipt.pid > 0
+                                && (self.disposition == ToolDisposition::Uncertain
+                                    || self.disposition == ToolDisposition::Failed
+                                        && matches!(self.intent.call, ToolCall::GitPush { .. })
+                                        && receipt.exit_code == Some(1)
+                                        && receipt.descendants_confirmed_stopped
+                                        && self.output == super::git::host::NON_FAST_FORWARD
+                                    || self.disposition == ToolDisposition::Succeeded
+                                        && receipt.exit_code == Some(0)
+                                        && receipt.descendants_confirmed_stopped)
+                        }
+                        None => self.disposition != ToolDisposition::Succeeded,
+                        _ => false,
+                    })
             && (!self.intent.call.is_unguarded()
                 || self.cache_update == CacheUpdate::NotApplicable
                     && self.enforcement_cause.is_none())
@@ -1509,6 +1575,12 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
     let private = matches!(observation.intent.target, EffectTarget::WorkerView { .. });
     let effect = if private {
         "none"
+    } else if observation.intent.call.is_host() {
+        match observation.disposition {
+            ToolDisposition::Uncertain => "uncertain",
+            ToolDisposition::Succeeded => "host",
+            _ => "not_confirmed",
+        }
     } else if observation.intent.call.is_unguarded() {
         match observation.disposition {
             ToolDisposition::Uncertain | ToolDisposition::Cancelled => "uncertain",
@@ -1625,6 +1697,7 @@ mod model_call_tests {
             },
         ] {
             let intent = EffectIntent {
+                host: None,
                 target: EffectTarget::Workspace,
                 id: Uuid::now_v7(),
                 run_id: RunId::new(),
@@ -1663,6 +1736,7 @@ mod unguarded_vocabulary_tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),

@@ -519,6 +519,7 @@ mod tests {
         assert!(tool_capacity_notice(&view, Some(id)).is_none());
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id,
             run_id,
@@ -736,6 +737,7 @@ mod tests {
         assert_eq!(model.activity_lines[3], "+3 more agents (use /agents)");
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run.id,

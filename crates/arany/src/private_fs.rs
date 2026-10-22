@@ -88,6 +88,15 @@ pub(crate) fn macos_directory(path: &Path, final_access: rustix::fs::OFlags) -> 
 }
 
 pub(crate) fn open_directory(path: &Path, create: bool) -> Result<PrivateDirectory, Error> {
+    open_directory_checked(path, create, || Ok(()))
+}
+
+pub(crate) fn open_directory_checked(
+    path: &Path,
+    create: bool,
+    check: impl Fn() -> Result<(), Error>,
+) -> Result<PrivateDirectory, Error> {
+    check()?;
     if !path.is_absolute() {
         return Err(Error::InvalidPath);
     }
@@ -111,6 +120,7 @@ pub(crate) fn open_directory(path: &Path, create: bool) -> Result<PrivateDirecto
     #[cfg(unix)]
     let mut ancestors = vec![identity(&dir)?];
     for (index, name) in names.iter().enumerate() {
+        check()?;
         match dir.open_dir_nofollow(name) {
             Ok(next) => dir = next,
             Err(error) if create && error.kind() == io::ErrorKind::NotFound => {

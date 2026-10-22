@@ -474,6 +474,22 @@ impl ToolView {
             })
     }
 
+    pub fn ran_host(&self) -> bool {
+        self.intent.call.is_host()
+            && match &self.observation {
+                Some(observation) => {
+                    matches!(
+                        observation.attestation,
+                        Some(crate::tools::Attestation::Host(_))
+                    ) || observation.disposition == crate::tools::ToolDisposition::Uncertain
+                }
+                None => self
+                    .permission_verdict
+                    .as_ref()
+                    .is_some_and(|verdict| verdict.approved),
+            }
+    }
+
     /// A host run that may have had effects: attested or uncertain, or approved without a recorded outcome.
     pub fn ran_unguarded(&self) -> bool {
         self.intent.call.is_unguarded()
@@ -706,6 +722,10 @@ impl RunView {
             )
             .map(|observation| (observation, false))
         })
+    }
+
+    pub fn host_tools(&self) -> usize {
+        self.tools.iter().filter(|tool| tool.ran_host()).count()
     }
 
     pub fn unguarded_tools(&self) -> usize {

@@ -1209,12 +1209,14 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut answered,
         "Up/Down · Left/Right page · Esc close",
     );
+    let closed_at = transcript.len();
     input.write_all(b"\x1b").unwrap();
-    wait(
+    super::session_picker::wait_for_screen(
         &mut output,
         &mut input,
         &mut transcript,
         &mut answered,
+        (closed_at, 80, 24),
         "Ask a question, or type / for commands",
     );
     input.write_all(b"\x03").unwrap();
@@ -1813,13 +1815,13 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "verb menu",
-        &shows("gh pr create (unavailable; human approval required)"),
+        &shows("gh pr create (host; human approval required)"),
     );
     assert!(super::session_picker::screen_contains(
         &transcript,
         80,
         24,
-        "unavailable; human approval required"
+        "host; human approval required"
     ));
     input.write_all(b"\r").unwrap();
     until(

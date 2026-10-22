@@ -35,6 +35,7 @@ pub use approval::{
 };
 pub use cancel::Cancellation;
 use config::Config;
+pub(crate) use git::host::sweep_stale as sweep_host_scratch;
 pub(crate) use git::recover_locks as report_git_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
@@ -95,14 +96,19 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
-    OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
+    FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS,
+    NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
     ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
     ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
 pub enum ToolError {
+    #[error("No admitted credential-helper search directory")]
+    HostHelperSearch,
+    #[error("Credential includes cannot be safely omitted")]
+    CredentialIncludes,
+
     #[error("tools require a private tools.json; see docs/tools.md")]
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
@@ -155,6 +161,7 @@ pub(crate) struct PermissionSnapshot {
 pub(crate) struct ToolRuntime {
     config: Config,
     git_writes_available: bool,
+    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     worker: Option<std::sync::Arc<worker::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
@@ -504,6 +511,10 @@ impl ToolRuntime {
         (capacity >= 128).then_some(capacity)
     }
 
+    pub(crate) fn continuation_reserve(turn_bytes: usize, feedback: usize) -> usize {
+        types::MAX_TOOL_RESULT_BYTES + turn_bytes + Self::step_context_reserve(true, feedback)
+    }
+
     pub(crate) fn step_context_reserve(command_integration: bool, feedback: usize) -> usize {
         512 + feedback
             + if command_integration {
@@ -518,6 +529,14 @@ impl ToolRuntime {
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
             } => self.config.write,
+            _ if call.is_host() => {
+                self.config.allows(call)
+                    && self
+                        .host_authentication
+                        .as_ref()
+                        .as_ref()
+                        .is_some_and(|auth| auth.allows(call))
+            }
             _ => self.config.allows(call),
         }
     }
@@ -688,6 +707,7 @@ impl ToolRuntime {
             snapshot.config = std::sync::Arc::new(config);
             snapshot
         });
+        let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
@@ -722,10 +742,23 @@ impl ToolRuntime {
         let process_enforcement_digest = guard::enforcement_digest(&config.runtime_grants)?;
         #[cfg(target_os = "macos")]
         capture.complete();
+        let skill_roots = config
+            .skills
+            .iter()
+            .map(|skill| {
+                (
+                    skill.name.clone(),
+                    fs::open_directory(Path::new(&skill.directory))
+                        .ok()
+                        .map(std::sync::Arc::new),
+                )
+            })
+            .collect();
         Ok(Self {
             definitions: std::sync::Arc::new(definitions),
             config,
             git_writes_available: guard::git_writes_available(),
+            host_authentication,
             worker: None,
             handover: None,
             permissions,
@@ -743,6 +776,7 @@ impl ToolRuntime {
             )),
             workspace: workspace.to_owned(),
             reads: Some(InProcessReads {
+                skills: skill_roots,
                 root: std::sync::Arc::new(root),
                 slots: std::sync::Arc::clone(&IN_PROCESS_READS),
             }),
@@ -900,7 +934,16 @@ impl ToolRuntime {
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
-                serde_json::json!({"write":write,"operations":catalog::git_operations(write),"scope":catalog::GIT_SCOPE})
+                let operations: Vec<_> = catalog::git_operations(write, self.config.write)
+                    .into_iter()
+                    .filter(|name| match *name {
+                        "git_push" | "gh_pr_create" => self.host_authentication.as_ref().as_ref()
+                            .is_some_and(|auth| auth.offers(name)),
+                        _ => true,
+                    })
+                    .filter(|name| *name != "gh_pr_create" || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .collect();
+                serde_json::json!({"write":write,"host":self.config.write,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },
@@ -1025,7 +1068,20 @@ impl ToolRuntime {
         } else {
             self.enforcement_digest
         };
+        let limits = if call.is_host() {
+            ToolLimits {
+                network: NetworkGrant::Host,
+                runtime_ms: 600_000,
+                cache_requested_bytes: 0,
+                cache_bytes: 0,
+                cache_candidate_bytes: 0,
+                ..ToolLimits::default()
+            }
+        } else {
+            ToolLimits::default()
+        };
         EffectIntent {
+            host: git::host::pin(&self.workspace, &call).ok(),
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -1035,7 +1091,7 @@ impl ToolRuntime {
             workspace_device: self.workspace_identity.device,
             workspace_inode: self.workspace_identity.inode,
             call,
-            limits: ToolLimits::default(),
+            limits,
             expires_at_ms: now_ms().saturating_add(60_000),
             use_count: 1,
         }
@@ -1043,7 +1099,7 @@ impl ToolRuntime {
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
-            Site::InProcess | Site::Unguarded => Duration::ZERO,
+            Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
@@ -1112,6 +1168,20 @@ impl ToolRuntime {
         }
         match intent.call.facts().site {
             Site::InProcess => self.run_in_process(intent, cancellation).await,
+            Site::Host => {
+                if let Err(error) = self.pinned_root(&intent) {
+                    return unstarted_observation(intent, error);
+                }
+                git::host::run(
+                    &self.config,
+                    self.host_authentication.as_ref().as_ref(),
+                    self.cache_state.as_deref(),
+                    &self.workspace,
+                    intent,
+                    cancellation,
+                )
+                .await
+            }
             Site::Unguarded => self.run_unguarded(intent, cancellation).await,
             Site::Guard => match guard::execute(self, &intent, cancellation).await {
                 Ok(observation) => observation,
@@ -1231,6 +1301,26 @@ impl ToolRuntime {
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
+            if let ToolCall::Skill { name, .. } = &read_intent.call {
+                let skill = runtime
+                    .config
+                    .skills
+                    .iter()
+                    .find(|skill| &skill.name == name)
+                    .ok_or(ToolError::Configuration)?;
+                let skill_root = runtime
+                    .reads
+                    .as_ref()
+                    .and_then(|reads| reads.skills.get(name))
+                    .and_then(Option::as_ref)
+                    .ok_or(ToolError::Path)?;
+                return Ok(skills::read(
+                    skill_root,
+                    skill,
+                    &read_intent.call,
+                    read_intent.limits.result_bytes as usize,
+                ));
+            }
             let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(
                 &root,
@@ -1279,6 +1369,7 @@ impl ToolRuntime {
 
 #[derive(Clone)]
 struct InProcessReads {
+    skills: std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>>,
     root: std::sync::Arc<cap_std::fs::Dir>,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -1371,18 +1462,49 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         Site::InProcess => "Read",
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
+        Site::Host => "host",
     };
     record_failure(site, &intent, &error);
+    let mut output = match &error {
+        ToolError::QueueFull => format!("{error}. No operation was dispatched."),
+        _ => format!(
+            "{site} {} unavailable before dispatch; no operation was dispatched.",
+            failure_stage(&error)
+        ),
+    };
+    if intent.call.facts().site == Site::Guard && !matches!(error, ToolError::QueueFull) {
+        let cause = failure_check(&error).unwrap_or(match &error {
+            ToolError::Operation => "Guard startup failed; exact cause was not reported",
+            _ => failure_stage(&error),
+        });
+        let next = match &error {
+            ToolError::GuardRejected(guard::GuardStage::NamespaceBootstrap) => {
+                "Enable unprivileged user namespaces and Bubblewrap for Arany, then resend your message."
+            }
+            ToolError::GuardRejected(guard::GuardStage::NativeManager) => {
+                "Restore the user service manager and its resource controls, then resend your message."
+            }
+            ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => {
+                "Check the admitted files and folder permissions, then resend your message to pin them again."
+            }
+            _ => {
+                "Check the Guard executable and native sandbox prerequisites, then resend your message."
+            }
+        };
+        let diagnostic = if cfg!(debug_assertions) {
+            " For details, inspect development.log in the Session State directory."
+        } else {
+            ""
+        };
+        let detail = format!(" Cause: {cause}. {next}{diagnostic}");
+        if output.len() + detail.len() <= intent.limits.result_bytes as usize {
+            output.push_str(&detail);
+        }
+    }
     ToolObservation {
         enforcement_cause,
         limit_cause: None,
-        output: match error {
-            ToolError::QueueFull => format!("{error}. No operation was dispatched."),
-            _ => format!(
-                "{site} {} unavailable before dispatch; no operation was dispatched.",
-                failure_stage(&error)
-            ),
-        },
+        output,
         intent,
         disposition: ToolDisposition::Failed,
         attestation: None,
