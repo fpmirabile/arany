@@ -926,7 +926,8 @@ pub(super) async fn execute(
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
         let primary_command = primary_command(intent);
-        let payload_phase = AtomicBool::new(!primary_command);
+        let payload_phase = AtomicBool::new(false);
+        let selecting = AtomicBool::new(false);
         let watcher = Mutex::new(Scope::new(
             unit.scope
                 .as_ref()
@@ -946,6 +947,7 @@ pub(super) async fn execute(
             .await
             .map_err(|_| ToolError::GuardRejected(GuardStage::PreparationDeadline))??;
             if bytes == b"SELECT_READY\n" {
+                selecting.store(true, Ordering::Release);
                 stream
                     .get_mut()
                     .write_all(b"SELECT\n")
@@ -965,6 +967,7 @@ pub(super) async fn execute(
                     super::super::selection_phase::receive(&mut stream, deadline),
                 )
                 .await?;
+                selecting.store(false, Ordering::Release);
                 bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
                     .await
                     .map_err(|_| ToolError::Limit)??;
@@ -1055,6 +1058,7 @@ pub(super) async fn execute(
                             .lock()
                             .map_err(|_| ToolError::ProtectionUnavailable)?
                             .begin_capture(&intent.limits)?;
+                        selecting.store(true, Ordering::Release);
                         payload_phase.store(false, Ordering::Release);
                         let (deadline, report_deadline) =
                             super::super::selection_phase::capture_deadlines(completion_deadline)?;
@@ -1077,6 +1081,7 @@ pub(super) async fn execute(
                         if done != b"CAPTURE_DONE\n" {
                             return Err(ToolError::Operation);
                         }
+                        selecting.store(false, Ordering::Release);
                     }
                 }
                 let capture_result = async {
@@ -1163,7 +1168,13 @@ pub(super) async fn execute(
                             .lock()
                             .map_err(|_| ToolError::ProtectionUnavailable)
                             .and_then(|mut watcher| {
-                                watcher.apply_limits(selection_limits(&intent.limits));
+                                let limits = if selecting.load(Ordering::Acquire) {
+                                    selection_limits(&intent.limits)
+                                } else {
+                                    watcher.capture_cpu = None;
+                                    intent.limits.clone()
+                                };
+                                watcher.apply_limits(limits);
                                 watcher.check_resources()
                             });
                         if let Err(error) = checked { break Err(error); }

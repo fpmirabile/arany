@@ -341,17 +341,26 @@ impl Inputs<'_> {
         if !valid_relative(path, false) || path.split('/').count() > 16 {
             return Err(ToolError::Limit);
         }
-        let file = open_file(self.source, path)?;
-        let metadata = safe_metadata(&file)?;
-        if path.split('/').any(ignored_directory)
-            || self.selector.excluded(path, metadata.is_dir())?
-        {
+        let (parent, name) = path.rsplit_once('/').unwrap_or((".", path));
+        let directory = Dir::from_std_file(open_file(self.source, parent)?);
+        let link = directory
+            .symlink_metadata(name)
+            .map_err(|_| ToolError::Path)?;
+        if path.split('/').any(ignored_directory) || self.selector.excluded(path, link.is_dir())? {
             self.selection.summary.ignored_entries += 1;
-            self.selection.summary.pruned_directories += u64::from(metadata.is_dir());
-            if metadata.is_dir() {
+            self.selection.summary.pruned_directories += u64::from(link.is_dir());
+            if link.is_dir() {
                 self.selection.pruned.insert(path.into());
             }
             return Ok(());
+        }
+        if !link.is_dir() && !link.is_file() {
+            return Err(ToolError::Path);
+        }
+        let file = open_file(self.source, path)?;
+        let metadata = safe_metadata(&file)?;
+        if metadata.is_dir() != link.is_dir() {
+            return Err(ToolError::ChangedInput);
         }
         if metadata.is_dir() {
             return self.directory(path);

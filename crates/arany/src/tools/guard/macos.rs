@@ -247,7 +247,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
     bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
-    bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-memory512m-wait30s-oversize-omission-full-output-validation");
+    bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation");
     bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
     bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));

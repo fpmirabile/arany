@@ -63,7 +63,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-oversize-omission-full-output-validation");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());

@@ -137,26 +137,32 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site.stop_descendants().await?;
         let mut capture_deadline = None;
         if site.command_before.is_some() {
-            use std::io::{Read, Write};
-            let mut stdout = std::io::stdout().lock();
-            stdout
-                .write_all(b"CAPTURE_READY\n")
-                .and_then(|()| stdout.flush())
-                .map_err(|_| ToolError::Operation)?;
-            let mut acknowledgement = [0; 8];
-            std::io::stdin()
-                .lock()
-                .read_exact(&mut acknowledgement)
-                .map_err(|_| ToolError::Operation)?;
-            if acknowledgement != *b"CAPTURE\n" {
-                return Err(ToolError::Configuration);
-            }
-            let mut frame = [0; 8];
-            std::io::stdin()
-                .lock()
-                .read_exact(&mut frame)
-                .map_err(|_| ToolError::Operation)?;
-            capture_deadline = Some(super::guard::selection_phase::decode_deadline(frame)?);
+            capture_deadline = Some(
+                tokio::task::spawn_blocking(|| {
+                    use std::io::{Read, Write};
+                    let mut stdout = std::io::stdout().lock();
+                    stdout
+                        .write_all(b"CAPTURE_READY\n")
+                        .and_then(|()| stdout.flush())
+                        .map_err(|_| ToolError::Operation)?;
+                    let mut acknowledgement = [0; 8];
+                    std::io::stdin()
+                        .lock()
+                        .read_exact(&mut acknowledgement)
+                        .map_err(|_| ToolError::Operation)?;
+                    if acknowledgement != *b"CAPTURE\n" {
+                        return Err(ToolError::Configuration);
+                    }
+                    let mut frame = [0; 8];
+                    std::io::stdin()
+                        .lock()
+                        .read_exact(&mut frame)
+                        .map_err(|_| ToolError::Operation)?;
+                    super::guard::selection_phase::decode_deadline(frame)
+                })
+                .await
+                .map_err(|_| ToolError::Operation)??,
+            );
         }
         if timed_out {
             (

@@ -3889,9 +3889,22 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
         }
         std::fs::create_dir(source.join("nested")).unwrap();
         std::fs::create_dir(source.join("pruned")).unwrap();
+        let outside = temp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("hidden"), b"excluded content").unwrap();
+        symlink(&outside, source.join("target")).unwrap();
+        symlink(outside.join("hidden"), source.join("result")).unwrap();
+        std::fs::hard_link(outside.join("hidden"), source.join("ignored-hardlink.bin")).unwrap();
+        nix::unistd::mkfifo(
+            &source.join("ignored-fifo.bin"),
+            nix::sys::stat::Mode::S_IRUSR,
+        )
+        .unwrap();
+        let _socket =
+            std::os::unix::net::UnixListener::bind(source.join("ignored-socket.bin")).unwrap();
         std::fs::write(
             source.join(".gitignore"),
-            b"*.bin\npruned/\n!pruned/visible\n.gitignore\n",
+            b"*.bin\nresult\npruned/\n!pruned/visible\n.gitignore\n",
         )
         .unwrap();
         std::fs::write(source.join("nested/.gitignore"), b"!keep.bin\n").unwrap();
@@ -3914,7 +3927,17 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
         .unwrap();
         assert_eq!(selection.summary.oversized_inputs, 1, "{case}");
         assert_eq!(selection.summary.pruned_directories, 1, "{case}");
-        for absent in [".gitignore", "pruned", "nested/drop.bin", "oversized"] {
+        for absent in [
+            ".gitignore",
+            "pruned",
+            "nested/drop.bin",
+            "oversized",
+            "target",
+            "result",
+            "ignored-hardlink.bin",
+            "ignored-fifo.bin",
+            "ignored-socket.bin",
+        ] {
             assert!(!target.join(absent).exists(), "{case}: {absent}");
         }
         assert_eq!(
@@ -3973,6 +3996,55 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
             assert!(captured.is_err(), "{case}");
         }
         assert_eq!(std::fs::read(source.join("source.txt")).unwrap(), b"before");
+    }
+}
+
+#[test]
+fn command_selection_rejects_unexcluded_unsafe_inputs() {
+    for kind in ["symlink", "hardlink", "fifo", "socket"] {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let target = temp.path().join("target");
+        let resources = temp.path().join("resources");
+        for path in [&source, &target, &resources] {
+            std::fs::create_dir(path).unwrap();
+        }
+        let input = source.join("unsafe-input");
+        let _socket = match kind {
+            "symlink" => {
+                std::os::unix::fs::symlink("missing", &input).unwrap();
+                None
+            }
+            "hardlink" => {
+                let outside = temp.path().join("outside");
+                std::fs::write(&outside, b"content").unwrap();
+                std::fs::hard_link(&outside, &input).unwrap();
+                None
+            }
+            "fifo" => {
+                nix::unistd::mkfifo(&input, nix::sys::stat::Mode::S_IRUSR).unwrap();
+                None
+            }
+            "socket" => Some(std::os::unix::net::UnixListener::bind(&input).unwrap()),
+            _ => unreachable!(),
+        };
+        let mut config = config_value();
+        config["workspace_paths"] = json!(["."]);
+        let config: Config = serde_json::from_value(config).unwrap();
+        assert!(
+            matches!(
+                super::fs::prepare_command(
+                    &super::fs::open_directory(&source).unwrap(),
+                    &super::fs::open_directory(&target).unwrap(),
+                    &super::fs::open_directory(&resources).unwrap(),
+                    &config,
+                    std::time::Instant::now() + super::selection::PHASE_TIME,
+                ),
+                Err(super::ToolError::Path)
+            ),
+            "{kind}"
+        );
+        assert_eq!(std::fs::read_dir(&target).unwrap().count(), 0);
     }
 }
 
