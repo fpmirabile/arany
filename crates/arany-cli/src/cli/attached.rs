@@ -1764,17 +1764,21 @@ async fn finish_submission(
         run_feedback,
         crate::presentation::render_provider_attempts(&outcome.run),
     );
-    if let Some(feedback) = feedback {
+    if let Some(feedback) = feedback.as_deref() {
         if composer.is_empty() {
-            notice = Some(Feedback::History(feedback));
+            notice = Some(Feedback::History(feedback.to_owned()));
         } else {
             terminal
-                .draw(view, composer, Some(&feedback))
+                .draw(view, composer, Some(feedback))
                 .map_err(|error| error.to_string())?;
         }
     }
     if let Some(config) = automatic {
-        let submission_feedback = composer.is_empty().then(|| notice.take()).flatten();
+        let submission_feedback = if composer.is_empty() {
+            notice.take()
+        } else {
+            feedback.map(Feedback::History)
+        };
         let compaction_notice = match compact_current(
             engine,
             terminal,
