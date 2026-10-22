@@ -401,6 +401,24 @@ impl Unit {
         Ok(())
     }
 
+    async fn wait_unloaded(&self, deadline: tokio::time::Instant) -> Result<(), ToolError> {
+        tokio::time::timeout_at(deadline, async {
+            loop {
+                let values = self.properties().await?;
+                if values["Id"].as_str() != Some(&self.name) {
+                    return Err(ToolError::ProtectionUnavailable);
+                }
+                match values["LoadState"].as_str() {
+                    Some("not-found") => return Ok(()),
+                    Some("loaded") => tokio::time::sleep(Duration::from_millis(10)).await,
+                    _ => return Err(ToolError::ProtectionUnavailable),
+                }
+            }
+        })
+        .await
+        .map_err(|_| ToolError::ProtectionUnavailable)?
+    }
+
     fn empty(&self) -> Result<bool, ToolError> {
         if let Some(group) = &self.group {
             let mut actual = String::new();
@@ -1647,6 +1665,8 @@ async fn prepare_inputs(
     drain_stderr(&mut drain, cleanup)
         .await
         .ok_or(ToolError::Operation)?;
+    // An inactive service can still retain its name until systemd unloads it.
+    unit.wait_unloaded(cleanup).await?;
     permit.prepared()?;
     result
 }
@@ -3001,34 +3021,53 @@ mod tests {
         };
         let name = unit.name.clone();
         let result = tokio::spawn(async move {
-            let mut command = manager_command("/usr/bin/systemd-run");
-            command.args([
-                "--user",
-                "--no-ask-password",
-                "--quiet",
-                "--wait",
-                "--service-type=exec",
-                "--unit",
-                &unit.name,
-                "--property=Restart=no",
-                "--property=KillMode=control-group",
-                "--property=TimeoutStopSec=2s",
-                "--property=RuntimeMaxSec=5s",
-                "/usr/bin/false",
-            ]);
-            let (status, _, _) = capture(command.spawn().unwrap(), 4096, Duration::from_secs(10))
-                .await
-                .unwrap();
-            assert!(!status.success());
-            let failed = unit.properties().await.unwrap();
-            assert_eq!(failed["ActiveState"], "failed");
-            assert_eq!(failed["MainPID"], "0");
-            assert_eq!(failed["ControlGroup"], "");
-            assert!(recover_reservation(id).await.unwrap());
-            let reset = unit.properties().await.unwrap();
-            assert_ne!(reset["ActiveState"], "failed");
-            assert_eq!(reset["MainPID"], "0");
-            assert_eq!(reset["ControlGroup"], "");
+            for (program, success) in [
+                ("/usr/bin/false", false),
+                ("/usr/bin/true", true),
+                ("/usr/bin/true", true),
+            ] {
+                let mut command = manager_command("/usr/bin/systemd-run");
+                command.args([
+                    "--user",
+                    "--no-ask-password",
+                    "--quiet",
+                    "--wait",
+                    "--service-type=exec",
+                    "--unit",
+                    &unit.name,
+                    "--property=Restart=no",
+                    "--property=KillMode=control-group",
+                    "--property=TimeoutStopSec=2s",
+                    "--property=RuntimeMaxSec=5s",
+                    program,
+                ]);
+                let (status, _, _) =
+                    capture(command.spawn().unwrap(), 4096, Duration::from_secs(10))
+                        .await
+                        .unwrap();
+                assert_eq!(status.success(), success);
+                if !success {
+                    let failed = unit.properties().await.unwrap();
+                    assert_eq!(failed["ActiveState"], "failed");
+                    assert_eq!(failed["MainPID"], "0");
+                    assert_eq!(failed["ControlGroup"], "");
+                    assert!(matches!(
+                        unit.wait_unloaded(
+                            tokio::time::Instant::now() + Duration::from_millis(100)
+                        )
+                        .await,
+                        Err(ToolError::ProtectionUnavailable)
+                    ));
+                    assert!(recover_reservation(id).await.unwrap());
+                }
+                unit.wait_unloaded(tokio::time::Instant::now() + super::super::TEARDOWN_WAIT)
+                    .await
+                    .unwrap();
+                let reset = unit.properties().await.unwrap();
+                assert_eq!(reset["LoadState"], "not-found");
+                assert_eq!(reset["MainPID"], "0");
+                assert_eq!(reset["ControlGroup"], "");
+            }
         })
         .await;
         for action in ["stop", "reset-failed"] {
