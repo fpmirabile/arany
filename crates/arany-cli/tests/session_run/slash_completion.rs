@@ -3723,9 +3723,15 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             prefix.strip_prefix('/').unwrap_or(prefix)
         );
         let expected_request = expected.clone();
+        let (submit, submitted) = std::sync::mpsc::sync_channel(1);
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             for index in 0..4 {
+                if index == 3 {
+                    submitted
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("attachment submission gate");
+                }
                 let deadline = Instant::now() + Duration::from_secs(10);
                 let mut stream = loop {
                     match listener.accept() {
@@ -4041,12 +4047,33 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 &mut answered,
                 b"Input:\r\n",
             );
+        } else {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                u16::try_from(3 + prefix.len() + label.len()).unwrap(),
+            );
         }
         if linear {
             fresh_capture(&mut transcript, &mut answered);
         }
         let from = transcript.len();
-        input.write_all(b" typed suffix\r").unwrap();
+        input.write_all(b" typed suffix").unwrap();
+        if !linear {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                u16::try_from(3 + prefix.len() + label.len() + " typed suffix".len()).unwrap(),
+            );
+        }
+        submit.send(()).expect("arm attachment request deadline");
+        input.write_all(b"\r").unwrap();
         wait_text(
             &mut output,
             &mut input,
