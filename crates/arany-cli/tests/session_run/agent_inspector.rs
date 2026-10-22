@@ -1156,10 +1156,13 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
 fn selected_child_messaging_journey() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&workspace).expect("workspace directory");
     let state = temp.path().join("state");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    write_profile(&state, listener.local_addr().unwrap().port());
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
     let server = gated_team_server(listener, 3, true, requests, released);
@@ -1177,17 +1180,17 @@ fn selected_child_messaging_journey() {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
-            .unwrap(),
+            .expect("spawn the prior Run"),
     );
     assert!(prior.status.success());
     let id = String::from_utf8(prior.stderr)
-        .unwrap()
+        .expect("prior stderr is UTF-8")
         .lines()
         .find_map(|line| {
             line.strip_prefix("Session: ")
                 .and_then(|id| id.parse::<SessionId>().ok())
         })
-        .unwrap();
+        .expect("prior Run reports its Session");
     let gates = Gates { requested, release };
     for classic in [false, true] {
         let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
@@ -1226,7 +1229,7 @@ fn selected_child_messaging_journey() {
             &[],
         );
         let from = pty.capture_from;
-        gates.release.send(()).unwrap();
+        gates.release.send(()).expect("server accepts the release");
         pty.await_request(&gates, "second");
         pty.frame(
             from,
@@ -1246,19 +1249,19 @@ fn selected_child_messaging_journey() {
         pty.step(b"\r", &["This child is read-only; draft retained"], &[]);
         pty.step(b"\x7f", &["Read-only"], &["> late note"]);
         pty.step(b"\x1b[1;3C", &["viewing child 2 (message)", "> draft"], &[]);
-        gates.release.send(()).unwrap();
+        gates.release.send(()).expect("server accepts the release");
         pty.await_request(&gates, "synthesis");
         pty.frame(
             pty.capture_from,
             &["viewing child 2 (read-only)", "> draft"],
             &[],
         );
-        gates.release.send(()).unwrap();
+        gates.release.send(()).expect("server accepts the release");
         pty.step(b"\x1b", &["team answer", "Ask Arany"], &["viewing child"]);
         exit_live(&mut attached, &mut pty);
     }
     live_linear_agent_chat(&workspace, &state, id, &gates, true);
-    server.join().unwrap();
+    server.join().expect("server thread finishes");
     let (events, view) = replayed(&state, id);
     assert_eq!(view.runs.len(), 4);
     assert_eq!(view.goals.len(), 4);

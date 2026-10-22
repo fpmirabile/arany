@@ -367,7 +367,37 @@ impl AttachedTerminal {
                 self.draw_agent_chat(view, None)?;
                 Ok(AgentChatInput::Handled)
             }
-            _ => self.edit_child(view, input).await,
+            TerminalInput::Character(_)
+            | TerminalInput::Newline
+            | TerminalInput::Backspace
+            | TerminalInput::Delete
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::WordLeft
+            | TerminalInput::WordRight
+            | TerminalInput::BackspaceWord
+            | TerminalInput::Up
+            | TerminalInput::Down
+            | TerminalInput::Home
+            | TerminalInput::End => self.edit_child(view, input).await,
+            TerminalInput::PageUp
+            | TerminalInput::PageDown
+            | TerminalInput::HalfPageUp
+            | TerminalInput::Tab
+            | TerminalInput::CycleApprovalMode
+            | TerminalInput::QuickActions
+            | TerminalInput::HistoryFind
+            | TerminalInput::HistoryLive
+            | TerminalInput::Transcript
+            | TerminalInput::CopySelection
+            | TerminalInput::PointerMove { .. }
+            | TerminalInput::PointerClick { .. }
+            | TerminalInput::PointerDrag { .. }
+            | TerminalInput::PointerRelease { .. }
+            | TerminalInput::PointerScrollUp { .. }
+            | TerminalInput::PointerScrollDown { .. }
+            | TerminalInput::LineRejected
+            | TerminalInput::LineContinued => Ok(AgentChatInput::Handled),
         }
     }
 
@@ -1304,6 +1334,46 @@ mod tests {
             composer,
             offered: None,
             notice: None,
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn pointer_input_on_a_read_only_child_is_handled_silently() {
+        let mut view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        view.runs[0].agents[2].status = arany::AgentStatus::Finished;
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 2,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: false,
+            shown: false,
+            choice: String::new(),
+            invalid: false,
+            editable: false,
+            last_child_notice: None,
+        });
+        for input in [
+            TerminalInput::PointerMove { column: 1, row: 1 },
+            TerminalInput::PointerClick {
+                column: 1,
+                row: 1,
+                clicks: 1,
+            },
+            TerminalInput::CopySelection,
+            TerminalInput::HistoryFind,
+        ] {
+            let action = terminal
+                .agent_chat_input(&view, input, &Composer::text_only())
+                .await
+                .unwrap();
+            assert!(matches!(action, AgentChatInput::Handled), "{input:?}");
         }
     }
 
