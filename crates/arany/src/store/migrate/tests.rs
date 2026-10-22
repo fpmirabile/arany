@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step.
-const EVENT_FIXTURES: [EventFixture<'static>; 26] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 32] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -29,7 +29,23 @@ const EVENT_FIXTURES: [EventFixture<'static>; 26] = [
     ),
     ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
     ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
-    ("ProviderCallRecorded", 16, REFUSAL_V16, REFUSAL_V17),
+    ("ToolStarted", 16, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 22, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 6, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 11, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        9,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        16,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("ProviderCallRecorded", 17, REFUSAL_V17, REFUSAL_V18),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -72,17 +88,28 @@ const EVENT_FIXTURES: [EventFixture<'static>; 26] = [
 #[test]
 fn refusal_reclassification_preserves_evidence_and_rejects_new_causes_in_old_payloads() {
     let step = REGISTRY
-        .event_step("ProviderCallRecorded", 16)
+        .event_step("ProviderCallRecorded", 17)
         .expect("migration");
-    assert_eq!((step.canonical)(REFUSAL_V16).as_deref(), Some(REFUSAL_V16));
-    let expected: Value = serde_json::from_str(REFUSAL_V17).unwrap();
+    assert_eq!((step.canonical)(REFUSAL_V17).as_deref(), Some(REFUSAL_V17));
+    let expected: Value = serde_json::from_str(REFUSAL_V18).unwrap();
     assert_eq!(
-        (step.transform)(serde_json::from_str(REFUSAL_V16).unwrap()),
-        Some(expected)
+        (step.transform)(serde_json::from_str(REFUSAL_V17).unwrap()),
+        Some(expected.clone())
     );
+    let source: Value = serde_json::from_str(REFUSAL_V17).unwrap();
+    let host_admission = REGISTRY
+        .event_step("ProviderCallRecorded", 16)
+        .expect("main migration");
+    let intermediate =
+        (host_admission.transform)(source.clone()).expect("main admits the old refusal");
+    assert_eq!(
+        intermediate, source,
+        "host admission preserves the refusal classification"
+    );
+    assert_eq!((step.transform)(intermediate), Some(expected));
     for forged in [
-        REFUSAL_V16.replace("invalid_arguments", "invalid_path"),
-        REFUSAL_V16.replace("invalid_response", "rejected"),
+        REFUSAL_V17.replace("invalid_arguments", "invalid_path"),
+        REFUSAL_V17.replace("invalid_response", "rejected"),
     ] {
         assert!((step.canonical)(&forged).is_none());
         assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
@@ -141,8 +168,8 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     }
 }
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
-const REFUSAL_V16: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
-const REFUSAL_V17: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
+const REFUSAL_V17: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
+const REFUSAL_V18: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
 
 const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
 const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
@@ -1608,4 +1635,40 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
         assert!(!path.join("archive").exists(), "{case}");
         replays(&root, &sessions);
     }
+}
+
+#[test]
+fn host_git_migrations_reject_new_authority_in_old_rows() {
+    let step = REGISTRY.event_step("ToolStarted", 16).unwrap();
+    let source: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let mut multiedit = source.clone();
+    multiedit["intent"]["call"] = serde_json::json!({"operation":"multiedit","file_path":"src/lib.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"before","new_string":"after","replace_all":false}]});
+    assert!(
+        (REGISTRY.event_step("ToolStarted", 15).unwrap().transform)(multiedit.clone()).is_none()
+    );
+    assert_eq!((step.transform)(multiedit.clone()), Some(multiedit.clone()));
+    let canonical = (step.canonical)(&multiedit.to_string()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&canonical).unwrap(),
+        multiedit
+    );
+    for field in ["call", "host", "network"] {
+        let mut forged = source.clone();
+        match field {
+            "call" => {
+                forged["intent"]["call"] = serde_json::json!({"operation":"git_push", "remote":"https://github.com/o/r", "branch":"main"})
+            }
+            "host" => {
+                forged["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))})
+            }
+            "network" => forged["intent"]["limits"]["network"] = serde_json::json!("host"),
+            _ => unreachable!(),
+        }
+        assert!((step.canonical)(&forged.to_string()).is_none(), "{field}");
+        assert!((step.transform)(forged).is_none(), "{field}");
+    }
+    assert_eq!(
+        (step.canonical)(GLOB_TOOLSTARTED).unwrap(),
+        GLOB_TOOLSTARTED
+    );
 }

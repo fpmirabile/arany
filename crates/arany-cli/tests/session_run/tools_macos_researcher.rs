@@ -107,7 +107,8 @@ done
         for directory in ["home", "environment-state", "environment-data"] {
             std::fs::create_dir(temp.path().join(directory)).unwrap();
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "tools_researcher::journey::native_researcher_journey_helper",
@@ -119,7 +120,9 @@ done
             .env("HOME", temp.path().join("home"))
             .env("XDG_STATE_HOME", temp.path().join("environment-state"))
             .env("XDG_DATA_HOME", temp.path().join("environment-data"))
-            .current_dir(temp.path())
+            .current_dir(temp.path());
+        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
+        let output = command
             .bounded_output_for(Duration::from_secs(360), 32 * 1024)
             .unwrap();
         assert!(
@@ -470,7 +473,16 @@ done
                     workspace_device,
                     workspace_inode,
                 } => {
-                    assert!(index < 3, "Skill and MCP require Guard receipts");
+                    assert!(
+                        matches!(
+                            calls[index],
+                            ToolCall::List { .. }
+                                | ToolCall::Read { .. }
+                                | ToolCall::Search { .. }
+                                | ToolCall::Skill { .. }
+                        ),
+                        "file and Skill reads require in-process attestation"
+                    );
                     assert_eq!(*policy_digest, observation.intent.policy_digest);
                     assert_eq!(
                         (*workspace_device, *workspace_inode),
@@ -482,8 +494,8 @@ done
                 }
                 Attestation::Guard(receipt) => {
                     assert!(
-                        index >= 3,
-                        "List/Read/Search require in-process attestation"
+                        matches!(calls[index], ToolCall::McpList { .. }),
+                        "only MCP catalog listing requires a Guard receipt"
                     );
                     assert_eq!(receipt.contract_version, 1);
                     let digest: [u8; 32] =
@@ -496,6 +508,7 @@ done
                     assert_eq!(receipt.limits, observation.intent.limits);
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
+                Attestation::Host(_) => panic!("researchers never run host Tools"),
                 Attestation::WorkerRead { .. }
                 | Attestation::WorkerMutation { .. }
                 | Attestation::WorkerData { .. }

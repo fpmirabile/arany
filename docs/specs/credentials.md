@@ -25,6 +25,20 @@ Debug builds only accept `ARANY_TEST_ACCOUNT_ROOT`, which must be an absolute pa
 
 Decision O4 (credentials): roster admission reuses current selected-account loaders. Multiple models or efforts on the same admitted identity are supported; simultaneous unsupported saved native or ChatGPT account combinations refuse before Workspace content, including an unused candidate. There is no roster credential-slot enumeration or account-store expansion; that requires a separate security/account change. Environment-backed native and selected saved sources keep their distinct admission rules. [Provider presets](./provider.md#named-roster-presets) own route composition and all-candidate ordering.
 
+## Metadata-only storage inspection
+
+The explicit local storage report may admit the fixed account root through
+private-directory admission without opening history, account payloads, selected
+credentials, the account lock or the OS keyring. It may stat private regular
+files, including secret-containing files, only into aggregated sizes/counts;
+individual record names and contents are never displayed. This does not authorize
+a model read, account selection, credential access, repair or creation. An
+explicit Session root never changes account-root resolution. The
+[storage inventory contract](./tools.md#local-storage-inventory) owns coverage,
+resource bounds, unsafe-object refusal and identity deduplication. Missing roots
+remain absent; malformed account/history payloads do not prevent safe metadata
+inspection. Reports never enter model input, Events, logs, telemetry or MCP.
+
 ## Backend selection and startup
 
 Setup prefers the OS keyring. An unavailable, unpinned store may offer a separately warned, explicitly selected private-file backend. A locked store reports a locked error. The checked backend marker pins keyring storage without a key, or file storage with the account. Read, write or authorization failure on a pinned keyring never silently downgrades storage.
@@ -93,6 +107,7 @@ A successful read-only store probe does not prove later writes will succeed. Lin
 
 | Scenario | Required outcome | Existing evidence owner |
 |---|---|---|
+| Local storage inspection | Fixed-root metadata only, including malformed/secret-containing records in aggregate; no payload reads, account/keyring access, record-name disclosure or mutation | [Inventory/private-fs corpus](../../crates/arany/src/store/state/inventory.rs), [fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
 | OS-user scope | Changing Session roots, `HOME` or XDG variables does not change the effective user's account root; different OS users retain separate account state. | [`crates/arany-cli/tests/session_run.rs::account_path_ignores_session_state_environment`](../../crates/arany-cli/tests/session_run.rs); [isolated Linux keyring lifecycle][native-checks] and [macOS optimized account isolation][native-checks] |
 | Selected identity and billing scope | Valid saved records retain identity and explicit workspace; replacement, schema mismatch and ambient scope substitution reject before disclosure. | [Credential corpus](../../crates/arany-cli/src/accounts/credentials.rs), [scoped API journey](../../crates/arany-cli/tests/session_run/setup/offline_https/anthropic.rs) |
 | Custom Kimi and GLM key isolation | Only the admitted platform, Code or GLM Standard environment reference supplies its key. A missing selected key, entitlement 401, redirect or model drift never selects another vendor, billing key or native Anthropic account; failed schema rechecks clear admission durably. | [Custom loader/checker](../../crates/arany/src/provider/custom.rs), [custom process journey](../../crates/arany-cli/tests/session_run/custom.rs), [routing corpus](../../crates/arany/tests/engine_run/routing.rs) |
