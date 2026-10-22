@@ -1,3 +1,4 @@
+use super::super::selection_phase::{primary_command, selection_limits};
 use super::super::{BootstrapFailure, GuardStage, Task, read_line_capped};
 use super::fixture::{Span as FixtureSpan, Stage as FixtureStage};
 use super::storage::{
@@ -874,8 +875,7 @@ pub(super) async fn execute(
         );
         capture.complete();
         let capture = FixtureSpan::begin(FixtureStage::ControllerReady);
-        let primary_command = runtime.worker.is_none()
-            && matches!(intent.call, crate::tools::ToolCall::Command { .. });
+        let primary_command = primary_command(intent);
         let payload_phase = AtomicBool::new(!primary_command);
         let mut watcher = Scope::new(
             unit.scope
@@ -1105,8 +1105,10 @@ pub(super) async fn execute(
                 biased;
                 result = &mut phases => break result,
                 _ = samples.tick() => {
-                    watcher.apply_limits(if payload_phase.load(Ordering::Acquire) { intent.limits.clone() } else { selection_limits(&intent.limits) });
-                    if let Err(error) = watcher.check_resources() { break Err(error); }
+                    if !payload_phase.load(Ordering::Acquire) {
+                        watcher.apply_limits(selection_limits(&intent.limits));
+                        if let Err(error) = watcher.check_resources() { break Err(error); }
+                    }
                 }
             }
         }
@@ -1266,16 +1268,14 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                             path.parent().ok_or(ToolError::Path)?,
                             &runtime,
                             &intent.limits,
-                            matches!(intent.call, crate::tools::ToolCall::Command { .. }),
+                            primary_command(&intent),
                         )
                         .await?,
                     )
                 } else {
                     None
                 };
-                if runtime.worker.is_none()
-                    && matches!(intent.call, crate::tools::ToolCall::Command { .. })
-                {
+                if primary_command(&intent) {
                     output
                         .write_all(b"SELECT_READY\n")
                         .await
@@ -1365,9 +1365,7 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     }
                     watched.cancel();
                 }));
-                if runtime.worker.is_none()
-                    && matches!(intent.call, crate::tools::ToolCall::Command { .. })
-                {
+                if primary_command(&intent) {
                     let root = path.parent().ok_or(ToolError::Path)?;
                     command_before = Some((
                         crate::tools::fs::command_snapshot(&root.join("workspace"))?,
@@ -1396,21 +1394,40 @@ pub(super) fn helper_main() -> std::process::ExitCode {
             capture.finish(cleanup.is_ok());
             let capture_started = cleanup.is_ok() && command_before.is_some() && result.is_ok();
             let mut capture_deadline = None;
-            if capture_started {
-                output
-                    .write_all(b"CAPTURE_READY\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                capture_deadline = Some(
-                    tokio::time::timeout(Duration::from_secs(5), &mut receive_capture)
+            let capture_handshake = async {
+                if capture_started {
+                    output
+                        .write_all(b"CAPTURE_READY\n")
                         .await
-                        .map_err(|_| ToolError::Limit)?
+                        .map_err(|_| ToolError::Operation)?;
+                    capture_deadline = Some(
+                        tokio::time::timeout(
+                            crate::tools::selection::PHASE_TIME,
+                            &mut receive_capture,
+                        )
+                        .await
+                        .map_err(|_| ToolError::Timeout(String::new()))?
                         .map_err(|_| ToolError::Operation)?,
-                );
-                scope.apply_limits(selection_limits(&intent.limits));
-                scope.check_resources()?;
+                    );
+                    scope.apply_limits(selection_limits(&intent.limits));
+                    scope.check_resources()?;
+                }
+                Ok(())
             }
-            let result = result.and_then(
+            .await;
+            let result = result.map(|mut worker| {
+                if let Err(error) = capture_handshake {
+                    let (disposition, output, cause, limit_cause) =
+                        crate::tools::dispatch::outcome(&intent, Err(error));
+                    worker.observation.disposition = disposition;
+                    worker.observation.output = output;
+                    worker.observation.enforcement_cause = cause;
+                    worker.observation.limit_cause = limit_cause;
+                    command_before = None;
+                }
+                worker
+            });
+            let mut result = result.and_then(
                 |super::WorkerOutput {
                      mut observation,
                      windows,
@@ -1510,11 +1527,8 @@ pub(super) fn helper_main() -> std::process::ExitCode {
                     Ok(observation)
                 },
             );
-            if capture_started {
-                output
-                    .write_all(b"CAPTURE_DONE\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
+            if capture_started && output.write_all(b"CAPTURE_DONE\n").await.is_err() {
+                result = Err(ToolError::Operation);
             }
             let mut response_sent = false;
             let mut cache_transfer_failed = false;
@@ -1708,15 +1722,6 @@ pub(super) fn helper_main() -> std::process::ExitCode {
     } else {
         std::process::ExitCode::FAILURE
     }
-}
-
-fn selection_limits(limits: &ToolLimits) -> ToolLimits {
-    let defaults = ToolLimits::default();
-    let mut limits = limits.clone();
-    limits.memory_bytes = limits.memory_bytes.min(defaults.memory_bytes);
-    limits.max_processes = limits.max_processes.min(defaults.max_processes);
-    limits.resource_class = ToolResourceClass::Default;
-    limits
 }
 
 #[cfg(test)]

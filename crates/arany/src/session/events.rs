@@ -1638,7 +1638,11 @@ pub(crate) fn add_command_selection(
     ) {
         return Some(value);
     }
+    let budget = usize::try_from(observation["intent"]["limits"]["result_bytes"].as_u64()?).ok()?;
     let output = observation.get_mut("output")?;
+    if output.as_str()?.len() > budget {
+        return None;
+    }
     let Ok(mut result) = serde_json::from_str::<serde_json::Value>(output.as_str()?) else {
         return Some(value);
     };
@@ -1648,10 +1652,17 @@ pub(crate) fn add_command_selection(
             serde_json::to_value(crate::tools::types::CommandSelectionSummary::default()).ok()?,
         );
         let result: crate::tools::types::CommandResult = serde_json::from_value(result).ok()?;
-        if !result.valid() {
+        let mut text = serde_json::to_string(&result).ok()?;
+        if text.len() > budget {
+            text = result.fit_migrated(budget)?;
+        }
+        if !serde_json::from_str::<crate::tools::types::CommandResult>(&text)
+            .ok()?
+            .valid()
+        {
             return None;
         }
-        *output = serde_json::to_string(&result).ok()?.into();
+        *output = text.into();
     }
     Some(value)
 }

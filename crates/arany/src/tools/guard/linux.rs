@@ -1,3 +1,4 @@
+use super::selection_phase::{primary_command, selection_limits};
 use super::{
     CAPTURE_BYTES, GuardStage, RUNTIME_ROOT, Task, bootstrap_failure, capture, drain_stderr,
     encode_task, parse_ready, profile, read_capped, read_line_capped, read_observation,
@@ -62,7 +63,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-monotonic-action-deadline-memory512m-wait30s-oversize-omission-full-output-validation");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-oversize-omission-full-output-validation");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -623,7 +624,7 @@ fn unit_command(
         runtime_directories,
         mounts,
     } = filesystem;
-    let phase_limits = if preparation || primary_command(intent) {
+    let phase_limits = if preparation {
         selection_limits(&intent.limits)
     } else {
         intent.limits.clone()
@@ -802,10 +803,15 @@ fn action_deadlines(
     tokio::time::Instant,
 ) {
     let cache_transfer = Duration::from_millis(u64::from(intent.limits.cache_transfer_ms));
-    let preparation_deadline = active_window
-        .map_or(capacity_started + Duration::from_secs(5), |window| {
-            window.preparation_deadline
-        });
+    let selection_time = if primary_command(intent) {
+        crate::tools::selection::PHASE_TIME
+    } else {
+        Duration::ZERO
+    };
+    let preparation_deadline = active_window.map_or(
+        capacity_started + RESERVATION_OVERHEAD + selection_time,
+        |window| window.preparation_deadline,
+    );
     let bulk = super::super::worker::transfer_time(intent);
     let go_deadline = active_window
         .map_or(preparation_deadline + cache_transfer + bulk, |window| {
@@ -820,6 +826,7 @@ fn action_deadlines(
         || {
             capacity_started
                 + Duration::from_secs(15)
+                + selection_time
                 + cache_transfer.saturating_mul(2)
                 + super::super::worker::transfer_overhead(intent)
                 + Duration::from_millis(u64::from(intent.limits.runtime_ms))
@@ -1005,16 +1012,14 @@ pub(super) async fn execute_inner(
         &mut cancellation,
     )
     .await?;
+    let preparation_deadline =
+        preparation_deadline.min(tokio::time::Instant::now() + RESERVATION_OVERHEAD);
     let mut unit = Unit {
         name: format!("arany-tool-{}.service", permit.id),
         invocation: None,
         group: None,
         kill: None,
-        limits: Some(if primary_command(intent) {
-            selection_limits(&intent.limits)
-        } else {
-            intent.limits.clone()
-        }),
+        limits: Some(intent.limits.clone()),
     };
     let filesystem = UnitFilesystem {
         preparation: false,
@@ -1056,9 +1061,6 @@ pub(super) async fn execute_inner(
         runtime
             .before_dispatch(active_window, intent.limits.runtime_ms, &go_cancellation)
             .await?;
-        if primary_command(intent) {
-            unit.set_limits(intent.limits.clone()).await?;
-        }
         *dispatched = true;
         stdin
             .write_all(b"GO\n")
@@ -1447,21 +1449,44 @@ fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
     Ok(path)
 }
 
-fn primary_command(intent: &EffectIntent) -> bool {
-    matches!(intent.call, ToolCall::Command { .. })
-        && intent.target == crate::session::worker::EffectTarget::Workspace
-}
-
-fn selection_limits(limits: &ToolLimits) -> ToolLimits {
-    let defaults = ToolLimits::default();
-    let mut limits = limits.clone();
-    limits.memory_bytes = limits.memory_bytes.min(defaults.memory_bytes);
-    limits.max_processes = limits.max_processes.min(defaults.max_processes);
-    limits.resource_class = ToolResourceClass::Default;
-    limits
+fn capture_limits(limits: &ToolLimits, stats: &str) -> Result<ToolLimits, ToolError> {
+    if stats.len() > STATUS_BYTES_CAP {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut values = stats.lines().filter_map(|line| line.strip_prefix("shmem "));
+    let retained = values
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    if values.next().is_some() || retained > limits.memory_bytes {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    let mut capture = selection_limits(limits);
+    // After descendant absence, capture cannot grow the retained private tmpfs files.
+    capture.memory_bytes = capture
+        .memory_bytes
+        .checked_add(retained)
+        .ok_or(ToolError::ProtectionUnavailable)?
+        .min(limits.memory_bytes);
+    Ok(capture)
 }
 
 impl Unit {
+    fn capture_limits(&self, limits: &ToolLimits) -> Result<ToolLimits, ToolError> {
+        let directory = self
+            .group
+            .as_ref()
+            .ok_or(ToolError::ProtectionUnavailable)?;
+        let mut stats = String::new();
+        directory
+            .open("memory.stat")
+            .map_err(|_| ToolError::ProtectionUnavailable)?
+            .take(STATUS_BYTES_CAP as u64 + 1)
+            .read_to_string(&mut stats)
+            .map_err(|_| ToolError::ProtectionUnavailable)?;
+        capture_limits(limits, &stats)
+    }
+
     async fn set_limits(&mut self, limits: ToolLimits) -> Result<(), ToolError> {
         let directory = self
             .group
@@ -1641,7 +1666,8 @@ async fn capture_phase(
             if read_line_capped(stdout, 64).await? != b"CAPTURE_READY\n" {
                 return Err(ToolError::Operation);
             }
-            unit.set_limits(selection_limits(&intent.limits)).await?;
+            unit.set_limits(unit.capture_limits(&intent.limits)?)
+                .await?;
             stdin
                 .write_all(b"CAPTURE\n")
                 .await
@@ -1760,6 +1786,39 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn capture_keeps_retained_tmpfs_charge_without_widening_parser_memory() {
+        let limits = ToolLimits {
+            memory_bytes: 2 * 1024 * 1024 * 1024,
+            resource_class: ToolResourceClass::Build,
+            ..ToolLimits::default()
+        };
+        for retained in [0, 600 * 1024 * 1024, limits.memory_bytes] {
+            let capture = capture_limits(
+                &limits,
+                &format!("anon 4194304\nfile {retained}\nshmem {retained}\n"),
+            )
+            .unwrap();
+            assert_eq!(
+                capture.memory_bytes,
+                (retained + ToolLimits::default().memory_bytes).min(limits.memory_bytes)
+            );
+            assert!(capture.memory_bytes - retained <= ToolLimits::default().memory_bytes);
+            assert_eq!(capture.resource_class, ToolResourceClass::Default);
+        }
+        for stats in [
+            "",
+            "shmem invalid\n",
+            "shmem 0\nshmem 0\n",
+            "shmem 18446744073709551615\n",
+        ] {
+            assert!(matches!(
+                capture_limits(&limits, stats),
+                Err(ToolError::ProtectionUnavailable)
+            ));
+        }
+    }
 
     #[test]
     fn hardened_status_requires_filter_no_new_privs_and_zero_capabilities() {
@@ -1908,7 +1967,7 @@ mod tests {
         let workspace = fixture.path().join("workspace");
         let home = fixture.path().join("home");
         let seed = fixture.path().join("seed");
-        for directory in [&workspace, &home, &seed] {
+        for directory in [&workspace, &home, &seed, &seed.join("workspace")] {
             std::fs::create_dir(directory).unwrap();
         }
         let host_config = home.join(".gitconfig");
@@ -2772,6 +2831,7 @@ mod tests {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
         let fixture = tempfile::tempdir().unwrap();
+        std::fs::create_dir(fixture.path().join("workspace")).unwrap();
         let source = fixture.path().join("home/.nvm/versions/node/v22.3.0");
         std::fs::create_dir_all(source.join("bin")).unwrap();
         std::fs::create_dir_all(source.join("late")).unwrap();

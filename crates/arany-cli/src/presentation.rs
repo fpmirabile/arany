@@ -374,10 +374,16 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         "discarded_outputs",
     ]
     .map(|key| selection[key].as_u64().unwrap_or(0));
+    let noun = |count: u64, singular: &str, plural: &str| {
+        format!("{count} {}", if count == 1 { singular } else { plural })
+    };
     let omissions = if counts.iter().any(|count| *count > 0) {
         format!(
-            " · {} ignored entries ({} pruned roots), {} oversized inputs, {} discarded outputs",
-            counts[0], counts[1], counts[2], counts[3]
+            " · {} ({}), {}, {}",
+            noun(counts[0], "ignored entry", "ignored entries"),
+            noun(counts[1], "pruned root", "pruned roots"),
+            noun(counts[2], "oversized input", "oversized inputs"),
+            noun(counts[3], "discarded output", "discarded outputs")
         )
     } else {
         String::new()
@@ -2578,8 +2584,27 @@ mod peer_row_tests {
         observation.output = result.to_string();
         assert_eq!(
             plain_tool_summary(&tool_summary(&tool)),
-            "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized inputs, 3 discarded outputs"
+            "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized input, 3 discarded outputs"
         );
+        for (count, expected) in [
+            (
+                1,
+                "1 ignored entry (1 pruned root), 1 oversized input, 1 discarded output",
+            ),
+            (
+                2,
+                "2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs",
+            ),
+        ] {
+            result["selection"] = serde_json::json!({
+                "ignored_entries":count,"pruned_directories":count,"oversized_inputs":count,"discarded_outputs":count
+            });
+            tool.observation.as_mut().unwrap().output = result.to_string();
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!("Command(sh )\nResult: exit 0 · 1 line · {expected}")
+            );
+        }
     }
 
     #[test]

@@ -1,13 +1,40 @@
 use super::{Cancellation, ToolError, read_line_capped};
 use crate::tools::selection::PHASE_TIME;
+use crate::tools::{EffectIntent, ToolCall, ToolLimits, ToolResourceClass};
 use std::time::{Duration, Instant};
 
+pub(super) fn primary_command(intent: &EffectIntent) -> bool {
+    matches!(intent.call, ToolCall::Command { .. })
+        && intent.target == crate::session::worker::EffectTarget::Workspace
+}
+
+pub(super) fn selection_limits(limits: &ToolLimits) -> ToolLimits {
+    let defaults = ToolLimits::default();
+    let mut limits = limits.clone();
+    limits.memory_bytes = limits.memory_bytes.min(defaults.memory_bytes);
+    limits.max_processes = limits.max_processes.min(defaults.max_processes);
+    limits.resource_class = ToolResourceClass::Default;
+    limits
+}
+
 fn monotonic_nanos() -> Result<u64, ToolError> {
-    let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
-    u64::try_from(time.tv_sec)
+    #[cfg(target_os = "linux")]
+    let (seconds, nanos) = {
+        let time = rustix::time::clock_gettime(rustix::time::ClockId::Monotonic);
+        (time.tv_sec, time.tv_nsec)
+    };
+    #[cfg(target_os = "macos")]
+    let (seconds, nanos) = {
+        // Match std::Instant's unslewed mach_absolute_time clock, including its resolution.
+        let time = nix::time::ClockId::from_raw(nix::libc::CLOCK_UPTIME_RAW)
+            .now()
+            .map_err(|_| ToolError::Operation)?;
+        (time.tv_sec(), time.tv_nsec())
+    };
+    u64::try_from(seconds)
         .ok()
         .and_then(|seconds| seconds.checked_mul(1_000_000_000))
-        .and_then(|seconds| seconds.checked_add(u64::try_from(time.tv_nsec).ok()?))
+        .and_then(|seconds| seconds.checked_add(u64::try_from(nanos).ok()?))
         .ok_or(ToolError::Operation)
 }
 

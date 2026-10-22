@@ -184,6 +184,23 @@ pub enum CacheUpdate {
 }
 
 impl CommandResult {
+    pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
+        if !self.changeset.valid() || !self.selection.valid() {
+            return None;
+        }
+        let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
+        let stderr = super::output::Window::from_recorded(&self.stderr, self.stderr_total)?;
+        super::output::fit_streams(&stdout, &stderr, budget, |stdout, stderr| {
+            serde_json::to_string(&Self {
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+                ..self.clone()
+            })
+            .map_err(|_| super::ToolError::Operation)
+        })
+        .ok()
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
             && self.selection.valid()

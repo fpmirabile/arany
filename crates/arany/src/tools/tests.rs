@@ -2500,6 +2500,17 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         }) > std::time::Duration::ZERO
     );
 
+    assert_eq!(
+        runtime.reservation_overhead(&ToolCall::Command {
+            program: "shell".into(),
+            args: vec![],
+            cwd: "".into(),
+        }),
+        runtime.reservation_overhead(&ToolCall::Mkdir {
+            path: "src/new".into()
+        }) + std::time::Duration::from_secs(5),
+    );
+
     let secret = run_in_process(&runtime, read("src/.env")).await;
     assert_eq!(secret.disposition, ToolDisposition::Denied);
     assert!(secret.attestation.is_none());

@@ -1090,6 +1090,107 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
 }
 
 #[test]
+fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceiling() {
+    for (kind, version, input) in [
+        ("ToolFinished", 21, COMMAND_TOOLFINISHED),
+        ("HookFinished", 10, GLOB_HOOKFINISHED),
+    ] {
+        for truncated in [false, true] {
+            let mut value: Value = serde_json::from_str(input).unwrap();
+            let observation = if kind == "HookFinished" {
+                &mut value["observation"]
+            } else {
+                &mut value
+            };
+            let mut result: Value =
+                serde_json::from_str(observation["output"].as_str().unwrap()).unwrap();
+            let budget = observation["intent"]["limits"]["result_bytes"]
+                .as_u64()
+                .unwrap() as usize;
+            let mut low = 0;
+            let mut high = budget;
+            let mut old = String::new();
+            while low <= high {
+                let count = low + (high - low) / 2;
+                let (stdout, total) = if truncated {
+                    let head = "prefix".repeat(count);
+                    let tail = "suffix".repeat(count);
+                    let total = crate::tools::OutputTotal {
+                        bytes: (head.len() + tail.len() + 1024) as u64,
+                        lines: 1,
+                    };
+                    (
+                        format!(
+                            "{head}\n…[1024 bytes, 0 lines omitted; {} bytes, 1 lines total]…\n{tail}",
+                            total.bytes
+                        ),
+                        total,
+                    )
+                } else {
+                    let text = "line\"\n".repeat(count);
+                    let total = crate::tools::OutputTotal {
+                        bytes: text.len() as u64,
+                        lines: text.lines().count() as u64,
+                    };
+                    (text, total)
+                };
+                assert!(total.valid_for(&stdout));
+                result["stdout"] = stdout.into();
+                result["stdout_total"] = serde_json::to_value(total).unwrap();
+                let text = result.to_string();
+                if text.len() <= budget {
+                    old = text;
+                    low = count + 1;
+                } else {
+                    high = count - 1;
+                }
+            }
+            assert!(old.len() > budget - 16);
+            let old_result: Value = serde_json::from_str(&old).unwrap();
+            observation["output"] = old.into();
+            let step = REGISTRY.event_step(kind, version).unwrap();
+            let mut oversized = value.clone();
+            let observation = if kind == "HookFinished" {
+                &mut oversized["observation"]
+            } else {
+                &mut oversized
+            };
+            let mut output = old_result.clone();
+            output["stdout"] = "x".repeat(budget).into();
+            output["stdout_total"] = serde_json::json!({"bytes": budget, "lines": 1});
+            observation["output"] = output.to_string().into();
+            assert!((step.transform)(oversized).is_none());
+            let migrated = (step.transform)(value).unwrap();
+            let observation = if kind == "HookFinished" {
+                &migrated["observation"]
+            } else {
+                &migrated
+            };
+            let output = observation["output"].as_str().unwrap();
+            assert!(output.len() <= budget);
+            let result: crate::tools::types::CommandResult = serde_json::from_str(output).unwrap();
+            assert!(result.valid());
+            for field in ["exit_code", "changeset", "stdout_total", "stderr_total"] {
+                assert_eq!(
+                    serde_json::to_value(&result).unwrap()[field],
+                    old_result[field]
+                );
+            }
+            assert!(result.stdout.contains("lines omitted;"));
+            let (run, agent) = intent_scope(&migrated).unwrap();
+            Event::decode(
+                kind,
+                version + 1,
+                &migrated.to_string(),
+                Some(run),
+                Some(agent),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     assert_eq!(
         uncovered(

@@ -45,6 +45,7 @@ nix.workspace = true
 seccompiler.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
+nix = { workspace = true, features = ["time"] }
 core-foundation.workspace = true
 security-framework.workspace = true
 
