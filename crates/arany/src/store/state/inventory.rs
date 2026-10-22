@@ -5,7 +5,7 @@ use std::fs::{File, Metadata};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Mutex,
+    Mutex, MutexGuard, TryLockError,
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
@@ -296,7 +296,7 @@ pub fn collect_storage(
     account: &Path,
     cancelled: &AtomicBool,
 ) -> Result<StorageReport, StorageError> {
-    let _inventory = INVENTORY.try_lock().map_err(|_| StorageError::Busy)?;
+    let _inventory = inventory_guard(&INVENTORY)?;
     collect(
         workspace,
         selected,
@@ -306,6 +306,15 @@ pub fn collect_storage(
         MAX_ENTRIES,
         DEADLINE,
     )
+}
+
+fn inventory_guard(inventory: &Mutex<()>) -> Result<MutexGuard<'_, ()>, StorageError> {
+    match inventory.try_lock() {
+        Ok(guard) => Ok(guard),
+        // This mutex protects no mutable data; poisoning cannot invalidate a later scan.
+        Err(TryLockError::Poisoned(poisoned)) => Ok(poisoned.into_inner()),
+        Err(TryLockError::WouldBlock) => Err(StorageError::Busy),
+    }
 }
 
 fn collect(
@@ -737,6 +746,26 @@ mod tests {
 
     #[test]
     fn unsafe_objects_limits_absence_and_cancellation_never_mutate_or_claim_complete_zero() {
+        let inventory = Mutex::new(());
+        for poisoned in [false, true] {
+            if poisoned {
+                assert!(
+                    std::panic::catch_unwind(|| {
+                        let _guard = inventory_guard(&inventory).expect("idle inventory");
+                        panic!("synthetic inventory panic");
+                    })
+                    .is_err()
+                );
+                assert!(inventory.is_poisoned());
+            }
+            let guard = inventory_guard(&inventory).expect("available inventory after release");
+            assert!(matches!(
+                inventory_guard(&inventory),
+                Err(StorageError::Busy)
+            ));
+            drop(guard);
+            drop(inventory_guard(&inventory).expect("inventory available again"));
+        }
         let temp = tempfile::tempdir().expect("storage fixture");
         let workspace = temp.path().join("workspace");
         directory(&workspace);
