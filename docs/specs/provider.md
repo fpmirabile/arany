@@ -25,15 +25,17 @@ This table is a summary only; the sections below and the linked contracts own ea
 | Anthropic | Claude subscription | — | Not admitted without Anthropic's prior approval |
 | Any OpenAI-Responses-compatible service | API key | `custom:NAME`, protocol `openai-responses` | Supported after `provider check` |
 | Any Anthropic-Messages-compatible service | API key | `custom:NAME`, protocol `anthropic-messages` | Supported after exact `provider check`; live compatibility remains unverified |
-| DeepSeek | API key | [Unavailable route](../setup.md#anthropic-compatible-custom-routes) | **UNAVAILABLE:** documented Messages compatibility lacks provider-enforced compaction JSON schema |
+| DeepSeek | API key | [Unavailable route](../setup.md#anthropic-compatible-custom-routes) | **Unsupported, no shipped recipe:** documented Messages compatibility lacks provider-enforced compaction JSON schema |
 | DeepSeek | Subscription | — | Not applicable: no DeepSeek subscription route is in scope |
 | Kimi (Moonshot) | Platform API key | [`custom:kimi-api`](../setup.md#anthropic-compatible-custom-routes), Messages, `kimi-k3` | Conditional on exact `provider check`; platform documents schema-constrained output |
-| Kimi (Moonshot) | Kimi Code subscription console key | [`custom:kimi-code` candidate](../setup.md#anthropic-compatible-custom-routes), honest Arany User-Agent | **UNAVAILABLE:** endpoint-specific strict-compaction evidence is missing; platform evidence does not establish Code support |
-| GLM (Z.ai) | Newly issued Standard API key | [`custom:glm-api` / `custom:glm-flash` candidates](../setup.md#anthropic-compatible-custom-routes), Messages, Bearer auth | **UNAVAILABLE:** Messages-specific provider-enforced compaction schema evidence is missing; Chat JSON mode is insufficient ([structured-output guide](https://docs.z.ai/guides/capabilities/struct-output)) |
+| Kimi (Moonshot) | Kimi Code subscription console key | [`custom:kimi-code` candidate](../setup.md#anthropic-compatible-custom-routes), honest Arany User-Agent | **Unsupported, no shipped recipe:** endpoint-specific strict-compaction evidence is missing; platform evidence does not establish Code support |
+| GLM (Z.ai) | Newly issued Standard API key | [`custom:glm-api` / `custom:glm-flash` candidates](../setup.md#anthropic-compatible-custom-routes), Messages, Bearer auth | **Unsupported, no shipped recipe:** Messages-specific provider-enforced compaction schema evidence is missing; Chat JSON mode is insufficient ([structured-output guide](https://docs.z.ai/guides/capabilities/struct-output)) |
 | GLM (Z.ai) | GLM Coding Plan | — | Excluded: its terms allow only listed tools, and Arany is not listed. Revisit if Z.ai approves Arany |
 | OpenRouter | API key | Broker profile | Deferred behind its route and privacy gate |
 
 Sources and verification status: [DeepSeek, Kimi and GLM research](../research/deepseek-kimi-glm-providers-2026-10.md). "Supported" means synthetic evidence plus CI; live support per route still requires the owner-run checks in [NEXT_STEPS](../../NEXT_STEPS.md).
+
+An unsupported route is not blocked by vendor name: a user-defined profile is admitted only after `arany provider check` passes the [strict-compaction nonce challenge](#custom-destinations-and-routing), the same gate every custom route uses; Arany claims no support for it.
 
 ## Per-role selection and fallback
 
