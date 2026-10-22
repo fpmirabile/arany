@@ -170,6 +170,7 @@ fn replayed(state: &Path, workspace: &Path) -> (Vec<arany::EventEnvelope>, Sessi
 
 #[test]
 fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
+    const NOTE: &str = "use the\nsmaller fixture";
     let temp = tempfile::tempdir().expect("private test root");
     let (workspace, state) = fixture_root(&temp);
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
@@ -226,6 +227,7 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
         &[
             b"SHELL_PID:",
             b"Agent: primary; state: active",
+            b"Draft: 8 characters; Enter offers it as a steering note",
             b"Notice: Steering note waits for the agent's next step\r\n",
             b"Notice: Working \xc2\xb7 request ",
             b"Steering note sent to the agent",
@@ -243,14 +245,23 @@ fn steering_note_during_attached_run_reaches_synthesis_and_is_confirmed() {
     child_ready
         .recv_timeout(Duration::from_secs(10))
         .expect("child call reached the Provider");
-    write_input(&attached.input, format!("{NOTE}\n").as_bytes());
-    stage(&attached.stages, 2, "steering offer notice");
+    write_input(
+        &attached.input,
+        b"\x1b[200~ignored\n/goal pause\n\x1b[201~\nuse the\\\n",
+    );
+    stage(
+        &attached.stages,
+        2,
+        "newline retained without a steering offer",
+    );
+    write_input(&attached.input, b"smaller fixture\n");
+    stage(&attached.stages, 3, "steering offer notice");
     // Controls keep running while the note waits; only plain text lines are offers.
     write_input(&attached.input, b"/status\n");
-    stage(&attached.stages, 3, "active status while the note waits");
+    stage(&attached.stages, 4, "active status while the note waits");
     release_sender.send(()).expect("release child call");
-    stage(&attached.stages, 4, "steering confirmation");
-    stage(&attached.stages, 5, "idle prompt after Run");
+    stage(&attached.stages, 5, "steering confirmation");
+    stage(&attached.stages, 6, "idle prompt after Run");
     write_input(&attached.input, b"/exit\n");
     let result = wait_product(attached.process.take());
     let output = attached.reader.join().expect("PTY output reader");

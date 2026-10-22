@@ -1,6 +1,6 @@
-use super::TerminalError;
 #[cfg(unix)]
 use super::composer::MAX_DRAFT_BYTES;
+use super::{NewlineShortcut, TerminalError};
 #[cfg(not(unix))]
 use crossterm::event;
 use crossterm::event::{
@@ -25,6 +25,8 @@ use std::sync::{
 };
 use std::thread::JoinHandle;
 use std::time::Duration;
+#[cfg(unix)]
+use std::time::Instant;
 
 use tokio::sync::mpsc;
 #[cfg(unix)]
@@ -62,9 +64,11 @@ impl ShutdownSignal {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TerminalInput {
     Character(char),
+    IgnoredKey,
     Paste,
     ClipboardPaste,
     Newline,
+    ModifiedEnter(NewlineShortcut),
     Backspace,
     Delete,
     Left,
@@ -124,6 +128,16 @@ pub(super) enum TerminalReader {
 }
 
 impl TerminalReader {
+    pub(super) fn set_chat_input(&mut self, chat: bool, child: bool) {
+        #[cfg(unix)]
+        if let Self::Lines(reader) = self {
+            reader.chat = chat;
+            reader.child = child;
+        }
+        #[cfg(not(unix))]
+        let _ = (chat, child);
+    }
+
     pub(super) fn cursor_query(&self) -> Option<CursorQuery> {
         match self {
             Self::Keys(reader) => Some(reader.cursor.clone()),
@@ -234,6 +248,8 @@ pub(super) struct LineReader {
     thread: Option<JoinHandle<()>>,
     pending: VecDeque<TerminalInput>,
     draft_bytes: usize,
+    chat: bool,
+    child: bool,
     epoch: u64,
     #[cfg(unix)]
     admission: InputAdmission,
@@ -290,6 +306,8 @@ impl LineReader {
             thread: Some(thread),
             pending: VecDeque::new(),
             draft_bytes: 0,
+            chat: false,
+            child: false,
             epoch: 0,
             admission,
         })
@@ -321,16 +339,30 @@ impl LineReader {
         bytes: Vec<u8>,
         submitted: bool,
     ) -> Result<TerminalInput, TerminalError> {
-        let Some(line) = validate_segment(bytes, self.draft_bytes) else {
+        let Some(mut line) = validate_segment(bytes, self.draft_bytes) else {
             return Ok(TerminalInput::LineRejected);
         };
+        let continued = submitted
+            && self.chat
+            && line.ends_with('\\')
+            && (!self.child || self.draft_bytes > 0 || line.starts_with("/message "));
+        if continued {
+            line.pop();
+            line.push('\n');
+        }
+        let submitted = submitted && !continued;
         self.draft_bytes = if submitted {
             0
         } else {
             self.draft_bytes + line.len()
         };
-        self.pending
-            .extend(line.chars().map(TerminalInput::Character));
+        self.pending.extend(line.chars().map(|character| {
+            if character == '\n' {
+                TerminalInput::Newline
+            } else {
+                TerminalInput::Character(character)
+            }
+        }));
         self.pending.push_back(if submitted {
             TerminalInput::Submit
         } else {
@@ -427,7 +459,9 @@ fn read_lines(
     let mut bytes = [0; 8194];
     let mut pending = None;
     let mut epoch = 0;
+    let mut decoder = LineDecoder::default();
     while !shutdown.load(Ordering::Acquire) {
+        decoder.expire(Instant::now())?;
         admit_input(input, requests, &mut epoch, || pending = None)?;
         if let Some(event) = pending.take() {
             match sender.try_send(event) {
@@ -448,8 +482,14 @@ fn read_lines(
         }
         admit_input(input, requests, &mut epoch, || pending = None)?;
         let event = match input.read(&mut bytes) {
+            Ok(0) if decoder.started.is_some() => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "incomplete terminal paste",
+                ));
+            }
             Ok(0) => LineEvent::EndOfInput,
-            Ok(len) => decode_line(&bytes[..len]),
+            Ok(len) => decoder.decode(&bytes[..len], Instant::now()),
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                 poll.registry()
@@ -463,6 +503,63 @@ fn read_lines(
         pending = Some((epoch, Ok(event)));
     }
     Ok(())
+}
+
+#[cfg(unix)]
+#[derive(Default)]
+struct LineDecoder {
+    started: Option<Instant>,
+    draining: bool,
+    delimiter: usize,
+}
+
+#[cfg(unix)]
+impl LineDecoder {
+    fn expire(&self, now: Instant) -> io::Result<()> {
+        if self
+            .started
+            .is_some_and(|started| now.duration_since(started) >= Duration::from_secs(10))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "incomplete terminal paste",
+            ));
+        }
+        Ok(())
+    }
+
+    fn decode(&mut self, bytes: &[u8], now: Instant) -> LineEvent {
+        let mut rejected = self.started.is_some();
+        for &byte in bytes {
+            let marker = if self.draining {
+                b"\x1b[201~"
+            } else {
+                b"\x1b[200~"
+            };
+            if byte == marker[self.delimiter] {
+                self.started.get_or_insert(now);
+                self.delimiter += 1;
+                rejected = true;
+                if self.delimiter == marker.len() {
+                    self.delimiter = 0;
+                    self.draining = !self.draining;
+                    if !self.draining {
+                        self.started = None;
+                    }
+                }
+            } else {
+                self.delimiter = usize::from(byte == marker[0]);
+                if !self.draining {
+                    self.started = (self.delimiter > 0).then_some(now);
+                }
+            }
+        }
+        if rejected || self.draining {
+            LineEvent::Rejected
+        } else {
+            decode_line(bytes)
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -689,7 +786,10 @@ impl Drop for InputReader {
 fn map_input(event: Event) -> Option<TerminalInput> {
     match event {
         Event::Resize(_, _) => Some(TerminalInput::Resize),
-        Event::Key(key) if key.kind == KeyEventKind::Press => map_key(key),
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            Some(map_key(key).unwrap_or(TerminalInput::IgnoredKey))
+        }
+        Event::FocusGained | Event::FocusLost => Some(TerminalInput::IgnoredKey),
         Event::Mouse(mouse) => pointer_input(mouse.kind, mouse.column, mouse.row, 1),
         _ => None,
     }
@@ -713,6 +813,14 @@ fn pointer_input(kind: MouseEventKind, column: u16, row: u16, clicks: u8) -> Opt
 }
 
 fn map_key(key: KeyEvent) -> Option<TerminalInput> {
+    if key.code == KeyCode::Enter && key.modifiers != KeyModifiers::NONE {
+        return match key.modifiers {
+            KeyModifiers::SHIFT => Some(TerminalInput::ModifiedEnter(NewlineShortcut::ShiftEnter)),
+            KeyModifiers::ALT => Some(TerminalInput::ModifiedEnter(NewlineShortcut::AltEnter)),
+            KeyModifiers::CONTROL => Some(TerminalInput::ModifiedEnter(NewlineShortcut::CtrlEnter)),
+            _ => None,
+        };
+    }
     if matches!(key.code, KeyCode::Char('v' | 'V'))
         && (key.modifiers == KeyModifiers::CONTROL
             || key.modifiers == KeyModifiers::CONTROL | KeyModifiers::SHIFT)
@@ -781,7 +889,6 @@ fn map_key(key: KeyEvent) -> Option<TerminalInput> {
             Some(TerminalInput::CycleApprovalMode)
         }
         KeyCode::Tab => Some(TerminalInput::Tab),
-        KeyCode::Enter if key.modifiers == KeyModifiers::SHIFT => Some(TerminalInput::Newline),
         KeyCode::Enter => Some(TerminalInput::Submit),
         KeyCode::Esc => Some(TerminalInput::Escape),
         _ => None,
@@ -849,6 +956,8 @@ mod tests {
                 thread: None,
                 pending: VecDeque::new(),
                 draft_bytes: 0,
+                chat: false,
+                child: false,
                 epoch: 1,
                 admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
             });
@@ -874,6 +983,39 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn canonical_segments_distinguish_submit_continue_and_reject_before_egress() {
+        let now = Instant::now();
+        for parts in [
+            vec![
+                b"\x1b[200~\\\n".as_slice(),
+                b"/exit\n",
+                b"1\n",
+                b"\x1b[201~\n",
+            ],
+            vec![b"\x1b[20".as_slice(), b"0~first\n", b"\x1b[20", b"1~\n"],
+            vec![b"\x1b[200~literal\x1b[13;2u\r\n\x1b[201~\n".as_slice()],
+        ] {
+            let mut decoder = LineDecoder::default();
+            for part in parts {
+                assert!(matches!(decoder.decode(part, now), LineEvent::Rejected));
+            }
+            assert!(decoder.started.is_none());
+            assert!(
+                matches!(decoder.decode(b"safe\n", now), LineEvent::Submitted(line) if line == b"safe")
+            );
+        }
+        let mut decoder = LineDecoder::default();
+        assert!(matches!(
+            decoder.decode(b"\x1b[200~unfinished\n", now),
+            LineEvent::Rejected
+        ));
+        assert!(decoder.expire(now + Duration::from_secs(9)).is_ok());
+        assert_eq!(
+            decoder
+                .expire(now + Duration::from_secs(10))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
         assert!(
             matches!(decode_line(b"/status\n"), LineEvent::Submitted(line) if line == b"/status")
         );
@@ -900,9 +1042,65 @@ mod tests {
             thread: None,
             pending: VecDeque::new(),
             draft_bytes: 0,
+            chat: false,
+            child: false,
             epoch: 0,
             admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         };
+        for (chat, child, segment, expected, submitted) in [
+            (true, false, "a\\", "a\n", false),
+            (true, false, "\\\\", "\\\n", false),
+            (true, false, "/paste", "/paste", true),
+            (false, false, "answer\\", "answer\\", true),
+            (true, true, "1\\", "1\\", true),
+            (true, true, "/message a\\", "/message a\n", false),
+        ] {
+            reader.reset_draft();
+            reader.chat = chat;
+            reader.child = child;
+            let first = reader
+                .accept_segment(segment.as_bytes().to_vec(), true)
+                .unwrap();
+            let mut events = vec![first];
+            events.extend(reader.pending.drain(..));
+            assert_eq!(
+                events.pop(),
+                Some(if submitted {
+                    TerminalInput::Submit
+                } else {
+                    TerminalInput::LineContinued
+                })
+            );
+            let text: String = events
+                .into_iter()
+                .map(|event| match event {
+                    TerminalInput::Character(character) => character,
+                    TerminalInput::Newline => '\n',
+                    _ => panic!("segment became an action"),
+                })
+                .collect();
+            assert_eq!(text, expected);
+            assert_eq!(
+                reader.draft_bytes,
+                if submitted { 0 } else { expected.len() }
+            );
+        }
+        reader.reset_draft();
+        reader.chat = true;
+        reader.child = false;
+        reader.draft_bytes = MAX_DRAFT_BYTES - 2;
+        assert_eq!(
+            reader.accept_segment(b"ab\\".to_vec(), true).unwrap(),
+            TerminalInput::LineRejected
+        );
+        assert_eq!(reader.draft_bytes, MAX_DRAFT_BYTES - 2);
+        assert_eq!(
+            reader.accept_segment(b"a\\".to_vec(), true).unwrap(),
+            TerminalInput::Character('a')
+        );
+        assert_eq!(reader.draft_bytes, MAX_DRAFT_BYTES);
+        reader.reset_draft();
+        reader.chat = false;
         for expected in [3000, 6000] {
             let first = reader.accept_segment(vec![b'x'; 3000], false).unwrap();
             assert_eq!(first, TerminalInput::Character('x'));
@@ -993,6 +1191,16 @@ mod tests {
 
     #[test]
     fn key_mapping_keeps_control_input_local_and_ignores_unowned_events() {
+        for (modifiers, shortcut) in [
+            (KeyModifiers::SHIFT, NewlineShortcut::ShiftEnter),
+            (KeyModifiers::ALT, NewlineShortcut::AltEnter),
+            (KeyModifiers::CONTROL, NewlineShortcut::CtrlEnter),
+        ] {
+            assert_eq!(
+                map_input(Event::Key(KeyEvent::new(KeyCode::Enter, modifiers))),
+                Some(TerminalInput::ModifiedEnter(shortcut))
+            );
+        }
         let cases = [
             (
                 Event::Key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT)),
@@ -1022,7 +1230,7 @@ mod tests {
                     KeyCode::Char('c'),
                     KeyModifiers::CONTROL | KeyModifiers::ALT,
                 )),
-                None,
+                Some(TerminalInput::IgnoredKey),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
@@ -1068,7 +1276,7 @@ mod tests {
                     KeyCode::Char('v'),
                     KeyModifiers::CONTROL | KeyModifiers::ALT,
                 )),
-                None,
+                Some(TerminalInput::IgnoredKey),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Left, KeyModifiers::CONTROL)),
@@ -1091,7 +1299,7 @@ mod tests {
                     KeyCode::Left,
                     KeyModifiers::CONTROL | KeyModifiers::SHIFT,
                 )),
-                None,
+                Some(TerminalInput::IgnoredKey),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL)),
@@ -1111,7 +1319,7 @@ mod tests {
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::SHIFT)),
-                Some(TerminalInput::Newline),
+                Some(TerminalInput::ModifiedEnter(NewlineShortcut::ShiftEnter)),
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
@@ -1127,7 +1335,7 @@ mod tests {
             ),
             (
                 Event::Key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT)),
-                None,
+                Some(TerminalInput::IgnoredKey),
             ),
             (Event::Resize(40, 8), Some(TerminalInput::Resize)),
             (
@@ -1197,7 +1405,7 @@ mod tests {
                 }),
                 None,
             ),
-            (Event::FocusGained, None),
+            (Event::FocusGained, Some(TerminalInput::IgnoredKey)),
         ];
         for (event, expected) in cases {
             assert_eq!(map_input(event), expected);
@@ -1260,6 +1468,9 @@ mod tests {
                         TerminalInput::AgentNext,
                         TerminalInput::Left,
                         TerminalInput::Right,
+                        TerminalInput::IgnoredKey,
+                        TerminalInput::IgnoredKey,
+                        TerminalInput::IgnoredKey,
                     ],
                 ),
                 // Option+Left/Right as `ESC b`/`ESC f` navigate only on macOS; other Alt letters stay inert.
@@ -1269,10 +1480,11 @@ mod tests {
                         vec![
                             TerminalInput::AgentPrevious,
                             TerminalInput::AgentNext,
+                            TerminalInput::IgnoredKey,
                             TerminalInput::AgentPrevious,
                         ]
                     } else {
-                        vec![]
+                        vec![TerminalInput::IgnoredKey; 4]
                     },
                 ),
                 (
@@ -1288,18 +1500,30 @@ mod tests {
                 (
                     b"\x1b[13;2u\x1b[27;2;13~\x1b[99;5u".as_slice(),
                     vec![
-                        TerminalInput::Newline,
-                        TerminalInput::Newline,
+                        TerminalInput::ModifiedEnter(NewlineShortcut::ShiftEnter),
+                        TerminalInput::ModifiedEnter(NewlineShortcut::ShiftEnter),
                         TerminalInput::Interrupt,
                     ],
                 ),
+                (
+                    b"\x1b\r\x1b[13;3u\x1b[27;3;13~\x1b[13;5u\x1b[27;5;13~\x1b[13;5:3u\x1b[13;6u".as_slice(),
+                    vec![
+                        TerminalInput::ModifiedEnter(NewlineShortcut::AltEnter),
+                        TerminalInput::ModifiedEnter(NewlineShortcut::AltEnter),
+                        TerminalInput::ModifiedEnter(NewlineShortcut::AltEnter),
+                        TerminalInput::ModifiedEnter(NewlineShortcut::CtrlEnter),
+                        TerminalInput::ModifiedEnter(NewlineShortcut::CtrlEnter),
+                        TerminalInput::IgnoredKey,
+                    ],
+                ),
+                (b"\x1bOP\x1bOS\x1b[15~\x1b[24~".as_slice(), vec![TerminalInput::IgnoredKey; 4]),
                 (
                     b"\x16\x1b[118;5u\x1b[86;6u\x1b[27;6;118~".as_slice(),
                     vec![TerminalInput::ClipboardPaste; 4],
                 ),
                 (
                     b"\x1b[99;5:2u\x1b[99;5:3u\x1b[120;3u\x1b[999~\x1b[?1h\x1b[57344u".as_slice(),
-                    vec![],
+                    vec![TerminalInput::IgnoredKey; 2],
                 ),
                 (
                     b"\x1b[<35;8;10M\x1b[<0;8;10M\x1b[<64;8;10M\x1b[<65;8;10M".as_slice(),

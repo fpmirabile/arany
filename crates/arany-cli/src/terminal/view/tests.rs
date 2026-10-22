@@ -666,6 +666,60 @@ fn dense_settings_choices_keep_the_change_keys_visible() {
         .map(|y| buffer_row(terminal.backend().buffer(), y))
         .collect::<Vec<_>>();
     assert!(rows.iter().any(|row| row.contains("↑↓ ←→ Enter Esc")));
+    for width in [16, 40, 80] {
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        terminal
+            .draw(|frame| {
+                draw_settings_frame(
+                    frame,
+                    frame.area(),
+                    &["Newline shortcut: Shift+Enter".into()],
+                    0,
+                    true,
+                    Some("Modifiers may be lost; CR submits. Use backslash then Enter"),
+                    Palette { color: false },
+                );
+            })
+            .unwrap();
+        let rows: Vec<_> = (0..8)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect();
+        assert!(rows.iter().any(|row| row.contains("Shift+Enter")));
+        assert!(rows[7].contains("↑↓ ←→ Enter") || rows[7].contains("Enter saves"));
+    }
+}
+
+#[test]
+fn newline_hint_recommends_a_received_preference_with_the_portable_fallback() {
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: true,
+        agent_switch: false,
+    };
+    for width in [40, 80] {
+        for shortcut in crate::terminal::NewlineShortcut::ALL {
+            let mut composer = Composer::default();
+            composer.set_newline_shortcut(shortcut);
+            composer.apply(TerminalInput::Character('a'));
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            terminal
+                .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
+                .unwrap();
+            let footer = buffer_row(terminal.backend().buffer(), 6);
+            assert!(footer.contains("\\ then Enter"));
+            assert!(!footer.contains(shortcut.label()));
+            composer.apply(TerminalInput::ModifiedEnter(shortcut));
+            terminal
+                .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
+                .unwrap();
+            let footer = buffer_row(terminal.backend().buffer(), 6);
+            assert!(footer.contains(shortcut.label()), "{width}: {footer}");
+            assert!(footer.contains("\\ Enter"), "{width}: {footer}");
+        }
+    }
 }
 
 #[test]
@@ -819,7 +873,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
         );
         assert!(rows[usize::from(height - 4)].starts_with("─ Ask Arany"));
         assert!(rows[usize::from(height - 3)].starts_with("> "));
-        assert!(rows[usize::from(height - 2)].contains("Ctrl+J"));
+        assert!(rows[usize::from(height - 2)].contains("\\"));
         if width >= 40 {
             assert!(rows[usize::from(height - 2)].contains("Enter sends"));
         }
@@ -1101,7 +1155,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         } else if width >= 40 {
                             "Enter sends"
                         } else {
-                            "Enter · Ctrl+J"
+                            "Enter · \\ Enter"
                         };
                         assert!(
                             footer.contains(action),
@@ -1109,7 +1163,7 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         );
                         assert!(!keeps_draft || !footer.contains("sends"));
                         if width >= 40 || (!command && (width >= 24 || !keeps_draft)) {
-                            assert!(footer.contains("Ctrl+J"));
+                            assert!(footer.contains("\\"));
                         }
                         assert_eq!(composer.text(), text);
                         assert_eq!(composer.cursor_byte_offset(), cursor);
@@ -1453,7 +1507,7 @@ fn multiline_frame_keeps_activity_draft_caret_and_status_in_order() {
         assert!(row(3).contains("\\u{202e}"));
         assert!(row(4).contains("last"));
         assert!(row(5).contains("Enter keeps draft"));
-        assert!(row(5).contains("Ctrl+J newline"));
+        assert!(row(5).contains("\\ then Enter newline"));
         assert!(row(6).contains("working · model"));
         assert!(buffer.content().iter().all(|cell| {
             cell.fg == ratatui::style::Color::Reset && cell.bg == ratatui::style::Color::Reset
@@ -1921,11 +1975,7 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                                 entry.name
                             );
                         }
-                        assert!(
-                            labels
-                                .iter()
-                                .any(|row| row.contains("Slash menu and chat view"))
-                        );
+                        assert!(labels.iter().any(|row| row.contains("Newline shortcut")));
                     }
                     if !color {
                         assert!(buffer.content().iter().all(|cell| cell.fg == Color::Reset));
@@ -2279,7 +2329,7 @@ fn composer_frame_wraps_draft_and_keeps_grapheme_cursor_visible() {
                     let footer = (0..width)
                         .map(|x| terminal.backend().buffer()[(x, 6)].symbol())
                         .collect::<String>();
-                    assert!(footer.contains("Shift+Enter newline"));
+                    assert!(footer.contains("\\ then Enter newline"));
                 }
                 assert_eq!(
                     composer.text(),

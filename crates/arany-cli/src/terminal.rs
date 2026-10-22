@@ -43,7 +43,7 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     invoked_objective, parse_submission, skill_invocation, transcript_agents,
 };
-pub use composer::{CompletionLayout, Composer, ComposerEdit};
+pub use composer::{CompletionLayout, Composer, ComposerEdit, NewlineShortcut};
 use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
@@ -420,6 +420,7 @@ fn pointer_modes(
 }
 
 pub struct AttachedTerminal {
+    newline_shortcut: NewlineShortcut,
     waiting_tool: Option<uuid::Uuid>,
     terminal: Option<Terminal<TerminalBackend>>,
     mode: TerminalMode,
@@ -737,6 +738,7 @@ impl AttachedTerminal {
         let pointer_modes = pointer_modes(mode, mode_label.is_some(), pointer.mouse.effective())?;
         Ok(Self {
             terminal,
+            newline_shortcut: NewlineShortcut::default(),
             waiting_tool: None,
             mode,
             classic_pinned: false,
@@ -786,11 +788,32 @@ impl AttachedTerminal {
         })
     }
 
+    pub fn set_newline_shortcut(&mut self, shortcut: NewlineShortcut) {
+        self.newline_shortcut = shortcut;
+    }
+
     pub fn defer_input(&mut self, input: TerminalInput) {
         self.deferred_input = Some(input);
     }
 
     pub async fn next_input(&mut self) -> Result<TerminalInput, TerminalError> {
+        self.read_input(false).await
+    }
+
+    pub async fn next_chat_input(&mut self) -> Result<TerminalInput, TerminalError> {
+        self.read_input(
+            !self.help_open()
+                && !self.transcript_open
+                && !self.scrollback_dump
+                && !self.agents_open(),
+        )
+        .await
+    }
+
+    async fn read_input(&mut self, chat: bool) -> Result<TerminalInput, TerminalError> {
+        if let Some(input) = &mut self.input {
+            input.set_chat_input(chat, self.agent_chat.is_some());
+        }
         self.clipboard_paste = None;
         if let Some(input) = self.deferred_input.take() {
             return Ok(input);
@@ -2247,7 +2270,8 @@ impl AttachedTerminal {
         };
         self.draw_dialog(
             Some(session),
-            view::settings_height(rows, width, max_rows),
+            view::settings_height(rows, width, max_rows)
+                .saturating_add(notice.map_or(0, |text| view::guidance_height(text, width))),
             |frame, area| draw_settings_frame(frame, area, rows, selected, armed, notice, palette),
         )?;
         Ok(())

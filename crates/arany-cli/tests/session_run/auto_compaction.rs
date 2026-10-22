@@ -434,9 +434,9 @@ fn run_attached_auto_compaction(case: CompactionCase) {
             maintenance_start = Some(start);
             let maintenance = &bytes[start..];
             let compaction_marker = match case {
-                CompactionCase::Success => b"Notice: Compaction saved; 20 input / 10 output tokens; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
-                CompactionCase::ProviderFailure => b"Notice: Error: Compaction failed: Provider unavailable; usage unavailable; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
-                CompactionCase::Interrupted => b"Notice: Automatic compaction unavailable: Compaction interrupted; check Session history; history retained; Draft retained: 14 characters; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::Success => b"Notice: Compaction saved; 20 input / 10 output tokens; Draft retained: 15 characters; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::ProviderFailure => b"Notice: Error: Compaction failed: Provider unavailable; usage unavailable; Draft retained: 15 characters; Enter submits\r\nInput:\r\n".as_slice(),
+                CompactionCase::Interrupted => b"Notice: Automatic compaction unavailable: Compaction interrupted; check Session history; history retained; Draft retained: 15 characters; Enter submits\r\nInput:\r\n".as_slice(),
             };
             if !compaction_reported
                 && crate::process::pty_text_matches(maintenance, compaction_marker)
@@ -457,7 +457,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
                 source_mismatch_reported = true;
             }
             let continuation =
-                b"Notice: Draft: 9 characters; Enter retains until compaction ends\r\n";
+                b"Notice: Draft: 10 characters; Enter retains until compaction ends\r\n";
             if !continuation_reported
                 && crate::process::pty_text_matches(maintenance, continuation)
                     .next()
@@ -584,7 +584,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
         .recv_timeout(Duration::from_secs(10))
         .expect("in-flight compaction request");
     input
-        .write_all(b"retained \x04")
+        .write_all(b"retained \\\n")
         .expect("continue maintenance draft");
     receive_stage(&receiver, "draft continuation");
     input
