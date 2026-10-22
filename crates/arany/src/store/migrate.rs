@@ -166,9 +166,17 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             16,
             crate::session::pre_host_git_payload
         ),
+        variant_step!("RunStarted", 21, crate::session::pre_host_payload),
+        variant_step!("ToolStarted", 17, crate::session::pre_host_payload),
+        variant_step!("ToolFinished", 23, crate::session::pre_host_payload),
+        variant_step!("ToolPermissionDecided", 5, crate::session::pre_host_payload),
+        variant_step!("AgentSpawned", 13, crate::session::pre_host_payload),
+        variant_step!("HookStarted", 7, crate::session::pre_host_payload),
+        variant_step!("HookFinished", 12, crate::session::pre_host_payload),
+        variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
         EventStep {
             kind: "ToolFinished",
-            from: 23,
+            from: 24,
             transform: |value| crate::session::add_command_selection("ToolFinished", value),
             canonical: |payload| {
                 crate::session::pre_command_selection_payload("ToolFinished", payload)
@@ -176,7 +184,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         },
         EventStep {
             kind: "HookFinished",
-            from: 12,
+            from: 13,
             transform: |value| crate::session::add_command_selection("HookFinished", value),
             canonical: |payload| {
                 crate::session::pre_command_selection_payload("HookFinished", payload)

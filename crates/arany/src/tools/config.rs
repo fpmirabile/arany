@@ -125,7 +125,7 @@ impl Config {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ToolError> {
-        if self.child_unguarded == UnguardedGrant::HumanOnly && self.commands.is_empty()
+        if self.child_unguarded != UnguardedGrant::Denied
             || self.version != 1
             || self.workspace_paths.is_empty()
             || self.workspace_paths.len() > 32
@@ -265,17 +265,14 @@ impl Config {
 
     pub(super) fn receipt(&self) -> ToolPolicyReceipt {
         ToolPolicyReceipt {
+            host_epoch: None,
             contract_version: 1,
             config_digest: self.digest(),
             permissions_digest: None,
             max_context_bytes: MAX_TOOL_CONTEXT_BYTES as u32,
             unguarded_rules_digest: None,
-            unguarded: if self.commands.is_empty() {
-                UnguardedGrant::Denied
-            } else {
-                UnguardedGrant::HumanOnly
-            },
-            child_unguarded: self.child_unguarded,
+            unguarded: UnguardedGrant::HumanOnly,
+            child_unguarded: UnguardedGrant::Denied,
         }
     }
 
@@ -288,7 +285,7 @@ impl Config {
     }
 
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
-        if !call.valid() || call.mutates() && !self.write {
+        if !call.valid() || call.mutates() && !self.write && !call.is_unguarded() {
             return false;
         }
         let path = match call {
@@ -309,7 +306,8 @@ impl Config {
             | ToolCall::MultiEdit {
                 file_path: path, ..
             } => Some(path),
-            ToolCall::Command { program, .. } | ToolCall::CommandUnguarded { program, .. } => {
+            ToolCall::CommandUnguarded { .. } => return true,
+            ToolCall::Command { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);
             }
             ToolCall::ApplyChangeset {

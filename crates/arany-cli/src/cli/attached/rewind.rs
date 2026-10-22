@@ -47,6 +47,9 @@ pub(super) async fn open(
     view: &mut SessionView,
     composer: &mut Composer,
 ) -> Result<String, String> {
+    engine
+        .revoke_host_approvals()
+        .map_err(|error| error.to_string())?;
     if view.rewinds.checkpoints.is_empty() {
         return Ok("No checkpoints; send a message first".into());
     }
