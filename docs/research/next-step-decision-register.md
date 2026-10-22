@@ -325,6 +325,30 @@ sparse backing make those quantities different. The
 [Tool contract](../specs/tools.md#local-storage-inventory) owns accepted behavior;
 the [remaining plan](../../planning/arany-storage/README.md) owns Guard expansion.
 
+### D-25 — Branch reads use Git semantics with inert tracking metadata
+
+Decided 2026-10-22. Extend the existing read form of `git_branch` rather than
+add another listing Tool: its grant, plan availability and macOS read path
+already own this operation. Standard Git scopes and ref identities follow
+[for-each-ref](https://git-scm.com/docs/git-for-each-ref); the pinned
+[Codex branch comparison](https://github.com/openai/codex/blob/86e17e98c7f901277aeeb4649cf1b01462b082f2/codex-rs/git-utils/src/branch.rs)
+uses [rev-list count semantics](https://git-scm.com/docs/git-rev-list).
+Arany captures OIDs before dependent reads so mutable ref names cannot silently
+change the meaning of a committed observation. Arany counts a bounded left/right
+stream instead of requesting an unlimited count; a per-row timer also bounds
+merge-base work. Separate subject captures keep one verbose tip from consuming
+the batch's output allowance and avoid requiring newer Git format atoms on both
+platform pins. [Tools](../specs/tools.md#branch-discovery) owns the caps and
+partial-result semantics.
+
+Git's `%(upstream)` depends on configuration that the neutralized view deliberately
+does not apply. Reading only a bounded direct metadata subset as data preserves
+the Safe AI cage; guessing `origin/<branch>` would invent an association. Includes
+and unusual refspecs therefore report unsupported instead of broadening Git's
+configuration authority. The [Tool contract](../specs/tools.md#branch-discovery)
+owns exact syntax, fidelity, disclosure and bounds; execution reuses its existing
+concrete Engine/Guard boundary with no new adapter or privilege.
+
 ### Rejected layering
 
 Retained from the 2026-10-04 architecture review (its report is folded into this register):

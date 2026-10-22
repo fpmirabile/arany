@@ -154,6 +154,9 @@ fn branch(name: &str, start_point: Option<&str>) -> ToolCall {
     ToolCall::GitBranch {
         name: Some(name.into()),
         start_point: start_point.map(str::to_owned),
+        scope: None,
+        base: None,
+        max_count: None,
     }
 }
 
@@ -228,15 +231,23 @@ fn commit_branch_and_switch_publish_exactly_what_their_receipts_name() {
         &ToolCall::GitBranch {
             name: None,
             start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
         },
     );
-    assert_eq!(
-        listed,
-        json!({"branches": [
-            {"name": "main", "oid": oid, "current": true},
-            {"name": "older", "oid": parent, "current": false},
-        ], "truncated": false})
-    );
+    let rows = listed["branches"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    for (row, name, tip, current) in [
+        (&rows[0], "refs/heads/main", &oid, true),
+        (&rows[1], "refs/heads/older", &parent, false),
+    ] {
+        assert_eq!(row["name"], name);
+        assert_eq!(row["oid"], *tip);
+        assert_eq!(row["current"], current);
+        assert_eq!(row["kind"], "local");
+    }
+    assert_eq!(listed["truncated"], false);
 
     let switched = repo.succeeded(switch("older"));
     assert_eq!(switched["switched"], true);
