@@ -80,14 +80,4 @@ association or authorize deletion.
    inventory. Completion covers this host/account, not other installations or
    secure media erasure.
 
-[`historical_seed_maintenance_removes_only_selected_inactive_objects`](../crates/arany/src/tools/guard/admission.rs)
-uses the same deletion primitive with independent UUIDs, selected identity,
-live-lease refusal, replacement and unrelated canaries. `Linux Tests (debug)` and
-`Linux Tests (release)` in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml)
-own this synthetic scenario. To run it separately on Linux:
-
-```sh
-cargo test --lib tools::guard::admission::tests::historical_seed_maintenance_removes_only_selected_inactive_objects -- --exact
-```
-
-It inventories and deletes only test-owned fixtures, never an existing user's installation.
+Remaining host cleanup is tracked in [next steps](../NEXT_STEPS.md#account-recovery-and-native-guard-follow-ups).

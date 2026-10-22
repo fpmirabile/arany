@@ -12,8 +12,27 @@ The trust boundary is from the developer or CI host's installed libraries, pkg-c
 
 ## Resolution and verification
 
-Use an approved controlled release environment that explicitly disables system detection and rejects a contradictory explicit system directory. Review and pin the remaining native compiler, assembler, source-selection, and linker inputs rather than treating one variable as full reproducibility; the [pinned build-provenance research](../beta-aws-lc-build-provenance-research.md) maps those controls and target-specific paths. For each release target, inspect the dependency's final build output, linked libraries, native source set, and resulting artifact. Exercise a hostile build environment in an isolated target directory and require the release gate to fail before publication. A lockfile checksum, selected Cargo feature, or this host's static archive alone does not close the finding.
+Use an approved controlled release environment that explicitly disables system detection and rejects a contradictory explicit system directory. Review and pin the remaining native compiler, assembler, source-selection, and linker inputs rather than treating one variable as full reproducibility; the source controls below also affect bundled builds. For each release target, inspect the dependency's final build output, linked libraries, native source set, and resulting artifact. Exercise a hostile build environment in an isolated target directory and require the release gate to fail before publication. A lockfile checksum, selected Cargo feature, or this host's static archive alone does not close the finding.
 
 Changing shared Cargo, CI, or release-build infrastructure requires user approval under [AGENTS.md](../../../AGENTS.md). The [SQLite build-environment finding](./sqlite-build-environment-override.md), advisory audit, source/license notices, and native macOS verification remain separate release gates.
 
 The approved [release-build entry point](../../../scripts/release-build.sh) rejects ambient AWS-LC and OpenSSL source-selection variables, sets `AWS_LC_SYS_USE_SYSTEM=0`, and requires a fresh bundled CC build record, static link directive, in-build archive, and no dynamic `libcrypto`/`libssl`. Its hostile-variable test and one fresh Linux build pass. Direct Cargo builds bypass this entry point; compiler, PATH, SDK, source-file, and macOS provenance remain open.
+
+## Bundled-build source controls
+
+Source review dated 2026-09-30, for `aws-lc-sys 0.45.0`; this is not target-wide
+artifact or cryptographic clearance:
+
+- [`prebuilt-nasm`](https://github.com/aws/aws-lc-rs/blob/7943223c99d909bc399bdf1b856821bb04f1f3c5/aws-lc-sys/builder/main.rs#L1186-L1199)
+  applies only to Windows x86-64, not Arany's Linux/macOS targets. Absent overrides,
+  the [binding selector](https://github.com/aws/aws-lc-rs/blob/7943223c99d909bc399bdf1b856821bb04f1f3c5/aws-lc-sys/builder/main.rs#L893-L966)
+  uses pregenerated universal Linux or universal-prefixed Apple bindings.
+- The [CC](https://github.com/aws/aws-lc-rs/blob/7943223c99d909bc399bdf1b856821bb04f1f3c5/aws-lc-sys/builder/cc_builder.rs#L373-L411)
+  and [CMake](https://github.com/aws/aws-lc-rs/blob/7943223c99d909bc399bdf1b856821bb04f1f3c5/aws-lc-sys/builder/cmake_builder.rs#L202-L317)
+  builders still accept compiler, flags and toolchain inputs. The `AWS_LC_SYS_`
+  controls `CMAKE_BUILDER`,
+  `NO_PREGENERATED_SRC`, `NO_ASM`, `SANITIZER`, binding/prefix controls, `STATIC`,
+  `SMALL`, `NO_JITTER_ENTROPY` and `INCLUDES` can alter source selection or linkage.
+- Apple's [CoreServices probe](https://github.com/aws/aws-lc-rs/blob/7943223c99d909bc399bdf1b856821bb04f1f3c5/aws-lc-sys/builder/main.rs#L1096-L1148)
+  can disable jitter entropy when headers are absent. A locked graph or one
+  Linux static archive cannot establish equivalent macOS native inputs.
