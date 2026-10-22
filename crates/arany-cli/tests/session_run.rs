@@ -3640,9 +3640,27 @@ fn check_output(
         .expect("check");
     assert_eq!(view.disposition, Some(disposition));
     if disposition == arany::CheckDisposition::Succeeded {
+        let catalog_pages = events
+            .windows(2)
+            .filter(|pair| {
+                matches!(
+                    *pair,
+                    [
+                        arany::CheckEvent::ProviderCheckCallStarted {
+                            kind: arany::CheckCallKind::Catalog,
+                            ..
+                        },
+                        arany::CheckEvent::ProviderCheckCallFinished {
+                            disposition: arany::CheckDisposition::Succeeded,
+                            ..
+                        }
+                    ]
+                )
+            })
+            .count();
         assert_eq!(
             view.completed_calls as usize,
-            view.start.probes.len() + usize::from(view.start.catalog_pages > 0)
+            view.start.probes.len() + catalog_pages
         );
     }
     prefix.as_bytes().to_vec()
