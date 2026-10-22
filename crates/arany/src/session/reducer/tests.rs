@@ -3606,7 +3606,11 @@ mod goal_replay_tests {
     fn assert_exhausted_crash_receipt(view: &SessionView) {
         let mut view = view.clone();
         view.goals[0].budget.max_active_ms = Some(1000);
+        if let Some(contract) = &mut view.goals[0].plan_contract {
+            contract.budget.max_active_ms = Some(1000);
+        }
         let goal = &view.goals[0];
+        assert_eq!(goal.effective_budget().max_active_ms, Some(1000));
         let usage = goal.resume_usage(&view);
         assert!(!usage.token_usage_unknown);
         assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
@@ -3614,7 +3618,7 @@ mod goal_replay_tests {
         let mut refusal = goal
             .effective_budget()
             .refusal(usage, crate::BudgetAction::Resume)
-            .unwrap();
+            .expect("finite active budget refuses the recovered ceiling");
         let mut close = Event::GoalFinished {
             goal_id: goal.id,
             status: GoalStatus::Failed,
