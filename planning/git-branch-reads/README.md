@@ -12,7 +12,7 @@
 The primary can discover local and remote-tracking tips through
 [branch discovery](../../docs/specs/tools.md#branch-discovery). S2 completes this
 feature with bounded range history and the existing endpoint diff. The
-[decision register](../../docs/research/next-step-decision-register.md#d-24--branch-reads-use-git-semantics-with-inert-tracking-metadata)
+[decision register](../../docs/research/next-step-decision-register.md#d-25--branch-reads-use-git-semantics-with-inert-tracking-metadata)
 owns the delivered discovery rationale; Tools owns its behavior and evidence.
 [GitHub PR reads](../github-pr-reads/README.md) supplies remote review/check
 information separately.

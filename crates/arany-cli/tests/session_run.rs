@@ -3692,3 +3692,7 @@ fn acp_refuses_terminal_input_before_state_admission() {
     );
     assert!(!state.exists());
 }
+
+#[cfg(all(unix, any(debug_assertions, target_os = "linux")))]
+#[path = "session_run/storage.rs"]
+mod storage;
