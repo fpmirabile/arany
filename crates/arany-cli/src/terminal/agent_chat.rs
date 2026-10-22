@@ -831,7 +831,7 @@ impl AttachedTerminal {
         self.restore_draft_input(capacity)?;
         self.draw_agent_chat(view, None)?;
         Ok(if edit == ComposerEdit::AtCapacity {
-            AgentChatInput::Notice("Child draft exceeds 8 KiB; text retained")
+            AgentChatInput::Notice("Child draft exceeds 8.0 KB; text retained")
         } else if edited {
             AgentChatInput::ChildEdited(target)
         } else {
@@ -884,7 +884,7 @@ impl AttachedTerminal {
                         || text.len() > super::composer::MAX_DRAFT_BYTES
                     {
                         return Ok(AgentChatInput::Notice(
-                            "Child message is empty or exceeds 8 KiB; message not offered",
+                            "Child message is empty or exceeds 8.0 KB; message not offered",
                         ));
                     }
                     let target = chat.target();

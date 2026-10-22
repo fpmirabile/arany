@@ -1137,7 +1137,7 @@ mod tests {
         linear
             .write_clipboard_draft(&mut with_image, &composer)
             .unwrap();
-        assert_eq!(with_image, "Draft (not sent):\n  alpha\\u{0009}beta\n  🙂\n  Image 1: PNG 1x1, 0.1 KB\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
+        assert_eq!(with_image, "Draft (not sent):\n  alpha\\u{0009}beta\n  🙂\n  Image 1: PNG 1x1, 69 B\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\n".as_bytes());
         composer.clear();
         composer.insert_paste("e\u{301}👩‍💻").unwrap();
         let mut graphemes = Vec::new();
