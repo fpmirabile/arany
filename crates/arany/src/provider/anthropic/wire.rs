@@ -1,3 +1,4 @@
+use crate::provider::compaction_input;
 use crate::provider::conversation::{Block, Conversation, Role};
 use crate::provider::decode::{argument_limit, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
@@ -7,7 +8,6 @@ use crate::provider::{
     ProviderError, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
     ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::provider::{compaction_input, summary_schema};
 use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -406,10 +406,12 @@ pub(in crate::provider) fn decode_compaction(
     if admitted.stop != Stop::EndTurn {
         return Err(ProviderError::InvalidOutcome);
     }
-    let summary: SummaryEnvelope = serde_json::from_str(&admitted.single_text()?)
-        .map_err(|_| ProviderError::InvalidOutcome)?;
+    let summary = admitted.single_text()?;
+    if summary.trim().is_empty() || summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES {
+        return Err(ProviderError::InvalidOutcome);
+    }
     Ok(CompactionResponse {
-        summary: summary.summary,
+        summary,
         response_id: Some(admitted.id),
         usage: admitted.usage,
         wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
@@ -583,14 +585,10 @@ pub(in crate::provider) fn compaction_body_with_optional_effort(
         "max_tokens": request.max_output_tokens,
         "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
         "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
-        "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.map(Effort::as_str)},
         "stream": false,
     });
-    if effort.is_none() {
-        body["output_config"]
-            .as_object_mut()
-            .expect("output config")
-            .remove("effort");
+    if let Some(effort) = effort {
+        body["output_config"] = json!({"effort": effort.as_str()});
     }
     cache_breakpoints(&mut body, false);
     body
@@ -822,12 +820,6 @@ impl Admitted<'_> {
             Err(_) => Err(ProviderError::InvalidOutcome),
         }
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SummaryEnvelope {
-    summary: String,
 }
 
 #[cfg(test)]

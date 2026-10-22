@@ -1,3 +1,4 @@
+use crate::provider::compaction_input;
 use crate::provider::conversation::{Block, Conversation, Role};
 use crate::provider::decode::{argument_limit, function_outcome, review_outcome, tool_function};
 use crate::provider::prompts::COMPACTION_INSTRUCTIONS;
@@ -6,7 +7,6 @@ use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, ProviderError, ProviderOutcome, ProviderRequest,
     ProviderResponse, ProviderTurn, ProviderWireProvenance, ToolUseId, Usage,
 };
-use crate::provider::{compaction_input, summary_schema};
 use crate::tools::ToolContext;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -316,10 +316,11 @@ fn decode_compaction_response(
     model: &str,
 ) -> Result<CompactionResponse, ResponseError> {
     let (response_id, usage, text) = response.completed_text(model)?;
-    let summary: SummaryEnvelope =
-        serde_json::from_str(&text).map_err(|_| ResponseError::Outcome)?;
+    if text.trim().is_empty() || text.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES {
+        return Err(ResponseError::Outcome);
+    }
     Ok(CompactionResponse {
-        summary: summary.summary,
+        summary: text,
         response_id: Some(response_id),
         usage: provider_usage(usage.as_ref()),
         wire_provenance: Some(ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
@@ -366,12 +367,9 @@ fn run_body_inner(
         json!(input_items(conversation)?),
         request.max_output_tokens,
         effort,
-        "arany_outcome",
-        conversation.outcome.clone(),
     );
     body["prompt_cache_key"] = json!(request.session_id.to_string());
     if request.input.role != crate::provider::PromptRole::ToolReview {
-        body.as_object_mut().expect("request object").remove("text");
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let functions: Vec<Value> = tools
             .iter()
@@ -393,6 +391,8 @@ fn run_body_inner(
             body["parallel_tool_calls"] = json!(false);
         }
         body["include"] = json!(["reasoning.encrypted_content"]);
+    } else {
+        body["text"] = json!({"format": {"type": "json_schema", "name": "arany_outcome", "strict": true, "schema": conversation.outcome}});
     }
     Ok(body)
 }
@@ -482,8 +482,6 @@ fn compaction_body_inner(request: &CompactionRequest, effort: Option<Effort>) ->
         json!(input.to_string()),
         request.max_output_tokens,
         effort,
-        "arany_compaction",
-        summary_schema(),
     );
     body["prompt_cache_key"] = json!(request.session_id.to_string());
     body
@@ -495,8 +493,6 @@ fn response_body(
     input: Value,
     max_output_tokens: u32,
     effort: Option<Effort>,
-    schema_name: &str,
-    schema: Value,
 ) -> Value {
     let mut body = json!({
         "model": model,
@@ -505,7 +501,6 @@ fn response_body(
         "max_output_tokens": max_output_tokens,
         "store": false,
         "truncation": "disabled",
-        "text": {"format": {"type": "json_schema", "name": schema_name, "strict": true, "schema": schema}},
     });
     if let Some(effort) = effort {
         body["reasoning"] = json!({"effort": effort.as_str()});
@@ -798,16 +793,6 @@ impl WireResponse {
             text.ok_or(ResponseError::MissingFinalMessage)?.0,
         ))
     }
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SummaryEnvelope {
-    summary: String,
-}
-
-pub(super) fn is_structured_text(text: &str) -> bool {
-    serde_json::from_str::<SummaryEnvelope>(text).is_ok()
 }
 
 #[cfg(test)]

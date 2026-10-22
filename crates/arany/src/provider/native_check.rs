@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v33";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v34";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -464,7 +464,7 @@ mod tests {
         };
         let mut legacy = Vec::new();
         for field in [
-            "native-goal-contract-outcome-conformance-v32",
+            "native-goal-contract-outcome-conformance-v33",
             env!("CARGO_PKG_VERSION"),
             "https://api.anthropic.com/v1/messages;output_config.format",
             "anthropic",

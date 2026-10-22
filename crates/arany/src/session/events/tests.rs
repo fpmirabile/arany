@@ -1106,10 +1106,18 @@ mod subscription_compaction_tests {
             missing.as_object_mut().unwrap().remove(field);
             assert!(serde_json::from_value::<CompactionRecord>(missing).is_err());
         }
-        for compiler_version in [1, 2, 4] {
-            let mut invalid = record.clone();
-            invalid.compiler_version = compiler_version;
-            assert!(invalid.validate().is_err());
+        for (field, current) in [
+            ("prompt_version", 1),
+            ("schema_version", 1),
+            ("compiler_version", 3),
+        ] {
+            assert_eq!(encoded[field], current);
+            for version in (0..=4).filter(|version| *version != current) {
+                let mut invalid = encoded.clone();
+                invalid[field] = serde_json::json!(version);
+                let invalid: CompactionRecord = serde_json::from_value(invalid).unwrap();
+                assert!(invalid.validate().is_err(), "{field}={version}");
+            }
         }
         record.provider = "chatgpt".into();
         record.chatgpt_provenance = Some(crate::provider::ChatGptProvenance {

@@ -217,15 +217,6 @@ fn outcome_schema() -> Value {
     })
 }
 
-fn summary_schema() -> Value {
-    json!({
-        "type": "object",
-        "properties": {"summary": {"type": "string"}},
-        "required": ["summary"],
-        "additionalProperties": false
-    })
-}
-
 pub(crate) fn compaction_input(request: &CompactionRequest) -> Value {
     let items = request
         .items
