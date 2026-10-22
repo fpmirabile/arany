@@ -325,7 +325,7 @@ done
             assert_eq!(requests[1].phase, AgentPhase::ChildWork);
             assert_eq!(requests[1].collaboration, CollaborationPolicy::Single);
             let primary: Value =
-                serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
             assert_eq!(primary["write"], true);
             assert_eq!(primary["commands"][0]["name"], "shell");
             assert_eq!(
@@ -333,7 +333,7 @@ done
                 json!(["git_status", "git_diff", "git_log", "git_branch"])
             );
             let catalog: Value =
-                serde_json::from_str(&requests[1].input.tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(requests[1].input.tools.as_ref().unwrap().catalog()).unwrap();
             assert_eq!(catalog["write"], false);
             assert_eq!(catalog["commands"], json!([]));
             assert!(catalog.get("git").is_none());
@@ -429,7 +429,7 @@ done
             assert!(request.input.history.is_empty());
             let context = request.input.tools.as_ref().unwrap();
             assert_eq!(
-                serde_json::from_str::<Value>(&context.catalog).unwrap(),
+                serde_json::from_str::<Value>(context.catalog()).unwrap(),
                 *catalog,
                 "catalog frozen at spawn"
             );

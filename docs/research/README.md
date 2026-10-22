@@ -16,29 +16,14 @@ must be read before using an old recommendation as implementation guidance.
 |---|---|
 | [DeepSeek, Kimi and GLM providers](./deepseek-kimi-glm-providers-2026-10.md) | Anthropic-compatible endpoints, key and subscription authorization, strict-wire gaps and peer adapter precedent |
 | [Git writes and remembered approvals](./git-writes-2026-10.md) | Peer permission evidence, neutralized Git publication, typed prefix authorization and host write isolation conflicts |
-| [Agent chat switching](./agent-switching-2026-10.md) | Codex and Claude Code navigation, journaled Arany child history, input barriers, read-only authority and OS evidence limits |
-| [Automatic state migrations](./state-migrations-2026-10.md) | Persisted-format inventory, commit churn, digest and storage constraints, and peer evidence |
-| [AGENTS.md instructions](./agents-md-2026-10.md) | Codex, Claude Code and OpenCode instruction framing, discovery, size limits and global files; behavior versus authority |
-| [Agent instructions and product specifications](./agent-instructions-and-product-specs-2026-10.md) | Conditional instruction loading, focused behavior specs, ADRs, Skills and evidence ownership |
-| [Harness effect-loop comparisons](./effectful-harness-tool-loops-2026-10.md) | Codex, Claude Code, Pi and OpenCode proposal/observation/recovery ownership |
-| [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Dated MCP protocol comparison, complete legacy tools flow, portable progressive Skills, bounded parser choices |
-| [Platform effect Guard](./effect-guard-platform-base-2026-10.md) | Kernel filesystem/namespace/cgroup enforcement, lifecycle, quotas and immutable receipts |
+| [MCP and runtime Skills](./mcp-and-runtime-skills-2026-10.md) | Protocol upgrade boundary, SDK and parser source evidence |
 | [macOS Guard crash recovery in other harnesses](./macos-guard-crash-recovery-in-harnesses-2026-10.md) | Owner-side cleanup versus persistent launchd/coalition/image recovery, source comparisons and verification limits |
-| [Agent-state persistence](./agent-state-persistence.md) | SQLite versus files, Rust KV stores, RocksDB, and PostgreSQL; crash/durability contract |
-| [Rust foundation and Engine contract](./rust-foundation-and-engine-contract.md) | Runtime ownership, semantic Provider seam and blocking integration trade-offs |
-| [Testing strategy](./testing-strategy-for-rust-cli-harness.md) | Evidence-dense Rust/CLI testing, exact user output, SQLite replay, live Provider smoke, flake and deletion policy |
-| [Modular harness architecture](./modular-harness-architecture.md) | Deep modules, dependency direction, protocol/client seams, polyglot boundary |
+| [Agent-state persistence](./agent-state-persistence.md) | SQLite alternatives, rollback-journal rationale and reconsideration gates |
+| [Testing strategy](./testing-strategy-for-rust-cli-harness.md) | Evidence per test, process and durability observations, behavioral evaluation methodology |
 | [Deterministic protection](./deterministic-harness-protection.md) | Effect-level enforcement, threat model, platform alternatives and advisory-model limits |
 | [Harness security lessons and controls](./harness-security-lessons-and-controls.md) | Incident and standards evidence behind authority, containment, disclosure and supply-chain controls |
-| [Multi-agent loop and feedback](./multi-agent-loop-and-user-feedback.md) | Reusable loop, supervision, Assignment DAG, scheduling, user feedback |
 | [Context, Memory, and compaction](./context-memory-and-compaction.md) | Context compiler, Session/Memory lifecycle, retrieval, caching, deletion |
-| [Provider capability and routing evidence](./beta-multi-provider-routing-and-adapters.md) | OpenAI, Anthropic, OpenRouter, and Z.AI capability, routing, privacy, and strict-output evidence |
-| [Consumer subscription authentication](./consumer-subscription-authentication-for-provider-adapters.md) | OpenCode/Codex/Claude subscription flows, official policy, OAuth, secret lifecycle, and provider conformance |
-| [Credential-store timeouts](./harness-credential-timeouts-2026-10.md) | Bounded OS credential calls, cancellation and uncertain writes |
-| [October 2026 subscription route recheck](./subscription-provider-routes-2026-10.md) | Official ChatGPT open-source plan route and Anthropic third-party subscription restrictions |
-| [Pi Anthropic subscription route check](./pi-anthropic-subscription-2026-10.md) | Pi's native OAuth implementation versus Anthropic's third-party authorization and billing boundary |
-| [Behavioral evaluation](./evaluation-and-quality-strategy.md) | Model quality, repeated trials, calibrated graders and equal-budget comparisons |
-| [OTLP observability](./otlp-observability.md) | Standard trace export, privacy, local Collector trust boundary, lifecycle, bounds, and evidence gates |
+| [October 2026 subscription route recheck](./subscription-provider-routes-2026-10.md) | Dated authorization evidence, Pi identity shaping and authentication library trade-offs |
 | [Next-step decision register](./next-step-decision-register.md) | Accepted architectural decisions, reasons and trade-offs |
 
 ## Retention and completion

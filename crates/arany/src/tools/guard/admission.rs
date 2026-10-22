@@ -1312,7 +1312,9 @@ mod tests {
     #[test]
     #[cfg_attr(not(arany_ci), ignore = "requires native Linux systemd and Bubblewrap")]
     fn native_seed_recovery_terminates_the_owned_unit_before_releasing_storage() {
-        let _gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let _gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         super::super::linux::check_available().unwrap();
         tokio::runtime::Builder::new_current_thread()
             .enable_all()

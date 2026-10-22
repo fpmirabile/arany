@@ -362,13 +362,6 @@ pub(in crate::provider) fn decode_run(
 ) -> Result<ProviderResponse, ProviderError> {
     let response: WireResponse =
         serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let turn = ProviderTurn::new(
-        ADAPTER,
-        &raw["content"].to_string(),
-        scope.secret,
-        scope.output_cap,
-    )?;
     let admitted = response.admit(scope.model, scope.output_cap)?;
     let (outcome, provenance) = match admitted.stop {
         Stop::EndTurn => (
@@ -386,6 +379,13 @@ pub(in crate::provider) fn decode_run(
             ProviderWireProvenance::MessagesToolUseStorageUnspecified,
         ),
     };
+    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+    let turn = ProviderTurn::new(
+        ADAPTER,
+        &raw["content"].to_string(),
+        scope.secret,
+        scope.output_cap,
+    )?;
     Ok(ProviderResponse {
         outcome,
         turn,
@@ -597,7 +597,7 @@ pub(in crate::provider) fn compaction_body_with_optional_effort(
 }
 
 #[derive(Deserialize)]
-struct WireResponse {
+struct WireResponse<'a> {
     id: String,
     #[serde(rename = "type")]
     kind: String,
@@ -606,13 +606,14 @@ struct WireResponse {
     stop_reason: String,
     stop_details: Option<Value>,
     stop_sequence: Option<String>,
-    content: Vec<WireContent>,
+    #[serde(borrow)]
+    content: Vec<WireContent<'a>>,
     usage: WireUsage,
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct WireContent {
+struct WireContent<'a> {
     #[serde(rename = "type")]
     kind: String,
     text: Option<String>,
@@ -622,7 +623,8 @@ struct WireContent {
     citations: Option<Value>,
     id: Option<String>,
     name: Option<String>,
-    input: Option<Value>,
+    #[serde(borrow)]
+    input: Option<&'a serde_json::value::RawValue>,
 }
 
 #[derive(Deserialize)]
@@ -647,14 +649,14 @@ enum Stop {
     ToolUse,
 }
 
-struct Admitted {
+struct Admitted<'a> {
     id: String,
     usage: Usage,
     stop: Stop,
-    content: Vec<WireContent>,
+    content: Vec<WireContent<'a>>,
 }
 
-impl WireContent {
+impl WireContent<'_> {
     fn is_thinking(&self) -> bool {
         match self.kind.as_str() {
             "thinking" => {
@@ -703,8 +705,8 @@ impl WireContent {
     }
 }
 
-impl WireResponse {
-    fn admit(self, model: &str, output_cap: u32) -> Result<Admitted, ProviderError> {
+impl<'a> WireResponse<'a> {
+    fn admit(self, model: &str, output_cap: u32) -> Result<Admitted<'a>, ProviderError> {
         let nested_creation = self
             .usage
             .cache_creation
@@ -766,7 +768,7 @@ impl WireResponse {
     }
 }
 
-impl Admitted {
+impl Admitted<'_> {
     fn single_text(&self) -> Result<String, ProviderError> {
         let mut text = None;
         for block in &self.content {
@@ -803,10 +805,13 @@ impl Admitted {
                     .strip_prefix(NAME_PREFIX)
                     .filter(|_| offered.iter().any(|spec| spec.name == name))
                     .ok_or(ProviderError::InvalidOutcome)?;
+                let input = block.input.ok_or(ProviderError::InvalidOutcome)?.get();
+                let input = crate::tools::parse_json(input.as_bytes(), argument_limit(operation))
+                    .map_err(|_| ProviderError::InvalidOutcome)?;
                 requests.push(tool_function(
                     ToolUseId::new(block.id.clone().unwrap_or_default())?,
                     operation,
-                    block.input.clone().unwrap_or_default(),
+                    input,
                 )?);
             } else if (!block.is_thinking() && !block.is_text()) || !requests.is_empty() {
                 return Err(ProviderError::InvalidOutcome);

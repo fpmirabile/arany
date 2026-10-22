@@ -1654,7 +1654,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                 assert_eq!(request.model, "guard-model");
                 assert_eq!(request.max_output_tokens, 4096);
                 if let Some(tools) = &request.input.tools {
-                    let catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
+                    let catalog: Value = serde_json::from_str(tools.catalog()).unwrap();
                     assert_eq!(catalog["host_clock"]["timezone"], "UTC");
                     let timestamp = catalog["host_clock"]["unix_ms"].as_u64().unwrap();
                     let current = std::time::SystemTime::now()
@@ -1683,7 +1683,7 @@ async fn tool_loop_exhaustion_and_team_children_do_not_widen_authority() {
                     );
                     assert!(request.input.child_results.is_empty());
                     let research: Value =
-                        serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog)
+                        serde_json::from_str(request.input.tools.as_ref().unwrap().catalog())
                             .unwrap();
                     assert_eq!(research["write"], false);
                     assert_eq!(research["commands"], serde_json::json!([]));
@@ -3269,7 +3269,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
 
     let requests = requests.lock().unwrap().clone();
     let catalog: Value =
-        serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
+        serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log", "git_branch"])

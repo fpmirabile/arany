@@ -46,28 +46,14 @@ investigation identified [SQLite's WAL-reset concurrency defect](https://www.sql
 as a reason to review native engine fixes rather than only the Rust wrapper.
 Do not weaken synchronization merely to improve a benchmark.
 
-## Commit, recovery and confidentiality
+## Recovery and confidentiality limits
 
-Commit-before-feedback prevents the UI from claiming a transition that cannot
-be replayed. Process death leaves a complete transaction or the prior prefix;
-missing terminal facts mean interrupted work, not completed cancellation.
-Store failures cannot be repaired by rebuilding history from terminal output.
-[Execution spec](../specs/execution.md#admission-persistence-and-recovery)
-owns rejection, interrupted replay and capacity behavior.
-
-SQLite checks and typed reduction protect different boundaries. A structurally
-valid database can contain an illegal semantic history. During pre-beta, only
-the current internal format is admitted; unsupported formats reject unchanged.
-Automatic migrations and compatibility readers are not part of this policy.
-
-Private modes and ACL admission reduce unintended access but do not encrypt
-history or exclude every same-user process. Copying or exporting state can copy
-sensitive content. Adding encryption would require key management, recovery
-and distribution evidence, not just another database library.
-
-A copy of an open database is not automatically a consistent backup. Any future
-backup/export feature must define whether it closes the owner or uses SQLite's
-backup facilities; this investigation does not introduce a recovery command.
+[Execution](../specs/execution.md#journal-migration) owns upgrades, archival and
+strict replay. SQLite structural validity and legal semantic history are separate
+checks. Private OS storage is not encryption; adding encryption needs key and
+recovery ownership. A copy of an open database is not automatically a consistent
+backup, and a valid snapshot alone does not prove it includes the final
+acknowledged commit at cutover.
 
 ## Reconsider only for an observed constraint
 

@@ -1573,7 +1573,9 @@ mod tests {
     fn native_git_launch_keeps_workspace_read_only_and_host_home_absent() {
         use crate::test_process::BoundedOutput;
 
-        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let _native_gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let fixture = tempfile::tempdir().unwrap();
         let workspace = fixture.path().join("workspace");
         let home = fixture.path().join("home");
@@ -1659,11 +1661,6 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        std::thread::Builder::new()
-            .spawn(|| ())
-            .unwrap()
-            .join()
-            .unwrap();
         harden().expect("production Guard hardening");
         let own = thread_status(Path::new("/proc/thread-self/status"))
             .unwrap()
@@ -2258,7 +2255,9 @@ mod tests {
         ignore = "native private mount propagation fixture; requires unprivileged user namespaces"
     )]
     fn native_runtime_mount_attestation() {
-        let _native_gate = crate::test_process::NATIVE_GATE.lock().unwrap();
+        let _native_gate = crate::test_process::NATIVE_GATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

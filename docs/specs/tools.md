@@ -387,6 +387,8 @@ Native Linux and macOS lanes run the same executor code; a live attached journey
 
 ## Commands
 
+Command project copies exclude `.git`; the command description points to typed Git reads when they are cataloged. Following the Run's pinned catalog, a nonzero command exit whose kept stderr contains `not a git repository` receives a fixed hint in the model result's `hint` field when `git_status`, `git_diff` and `git_log` are available; the hint is derived deterministically from the recorded observation and omitted if adding it would put the complete model result above the [per-call result ceiling](#limits-and-failure-behavior).
+
 Each `commands` entry declares a reviewed executable and its SHA-256, whether it is an interpreter, and any additional pinned input files:
 
 ```json
@@ -710,6 +712,14 @@ Before review or dispatch the Engine commits an immutable `ToolStarted` intent. 
 The [execution admission contract](./execution.md#admission-persistence-and-recovery) owns complete-topology Event headroom, ancestor locking, compaction and fork quotas and pre-disclosure rejection. Logical headroom does not reserve physical disk or eliminate crash or disk-fault uncertainty after dispatch.
 
 ## macOS enforcement and compatibility
+
+Ambient Seatbelt traversal metadata grants name only required roots and exact
+ancestors; ancestors grant no directory data. Selected resources retain their
+scoped read grants. The spawning command profile retains a
+literal `/` directory read for the native loader, exposing top-level names
+without access beneath them. Search-only ancestor handles preserve no-follow
+path admission without granting ancestor listings. The file-profile and native
+unit corpora own unselected-metadata and ancestor/control-root listing refusal.
 
 Private worker commands use this spawning profile and capture the reconstructed tree only after coalition cleanup, before volume detachment. Native Tool dispatch requires an available Background launchd user domain, a distinct kernel resource coalition, a trusted bounded supervisor and a separate attested Seatbelt worker. The private control directory lies outside the Workspace; overlap rejects before dispatch. The supervisor's launchd PID and authenticated local peer must identify the same process. The controller accepts completion only after the owned coalition is empty and the one-use job is removed or positively reported absent; automatic job retirement alone is not descendant cleanup. There is no unsandboxed fallback. Typed Git reads use a third Seatbelt profile that may spawn only the pinned Command Line Tools Git, with no command catalogue, runtime grants, network or Mach service lookup. The file and Skill worker stays non-spawning; commands and MCP keep ordinary child launches.
 

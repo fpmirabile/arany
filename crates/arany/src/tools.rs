@@ -904,17 +904,12 @@ impl ToolRuntime {
             } else {
                 serde_json::json!("unavailable")
             },
-        }).to_string();
-        if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
+        });
+        let context = ToolContext::new(catalog);
+        if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
         }
-        Ok(ToolContext {
-            invoked_skill: None,
-            stop_bytes: 0,
-            catalog,
-            history_summary: None,
-            steps: Vec::new(),
-        })
+        Ok(context)
     }
 
     pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
@@ -972,7 +967,7 @@ impl ToolRuntime {
     ) -> Result<ToolContext, ToolError> {
         let mut context = self.research_context(remaining)?;
         let mut catalog: serde_json::Value =
-            serde_json::from_str(&context.catalog).map_err(|_| ToolError::Configuration)?;
+            serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
         catalog["write"] = serde_json::json!(true);
         catalog["skills"] = serde_json::json!([]);
@@ -991,8 +986,8 @@ impl ToolRuntime {
                 .map(|tool| tool.label())
                 .collect::<Vec<_>>()
         );
-        context.catalog = catalog.to_string();
-        if context.catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
+        context.set_catalog(&catalog);
+        if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
         }
         Ok(context)
@@ -1011,18 +1006,12 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
-        })
-        .to_string();
-        if catalog.len() > types::MAX_TOOL_CATALOG_BYTES {
+        });
+        let context = ToolContext::new(catalog);
+        if context.catalog().len() > types::MAX_TOOL_CATALOG_BYTES {
             return Err(ToolError::Limit);
         }
-        Ok(ToolContext {
-            invoked_skill: None,
-            stop_bytes: 0,
-            catalog,
-            history_summary: None,
-            steps: Vec::new(),
-        })
+        Ok(context)
     }
 
     pub(crate) fn intent(
