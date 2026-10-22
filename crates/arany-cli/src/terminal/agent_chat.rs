@@ -1184,6 +1184,7 @@ impl AttachedTerminal {
 
 #[cfg(test)]
 mod tests {
+    use super::super::NewlineShortcut;
     use super::*;
 
     fn active_child_view() -> SessionView {
@@ -1608,15 +1609,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn child_drafts_and_primary_bytes_survive_a_released_terminal() {
-        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
-        terminal.child_drafts = vec![filled_draft(RunId::new())];
-        terminal.primary_draft_bytes = 7;
-        terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
-            None,
-        ));
-        assert_eq!(terminal.child_drafts.len(), 1);
-        assert_eq!(terminal.primary_draft_bytes, 7);
+    async fn child_drafts_primary_bytes_and_shortcut_survive_a_released_terminal() {
+        for shortcut in [NewlineShortcut::AltEnter, NewlineShortcut::CtrlEnter] {
+            let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+            terminal.set_newline_shortcut(shortcut);
+            terminal.child_drafts = vec![filled_draft(RunId::new())];
+            terminal.primary_draft_bytes = 7;
+            terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
+                None,
+            ));
+            assert_eq!(terminal.child_drafts.len(), 1);
+            assert_eq!(terminal.primary_draft_bytes, 7);
+            assert_eq!(terminal.newline_shortcut, shortcut);
+        }
     }
 
     #[cfg(unix)]

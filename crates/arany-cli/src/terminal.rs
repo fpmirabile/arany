@@ -2650,6 +2650,7 @@ impl AttachedTerminal {
     }
 
     fn replace_released(&mut self, mut replacement: Self) {
+        replacement.newline_shortcut = self.newline_shortcut;
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.dialog_armed = self.dialog_armed;

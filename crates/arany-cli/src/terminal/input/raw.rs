@@ -866,6 +866,23 @@ mod tests {
                     "linear={linear}: partial records before admission are discarded and later bytes delivered"
                 );
             }
+            if linear {
+                for segment in [b"\x1b[200~\n".as_slice(), b"1\n", b"\x1b[201~\n"] {
+                    master.write_all(segment).unwrap();
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(2), reader.recv())
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        TerminalInput::LineRejected,
+                        "admission must not release paste contents as approval input"
+                    );
+                    reader.discard_typeahead().await.unwrap();
+                }
+                master.write_all(b"n\n").unwrap();
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('n'));
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Submit);
+            }
             reader.stop();
         }
     }

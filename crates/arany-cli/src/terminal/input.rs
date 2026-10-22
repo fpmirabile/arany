@@ -459,6 +459,7 @@ fn read_lines(
     let mut bytes = [0; 8194];
     let mut pending = None;
     let mut epoch = 0;
+    // Keep paste framing across admission; a flushed terminator must fail closed.
     let mut decoder = LineDecoder::default();
     while !shutdown.load(Ordering::Acquire) {
         decoder.expire(Instant::now())?;
