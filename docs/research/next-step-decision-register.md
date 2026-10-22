@@ -280,7 +280,27 @@ and migration behavior. The [migration owner](../../crates/arany/src/store/migra
 implements registered upgrades and pre-floor archival; this source observation
 is not native crash-recovery or release evidence.
 
-### D-23 — Pasted text and continuation inputs
+### D-23 — Tool latency measures durable acknowledgement
+
+The owner accepted a monotonic metric from complete Provider receipt to result
+acknowledgement on 2026-10-22. Journal timestamps precede validation, insertion and
+commit, and the subscriber ring is lossy; neither can time the exact durable
+endpoint. Keep bounded local samples, audit their scoped identities against closed history and
+report journal wall-time intervals separately. No new canonical Event or stored
+format migration is justified for benchmark-only timing.
+
+Copy peers' per-operation reporting and explicit timing boundaries: the pinned
+[Codex handler measurement](https://github.com/openai/codex/blob/b4ad33d1a3c10c9652dd57f7afd7a949f8f26895/codex-rs/otel/src/events/session_telemetry.rs#L1255-L1335)
+uses `Instant`, and [Claude Code Tool spans](https://code.claude.com/docs/en/monitoring-usage#span-attributes)
+distinguish permission wait from execution. Arany includes its durable journal
+and admitted execution work rather than inferring a numerical peer SLO. Preserve
+Guard and SQLite guarantees; diagnose baseline misses without relaxing them or
+adjusting objectives automatically. [The corpus procedure](../../crates/arany-cli/tests/guard_runs/latency.md)
+owns methodology; [next steps](../../NEXT_STEPS.md#daily-use-first) owns the remaining
+named-host evidence and provisional objectives. This does not claim macOS, cold
+disk, long-history, large-snapshot or live Provider latency support.
+
+### D-24 — Pasted text and continuation inputs
 
 Owner decision, 2026-10-22: follow Codex's scalar threshold, duplicate labels and inline expansion, with process-local unsubmitted chips and canonical submitted text. Arany retains its smaller objective and journal bounds; collapse cannot save input tokens. The pinned [Codex composer](https://github.com/openai/codex/blob/342ed69a174c206c1de52a59491b131e0753cfa5/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs#L152-L193) supplies the presentation precedent. In-process inert inspection avoids introducing a separately admitted external editor.
 

@@ -2,11 +2,11 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: repository owner (target and named-host decisions); implementing lead (corpus and verification)
 - Last updated: `2026-10-22`
 - Research baseline: `14384e1b080946346fe5391d2d0dfe462f6cf72d`
-- Next action: resolve the owner questions, then implement the two slices in order. This change writes the plan and index only; the lead owns commits.
+- Next action: implement slice 2 by extending the [Read corpus and accepted procedure](../../crates/arany-cli/tests/guard_runs/latency.md) with guarded Edit and command rows. Slice 1 is implemented locally; the lead owns commits and CI.
 
 ## Outcome and scope
 
@@ -124,14 +124,6 @@ All five guarantees remain unchanged: ordinary committed Provider/intent/verdict
 - Owner host unavailable → land validated measurement capability and leave evidence explicitly pending in `NEXT_STEPS.md`; no native latency claim from synthetic or compile-only results.
 
 ## Vertical slices
-
-### 1. PR: report replay-validated Read latency through durable result acknowledgement
-
-Ship an independently usable ignored Linux release corpus in the existing `guard_runs` integration target, initially containing the Read row. Cross the full path: scripted Tool response → Engine acceptance/permission → in-process Read → committed result → buffered report → closed Store/replay and fresh `arany show` audit. Add the narrow recorder at the two actual timing boundaries and deterministic evidence for receipt/finish correlation, withheld acknowledgement, failed/incomplete classification and percentile arithmetic in the existing relevant corpus. Keep the current dispatch test and its meaning unchanged.
-
-No product spec behavior changes. Put the exact accepted endpoint/workload procedure with the corpus, link the existing Tools/Execution evidence owners, and add an explicitly unverified Linux named-host measurement entry under item 11 in `NEXT_STEPS.md`. Do not duplicate or close Pursue item 2.
-
-Verification: documentation links; `cargo fmt --all --check`; workspace Clippy and production-without-test-support checks from the [development guide](../../docs/development.md#verification); targeted recorder/Store ordering and Read replay owners. The deterministic tests assert order/counts/bytes, never milliseconds. Build/list the ignored release corpus and prove its exact nonzero selection. Run it only where native prerequisites are available; report refusal otherwise. Code-changing PR requires complete final-head CI, with timing still ignored.
 
 ### 2. PR: complete the same report with guarded Edit and command rows
 
