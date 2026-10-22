@@ -138,7 +138,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 9),
+    ("GoalPlanContractRecorded", 10),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
@@ -147,7 +147,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 13),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 16),
+    ("ProviderCallRecorded", 17),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -165,14 +165,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 5),
-    ("HookStarted", 6),
-    ("HookFinished", 11),
-    ("ToolFinished", 22),
+    ("HookStarted", 7),
+    ("HookFinished", 12),
+    ("ToolFinished", 23),
     ("RunStarted", 21),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 16),
+    ("ToolStarted", 17),
     ("ContextCompacted", 7),
 ];
 
@@ -1443,6 +1443,24 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
 }
 
 // The same for the typed Git write variants, which a later payload version added.
+pub(crate) fn pre_host_git_payload(kind: &str, payload: &str) -> Option<String> {
+    fn has_host(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => {
+                fields.contains_key("host")
+                    || fields.get("network").is_some_and(|v| v == "host")
+                    || fields.values().any(has_host)
+            }
+            serde_json::Value::Array(values) => values.iter().any(has_host),
+            _ => false,
+        }
+    }
+    if has_host(&serde_json::from_str(payload).ok()?) {
+        return None;
+    }
+    before_operations(kind, payload, &["git_push", "gh_pr_create"], None)
+}
+
 pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
     before_operations(
         kind,

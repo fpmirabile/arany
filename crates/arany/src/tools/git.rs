@@ -1,3 +1,4 @@
+pub(crate) mod host;
 mod write;
 
 pub(crate) use write::recover_locks;
@@ -90,6 +91,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             }
         },
         ToolCall::GitSwitch { branch } => valid_branch(branch),
+        call if call.is_host() => host::valid(call),
         _ => false,
     }
 }
@@ -172,7 +174,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             "branch",
             json!({"type":"string", "description":"Existing local branch name."}),
         )],
-        _ => return None,
+        _ => return host::schema(operation),
     })
 }
 
@@ -358,7 +360,7 @@ struct Repository {
     config: Vec<u8>,
 }
 
-fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
+fn inspect_layout(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
     let root = super::fs::open_directory(workspace)?;
     match root.symlink_metadata(".git") {
         Ok(metadata) if metadata.is_dir() => {}
@@ -404,7 +406,22 @@ fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolErr
             _ => return Ok(Err(UNSUPPORTED_LAYOUT)),
         }
     }
-    let index = match open_optional(&git_dir, "index").and_then(|file| {
+    Ok(Ok(Repository {
+        identity: super::fs::identity(&git_dir)?,
+        git_dir,
+        head,
+        index: None,
+        links,
+        config,
+    }))
+}
+
+fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
+    let mut repository = match inspect_layout(workspace)? {
+        Ok(repository) => repository,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    repository.index = match open_optional(&repository.git_dir, "index").and_then(|file| {
         file.map(|file| {
             let modified = file
                 .metadata()
@@ -418,14 +435,7 @@ fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolErr
         Err(ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
         Err(error) => return Err(error),
     };
-    Ok(Ok(Repository {
-        identity: super::fs::identity(&git_dir)?,
-        git_dir,
-        head,
-        index,
-        links,
-        config,
-    }))
+    Ok(Ok(repository))
 }
 
 // The fixed config, HEAD and index copies every view starts from.

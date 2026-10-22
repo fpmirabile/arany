@@ -718,3 +718,116 @@ async fn typed_prefix_rules_cannot_expand_git_authority() {
     }
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "second\n");
 }
+
+#[test]
+fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human() {
+    use arany::test_support::process::BoundedOutput;
+    const TEST: &str = "git_writes::host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human";
+    const CHILD: &str = "ARANY_HOST_GIT_JOURNEY";
+    const CANARY: &str = "synthetic-host-credential-canary";
+    if std::env::var_os(CHILD).is_none() {
+        let auth = tempfile::tempdir().unwrap();
+        let home = auth.path().join("home");
+        let gh = home.join(".config/gh");
+        std::fs::create_dir_all(&gh).unwrap();
+        let hosts = gh.join("hosts.yml");
+        std::fs::write(&hosts, format!("github.com:\n    oauth_token: {CANARY}\n")).unwrap();
+        std::fs::set_permissions(hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env(CHILD, "1")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GH_CONFIG_DIR", gh)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "TMPDIR",
+                std::fs::canonicalize(std::env::temp_dir()).unwrap(),
+            )
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .bounded_output_for(Duration::from_secs(60), 64 * 1024)
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated host journey: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        process::assert_single_test_completed(&result.stdout, TEST);
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        for scenario in ["success", "missing_human", "uncertain"] {
+            let human = scenario != "missing_human";
+            let success = scenario == "success";
+            let repo = Repo::new();
+            let tools_path = repo.state.join("tools.json");
+            let mut tools: Value = serde_json::from_slice(&std::fs::read(&tools_path).unwrap()).unwrap();
+            // This synthetic peer succeeds if accidentally dispatched, so missing-human refusal cannot pass on a peer error.
+            let executable = std::fs::canonicalize(if scenario == "uncertain" { "/usr/bin/false" } else { "/usr/bin/true" }).unwrap();
+            tools["commands"] = json!([{"name":"gh", "executable":executable, "sha256":Sha256::digest(std::fs::read(&executable).unwrap()).iter().map(|b| format!("{b:02x}")).collect::<String>(), "interpreter":false, "inputs":[]}]);
+            std::fs::write(tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+            repo.settings(json!({"permissions":{"defaultMode":"auto", "typedPrefixes":[{"prefix":["gh","pr","create"],"decision":"allow","workspace":null}]}}));
+            let call = ToolCall::GhPrCreate { repository: "github.com/example/project".into(), base: "base".into(), head: "main".into(), title: "Synthetic PR".into(), body: "Synthetic body".into(), draft: true };
+            let mut outcomes = vec![tool_outcome(call)];
+            if success { outcomes.push(ProviderOutcome::Answer(Answer { text: "PR created".into() })); }
+            let provider = Arc::new(ScriptedProvider::new(outcomes));
+            let engine = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
+            let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Auto);
+            let mut input = request(&repo.workspace, "Create the explicitly approved PR");
+            input.include_paths.clear();
+            let controls = RunControls { tools: ToolGrant::Configured, approvals: human.then_some(approvals), ..Default::default() };
+            let mut asked = 0;
+            let outcome = {
+                let running = run_with(&engine, &provider, input, controls);
+                tokio::pin!(running);
+                loop {
+                    tokio::select! {
+                        result = &mut running => break result,
+                        Some(approval) = inbox.next() => {
+                            asked += 1;
+                            assert!(approval.intent.call.is_host() && approval.intent.host.is_some());
+                            assert!(approval.remember_prefix.is_none() && approval.unguarded.is_none());
+                            let contender = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
+                            let peer = Arc::new(ScriptedProvider::new(vec![answer()]));
+                            let mut competing = request(&repo.workspace, "A competing host write");
+                            competing.include_paths.clear();
+                            let refused = run_with(&contender, &peer, competing, RunControls { tools: ToolGrant::Configured, ..Default::default() }).await;
+                            assert!(matches!(refused, Err(arany::EngineError::WorkspaceBusy)));
+                            assert!(peer.requests.lock().unwrap().is_empty());
+                            contender.close().await.unwrap();
+                            approval.decide(arany::ApprovalReply::AllowOnce);
+                        }
+                    }
+                }
+            };
+            assert_eq!(asked, usize::from(human));
+            assert_eq!(provider.requests.lock().unwrap().len(), if success { 2 } else { 1 });
+            assert!(!format!("{:?}", provider.requests.lock().unwrap()).contains(CANARY));
+            let session = match outcome {
+                Ok(outcome) => outcome.session_id,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain)) if scenario == "uncertain" => {
+                    list_sessions(StateRoot::open_existing(&repo.state).unwrap(), repo.workspace.clone()).await.unwrap()[0].id
+                }
+                Err(error) => panic!("{scenario}: {error:?}"),
+            };
+            let (events, view) = repo.reopen(engine, session).await;
+            for event in &events { assert!(!event.event.payload().unwrap().contains(CANARY)); }
+            let tool = view.runs[0].tools.iter().find(|tool| tool.intent.call.is_host()).unwrap();
+            let verdict = tool.permission_verdict.as_ref().unwrap();
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(verdict.approved, human);
+            assert_eq!(observation.disposition, if success { ToolDisposition::Succeeded } else if human { ToolDisposition::Uncertain } else { ToolDisposition::Denied });
+            assert_eq!(matches!(observation.attestation, Some(arany::Attestation::Host(_))), human);
+            if human { assert_eq!(verdict.source, PermissionSource::Human); }
+            assert_eq!(std::fs::read_dir(&repo.markers).unwrap().count(), 0);
+            let shown = observe_process(std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+                .env_clear().args(["show", "--state-dir"]).arg(&repo.state).args(["--output", "text"]).arg(session.to_string()), repo._temp.path(), 256 * 1024);
+            assert!(shown.status.success());
+            assert!(shown.stderr.is_empty());
+            let text = String::from_utf8(shown.stdout).unwrap();
+            assert!(text.contains("host") && !text.contains(CANARY));
+        }
+    });
+}

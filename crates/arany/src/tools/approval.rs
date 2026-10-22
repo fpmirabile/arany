@@ -109,7 +109,7 @@ impl ToolApprovals {
     }
 
     pub(crate) fn admits_human_only(&self, call: &ToolCall, hook_ask: bool) -> bool {
-        self.human_only || !(call.is_unguarded() || hook_ask)
+        self.human_only || !(call.is_unguarded() || call.is_host() || hook_ask)
     }
 
     pub fn mode(&self) -> ApprovalMode {
