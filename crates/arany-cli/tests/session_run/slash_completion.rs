@@ -302,9 +302,9 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         b"Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels\r\n\
           Choice 1: Slash menu: tabs (tabs|combined)\r\n\
           Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
-          Choice 3: Goal provider calls: 64 (number or unlimited)\r\n\
+          Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
           Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
-          Choice 5: Goal active milliseconds: 1800000 (number or unlimited)\r\n\
+          Choice 5: Goal active milliseconds: unlimited (number or unlimited)\r\n\
           Choice 6: Default command timeout ms: 120000\r\n\
           Choice 7: Maximum command timeout ms: 600000\r\n\
           Choice 8: Build memory bytes: 4294967296\r\n\
@@ -351,7 +351,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         selected_at,
-        "Notice: Settings saved · calls 64 · active ms 1800000 · command max 600000 ms · visual sessions\r\nInput:\r\n".as_bytes(),
+        "Notice: Settings saved · calls unlimited · active ms unlimited · command max 600000 ms · visual sessions\r\nInput:\r\n".as_bytes(),
     );
     assert_eq!(
         StateRoot::open_existing(&state)
