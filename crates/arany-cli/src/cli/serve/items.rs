@@ -311,7 +311,11 @@ pub(in crate::cli) fn tool_item(
             disposition,
             output,
         },
-        ToolCall::Edit { path, .. } | ToolCall::Mkdir { path } => Item::FileChange {
+        ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        }
+        | ToolCall::Mkdir { path } => Item::FileChange {
             id,
             changes: vec![FileChange {
                 path: path.clone(),

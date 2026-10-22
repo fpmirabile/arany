@@ -438,6 +438,7 @@ impl GoalPlanContract {
                         &observation.intent.call,
                         ToolCall::Write { .. }
                             | ToolCall::Edit { .. }
+                            | ToolCall::MultiEdit { .. }
                             | ToolCall::ApplyChangeset { .. }
                             | ToolCall::McpCall { .. }
                             | ToolCall::GitSwitch { .. }
@@ -497,12 +498,12 @@ fn file_observation_digest(
         ToolCall::Read { path: observed, .. }
         | ToolCall::Write { path: observed, .. }
         | ToolCall::Edit { path: observed, .. }
-            if observed == path =>
-        {
-            serde_json::from_str::<serde_json::Value>(&observation.output)
-                .ok()
-                .and_then(|value| value.get("sha256")?.as_str().map(str::to_owned))
-        }
+        | ToolCall::MultiEdit {
+            file_path: observed,
+            ..
+        } if observed == path => serde_json::from_str::<serde_json::Value>(&observation.output)
+            .ok()
+            .and_then(|value| value.get("sha256")?.as_str().map(str::to_owned)),
         ToolCall::ApplyChangeset {
             source: crate::session::worker::ChangesetSource::CommandReceipt { changeset, .. },
         } => changeset
@@ -558,6 +559,9 @@ impl GoalPlanContract {
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
             | ToolCall::Edit { path, .. }
+            | ToolCall::MultiEdit {
+                file_path: path, ..
+            }
             | ToolCall::GitStatus { path }
             | ToolCall::GitDiff { path, .. }
             | ToolCall::GitLog { path, .. } => self.allows_path(path),

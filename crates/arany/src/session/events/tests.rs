@@ -865,9 +865,6 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(20));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
-        assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
         for (cap, valid) in [
@@ -1541,7 +1538,6 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(12));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1747,9 +1743,10 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(21));
+        let version = finished.version();
         assert_eq!(
-            Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", version, &payload, Some(run), Some(agent))
+                .expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1757,7 +1754,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                version,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1769,14 +1766,14 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 21, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", version, &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                version,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1789,14 +1786,14 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                version,
                 &unknown.to_string(),
                 Some(run),
                 Some(agent)
             )
             .is_err()
         );
-        for previous in [20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in 7..version {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1849,8 +1846,6 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(15));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
     #[test]
@@ -1993,13 +1988,7 @@ mod payload_version_tests {
         for event in bumped {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
-            let version = match event {
-                Event::RunStarted { .. } => 20,
-                Event::ToolStarted { .. } => 15,
-                Event::RunFinished { .. } => 9,
-                _ => 7,
-            };
-            assert_eq!(event.version(), version, "{}", event.kind());
+            let version = event.version();
             assert_eq!(
                 Event::decode(event.kind(), version, &payload, run_id, agent_run_id)
                     .expect("current"),
@@ -2335,7 +2324,6 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(20));
 }
 
 #[test]
@@ -2343,8 +2331,9 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
-    assert_eq!(payload_version("RunFinished"), Some(9));
+
+    let call_version = payload_version("ProviderCallRecorded").expect("payload version");
+    let run_version = payload_version("RunFinished").expect("payload version");
     let record = ProviderCallRecord {
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
@@ -2372,8 +2361,8 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
-    assert!(decode_call(&valid, 15).is_ok());
-    assert!(decode_call(&valid, 14).is_err());
+    assert!(decode_call(&valid, call_version).is_ok());
+    assert!(decode_call(&valid, call_version - 1).is_err());
     for (field, value) in [
         ("refusal", serde_json::Value::Null),
         ("failure_reason", serde_json::Value::Null),
@@ -2394,17 +2383,20 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     ] {
         let mut invalid = valid.clone();
         invalid[field] = value;
-        assert!(decode_call(&invalid, 15).is_err(), "field {field}");
+        assert!(
+            decode_call(&invalid, call_version).is_err(),
+            "field {field}"
+        );
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
-    assert!(decode_call(&worker_phase, 15).is_err());
+    assert!(decode_call(&worker_phase, call_version).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
-    assert!(decode_call(&synthesis, 15).is_ok());
+    assert!(decode_call(&synthesis, call_version).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
-    assert!(decode_call(&missing, 15).is_err());
+    assert!(decode_call(&missing, call_version).is_err());
     for (disposition, failure, accepted) in [
         ("failed", serde_json::json!("proposal_refused"), true),
         ("failed", serde_json::Value::Null, false),
@@ -2420,16 +2412,25 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         let value =
             serde_json::json!({"disposition":disposition, "failure":failure, "active_ms":0});
         assert_eq!(
-            Event::decode("RunFinished", 9, &value.to_string(), run_id, None).is_ok(),
+            Event::decode("RunFinished", run_version, &value.to_string(), run_id, None).is_ok(),
             accepted,
             "{disposition}"
         );
-        assert!(Event::decode("RunFinished", 8, &value.to_string(), run_id, None).is_err());
+        assert!(
+            Event::decode(
+                "RunFinished",
+                run_version - 1,
+                &value.to_string(),
+                run_id,
+                None
+            )
+            .is_err()
+        );
     }
     assert!(
         Event::decode(
             "RunFinished",
-            9,
+            run_version,
             r#"{"disposition":"failed","active_ms":0}"#,
             run_id,
             None
@@ -2455,6 +2456,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
         refusal: None,
     };
     let value = serde_json::to_value(&record).unwrap();
+    let current = payload_version("ProviderCallRecorded").expect("payload version");
     let decode = |payload: &serde_json::Value, version| {
         Event::decode(
             "ProviderCallRecorded",
@@ -2464,8 +2466,8 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
             Some(AgentRunId::new()),
         )
     };
-    assert!(decode(&value, 15).is_ok());
-    assert!(decode(&value, 14).is_err());
+    assert!(decode(&value, current).is_ok());
+    assert!(decode(&value, current - 1).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
         ("phase", serde_json::json!("tool_review")),
@@ -2478,7 +2480,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, 15).is_err(), "{key}");
+        assert!(decode(&malformed, current).is_err(), "{key}");
     }
 }
 

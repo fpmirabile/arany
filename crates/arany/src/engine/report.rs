@@ -674,7 +674,10 @@ fn push_success_facts(
                 } => {}
                 crate::tools::ToolCall::ParseAgentDefinition { .. } => {}
                 crate::tools::ToolCall::Write { path, .. }
-                | crate::tools::ToolCall::Edit { path, .. } => {
+                | crate::tools::ToolCall::Edit { path, .. }
+                | crate::tools::ToolCall::MultiEdit {
+                    file_path: path, ..
+                } => {
                     push_goal_report_item(
                         report,
                         GoalReportSection::Changes,
@@ -821,7 +824,10 @@ fn goal_report_call_label(call: &crate::tools::ToolCall) -> String {
         | crate::tools::ToolCall::Search { path, .. }
         | crate::tools::ToolCall::Mkdir { path }
         | crate::tools::ToolCall::Write { path, .. }
-        | crate::tools::ToolCall::Edit { path, .. } => format!("{} {path}", call.label()),
+        | crate::tools::ToolCall::Edit { path, .. }
+        | crate::tools::ToolCall::MultiEdit {
+            file_path: path, ..
+        } => format!("{} {path}", call.label()),
         crate::tools::ToolCall::Glob { pattern, path, .. } => format!("glob {pattern} in {path}"),
         crate::tools::ToolCall::Command { program, .. } => format!("Command {program}"),
         crate::tools::ToolCall::CommandUnguarded { program, .. } => {

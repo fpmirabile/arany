@@ -110,6 +110,7 @@ pub(super) fn outcome(
                     | ToolCall::Glob { .. }
                     | ToolCall::Write { .. }
                     | ToolCall::Edit { .. }
+                    | ToolCall::MultiEdit { .. }
                     | ToolCall::Mkdir { .. }
             ) =>
         {

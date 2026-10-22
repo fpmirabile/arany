@@ -195,46 +195,52 @@ impl Provider for Journey {
                 limit: None,
             },
             2 => ToolCall::Edit {
-                path: "src/main.c".into(),
-                expected_digest: hash(b"int main(void) { return 1; }\n"),
-                old: "return 1".into(),
-                new: "return 0".into(),
+                path: "src/main.c".into(), expected_digest: hash(b"int main(void) { return 1; }\n"),
+                old: "return 1".into(), new: "return 2".into(),
             },
-            3 => ToolCall::Read {
+            3 => ToolCall::MultiEdit {
+                file_path: "src/main.c".into(),
+                expected_digest: hash(b"int main(void) { return 2; }\n"),
+                edits: vec![
+                    arany::LiteralEdit { old_string: "return 2".into(), new_string: "return 3".into(), replace_all: false },
+                    arany::LiteralEdit { old_string: "return 3".into(), new_string: "return 0".into(), replace_all: false },
+                ],
+            },
+            4 => ToolCall::Read {
                 path: "src/main.c".into(),
                 offset: None,
                 limit: None,
             },
-            4 => ToolCall::Mkdir {
+            5 => ToolCall::Mkdir {
                 path: "src/generated".into(),
             },
-            5 => ToolCall::Write {
+            6 => ToolCall::Write {
                 path: "src/generated/note.txt".into(),
                 expected_digest: None,
                 content: "typed create\n".into(),
             },
-            6 => ToolCall::Command {
+            7 => ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["src/check.sh".into()],
                 cwd: "".into(),
             },
-            7 => ToolCall::Command {
+            8 => ToolCall::Command {
                 program: "bash".into(),
                 args: vec!["-c".into(), "set -eu; test \"$(cat src/command-output.txt)\" = 'command create'; test \"$(cat src/generated/note.txt)\" = 'command modify'; test ! -e src/deleted.txt; printf fresh-snapshot".into()],
                 cwd: "".into(),
             },
-            8 => ToolCall::Skill {
+            9 => ToolCall::Skill {
                 name: "synthetic".into(),
                 resource: None,
             },
-            9 => ToolCall::Skill {
+            10 => ToolCall::Skill {
                 name: "synthetic".into(),
                 resource: Some("references/note.txt".into()),
             },
-            10 => ToolCall::McpList {
+            11 => ToolCall::McpList {
                 server: "synthetic".into(),
             },
-            11 => {
+            12 => {
                 let catalog: Value = serde_json::from_str(&context.observations().iter().find(|observation| matches!(observation.intent.call, ToolCall::McpList { .. })).ok_or(ProviderError::InvalidOutcome)?.output)
                     .map_err(|_| ProviderError::InvalidOutcome)?;
                 ToolCall::McpCall {
@@ -247,12 +253,12 @@ impl Provider for Journey {
                     arguments: "{\"value\":42}".into(),
                 }
             }
-            12 => ToolCall::Read {
+            13 => ToolCall::Read {
                 path: "omitted.txt".into(),
                 offset: None,
                 limit: Some(16),
             },
-            13 => {
+            14 => {
                 requests.push(request);
                 return Ok(ProviderResponse { turn: arany::ProviderTurn::scripted(),
                     outcome: ProviderOutcome::Answer(Answer { text: "Built, tested, loaded Skill and called local MCP.".into() }),
@@ -422,7 +428,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
     );
     assert!(!workspace.join("src/deleted.txt").exists());
     let requests = requests.lock().unwrap().clone();
-    assert_eq!(requests.len(), 14);
+    assert_eq!(requests.len(), 15);
     for (step, request) in requests.iter().enumerate() {
         assert_eq!(request.phase, AgentPhase::RootPlan);
         assert_eq!(request.model, "tool-model");
@@ -440,19 +446,19 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         );
         assert_eq!(request.max_output_tokens, 4096);
         let context = request.input.tools.as_ref().unwrap();
-        assert_eq!(context.observations().len(), step + usize::from(step > 6));
+        assert_eq!(context.observations().len(), step + usize::from(step > 7));
         assert!(!format!("{context:?}").contains("OMITTED_TOOL_CANARY"));
         for observation in context.observations() {
             assert_eq!(observation.intent.run_id, request.run_id);
             assert_eq!(observation.intent.agent_run_id, request.agent_run_id);
         }
     }
-    let observations = &requests[13].input.tools.as_ref().unwrap().observations();
+    let observations = &requests[14].input.tools.as_ref().unwrap().observations();
     for observation in observations {
         assert_seed_retired(observation.intent.id);
     }
     assert!(
-        observations[..13]
+        observations[..14]
             .iter()
             .all(
                 |observation| observation.disposition == ToolDisposition::Succeeded
@@ -460,7 +466,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             )
     );
     assert!(
-        observations[..13]
+        observations[..14]
             .iter()
             .filter(|observation| {
                 !matches!(
@@ -474,27 +480,27 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
             }),
         "ordinary successful Workspace, Skill and MCP observations do not become cache uncertainty"
     );
-    assert_eq!(observations[13].disposition, ToolDisposition::Denied);
-    assert!(observations[13].attestation.is_none());
-    let read: Value = serde_json::from_str(&observations[3].output).unwrap();
+    assert_eq!(observations[14].disposition, ToolDisposition::Denied);
+    assert!(observations[14].attestation.is_none());
+    let read: Value = serde_json::from_str(&observations[4].output).unwrap();
     assert_eq!(read["text"], "1\tint main(void) { return 0; }\n");
-    let command: Value = serde_json::from_str(&observations[6].output).unwrap();
+    let command: Value = serde_json::from_str(&observations[7].output).unwrap();
     assert_eq!(command["exit_code"], 0);
     assert_eq!(command["stdout"], "build and test passed");
     assert_eq!(command["stderr"], "");
     assert_eq!(command["changeset"]["files"].as_array().unwrap().len(), 3);
     assert!(
-        matches!(&observations[7].intent.call, ToolCall::ApplyChangeset { source: arany::worker::ChangesetSource::CommandReceipt {  changeset, ..  } } if changeset.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>() == ["src/command-output.txt", "src/deleted.txt", "src/generated/note.txt"])
+        matches!(&observations[8].intent.call, ToolCall::ApplyChangeset { source: arany::worker::ChangesetSource::CommandReceipt {  changeset, ..  } } if changeset.files.iter().map(|file| file.path.as_str()).collect::<Vec<_>>() == ["src/command-output.txt", "src/deleted.txt", "src/generated/note.txt"])
     );
-    let fresh: Value = serde_json::from_str(&observations[8].output).unwrap();
+    let fresh: Value = serde_json::from_str(&observations[9].output).unwrap();
     assert_eq!(fresh["stdout"], "fresh-snapshot");
     assert_eq!(fresh["changeset"]["files"], json!([]));
     assert_eq!(
-        observations[9].output,
+        observations[10].output,
         std::str::from_utf8(skill_body).unwrap()
     );
-    assert_eq!(observations[10].output, "A lazy resource.\n");
-    let mcp: Value = serde_json::from_str(&observations[12].output).unwrap();
+    assert_eq!(observations[11].output, "A lazy resource.\n");
+    let mcp: Value = serde_json::from_str(&observations[13].output).unwrap();
     assert_eq!(mcp["structured_content"], json!({"value":42}));
     drop(requests);
     {
@@ -523,7 +529,7 @@ async fn guarded_coding_skill_and_mcp_journey_survives_closed_journal_replay() {
         .unwrap();
     assert_eq!(replay.runs[0], outcome.run);
     assert_eq!(replay.compactions.len(), 1);
-    let attempted = events.iter().position(|event| matches!(event.event, arany::Event::ToolStarted { ref intent, .. } if matches!(intent.call, ToolCall::Edit { .. }))).unwrap();
+    let attempted = events.iter().position(|event| matches!(event.event, arany::Event::ToolStarted { ref intent, .. } if matches!(intent.call, ToolCall::MultiEdit { .. }))).unwrap();
     let interrupted = SessionView::replay(outcome.session_id, &events[..=attempted])
         .unwrap()
         .unwrap();
