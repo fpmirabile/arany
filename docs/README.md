@@ -49,8 +49,15 @@ Follow relevant cross-boundary links before editing. A harmless prose correction
 
 Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then the implementation and its evidence owner. Open research or decision records only for rationale, checking their scope and date before reusing time-sensitive claims; consult a plan only for the initiative being continued. User guides explain actions, specs define outcomes, rules constrain edits and Skills describe repeatable procedures; link between them instead of copying. Spec requirements, implementation state and completed verification are distinct: report disagreements rather than choosing the newer document.
 
+The instruction-organization source review (2026-10-12) found mixed effectiveness
+evidence: [Gloaguen et al., v3](https://arxiv.org/abs/2602.11988v3) and
+[Lulla et al., v2](https://arxiv.org/abs/2601.20404v2) used different tasks and
+reported different cost/runtime effects. Neither establishes an optimal file
+layout or measured benefit for Arany; link checks establish consistency only.
+
 ## Current milestone and evidence
 
 The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [the agentic coding teams plan](../planning/agentic-teams/README.md) owns the remaining Beta 1 implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
-The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session spec](./specs/session.md) and [security rules](../agents/security.md).
+Runtime instruction discovery belongs to the [Session contract](./specs/session.md#workspace-admission-and-authority);
+documentation routing grants no authority or outbound-content expansion.

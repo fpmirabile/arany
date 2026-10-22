@@ -4,14 +4,12 @@ Source-check date: **2026-10-21**; GLM recheck: **2026-10-22**. Question: can Ar
 API keys and, where authorized, consumer coding subscriptions without adding
 another wire adapter or impersonating a vendor client?
 
-Conclusion: pursue **Anthropic-compatible custom routes**, with DeepSeek API
-keys, Kimi platform API keys, Kimi Code subscription console keys and GLM
-standard API keys. Exclude the GLM Coding Plan because its supported-tool
-allowlist excludes Arany. DeepSeek has no subscription route in scope. These
-are the owner's accepted planning choices; they do not establish working
-Arany routes. Delivery is tracked in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first),
-while the [Provider](../specs/provider.md) and
-[credential](../specs/credentials.md) specs own behavior and secret handling.
+Conclusion: Anthropic-compatible custom routes reuse the existing adapter.
+Kimi platform is eligible for exact-profile conformance; DeepSeek, Kimi Code
+and GLM Standard remain unavailable pending their strict-compaction evidence.
+GLM Coding Plan is excluded by its supported-tool authorization boundary.
+The [Provider contract](../specs/provider.md#provider-support-summary) owns route
+admission; [setup](../setup.md#anthropic-compatible-custom-routes) owns recipes.
 
 Scope: official documentation and pinned peer source review. No credentials,
 paid requests, live `provider check`, native-platform checks or conformance
@@ -165,17 +163,6 @@ is missing evidence, not proof of non-support. Keep the schema-only nonce
 challenge unchanged; synthetic success cannot promote either GLM candidate.
 ([Structured-output guide](https://docs.z.ai/guides/capabilities/struct-output))
 
-S3's offline fixtures pin `/api/anthropic/v1/messages`, Bearer auth, exact
-`glm-5.3` / `glm-5.3-flash` identity and the honest Arany User-Agent through the
-shared adapter. They establish mechanics, key isolation and fail-closed
-conformance only. No documented Messages delta justifies a new field mapping:
-Chat `reasoning_content`, prompt-only JSON and client-side validation cannot
-replace the existing thinking/continuation or compaction contracts. Opaque key
-bytes provide no local proof of billing classification; the owner must reject
-Compatible and Coding Plan keys and confirm a newly issued Standard key in the
-console before any paid check. [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first)
-owns the remaining provider, billing and platform evidence.
-
 The GLM Coding Plan tool page confines subscription use to its listed tools;
 Arany is absent. Section 4 of the subscription terms limits quota to supported
 tools and excludes general API integrations without a separate written
@@ -196,12 +183,8 @@ Source reviewed at commit `cae9fd28a2d3d515c83ea495093e3768cc8efab6`:
 [client construction, lines 1104–1108](https://github.com/earendil-works/pi/blob/cae9fd28a2d3d515c83ea495093e3768cc8efab6/packages/ai/src/api/anthropic-messages.ts#L1104-L1108),
 [base-URL customization](https://github.com/earendil-works/pi/blob/cae9fd28a2d3d515c83ea495093e3768cc8efab6/packages/coding-agent/docs/models.md#L69-L76).
 
-The earlier investigation considered Responses compatibility first and adding
-Chat Completions later. Those recommendations are **superseded** by the owner:
-one Anthropic-compatible custom protocol, reusing the native adapter, plus
-vendor recipes. Neither a native vendor enum nor a second wire adapter is
-justified by this investigation. Private first-party login mechanisms are not
-an alternative third-party authorization grant.
+One shared Anthropic-compatible adapter avoids another vendor enum or wire
+protocol. Private first-party login is not a third-party authorization grant.
 
 ## Admission implications
 

@@ -4,27 +4,19 @@ Source baseline: 2026-10-04. The initial review used primary sources without lau
 
 [Tool spec](../specs/tools.md) owns the advertised profile, admission, resource bounds and lifecycle. This report retains source comparisons and failure modes; the original implementation plan and proposed limits are absorbed there. [Project skill setup](../../agents/skills/README.md) separately owns development Skills.
 
-## Protocol-era differences
+## Protocol upgrade boundary
 
-The stable specification inspected on 2026-10-04 was **2026-07-28**; comparison with **2025-11-25** revealed incompatible lifecycle assumptions. Modern MCP carries version and client capabilities on every request; there is no initialization handshake. For dual-era stdio, probe `server/discover`: a discovery result or recognized modern version error selects modern behavior; another error or a bounded timeout permits legacy `initialize` fallback. Self-reported identity is not proof of provenance. [Versioning and compatibility](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover).
+The 2026-10-04 review compared [2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
+and [discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
+with the [2025-11-25 lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle).
+It found per-request version/capabilities and discovery replacing the legacy
+initialization handshake. This dated observation is not a fresh claim about the
+latest standard. Any upgrade needs an explicit lifecycle/transport review;
+[local MCP](../specs/tools.md#local-mcp) owns Arany's admitted generation.
 
-Legacy 2025-11-25 requires `initialize`, a supported response version/capabilities, then `notifications/initialized` before normal requests. Its lifecycle also specifies version negotiation and a maximum timeout regardless of progress. [Legacy lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle).
-
-Both standard transports are real supported choices: stdio uses newline-delimited UTF-8 JSON-RPC on child stdin/stdout, with separate stderr. Modern Streamable HTTP posts each message to one endpoint and accepts JSON or request-scoped SSE; it removed protocol sessions and the standalone GET stream. Legacy HTTP has different session, GET/DELETE and resumability behavior. Those differences prevent treating the eras as interchangeable. [stdio](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio), [Streamable HTTP](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http).
-
-Tools use paginated `tools/list` and `tools/call`. Definitions include input schemas and optional output schemas; results contain content, optional structured data and an error flag. Modern structured results may be any JSON value, not just objects. Tool names are server-local; annotations such as read-only or idempotent are untrusted. Modern `input_required` is not a completed result. [Modern Tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools), [Legacy Tools](https://modelcontextprotocol.io/specification/2025-11-25/server/tools).
-
-JSON Schema defaults to 2020-12. Dialect support, reference retrieval and expensive compositions remain separate implementation concerns. Modern request metadata and `resultType` are core protocol behavior, not cosmetic fields. [Base protocol and schema requirements](https://modelcontextprotocol.io/specification/2026-07-28/basic).
-
-Cancellation is not rollback: stdio sends `notifications/cancelled` for its in-flight ID; modern HTTP closes the response stream. Servers may already have completed or be unable to cancel. That makes cancellation acknowledgement insufficient evidence that an effect was undone. [Cancellation](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/cancellation).
-
-MCP's authorization and security guidance distinguishes a server connection from authority for its individual operations. A transport endpoint or self-reported Tool annotation does not establish the permission or downstream scope of an effect. [Authorization](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization), [security guidance](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices).
-
-## Portable Skills and host extensions
-
-The inspected Agent Skills format used YAML-frontmatter `SKILL.md` with name and description plus optional scripts, references and assets. Its integration guide allowed file-read or dedicated-Tool activation and explicit user activation. `allowed-tools` was experimental and host-dependent; format compatibility did not imply portable permission semantics. [Specification](https://agentskills.io/specification), [integration guide](https://agentskills.io/client-implementation/adding-skills-support).
-
-Codex, Claude Code and Pi documented progressive disclosure, but their activation, dynamic command and permission extensions differed. That comparison explains separating portable instruction/resource loading from host-specific execution behavior. [Codex Skills](https://learn.chatgpt.com/docs/build-skills), [Claude Code Skills](https://code.claude.com/docs/en/skills), [Pi Skills](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/skills.md).
+The [Agent Skills format](https://agentskills.io/specification) review on the
+same date distinguished portable progressive resource loading from experimental,
+host-dependent `allowed-tools`. Format compatibility supplies no authority.
 
 ## SDK source findings
 

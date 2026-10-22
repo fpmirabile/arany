@@ -20,6 +20,10 @@ The pinned `keyring/v1` API exposes no operation deadline. Its Linux backend con
 
 ## Resolution and verification
 
-The [2026-10-06 investigation](../../research/harness-credential-timeouts-2026-10.md#aranys-recorded-parent-deadline-miss) measured four synthetic helpers in the older scenario ending near five seconds and independently observed optimized startup recovering the composer. It did not reproduce or establish the cause of the single historical parent-observer deadline miss; that unconfirmed incident is not an active follow-up. The comparison records how other harnesses handle Linux credential storage without changing Arany's backend consent or operation bounds.
+The historical parent-observer deadline miss has no established cause and is
+not an active follow-up. The [credential contract](../../specs/credentials.md#selected-item-authorization)
+owns current bounds; [D-11](../../research/next-step-decision-register.md#d-11--configuration-credentials-and-custom-endpoints)
+retains the prompt-completion race rationale. A passing synthetic helper cannot
+identify the cause of an earlier observer timeout or prove native rollback.
 
 Before release, run isolated native Linux locked-store and stalled-OS-write checks, a full setup save/reuse journey against a private unlockable service, and the remaining macOS optimized setup/refresh/logout and permission-dialog journeys on an isolated native runner. Verify that the helper preserves the chosen keyring behavior and error distinction, that secrets do not appear in argv, environment, user-visible output, or diagnostics, and that a timed-out write cannot be reported as rolled back. Keep the account-replacement lock through helper reaping. Do not use a real account or silently change the credential backend to make this gate green.

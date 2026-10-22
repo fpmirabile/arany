@@ -19,12 +19,16 @@ architectural consequence.
 
 ### D-01 — Runtime and physical ownership
 
-One Cargo package and one long-lived process keep internal interfaces private.
+One library crate and one CLI crate in a long-lived process keep harness
+interfaces separate from presentation.
 A current-thread async coordinator, a dedicated SQLite owner and bounded helper
 lifecycles separate waiting from blocking work. Extra crates or a daemon need a
 real dependency, release, privilege, ownership or Client boundary. See
-[runtime rationale](./rust-foundation-and-engine-contract.md) and
-[physical architecture](../architecture/system-overview.md).
+[physical architecture](../architecture/system-overview.md#2-runtime-architecture).
+A dedicated SQLite owner avoids a connection pool and keeps enduring blocking
+work out of Tokio's generic pool, whose started tasks cannot simply be aborted.
+Source baseline: 2026-09-29, [Tokio blocking-task lifetime](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html);
+this explains ownership, not measured scheduling performance.
 
 ### D-02 — Durable Session model
 
@@ -36,12 +40,14 @@ recovery. [Session spec](../specs/session.md) owns lifecycle semantics;
 
 ### D-03 — Generic bounded agent protocol
 
-One accountable primary and direct read-only children provide useful fan-out
-without recursive scheduling, leases or ownership transfer. Ordered assignments
+One accountable primary and bounded direct children provide useful fan-out
+without recursive scheduling or final-answer ownership transfer. Ordered assignments
 make synthesis independent of completion order. Single-agent work avoids
 unnecessary coordination and cost. [Execution](../specs/execution.md) owns the
-protocol and bounds; [supervision rationale](./multi-agent-loop-and-user-feedback.md)
-owns alternatives and expansion conditions.
+protocol and bounds. An Assignment DAG requires demonstrated dependencies or
+ownership transfer, including attempts, leases, fencing and stale-result
+rejection; more agents alone do not justify it. [Architecture](../architecture/system-overview.md#14-explicitly-deferred)
+owns expansion triggers.
 
 ### D-04 — Provider seam and profiles
 
@@ -49,7 +55,13 @@ Provider is the substitutable Engine behavior seam because multiple real
 adapters exist. Semantic types prevent vendor schemas from defining policy.
 Exact custom profiles require data-free conformance: resemblance to an API does
 not prove output, privacy or routing guarantees. [Provider spec](../specs/provider.md)
-own admission and current capability requirements.
+owns admission and current capability requirements.
+
+The 2026-09-29 [OpenRouter routing review](https://openrouter.ai/docs/guides/routing/provider-selection)
+and [response-cache review](https://openrouter.ai/docs/guides/features/response-caching)
+separated executing upstream, parameter support, cache provenance and privacy.
+A broker model slug cannot establish all four; that dated comparison is not
+current route admission or a live conformance result.
 
 ### D-05 — Event contract and replay
 
@@ -69,8 +81,8 @@ suffice; no Clock or ID-generator seam is earned by the current flow.
 ### D-07 — Workspace and instruction inputs
 
 Pinned handles and immutable bounded snapshots tie disclosure to admitted
-objects. Project text cannot select credentials or grant capabilities. Exact
-root instructions avoid implicit discovery and expansion. [Session spec](../specs/session.md)
+objects. Project text cannot select credentials or grant capabilities. Bounded, handle-relative
+instruction discovery keeps scope within the admitted Workspace. [Session spec](../specs/session.md)
 and [security rules](../../agents/security.md) own the admission contract.
 
 ### D-08 — Resource bounds
@@ -90,7 +102,7 @@ owns current entry modes, channels and syntax.
 
 ### D-10 — Terminal contract
 
-Primary-screen history and compact conditional activity keep ordinary chat
+Navigable history and compact conditional activity keep ordinary chat
 readable while allowing team inspection. Complete keyboard access and transient
 picker mouse reporting avoid imposing a permanent control room or pointer
 requirement. [The terminal spec](../specs/terminal.md) owns interaction and
@@ -100,6 +112,15 @@ restoration. Source precedents reviewed on 2026-09-29:
 [noninteractive output](https://developers.openai.com/codex/noninteractive).
 They inform the choice; they do not prove Arany's accessibility.
 
+Agent-chat sources checked 2026-10-21: [Codex navigation](https://github.com/openai/codex/blob/c419fd01a70dd1d05356da443ac44328bda2e6f4/codex-rs/tui/src/multi_agents.rs)
+provides empty-composer Alt+Left/Right and stable traversal; its
+[parent-owned child views](https://github.com/openai/codex/blob/c419fd01a70dd1d05356da443ac44328bda2e6f4/codex-rs/tui/src/app/session_lifecycle.rs)
+are view-only. [Claude Code's agent panel](https://code.claude.com/docs/en/agent-teams#start-your-first-agent-team)
+documents transcript messaging and collapsing excess idle rows. These are
+separate precedents: native Option-key delivery, accessibility and scale are not
+proved by source inspection. [Terminal](../specs/terminal.md#agent-chats) and
+[Goals](../specs/goals.md#steering-notes-and-pause) own Arany's current interaction.
+
 ### D-11 — Configuration, credentials, and custom endpoints
 
 Accounts belong to the current OS user across Sessions and StateRoots; a
@@ -107,7 +128,13 @@ Session override must not create another billing identity. Trusted selection
 precedes secret access and project input. OS stores have distinct availability
 and confidentiality limits, so fallback must be explicit. [Credentials](../specs/credentials.md)
 owns scope, storage and recovery; [Provider spec](../specs/provider.md)
-own destination admission.
+owns destination admission.
+
+The 2026-10-06 [Secret Service prompt review](https://specifications.freedesktop.org/secret-service/latest/prompts.html)
+found that disconnect invalidates prompts but races completion. Killing a
+credential helper therefore bounds waiting without proving rollback; an
+uncertain native write cannot justify silently saving a second copy to a file.
+This is protocol rationale, not a diagnosis of a particular native stall.
 
 ### D-12 — Cancellation, errors, and retries
 
@@ -136,7 +163,12 @@ Traces describe timing and causality; they are not durable history. A local
 Collector keeps remote authentication and routing outside the harness. Bounded,
 content-free export protects Run correctness and privacy even when delivery
 fails. [Telemetry spec](../specs/telemetry.md) owns enforcement;
-[OTLP rationale](./otlp-observability.md) explains the transport and SDK choices.
+HTTP/protobuf reuses the HTTP stack without a second gRPC stack. The SDK batch
+worker and synchronous shutdown need an owned reactor and lifecycle outside the
+current-thread Engine coordinator, so shutdown cannot starve its own requests.
+Source baseline: 2026-09-29, [SDK 0.33.0 batch processor](https://docs.rs/opentelemetry_sdk/0.33.0/opentelemetry_sdk/trace/struct.BatchSpanProcessor.html)
+and [OTLP transport](https://opentelemetry.io/docs/specs/otlp/). That source review
+is not a current dependency version or delivery claim.
 
 ### D-15 — Security boundary
 
@@ -162,20 +194,16 @@ compose literal filters with `require-any`. The WebKit link tracks mutable
 compiler performance or the timeout's cause. Native fixtures own enforcement
 evidence.
 
-Fixture capture on 2026-10-13 attributed the stopped-command timeout: under
-host memory pressure the over-limit `receipt-loss` payload stayed below the
-512 MiB resident-size threshold, so supervision never stopped it and the case
-reached its 30-second deadline in `controller_receipt`. Supervision now bounds
-`ri_phys_footprint`, which counts compressed memory whether held in RAM or
-swapped out. The same
-capture showed the Security signature scan costing about 1.3 seconds of every
-command-capable Run, and up to 5 seconds under parallel load; stamp-bound
-in-process verdict reuse removes the repeated scan without caching authority
-across processes. Earlier `mcp-version` timeouts were captured with most time
-before Ready, where that scan ran; after both changes the case completed in
-about 4 seconds across three `arany_ci` suites and twelve journeys run four at a
-time. A recurrence is a new defect; capture its stages through the
-[fixture](../specs/tools.md) before changing budgets.
+The macOS resource supervisor uses physical footprint because resident size
+alone can miss compressed or swapped memory. Signature verdict reuse is bound
+to executable stamps within one process; it does not cache authority across
+processes. The [Tool contract](../specs/tools.md) owns enforcement and bounds.
+Fixture capture on 2026-10-13: an over-limit payload stayed below the 512 MiB
+resident-size threshold under memory pressure and reached its 30-second
+deadline, and the per-Run Security signature scan cost about 1.3 seconds (up
+to 5 seconds under parallel load); after both fixes the case completed in about
+4 seconds across three `arany_ci` suites. A recurrence is a new defect: capture
+its stages through the fixture before changing budgets.
 
 ### D-16 — Evidence-dense testing
 
@@ -194,7 +222,9 @@ under WSL2 (decided 2026-10-13: one Unix enforcement family keeps the Guard
 and its evidence tractable). Native evidence determines support claims,
 including for WSL2. Apache-2.0
 plus NOTICE supplies standard attribution and patent terms without a custom
-license. It does not require private users or hosted services to display credit.
+license. An MIT alternative would let recipients bypass Apache-specific NOTICE
+and changed-file obligations. It does not require private users or hosted
+services to display credit.
 [LICENSE](../../LICENSE), [NOTICE](../../NOTICE) and [project priorities](../../AGENTS.md)
 own the current obligations.
 
@@ -245,10 +275,25 @@ behavior, retention and storage limits.
 The owner accepted archiving pre-floor history during pre-beta on 2026-10-21.
 Some past format changes introduced facts that cannot be reconstructed honestly;
 preserving that history intact in an archive avoids fabricating replay facts.
-[The research constraints](./state-migrations-2026-10.md#3-arany-constraints)
-explain the risk; [the execution contract](../specs/execution.md#journal-migration)
-owns the floor and migration behavior. This decision does not establish
-that migration or archive behavior has shipped.
+[The execution contract](../specs/execution.md#journal-migration) owns the floor
+and migration behavior. The [migration owner](../../crates/arany/src/store/migrate.rs)
+implements registered upgrades and pre-floor archival; this source observation
+is not native crash-recovery or release evidence.
+
+### Rejected layering
+
+Retained from the 2026-10-04 architecture review (its report is folded into this register):
+
+- Keep profile admission before Workspace access and strict replay validation:
+  they defend different boundaries. Revisit only demonstrated invariant drift.
+- Keep concrete Store errors and one-library semantic type references. Useful
+  SQLite causes do not require a backend-neutral interface unless a caller needs
+  backend-neutral recovery or another implementation exists.
+- Defer a broader typed-notice interface until another demonstrated feedback
+  lifetime mismatch or an accepted presentation redesign requires it.
+- Reject traits per dependency, crates per architecture circle, runtime plugins
+  and file-length splits. Concrete substitution, isolation, release or ownership
+  pressure must justify a new boundary.
 
 ## 3. Expansion decisions
 

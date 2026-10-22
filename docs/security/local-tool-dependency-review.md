@@ -2,7 +2,7 @@
 
 **Status:** selected dependency/entrypoint review and local synthetic evidence; not whole-dependency or redistribution clearance
 
-The [Tool contract](../specs/tools.md) uses Guard-only YAML parsing, offline MCP JSON Schema validation and a fixed Linux syscall filter, following [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) and [Guard research](../research/effect-guard-platform-base-2026-10.md). [Cargo.toml](../../Cargo.toml) and [Cargo.lock](../../Cargo.lock) remain the version/feature/checksum authority.
+The [Tool contract](../specs/tools.md) uses Guard-only YAML parsing, offline MCP JSON Schema validation and a fixed Linux syscall filter, following [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) and [Guard research](../research/deterministic-harness-protection.md#linux-launch-and-syscall-rationale). [Cargo.toml](../../Cargo.toml) and [Cargo.lock](../../Cargo.lock) remain the version/feature/checksum authority.
 
 ## Direct choices and runtime ownership
 

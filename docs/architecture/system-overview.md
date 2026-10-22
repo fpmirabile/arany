@@ -6,12 +6,15 @@
 
 This document owns physical architecture, data model and responsibility boundaries. [Product specs](../specs/README.md) own observable contracts. [The documentation map](../README.md) locates those owners, and [next steps](../../NEXT_STEPS.md) owns current defects and verification debt. Research and the [decision register](../research/next-step-decision-register.md) retain source evidence and rationale. Anything absent here is not an empty module waiting to be scaffolded.
 
+[D-17](../research/next-step-decision-register.md#d-17--product-identity-platforms-and-license)
+owns product identity, platform scope and the distribution license.
+
 Read the section for the affected boundary:
 [runtime ownership](#2-runtime-architecture), [module entry points](#3-physical-beta-shape),
 [Session lifecycle](#5-session-run-and-collaboration-lifecycle),
 [context and effects](#6-context-and-compaction), [persistence](#7-canonical-persistence),
 [presentation](#8-terminal-presentation), [Providers](#9-provider-profiles-and-custom-endpoints),
-[telemetry](#10-otlp-ships-last-in-beta), or [security](#11-security-boundary).
+[telemetry](#10-telemetry-and-diagnostics), or [security](#11-security-boundary).
 
 ## 1. What the beta must prove
 
@@ -25,14 +28,12 @@ The full product contract is successful when it proves all of these together:
 4. the default fullscreen terminal keeps a navigable committed transcript on the alternate screen (Classic inserts it into native scrollback), conditional agent activity above a bottom composer, a slash menu below input when open, and a compact status row;
 5. keyboard access is complete, while mouse reporting exists only in fullscreen or transiently inside an open picker or detail panel;
 6. native OpenAI and Anthropic plus every admitted exact custom endpoint/model profile satisfy the same semantic Provider contract;
-7. exact Workspace-root `AGENTS.md` loads first, with exact `CLAUDE.md` as absence-only fallback;
+7. bounded instruction discovery follows the [Session admission contract](../specs/session.md#workspace-admission-and-authority);
 8. `exec` and `show` expose the same committed facts without terminal initialization; and
 9. cancellation reaches the primary and every admitted child without fabricating completion; and
 10. explicitly enabled primary Tools use typed one-use intents, restrict-only Policy, native Guard enforcement, bounded continuation and durable non-executing replay.
 
-The current personal beta 1 implementation milestone is narrower: build a local Linux executable and complete the current OS user's ChatGPT account, model/effort, durable Engine and chat flows, plus an explicitly enabled local coding foundation for guarded file operations, offline commands, progressive Skills and stdio MCP. Automated synthetic evidence owns these implementation claims. Real sign-in, plan-consuming turns/tool loops, remaining native credential checks, and manual UX/accessibility testing belong to the final user handoff; they do not block implementation and remain unverified support claims until performed. The broader contract above is not a claim that beta 1 has cross-platform or redistribution evidence. Native macOS validation, portable distribution, and additional performance gates follow after beta 1; the [decision register](../research/next-step-decision-register.md) records the scope and Anthropic subscription authorization boundary.
-
-Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed. The selected ChatGPT subscription has completed the reported resumed file edit; other live model workflows and native macOS remain unverified.
+Startup resolves trusted user/process configuration, admits a private state root outside the Workspace, admits [per-role Provider routes and configured fallback chains](../specs/provider.md#per-role-selection-and-fallback), and pins the caller-selected Workspace before consuming project-controlled input. Admission never executes or discovers Git/repository configuration, `.env`, hooks, plugins, packages, tests, or startup commands. Instruction and explicit include files remain bounded immutable no-follow snapshots. Explicit include data preserves its escaped relative path and raw-file SHA-256 alongside untrusted text; the full envelope counts toward context admission. Untrusted and ordinary headless Runs are read-only. Attached folder trust generates a user-owned, directory-pinned grant; `--tools` loads an explicit private grant. Both use the separate native Guard described in [local tools](../tools.md): Linux and macOS admit typed files, pinned Skill data, offline commands and local MCP through their separately attested native profiles. Unsupported native enforcement fails closed.
 
 Tools owns one private model-input projection shared by the native adapters. It exposes structured bounded catalog/output data and ordered call/disposition/workspace-effect facts, while keeping journal intent identities, enforcement digests, limits and receipts out of current Tool observations sent to the model. Canonical Tool observations retain all enforcement evidence; projection changes neither authority nor replay. Native Run adapters use the [Provider text-answer and automatic Tool-selection contract](../specs/provider.md#structured-outcomes-and-tool-encoding). The adapter reconstructs paired model action/result items with request-local correlation labels and carries each model-action observation only in its result item. Engine-generated integration outcomes use separate untrusted user-data records, with no fabricated model function or advertised integration operation. The adapter omits the duplicate observation list from the task-data envelope. Provider instructions explain continuation and completion evidence independently of untrusted result text.
 
@@ -53,7 +54,9 @@ that Engine. Its stdio adapter, ACP translator and in-process conformance
 adapter use the same loop. ACP maps its private wire subset into the serve
 vocabulary at the binary edge. Each active submission has an owned task driving
 its RunHandle while the Server projects its committed Event subscription; bounded client backpressure
-cannot hold Journal appends. The library has no protocol or transport dependency.
+cannot hold Journal appends. The library has no protocol or transport dependency. Supervised stdio avoids
+listener and discovery ownership; browser or multi-client transports require
+the separate admission and recovery design in the [Serve contract](../specs/serve.md).
 
 Production entry points poll the Engine on the process main thread's current-thread Tokio runtime.
 Any new production thread hosting the Engine, including a multi-thread runtime worker,
@@ -247,7 +250,7 @@ Context is isolated per AgentRun. Children receive explicit assignment capsules 
 
 ### Local effect ownership
 
-The [Tool contract](../specs/tools.md) owns supported behavior and acceptance scenarios. [Guard research](../research/effect-guard-platform-base-2026-10.md) and [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) retain alternatives and rationale; [dependency review](../security/local-tool-dependency-review.md) owns scoped security evidence. `tools.json` is private host configuration, not repository configuration. Its pinned scope/resource digests produce immutable primary-only one-use intents. The Engine commits each Provider request fact and intent before dispatch, then a correlated observation before inferring again. Uncertain, cancelled or unacknowledged effects stop without retry; public typed replay validates payloads as well as legal transitions. Replay accepts only the current Goal-linked format and never grants authority from an older or incomplete journal.
+The [Tool contract](../specs/tools.md) owns supported behavior and acceptance scenarios. [Guard research](../research/deterministic-harness-protection.md#linux-launch-and-syscall-rationale) and [MCP/Skill research](../research/mcp-and-runtime-skills-2026-10.md) retain alternatives and rationale; [dependency review](../security/local-tool-dependency-review.md) owns scoped security evidence. `tools.json` is private host configuration, not repository configuration. Its pinned scope/resource digests produce immutable primary-only one-use intents. The Engine commits each Provider request fact and intent before dispatch, then a correlated observation before inferring again. Uncertain, cancelled or unacknowledged effects stop without retry; public typed replay validates payloads as well as legal transitions. Replay accepts only the current Goal-linked format and never grants authority from an older or incomplete journal.
 
 The Linux Guard verifies namespace/capability/seccomp and effective cgroup limits before payload release, owns the exact invocation and retained cgroup through cleanup, and reports a digest-bound receipt. Native operations use live no-follow handles and digest/create-preconditioned fresh-inode replacements. Commands/MCP instead receive fresh private selected-file snapshots, no network or accounts and bounded memory/PID/CPU/time/scratch; commands return bounded changesets after descendant termination; MCP writes remain disposable. Engine journals command results and routes a separate receipt-bound internal integration through the native mutation Guard, validating all file preconditions before publication. Skills are pinned progressive guidance/resources, never permissions. YAML/schema work occurs only inside this killable boundary. MCP supports exactly the 2025-11-25 local stdio tools profile, with bounded negotiation/catalog/schema/framing/calls and no automatic retries. [The Tool contract](../specs/tools.md) owns the supported subset and [tool guide](../tools.md) explains setup, not a claim of arbitrary build/runtime compatibility.
 
@@ -390,42 +393,35 @@ Subscription inference always uses one bounded SSE decoder after its HTTP status
 
 The shared Responses decoder validates all assistant text parts, distinguishes explicit `commentary` from exactly one final answer, and joins ordered final text parts without inserting or repairing bytes. Missing/null phase preserves legacy single-final-message support. Unknown phases, malformed/refusal blocks, extra finals, late commentary and non-null error/incomplete markers reject. Native, exact-custom and ChatGPT check versions reflect the shared acceptance contract. Subscription development diagnostics preserve received stream counts and distinguish closed final-decoding causes without retaining response content or changing canonical failure reasons.
 
-## 10. OTLP ships last in beta
+## 10. Telemetry and diagnostics
 
-OTLP is part of the beta milestone but added after the Session/team/provider proof. It is runtime opt-in and cannot change canonical truth or a Run outcome.
+The private telemetry owner consumes committed Journal facts without blocking
+appends. Its SDK batch worker owns the HTTP reactor; construction and synchronous
+shutdown sit outside the Engine coordinator. [Telemetry](../specs/telemetry.md)
+owns endpoint admission, span topology, privacy, bounds and failure behavior;
+[D-14](../research/next-step-decision-register.md#d-14--otlp-is-optional-lossy-output)
+owns the transport rationale.
 
-Development-only local diagnostics are a separate private owner, not an OTLP extension or an Engine behavior seam. The CLI enables it after ordinary attached Session/`exec` admission and writes an activation marker. The Engine supplies failed Provider/Tool/Run/compaction facts and typed operation errors; CLI callers supply closed admission/catalog/setup/exit stages. The subscription adapter records compiled failure stages and numeric counters, including rejected Tool argument shape, with bounded local stack frames. StateRoot admits the private, fixed-size log with nonblocking locking. No content, credential, argument value, upstream text or source path is recorded or exported. Optimized builds leave it disabled, and canonical replay retains its existing coarse failure categories. [The diagnostic guide](../development-diagnostics.md) specifies retention and non-claims.
-
-The [telemetry contract](../specs/telemetry.md#spans) owns span topology, commit timing and failure isolation.
-
-Arany exports trace-only OTLP/HTTP protobuf to an explicit numeric-loopback Collector selected by `--otlp-endpoint`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_ENDPOINT` in that order. A trace-specific endpoint is exact; the other two append `/v1/traces`. Invalid explicit configuration is rejected before Workspace input. Objectives, Messages, prompts, instructions, summaries, results, paths, file contents, Event payloads, provider bodies, headers, and credentials are excluded by type. Resource attributes are limited to service and SDK identity; Provider identity is a closed category and custom destinations are not exported. Provider-call failures carry only a closed low-cardinality `error.type` (`timeout`, `provider_unavailable`, `provider_rejected`, `invalid_response`, `output_limit`, or `task_panic`); cancellation uses `cancelled`. The Collector owns remote TLS, authentication, vendor routing, buffering, and backend retry. Arany uses a fixed 256-span queue, 64-span batches, a 256 KiB body ceiling, a 500 ms complete-request deadline, a 750 ms shutdown timeout, and no exporter retry. Its private async Reqwest adapter runs on an owned current-thread Tokio runtime inside the bounded SDK batch worker; automatic decompression is disabled. Export remains lossy and failure-isolated; SQLite replay is canonical.
+Development diagnostics have a separate private StateRoot log owner. Engine and
+CLI boundaries supply typed failure stages; optimized builds leave it disabled.
+[Diagnostics](../specs/diagnostics.md) owns content and retention.
 
 ## 11. Security boundary
 
-Authority is fixed before project input. Repository text, Session history, provider output, child Messages, custom-profile responses, and replayed Events are untrusted data. They cannot widen Workspace roots, endpoints, credentials, protocol, models, budgets, topology, policy, instruction role, telemetry destination, or capabilities.
+Policy admits authority before project input; the separate native Guard enforces
+effects and returns evidence for validated publication. The Engine journals the
+transition and never treats replay as permission to dispatch. Account setup and
+the credential helper own browser/callback and OS-store access respectively.
 
-On Unix, the Workspace input loader rejects an opened instruction or explicit-include file whose hard-link count is not exactly one. This conservatively excludes static aliases to files outside the Workspace, at the cost of rejecting legitimate multi-linked files inside it. Link-count admission is not a defense against concurrent hard-link churn or bind mounts; those require separate native evidence and policy.
-
-The release boundary includes:
-
-- Runs without an admitted Tool grant remain read-only; folder-trusted or explicitly configured model-driven files/commands/Skills/local MCP use only the typed private grant/Guard path, including explicit headless `--tools`; no arbitrary fetch, runtime plugin, self-update or unsandboxed fallback; account setup owns its compiled browser/callback route, and only the credential helper accesses the OS store;
-- private no-follow SQLite state outside the Workspace, strict data-only replay, aggregate growth admission, and no encryption-at-rest claim;
-- one immutable aggregate Run budget for calls, output tokens, bytes, time, memory, disk, `N`, and concurrency;
-- only admitted fixed native or exact verified custom Provider requests, with phase-minimal content and origin-bound credentials; standard OS TLS validation may make auxiliary certificate-related connections, never an Arany payload destination;
-- inert terminal output, classic primary-screen and explicit alternate-screen fullscreen/detail ownership, scoped mouse, and one RAII terminal owner that restores every enabled mode on every exit path; and
-- pinned/reviewed dependencies, lockfile, build/proc-macro/native inventory, binary-forbidden and library-denied `unsafe` with scoped native Guard/ACL exceptions.
-
-The first local effectful base implements immutable typed effects, deterministic restrict-only Policy and a separately enforcing Guard. Private reviewed configuration or explicit user folder trust supplies upfront grants. Attached Request approvals, Auto edits and AI-reviewed Auto approval narrow dispatch through a bounded one-shot control channel; AI reviews use the existing Provider seam and canonical phase/usage, never a new authority. The terminal owns vertical choices and mode keys. Replay retains review/effect facts without renewing permission. Universal host/same-UID protection is not claimed. Native macOS Guard, private-filesystem ACL and clipboard checks belong to `macOS Tests (debug)` and `macOS Tests (release)`; Keychain fixtures run only in `macOS Tests (debug)`; open native and human checks remain in [NEXT_STEPS](../../NEXT_STEPS.md). Remote MCP/network disclosure and larger runtimes require separate admission/evidence.
+[Session admission](../specs/session.md#workspace-admission-and-authority),
+[Tool enforcement](../specs/tools.md), [credentials](../specs/credentials.md) and
+[Provider egress](../specs/provider.md#configuration-and-egress) own the contracts;
+[security rules](../../agents/security.md) own the development review. Native and
+human evidence gaps remain in [next steps](../../NEXT_STEPS.md).
 
 ## 12. Evidence-dense proof
 
 Test: [`crates/arany-cli/tests/guard_runs.rs::scripted_runs_snapshot_workspace_and_replay_across_process_exit`](../../crates/arany-cli/tests/guard_runs.rs); [Session scenarios](../specs/session.md#acceptance-scenarios-and-evidence-owners) own the journey requirements, and [testing rules](../../agents/testing.md#user-visible-proof) own observations and evidence lanes.
-
-## 13. Distribution decision
-
-Arany uses **Apache License 2.0 plus a project `NOTICE` file**. This standard combination allows free use and modification while requiring redistributed derivatives to preserve applicable attribution and mark changed files. It also includes an explicit patent grant.
-
-It does not force private users or hosted services to show a public “Powered by” badge. Requiring use-time public credit would need a custom lawyer-reviewed license and would no longer be the ordinary standard open-source contract. Do not dual-license with MIT because recipients could bypass the Apache-specific NOTICE and changed-file obligations. The repository's exact `LICENSE` and `NOTICE` credit `fpmirabile`; every release artifact must preserve both files.
 
 ## 14. Explicitly deferred
 
@@ -444,12 +440,3 @@ It does not force private users or hosted services to show a public “Powered b
 | Built-in OpenRouter support is claimed | Exact route, privacy, provenance, strict-output, and no-fallback gates |
 | Anthropic explicitly approves third-party subscription auth | Reassess native Claude subscription profile |
 | Browser/remote/multi-tenant product exists | New identity, authorization, quota, encryption, retention, threat model |
-
-## 15. Implementation order
-
-[Next steps](../../NEXT_STEPS.md) owns remaining execution priority; the
-[team plan](../../planning/agentic-teams/README.md) defines the live team slices. This architecture does not
-retain a second task sequence for already implemented foundations. Accepted
-contracts stay with their mapped owners; completed work and checks stay in the
-handoff and Git/PR/CI history. Missing live, native or accessibility evidence
-remains an explicit gap rather than an inferred support claim.
