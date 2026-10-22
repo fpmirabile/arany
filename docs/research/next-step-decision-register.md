@@ -280,7 +280,27 @@ and migration behavior. The [migration owner](../../crates/arany/src/store/migra
 implements registered upgrades and pre-floor archival; this source observation
 is not native crash-recovery or release evidence.
 
-### D-23 — Selected Rust and honest Guard-only test omissions
+### D-23 — Tool latency measures durable acknowledgement
+
+The owner accepted a monotonic metric from complete Provider receipt to result
+acknowledgement on 2026-10-22. Journal timestamps precede validation, insertion and
+commit, and the subscriber ring is lossy; neither can time the exact durable
+endpoint. Keep bounded local samples, audit their scoped identities against closed history and
+report journal wall-time intervals separately. No new canonical Event or stored
+format migration is justified for benchmark-only timing.
+
+Copy peers' per-operation reporting and explicit timing boundaries: the pinned
+[Codex handler measurement](https://github.com/openai/codex/blob/b4ad33d1a3c10c9652dd57f7afd7a949f8f26895/codex-rs/otel/src/events/session_telemetry.rs#L1255-L1335)
+uses `Instant`, and [Claude Code Tool spans](https://code.claude.com/docs/en/monitoring-usage#span-attributes)
+distinguish permission wait from execution. Arany includes its durable journal
+and admitted execution work rather than inferring a numerical peer SLO. Preserve
+Guard and SQLite guarantees; diagnose baseline misses without relaxing them or
+adjusting objectives automatically. [The corpus procedure](../../crates/arany-cli/tests/guard_runs/latency.md)
+owns methodology; [next steps](../../NEXT_STEPS.md#daily-use-first) owns the remaining
+named-host evidence and provisional objectives. This does not claim macOS, cold
+disk, long-history, large-snapshot or live Provider latency support.
+
+### D-24 — Selected Rust and honest Guard-only test omissions
 
 The owner accepted selected offline Rust defaults and conditional IPC omissions on 2026-10-22. Reuse the existing command environment, exact runtime/cache selections and cache transaction; a Cargo-specific executor or wider home mount is unnecessary. [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags) gives encoded Rust flags precedence; [Cargo fingerprints](https://github.com/rust-lang/cargo/blob/cf29d0e0b1f7b03c4ceda5211cc4dc493bfc542e/src/compiler/fingerprint/mod.rs#L1110) include those flags in compilation identity. The fixed marker makes omissions follow the compiled environment while native enforcement remains independent.
 
