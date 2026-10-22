@@ -92,6 +92,7 @@ impl Repo {
         let scratch = scratch(self.temp.path(), self.runs);
         self.intent = uuid::Uuid::now_v7();
         let intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: self.intent,
             run_id: crate::session::RunId::new(),

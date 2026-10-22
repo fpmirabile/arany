@@ -316,6 +316,7 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
