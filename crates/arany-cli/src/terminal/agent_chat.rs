@@ -727,6 +727,8 @@ impl AttachedTerminal {
                         "Steering note outcome unknown; check child history; draft retained"
                     }
                 })
+            } else if draft.composer.text().trim().is_empty() {
+                AgentChatInput::Notice("Child message is empty; message not offered")
             } else {
                 AgentChatInput::ChildMessage {
                     target,
@@ -1303,6 +1305,47 @@ mod tests {
             offered: None,
             notice: None,
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn blank_child_draft_is_not_submitted_and_stays_unchanged() {
+        let view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: run,
+            agent_run_id: targets[2].id,
+        };
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 2,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: false,
+            shown: false,
+            choice: String::new(),
+            invalid: false,
+            editable: true,
+            last_child_notice: None,
+        });
+        let mut draft = filled_draft(run);
+        draft.target = target;
+        draft.composer.clear();
+        draft.composer.insert_paste("  ").unwrap();
+        terminal.child_drafts = vec![draft];
+        assert!(matches!(
+            terminal
+                .edit_child(&view, TerminalInput::Submit)
+                .await
+                .unwrap(),
+            AgentChatInput::Notice("Child message is empty; message not offered")
+        ));
+        assert_eq!(terminal.child_drafts[0].composer.text(), "  ");
     }
 
     #[cfg(unix)]
