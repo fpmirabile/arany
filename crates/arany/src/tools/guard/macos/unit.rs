@@ -2956,8 +2956,9 @@ int main(int argc, char **argv) {
     }
 
     #[tokio::test]
+    // Skipped in the Guard: local test IPC capability is missing.
     #[cfg_attr(
-        not(arany_ci),
+        any(arany_guard, not(arany_ci)),
         ignore = "native aggregate-resource and escaped-descendant gate; finite synthetic jobs"
     )]
     #[allow(clippy::await_holding_lock)]
@@ -3529,6 +3530,7 @@ int main(int argc, char **argv) {
                     root,
                     &runtime.config.runtime_grants,
                     false,
+                    ToolResourceClass::Default,
                 )
                 .unwrap();
                 let (probe_status, probe_stdout, probe_stderr) = reactor
@@ -3560,6 +3562,7 @@ int main(int argc, char **argv) {
                     root,
                     &runtime.config.runtime_grants,
                     false,
+                    ToolResourceClass::Default,
                 )
                 .unwrap();
                 let (rust_status, rust_stdout, rust_stderr) = reactor
@@ -3676,6 +3679,7 @@ int main(int argc, char **argv) {
                         root,
                         &runtime.config.runtime_grants,
                         false,
+                        ToolResourceClass::Default,
                     )
                     .unwrap();
                     let (status, stdout, stderr) = reactor
@@ -3729,6 +3733,7 @@ printf 'native command success'
                     root,
                     &runtime.config.runtime_grants,
                     false,
+                    ToolResourceClass::Default,
                 )
                 .unwrap();
                 let (status, stdout, stderr) = reactor

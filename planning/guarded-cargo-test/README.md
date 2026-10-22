@@ -2,11 +2,11 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: Arany lead (`fpmirabile`); implementation and native measurement assignees to be named by the lead.
 - Last updated: `2026-10-22`
 - Priority: [NEXT_STEPS.md:23](../../NEXT_STEPS.md), Daily use first, item 6.
-- Next action: implement slice 1 under the accepted decisions below; implementation is outside this documentation task.
+- Next action: validate slice 1 in CI and on a qualified native host, then implement slice 2; native evidence gaps are tracked in NEXT_STEPS.
 
 ## Outcome and scope
 
@@ -27,10 +27,10 @@ The findings below come from the current spec and source, plus primary peer docu
 RPI gates follow [PLANNING.md](../PLANNING.md):
 
 - **Research:** static authority, mounts, limits and known test incompatibilities are traced below. Native success and timing remain explicitly unmeasured. Refresh the cited source before implementation; a contradiction stops work and updates this plan.
-- **Plan:** passed. The owner decisions and conditional-ignore mechanism below resolve all material questions; status is `Ready`.
+- **Plan:** passed. The owner decisions and conditional-ignore mechanism below resolve all material questions; implementation is in progress.
 - **Implement:** each slice must pass its success, refusal, cancellation and replay checks before the next slice. A workload failure is evidence to classify, never permission to weaken the Guard. Native gaps remain in NEXT_STEPS; they prevent native support claims, not ordinary synthetic implementation work.
 
-### What happens today
+### Baseline used to scope the feature
 
 | Stage | Current behavior and implication for this command | Evidence |
 |---|---|---|
@@ -44,7 +44,7 @@ RPI gates follow [PLANNING.md](../PLANNING.md):
 
 The repository asks for Rust `1.98.1` in [rust-toolchain.toml:2](../../rust-toolchain.toml). That is build input, never authority to mount or install it. Folder trust must select an installed concrete version; invoking its real Cargo does not perform rustup's repository-driven selection. The user should select the requested version for reproducible evidence. Native dependencies also need an admitted C compiler/linker; for example bundled SQLite and AWS-LC are present in [Cargo.toml:16](../../Cargo.toml).
 
-There is no single universal first failure. Untrusted/no-command grants refuse first; unavailable native protection refuses bootstrap; missing Cargo fails executable lookup; missing registry/index/source data causes Cargo resolution or extraction failure. An incomplete read-only source cache cannot be repaired in place. Cargo is not currently given an offline environment default, so attempted dependency downloads encounter the OS network denial. A snapshot, resource or cache limit can fail before any tests execute. None justifies automatically mounting more host paths or downloading dependencies.
+There is no single universal first failure. Untrusted/no-command grants refuse first; unavailable native protection refuses bootstrap; missing Cargo fails executable lookup; missing registry/index/source data causes Cargo resolution or extraction failure. An incomplete read-only source cache cannot be repaired in place. The selected Build Rust environment uses the [offline default](../../docs/specs/tools.md#persistent-workspace-build-cache); incomplete dependencies fail without downloads. A snapshot, resource or cache limit can fail before any tests execute. None justifies automatically mounting more host paths or downloading dependencies.
 
 Even after successful compilation, socket fixtures fail under the current profile. Linux denies `socket`, `connect`, `bind` and `listen` in [guard/profile.rs:96](../../crates/arany/src/tools/guard/profile.rs); both platforms deny named sockets ([Tools](../../docs/specs/tools.md#private-grants)). The accepted remedy is the conditional-ignore mechanism below, with no inherited `arany_ci`, broad test filter or weaker Guard.
 
@@ -57,7 +57,7 @@ Static review traced listener creation and fixture callers under `crates/arany/s
 | [Custom adapter](../../crates/arany/src/provider/custom/adapter.rs) | `readonly_custom_admission_cannot_dispatch_tools_or_child_authority`: loopback TCP listener. |
 | [Tool glob corpus](../../crates/arany/src/tools/tests.rs) | `glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_walk`: named Unix listener. |
 | [Provider catalog](../../crates/arany/src/provider/catalog.rs) | `native_catalog_lists_account_visible_models_without_confusing_support` and `malformed_oversized_and_hostile_catalogs_fail_closed`, through `fixture` / `fixture_with_header`: loopback TCP. |
-| [Custom conformance](../../crates/arany/src/provider/custom/check.rs) | `transport_accepts_exact_cap_and_rejects_excess_or_encoding`, `custom_compaction_requires_schema_only_challenges_at_every_effort`, `messages_compaction_rejection_clears_admission`, `synthetic_conformance_checks_exact_wire_and_reopens_evidence`, through `run_transport_case` / `run_case_protocol`: loopback TCP. |
+| [Custom conformance](../../crates/arany/src/provider/custom/check.rs) | `transport_accepts_exact_cap_and_rejects_excess_or_encoding`, `custom_compaction_requires_valid_text_at_every_effort`, `messages_compaction_rejection_clears_admission`, `synthetic_conformance_checks_exact_wire_and_reopens_evidence`, through `run_transport_case` / `run_case_protocol`: loopback TCP. |
 | [Subscription transport](../../crates/arany/src/provider/openai/subscription/tests.rs) | `streaming_transport_accepts_only_final_usage_within_local_cap`, `the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging`, `compaction_stream_requires_complete_bounded_summary`, `transport_rejects_non_event_and_encoded_replies`, `stream_failure_code_reaches_run_and_compaction_without_partial_result`, `direct_route_http_failures_are_classified_without_exposing_body`, `direct_route_429_honors_retry_after_and_never_retries_a_quota_body`, `model_probe_requires_distinct_direct_delegate_and_compaction_outcomes`, through `serve` / `serve_sequence`: loopback TCP. Decoder and in-memory tests remain active. |
 | [OTLP](../../crates/arany/src/telemetry/tests.rs) | `loopback_export_is_protobuf_with_a_minimal_resource`, `collector_redirect_is_not_followed`, `stalled_collector_cannot_hold_shutdown_open`: loopback TCP. `trickling_collector_cannot_hold_the_export_worker` and both [performance gates](../../crates/arany/src/telemetry/tests/performance.rs) already have explicit ignores; retain those reasons. |
 | [Shared Guard admission](../../crates/arany/src/tools/guard/admission.rs) | `shared_capacity_and_fifo_survive_cancellation_death_and_expiry`, Linux `seed_ownership_survives_controller_death_at_each_publication_boundary`: named Unix control sockets. The native seed-recovery gate calls the same fixture but is already ignored without `arany_ci`; retain its existing gate. |
@@ -86,7 +86,7 @@ Linux project, scratch and cache views use tmpfs. A large writable-cache setting
 
 macOS uses Seatbelt plus an owned launchd job/coalition and separate quota-backed project, scratch and cache volumes. It needs explicit, distinct selections for the physical CLT compiler root and a versioned SDK in addition to Rust and Cargo caches. Cargo receives `CURL_SSL_BACKEND=Secure-Transport` only with Rust, `SDKROOT` only with the selected SDK, and the existing exact-byte page-size compatibility library. Host CPU/sysctl discovery stays denied; the current contract recommends a positive Cargo jobs value. Shell strings are not rewritten into physical Workspace paths. See [tools.md:712](../../docs/specs/tools.md#macos-enforcement-and-compatibility) and [guard.rs:2074](../../crates/arany/src/tools/guard.rs).
 
-The existing explicit native Rust gate builds and runs a standard-library-only fixture with `--jobs 1`; it does not prove this repository or registry-backed tests work: [tools_macos.rs:364](../../crates/arany-cli/tests/session_run/tools_macos.rs), [tools_macos.rs:1284](../../crates/arany-cli/tests/session_run/tools_macos.rs). Reuse this evidence owner. Unsupported or unverified enforcement must refuse; put unavailable native measurements in [NEXT_STEPS](../../NEXT_STEPS.md#beta-2-and-broader-release), without claiming macOS support from Linux or compilation alone.
+The [native command journeys](../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners) own the registry-backed fixture; a fixture does not prove this repository workload works. Unsupported or unverified enforcement must refuse; put unavailable native measurements in [NEXT_STEPS](../../NEXT_STEPS.md#beta-2-and-broader-release), without claiming macOS support from Linux or compilation alone.
 
 ### Peer evidence and the choice it supports
 
@@ -98,20 +98,9 @@ The existing explicit native Rust gate builds and runs a standard-library-only f
 | [Cargo home](https://doc.rust-lang.org/cargo/guide/cargo-home.html), [Rustup overrides](https://rust-lang.github.io/rustup/overrides.html) | Cargo home mixes registry data with credentials, config and installed binaries. Rustup selection includes command-line and repository overrides. Keep real selected toolchain executables and exact cache subtrees; never mount all of `~/.cargo` or `.rustup` as a shortcut. |
 | [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html), [Cargo test](https://doc.rust-lang.org/cargo/commands/cargo-test.html#miscellaneous-options), [libtest execution](https://doc.rust-lang.org/rustc/tests/index.html#execution-options) | Cargo jobs constrain compilation, not test threads. Environment/config/CLI precedence can change jobs, runners, wrappers and offline preferences. Those are build inputs inside the cage, not enforcement. Record test concurrency separately; offline flags do not prevent socket syscalls. |
 
-### Conditional ignores: peer choice and exact mechanism
+### Conditional ignores
 
-**Decided 2026-10-22 (peer parity):** condition unavailable test fixtures on their execution environment. Claude Code's [sandbox-runtime tests](https://github.com/anthropics/sandbox-runtime/blob/aceba124fd725f4a43d7016ed3f5651d61f83115/test/sandbox/wrap-with-sandbox.test.ts#L28) use the runner's conditional `describe.if` / `it.if`; Codex's [test support](https://github.com/openai/codex/blob/86e17e98c7f901277aeeb4649cf1b01462b082f2/codex-rs/core/tests/common/lib.rs#L578) has `skip_if_sandbox!` and `skip_if_no_network!` driven by sandbox environment markers. Use Rust's standard [`cfg_attr`](https://doc.rust-lang.org/reference/conditional-compilation.html#the-cfg_attr-attribute) and [`ignore`](https://doc.rust-lang.org/reference/attributes/testing.html#the-ignore-attribute), already used by this repository's native gates. Codex returns early, which libtest counts as passed; Arany needs explicit ignored counts to keep its journal/result evidence honest. Conditional `ignore` preserves peer behavior while making the omission visible.
-
-For each ordinary test in the inventory, place this attribute beside its existing test attribute, with exactly one short comment:
-
-```rust
-// Skipped in the Guard: local test IPC capability is missing.
-#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-```
-
-For guarded commands with selected Rust, on both platforms and in either resource class, the existing cleared-environment constructor supplies `CARGO_ENCODED_RUSTFLAGS` containing two arguments, `--cfg` and `arany_guard`, separated by byte `0x1f`. Register `cfg(arany_guard)` in the workspace's existing `unexpected_cfgs.check-cfg` list; registering it does not enable it. [Cargo's documented flag precedence](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags) gives this variable priority over `RUSTFLAGS` and repository Rust flag configuration. This intentionally selects the fixed Guard compilation flags rather than merging untrusted configuration; Cargo commands and other build inputs still run inside the same cage. Do not export the marker to the host, add it to ordinary CI flags, enable `arany_ci`, add a default Cargo feature or introduce a runner/dependency. Bind the fixed environment change into the existing enforcement digest.
-
-The marker describes this Cargo compilation environment; it is not authority or proof of confinement. Repository code can override build preferences or force ignored tests to run, but cannot gain socket access. [Cargo fingerprints include Rust flags](https://github.com/rust-lang/cargo/blob/cf29d0e0b1f7b03c4ceda5211cc4dc493bfc542e/src/compiler/fingerprint/mod.rs#L1110), so the guarded invocation rebuilds rather than reusing an outside-Guard binary without the ignores. Verify that flag-sensitive reuse in the existing cache journey. Ordinary outside-Guard builds receive no marker and execute these tests, including CI with `arany_ci`. Report guarded skips separately from passes and existing native/helper ignores. Remove these conditional ignores only after the separately recorded local test IPC capability and its native evidence exist.
+The [Tools contract](../../docs/specs/tools.md#persistent-workspace-build-cache) owns the fixed Guard compilation marker and explicit test omissions; [D-23](../../docs/research/next-step-decision-register.md#d-23--selected-rust-and-honest-guard-only-test-omissions) records the peer choice. Keep that environment identical in both measurement arms. [Cargo fingerprints include Rust flags](https://github.com/rust-lang/cargo/blob/cf29d0e0b1f7b03c4ceda5211cc4dc493bfc542e/src/compiler/fingerprint/mod.rs#L1110), so flag-sensitive reuse belongs in the native cache journey. Ignored tests remain no evidence of local IPC support.
 
 Secondary peer checks support reusing ordinary command/environment paths, not a Cargo-specific executor: [OpenCode permissions](https://opencode.ai/docs/permissions/) control shell and external-directory actions; [Pi security](https://github.com/earendil-works/pi/blob/cae8d69e572e038d584c881efd1818e40571fb7c/packages/coding-agent/docs/security.md) recommends an external isolation boundary; [Goose permission modes](https://github.com/block/goose/blob/5be3f8d3db9a2c4dfd5162bc50c3a35c648b7706/documentation/docs/guides/managing-tools/goose-permissions.md) govern Tool approval; Aider's Docker limitations are cited above. These sources supply no common numeric Cargo concurrency policy. The owner supplies that policy below. Claude's [local-server behavior](https://code.claude.com/docs/en/sandboxing#network-isolation) permits private Linux loopback and opt-in macOS local binding; Arany defers that capability because its per-effect isolation and safe AI cage require a pinned, enforcing local-IPC grant before any access is added.
 
@@ -125,7 +114,7 @@ Today runtime grants are serialized into Config and hashed into the Tool policy 
 
 ## Contract and scenarios
 
-The future implementation updates [Tools](../../docs/specs/tools.md) for Build environment/limits and scenarios, [Goals](../../docs/specs/goals.md) for the new pinned resource setting, [Execution](../../docs/specs/execution.md) only for affected persisted versions/migrations, and [Terminal](../../docs/specs/terminal.md) for the settings/consent explanation. This planning change edits none of them.
+Slice 2 updates [Tools](../../docs/specs/tools.md) for parallel Build limits, [Goals](../../docs/specs/goals.md) for the pinned resource setting, [Execution](../../docs/specs/execution.md) for affected persisted versions/migrations, and [Terminal](../../docs/specs/terminal.md) for settings. The selected one-job environment and consent are owned by Tools and Terminal.
 
 | Scenario | Required observable result / evidence owner |
 |---|---|
@@ -169,15 +158,9 @@ The security pass **is triggered** by changed filesystem/process environment, ca
 
 ## Vertical slices
 
-### 1. Selected offline Rust environment runs dependency-backed Cargo tests — one PR
+### Slice 1 verification prerequisite
 
-**Observable increment:** after explicit folder selections and a Build request, an offline registry-backed fixture runs real Cargo tests with one compilation job, reuses a successful private cache and explains missing inputs without wider access.
-
-Path: consent/permission explanation → saved existing runtime selections → Goal Build request → normalized environment/policy digest (including the Rust Guard marker) → ToolStarted/permission decision → Linux or macOS Guard → command/cache receipt → terminal result and closed replay. Apply the conditional ignores and check-cfg registration in this slice. Set the initial explicit jobs value to one; do not add the user parallelism setting until slice 2. Clarify the existing unchecked Rust/cache/Apple choices rather than creating another trust mechanism. Update only the changed Tools/Terminal behavior and evidence rows.
-
-Verification: extend existing workspace/chooser corpora for independent cache selection, replacement and no repository-driven selection. Extend Linux and macOS native command journeys with a pinned, small offline registry fixture, native dependency where needed, real nonzero test count, success-to-warm reuse, missing index/source, denied cache writes, malicious Cargo configuration, cancellation and failed-test cache retention. Reuse cache/replay corpora for transaction fault cases. Run formatting, targeted Clippy/tests and complete CI per the development guide. The dependency-backed fixture must execute a nonzero count; inventory ignores never count as passed evidence. Verify Guard-only ignores, outside-Guard execution and unchanged socket denial in the same existing journeys.
-
-Measurement gate: run the exact repository command with this one-job Build environment when a qualified native host is available; record the first failure and all completed phases. No Guard run is part of the present research task. If unavailable, hand the explicit measurement gap to NEXT_STEPS and make no native claim. Before slice 2, distinguish a CPU bottleneck from compilation admission, offline data, capacity and test-IPC failures.
+Before slice 2, validate the [selected offline Rust scenarios](../../docs/specs/tools.md#acceptance-scenarios-and-evidence-owners) in CI and the native command journeys. The owner-run exact one-job repository measurement and unavailable native evidence remain in [NEXT_STEPS](../../NEXT_STEPS.md#beta-2-and-broader-release). Distinguish CPU bottlenecks from compilation admission, offline inputs, capacity and test-IPC failures before changing parallelism. No native success is inferred from compiled tests.
 
 ### 2. User-selected bounded multicore Build execution with repository measurement — one PR
 
@@ -202,5 +185,5 @@ Measurement is part of this slice's acceptance, not a separate artifact-only PR:
 - Selected offline dependency-backed Cargo tests pass with nonzero counts on the available native evidence lanes; hostile grants, drift, resource exhaustion, cancellation, uncertainty, cache retention and closed replay have the named evidence.
 - The exact repository workload succeeds with nonzero executed tests and declared Guard-only ignores, with one-job/multicore measurement evidence and unavailable platforms recorded. A failed, filtered, compile-only or fixture run never closes item 6. The missing local test IPC capability remains in NEXT_STEPS as a separate item when item 6 closes; ignored scenarios are not full-suite or native IPC evidence.
 - Final diff receives Ponytail, Rust and architecture review. No widened host/cache/network authority, new generic executor or layer-only slice remains. Necessary contract changes and stored-format migrations ship with the behavior that needs them.
-- Full final-head CI passes for implementation; unavailable native/live checks are recorded once in NEXT_STEPS with owner procedure. The current documentation-only task requires prose, links and whitespace checks, not a Rust build.
+- Full final-head CI passes for implementation; unavailable native/live checks are recorded once in NEXT_STEPS with owner procedure.
 - When the agreed feature is complete, move remaining defects/dependencies to NEXT_STEPS and close this plan/index row under the [planning lifecycle](../README.md#lifecycle). The lead handles commits and PR publication; this task creates neither.

@@ -15,6 +15,7 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
 const CAPTURE_BYTES: usize = 48 * 1024;
+const RUST_GUARD_FLAGS: &str = "--cfg\x1farany_guard";
 pub(super) const TASK_BYTES_CAP: usize = 1024 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.
 const DEFINITION_TASK_BYTES: usize = (64 * 1024_usize).div_ceil(3) * 4;
@@ -608,7 +609,16 @@ fn bind_runtime_grants(
     if runtime_grants.is_empty() {
         return Ok(profile);
     }
-    let mut bytes = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    let mut bytes = b"arany-runtime-profile-v3:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+    if runtime_grants
+        .iter()
+        .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
+    {
+        bytes.extend_from_slice(
+            b";selected-rust:build-offline=true;build-jobs=1;encoded-rustflags=",
+        );
+        bytes.extend_from_slice(RUST_GUARD_FLAGS.as_bytes());
+    }
     bytes.extend_from_slice(&profile);
     bytes.extend_from_slice(
         &serde_json::to_vec(runtime_grants).map_err(|_| ToolError::Configuration)?,
@@ -2009,6 +2019,7 @@ pub(super) fn payload(
     root: &Path,
     runtime_grants: &[RuntimeGrant],
     cache_enabled: bool,
+    resource_class: ToolResourceClass,
 ) -> Result<Command, ToolError> {
     let resources = if cfg!(target_os = "macos") {
         root.join("runtime")
@@ -2078,13 +2089,20 @@ pub(super) fn payload(
         args
     };
     command.args(payload_args);
-    // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
-    if cfg!(target_os = "macos")
-        && runtime_grants
-            .iter()
-            .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
+    if runtime_grants
+        .iter()
+        .any(|grant| grant.kind == super::toolchains::RuntimeKind::Rust)
     {
-        command.env("CURL_SSL_BACKEND", "Secure-Transport");
+        command.env("CARGO_ENCODED_RUSTFLAGS", RUST_GUARD_FLAGS);
+        if resource_class == ToolResourceClass::Build {
+            command
+                .env("CARGO_NET_OFFLINE", "true")
+                .env("CARGO_BUILD_JOBS", "1");
+        }
+        // Cargo's libcurl otherwise initializes LibreSSL, which reads /private/etc/ssl and fails under Seatbelt.
+        if cfg!(target_os = "macos") {
+            command.env("CURL_SSL_BACKEND", "Secure-Transport");
+        }
     }
     if cfg!(target_os = "macos")
         && let Some(sdk) = runtime_grants
@@ -2099,6 +2117,84 @@ pub(super) fn payload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_rust_environment_is_class_scoped_and_digest_bound() {
+        use super::super::toolchains::{RuntimeKind, RuntimeManager};
+        let temp = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temp.path()).unwrap();
+        let resources = if cfg!(target_os = "macos") {
+            root.join("runtime")
+        } else {
+            root.clone()
+        };
+        std::fs::create_dir_all(resources.join("programs")).unwrap();
+        std::fs::write(resources.join("programs/probe"), b"pinned executable").unwrap();
+        #[cfg(target_os = "macos")]
+        std::fs::write(resources.join(RUNTIME_COMPAT_FILE), RUNTIME_COMPAT_BYTES).unwrap();
+        let program = super::super::config::Program {
+            name: "probe".into(),
+            executable: root.join("probe").to_str().unwrap().into(),
+            sha256: hex_digest(b"pinned executable"),
+            interpreter: false,
+            inputs: Vec::new(),
+        };
+        let rust = RuntimeGrant {
+            kind: RuntimeKind::Rust,
+            manager: RuntimeManager::Rustup,
+            version: Some("1.98.1-x86_64-unknown-linux-gnu".into()),
+            path: root.join("home/.rustup/toolchains/1.98.1-x86_64-unknown-linux-gnu"),
+            device: 1,
+            inode: 1,
+        };
+        for selected in [false, true] {
+            for class in [ToolResourceClass::Default, ToolResourceClass::Build] {
+                let grants = if selected {
+                    std::slice::from_ref(&rust)
+                } else {
+                    &[]
+                };
+                let command = payload(&program, &[], "", &root, grants, false, class).unwrap();
+                let environment = command
+                    .as_std()
+                    .get_envs()
+                    .map(|(key, value)| (key.to_str().unwrap(), value.unwrap().to_str().unwrap()))
+                    .collect::<std::collections::BTreeMap<_, _>>();
+                assert_eq!(
+                    environment.get("CARGO_ENCODED_RUSTFLAGS").copied(),
+                    selected.then_some("--cfg\x1farany_guard")
+                );
+                let build = selected && class == ToolResourceClass::Build;
+                assert_eq!(
+                    environment.get("CARGO_NET_OFFLINE").copied(),
+                    build.then_some("true")
+                );
+                assert_eq!(
+                    environment.get("CARGO_BUILD_JOBS").copied(),
+                    build.then_some("1")
+                );
+                for absent in [
+                    "RUSTUP_HOME",
+                    "RUSTFLAGS",
+                    "SSH_AUTH_SOCK",
+                    "CARGO_REGISTRY_TOKEN",
+                ] {
+                    assert!(!environment.contains_key(absent));
+                }
+                assert_eq!(environment["HOME"], root.join("scratch").to_str().unwrap());
+                assert_eq!(
+                    environment["CARGO_HOME"],
+                    root.join("scratch/cargo").to_str().unwrap()
+                );
+            }
+        }
+        let profile = [7; 32];
+        assert_eq!(bind_runtime_grants(profile, &[]).unwrap(), profile);
+        let mut old = b"arany-runtime-profile-v2:metadata-detected;exact-versioned-roots;explicit-read-only-cache-grants;bounded-output-may-disclose;no-automatic-cache-load;no-parent-cache-config-or-credentials".to_vec();
+        old.extend_from_slice(&profile);
+        old.extend_from_slice(&serde_json::to_vec(std::slice::from_ref(&rust)).unwrap());
+        assert_ne!(bind_runtime_grants(profile, &[rust]).unwrap(), digest(&old));
+    }
 
     #[test]
     fn shell_runtime_compat_preserves_script_position_and_rejects_options() {

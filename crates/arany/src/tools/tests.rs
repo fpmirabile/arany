@@ -3374,6 +3374,8 @@ async fn glob_returns_admitted_regular_files_in_path_order_with_honest_truncatio
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_walk() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");

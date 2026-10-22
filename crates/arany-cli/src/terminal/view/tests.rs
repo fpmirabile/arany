@@ -3231,7 +3231,7 @@ fn permission_frame_fills_the_terminal_like_chat() {
             "    [ ] {index}. Node v20.19.2 · ~/.local/share/fnm/node-versions/v20.19.2/installation"
         )
     }));
-    for (width, height, expect_more) in [(100, 30, false), (60, 20, true)] {
+    for (width, height, expect_more) in [(100, 36, false), (60, 20, true)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let mut progress = None;
         terminal
@@ -3273,8 +3273,8 @@ fn permission_frame_fills_the_terminal_like_chat() {
             let page = rows.iter().position(|row| row.contains("Page 1/")).unwrap();
             assert_eq!(page, usize::from(height) - 4);
         } else {
-            assert!(buffer_row(buffer, 26).contains("› Read only"));
-            assert!(buffer_row(buffer, 29).contains("Ctrl+C exit"));
+            assert!(buffer_row(buffer, height - 4).contains("› Read only"));
+            assert!(buffer_row(buffer, height - 1).contains("Ctrl+C exit"));
         }
     }
 }

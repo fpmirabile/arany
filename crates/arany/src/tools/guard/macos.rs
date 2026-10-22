@@ -1393,6 +1393,8 @@ mod tests {
     }
 
     #[test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     fn native_file_profile_denies_host_network_spawn_and_cpu_changes() {
         let output = probe(false);
         assert!(
@@ -1407,8 +1409,9 @@ mod tests {
     }
 
     #[test]
+    // Skipped in the Guard: local test IPC capability is missing.
     #[cfg_attr(
-        not(arany_ci),
+        any(arany_guard, not(arany_ci)),
         ignore = "native 15-second CPU expiry; finite isolated process"
     )]
     fn native_file_profile_cpu_expiry_cannot_be_disabled() {
@@ -1542,6 +1545,8 @@ mod tests {
     }
 
     #[test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     fn native_git_profile_runs_pinned_git_and_denies_host_access() {
         let git = crate::tools::git::discover();
         if !Path::new(EXECUTABLES.git[0].path)

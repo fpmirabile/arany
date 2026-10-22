@@ -88,6 +88,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         site.root,
         &site.config.runtime_grants,
         site.intent.limits.cache_bytes > 0,
+        site.intent.limits.resource_class,
     )?;
     command.current_dir(site.workspace.join(cwd));
     command.env("ARANY_TOOL_WORKSPACE", site.workspace);

@@ -729,6 +729,8 @@ fn client() -> Client {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
@@ -889,6 +891,8 @@ fn with_output_details(stream: Vec<u8>, details: &Value) -> Vec<u8> {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
     use crate::ProviderFailureReason::{LocalOutputLimit, ResponseContract};
     type Usage = fn(u32) -> (u32, Value);
@@ -1035,6 +1039,8 @@ async fn only_received_events_restart_the_stream_idle_window() {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn compaction_stream_requires_complete_bounded_summary() {
     let stream = completed_with_text(Some(12), r#"Condensed"#);
     let reply = format!(
@@ -1116,6 +1122,8 @@ async fn compaction_stream_requires_complete_bounded_summary() {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn transport_rejects_non_event_and_encoded_replies() {
     let response = json!({
         "id": "resp_synthetic",
@@ -1180,6 +1188,8 @@ async fn transport_rejects_non_event_and_encoded_replies() {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn stream_failure_code_reaches_run_and_compaction_without_partial_result() {
     let stream = b"event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\nevent: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"error\":{\"code\":\"subscription_sharing_usage_limit_exceeded\",\"message\":\"private diagnostic\"}}}\n\n";
     let (endpoint, server) = serve(event_reply(stream.to_vec())).await;
@@ -1211,6 +1221,8 @@ async fn stream_failure_code_reaches_run_and_compaction_without_partial_result()
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn direct_route_http_failures_are_classified_without_exposing_body() {
     for (status, expected) in [
         (400, ProviderFailureClass::Rejected),
@@ -1252,6 +1264,8 @@ async fn direct_route_http_failures_are_classified_without_exposing_body() {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn direct_route_429_honors_retry_after_and_never_retries_a_quota_body() {
     for (body, quota) in [
         (r#"{"error":{"type":"usage_limit_reached"}}"#, true),
@@ -1281,6 +1295,8 @@ async fn direct_route_429_honors_retry_after_and_never_retries_a_quota_body() {
 }
 
 #[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes() {
     let direct = event_reply(completed_with_id("resp_direct", Some(12), r#"done"#));
     let delegate = event_reply(completed_with_id(

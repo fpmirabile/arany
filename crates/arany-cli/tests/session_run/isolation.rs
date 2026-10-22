@@ -179,7 +179,18 @@ pub fn native_account_isolated_test_command(
     test_executable: &std::path::Path,
     guard_executable: &std::path::Path,
 ) -> Command {
+    native_account_isolated_test_command_with_timeout(root, test_executable, guard_executable, 80)
+}
+
+#[cfg(target_os = "linux")]
+pub fn native_account_isolated_test_command_with_timeout(
+    root: &std::path::Path,
+    test_executable: &std::path::Path,
+    guard_executable: &std::path::Path,
+    timeout_seconds: u32,
+) -> Command {
     use std::{io::Write, os::unix::fs::OpenOptionsExt};
+    assert!((1..=1200).contains(&timeout_seconds));
     assert!(
         test_executable.is_absolute() && test_executable.is_file(),
         "isolated test executable must be an absolute file"
@@ -217,12 +228,13 @@ pub fn native_account_isolated_test_command(
         .args([
             "--non-interactive", "--", "/usr/bin/unshare", "--mount", "--net",
             "--propagation", "private", "--", "/usr/bin/sh", "-eu", "-c",
-            "root=$1; uid=$2; gid=$3; shift 3; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s 80s /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
+            "root=$1; uid=$2; gid=$3; duration=$4; shift 4; /usr/bin/mount --bind \"$root/passwd\" /etc/passwd; /usr/bin/mount --options remount,bind,ro /etc/passwd; /usr/sbin/ip link set lo up; exec /usr/bin/timeout --kill-after=2s \"$duration\" /usr/bin/setpriv --reuid \"$uid\" --regid \"$gid\" --clear-groups --no-new-privs /usr/bin/env -i HOME=\"$root/home\" XDG_STATE_HOME=\"$root/environment-state\" XDG_DATA_HOME=\"$root/environment-data\" PATH=/usr/bin:/bin ARANY_TEST_CACHE_CANARY_ROOT=\"$root\" ARANY_ACCOUNT_ISOLATED_TEST=1 \"$@\"",
             "arany-native-account-fixture",
         ])
         .arg(root)
         .arg(user.uid.as_raw().to_string())
         .arg(user.gid.as_raw().to_string())
+        .arg(timeout_seconds.to_string())
         .arg(test_executable);
     command
 }
