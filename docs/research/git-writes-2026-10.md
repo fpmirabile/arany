@@ -3,7 +3,7 @@
 - Question: how can Arany commit, branch, push and open pull requests with peer-like usability while preserving explicit authority and honest recovery?
 - Source-check date: 2026-10-21. Peer evidence is the official Claude Code and Codex CLI documentation as published on 2026-10-21; neither page exposes a stable document revision, so no version can be pinned, and the conclusions should be rechecked if those docs change. This is not a pinned peer release or implementation audit.
 - Conclusion: typed local writes use the neutralized-view approach and receipted publication. Host push and PR creation require the separately approved isolation exception. Prefix matching must operate on a closed typed schema rather than authorize arbitrary Git options.
-- Scope: evidence, alternatives and conflicts. The [Git write workflow plan](../../planning/git-write-workflow/README.md) owns the 2026-10-21 owner decisions and implementation sequence; [Tools](../specs/tools.md) and [execution](../specs/execution.md) remain the current contracts. This report grants no capability and establishes no native or live support.
+- Scope: evidence, alternatives and conflicts. [AGENTS.md guarantees](../../AGENTS.md#non-negotiable-guarantees), [typed Git writes](../specs/tools.md#typed-git-writes), [human-approved host Git](../specs/tools.md#human-approved-host-git) and [execution](../specs/execution.md) own the accepted decisions and current contracts. This report preserves rationale, grants no capability and establishes no native or live support.
 
 ## Peer evidence
 
@@ -37,7 +37,6 @@ The [Git configuration reference](https://git-scm.com/docs/git-config) documents
 
 The [GitHub CLI PR manual](https://cli.github.com/manual/gh_pr_create) says PR creation can also prompt to push or fork; explicit `--head` skips those behaviors. It also documents repository-derived base selection when `--base` is omitted. **Recommendation:** the typed adapter supplies explicit repository, head, base, title and body so approval covers one PR creation rather than undisclosed side effects. The [environment manual](https://cli.github.com/manual/gh_help_environment) lists token precedence, repository/host selection, and executable-bearing editor/browser/pager variables. Authentication and environment admission therefore need a deliberate adapter contract.
 
-## Unverified items and owner follow-up
+## Verification limits
 
-- **Authentication:** which pinned credential helpers, SSH facilities and `gh` credential sources may the host adapter use? User-global configuration is an authority source only after explicit admission; “user-global” does not make executable helper text inert. GitHub auth storage, token scope and Enterprise support remain owner questions.
-- **Platform and peer execution:** no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment ran. Inert configuration and exact network side-effect behavior remain verification obligations of the implementation slices, not findings established by this document.
+This investigation ran no Linux/macOS native write test, remote push, PR creation, credential access or peer executable experiment. Remaining implementation and owner-run evidence live in [NEXT_STEPS.md, Daily use item 9](../../NEXT_STEPS.md#daily-use-first) and its linked native/live checklist. The current contracts above own authentication, supported layouts and recovery; this report is not evidence of their native or live verification.

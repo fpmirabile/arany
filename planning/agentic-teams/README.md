@@ -90,7 +90,7 @@ thresholds. No enforcement slice is implementation-ready yet.
 
 <a id="e-goal-lifecycle-and-terminal"></a>
 
-Git authority belongs exclusively to the [Git write workflow](../git-write-workflow/README.md)
+Git authority belongs exclusively to the [typed Git writes](../../docs/specs/tools.md#typed-git-writes) and [human-approved host Git](../../docs/specs/tools.md#human-approved-host-git)
 and [typed Git contract](../../docs/specs/tools.md#typed-git-writes).
 [Goal RPI](../goal-rpi/README.md), [Goal progress](../goal-progress/README.md),
 [agent route recovery](../agent-route-recovery/README.md) and
