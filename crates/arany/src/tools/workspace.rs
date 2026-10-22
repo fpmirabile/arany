@@ -41,14 +41,7 @@ pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
             (tail[..used].to_owned(), used)
         };
         if !path.is_empty() {
-            let directory = path.ends_with('/');
-            if !super::types::valid_relative(path.strip_suffix('/').unwrap_or(&path), false) {
-                return Err(ToolError::Path);
-            }
-            if directory {
-                remaining = &tail[used..];
-                continue;
-            }
+            super::types::validate_mention_path(path.strip_suffix('/').unwrap_or(&path), false)?;
             let path = PathBuf::from(path);
             if !paths.contains(&path) {
                 paths.push(path);
@@ -868,8 +861,10 @@ mod tests {
             ("@中.md", vec!["中.md"]),
             (
                 "Inspect @docs/ and @\"docs/hello world/\" then @README.md",
-                vec!["README.md"],
+                vec!["docs", "docs/hello world", "README.md"],
             ),
+            ("@docs @docs/ @\"docs/\"", vec!["docs"]),
+            ("@\"docs/hello world\"", vec!["docs/hello world"]),
         ] {
             assert_eq!(
                 mention_paths(objective).unwrap(),
@@ -889,6 +884,14 @@ mod tests {
         ] {
             assert!(mention_paths(objective).is_err());
         }
+        assert_eq!(
+            mention_paths("@../outside").unwrap_err().to_string(),
+            "path is outside workspace"
+        );
+        assert_eq!(
+            mention_paths("@.git").unwrap_err().to_string(),
+            "protected path"
+        );
         let temp = tempfile::tempdir().unwrap();
         let workspace = temp.path().join("project");
         std::fs::create_dir_all(workspace.join("docs")).unwrap();
@@ -920,6 +923,22 @@ mod tests {
                 fs::workspace_entries(&workspace, "docs", "hello").unwrap(),
                 vec!["docs/hello world.md"]
             );
+            assert_eq!(
+                fs::workspace_entries(&workspace, "docs", "").unwrap(),
+                vec!["docs/hello world.md"]
+            );
+            for (folder, reason) in [
+                ("missing", "Tool file or directory not found"),
+                ("../outside", "path is outside workspace"),
+                (".git", "protected path"),
+            ] {
+                assert_eq!(
+                    fs::workspace_entries(&workspace, folder, "")
+                        .unwrap_err()
+                        .to_string(),
+                    reason
+                );
+            }
             for query in ["world", "HELLO", "docs/hello", "hwd"] {
                 assert_eq!(
                     fs::workspace_entries(&workspace, "", query).unwrap(),

@@ -173,6 +173,7 @@ impl From<InputError> for EngineError {
             InputError::TooManyIncludes => Self::TooManyIncludes,
             InputError::State(error) => Self::Store(error),
             InputError::StateOverlap => Self::StateOverlap,
+            InputError::Include(error) => Self::Tool(error),
             InputError::Io(_) => Self::WorkspaceUnavailable,
         }
     }

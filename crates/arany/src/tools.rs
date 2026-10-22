@@ -117,6 +117,10 @@ pub enum ToolError {
     ChangedInput,
     #[error("Tool path is not admitted")]
     Path,
+    #[error("path is outside workspace")]
+    OutsideWorkspace,
+    #[error("protected path")]
+    ProtectedPath,
     #[error("Tool file or directory not found")]
     NotFound,
     #[error("Guard filesystem boundary denied access")]

@@ -78,15 +78,6 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
             );
         }
 
-        let mut directory = request(&workspace, "Question");
-        directory.include_paths = vec!["notes".into()];
-        let outcome = run_to_end(&engine, &provider, directory).await;
-        assert!(
-            matches!(&outcome, Err(EngineError::InputNotRegular)),
-            "directory include: expected InputNotRegular, observed {:?}",
-            outcome.err()
-        );
-
         let mut special = request(&workspace, "Question");
         special.include_paths = vec!["notes/socket".into()];
         let outcome = run_to_end(&engine, &provider, special).await;

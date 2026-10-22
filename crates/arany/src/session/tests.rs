@@ -1,5 +1,68 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let selected = workspace.join("docs/with spaces");
+    std::fs::create_dir_all(selected.join("nested")).unwrap();
+    std::fs::write(selected.join("a.txt"), "FILE_BODY_CANARY").unwrap();
+    std::fs::write(selected.join("nested/private.txt"), "NESTED_BODY_CANARY").unwrap();
+    std::fs::create_dir(selected.join(".git")).unwrap();
+    std::os::unix::fs::symlink(temp.path(), selected.join("outside")).unwrap();
+    std::fs::hard_link(selected.join("a.txt"), selected.join("alias.txt")).unwrap();
+    std::fs::write(selected.join("b.txt"), "FILE_BODY_CANARY").unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let load = |path: &str| input::WorkspaceInputs::load(&workspace, &state, None, &[path.into()]);
+    let content = "\"b.txt\"\n\"nested/\"\n";
+    for path in ["docs/with spaces", "docs/with spaces/"] {
+        let loaded = load(path).unwrap();
+        assert_eq!(loaded.includes[0].path, "docs/with spaces/");
+        assert_eq!(loaded.includes[0].content, content);
+        assert_eq!(
+            loaded.includes[0].digest,
+            <[u8; 32]>::from(Sha256::digest(content))
+        );
+        assert!(loaded.includes[0].model_include().starts_with("Directory:"));
+    }
+    assert!(matches!(
+        load("docs/with spaces/.git"),
+        Err(input::InputError::Include(
+            crate::tools::ToolError::ProtectedPath
+        ))
+    ));
+    assert!(matches!(
+        load("docs/with spaces/outside"),
+        Err(input::InputError::Io(_))
+    ));
+    assert!(matches!(
+        load("docs/with spaces/b.txt/"),
+        Err(input::InputError::InvalidPath)
+    ));
+    for (folder, count, name_len) in [("entry-cap", 70, 10), ("byte-cap", 64, 255)] {
+        let directory = workspace.join(folder);
+        std::fs::create_dir(&directory).unwrap();
+        for index in 0..count {
+            let name = format!("{index:03}{}", "a".repeat(name_len - 3));
+            std::fs::write(directory.join(name), "OMITTED_BODY_CANARY").unwrap();
+        }
+        let loaded = load(folder).unwrap();
+        let listing = &loaded.includes[0].content;
+        assert!(listing.len() <= 16 * 1024);
+        assert!(listing.ends_with("[truncated]\n"));
+        let entries = listing.lines().filter(|line| line.starts_with('"')).count();
+        assert!(entries <= 64);
+        if folder == "entry-cap" {
+            assert_eq!(entries, 64);
+        } else {
+            assert!(entries < 64);
+        }
+        assert!(!listing.contains("OMITTED_BODY_CANARY"));
+    }
+}
+
 pub(crate) fn unanswered_run(status: RunStatus) -> RunView {
     RunView {
         skill: None,
