@@ -1157,6 +1157,7 @@ impl ToolRuntime {
                 git::host::run(
                     &self.config,
                     self.host_authentication.as_ref().as_ref(),
+                    self.cache_state.as_deref(),
                     &self.workspace,
                     intent,
                     cancellation,

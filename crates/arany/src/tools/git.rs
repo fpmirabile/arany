@@ -321,7 +321,7 @@ struct Repository {
     links: Vec<&'static str>,
 }
 
-fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
+fn inspect_layout(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
     let root = super::fs::open_directory(workspace)?;
     match root.symlink_metadata(".git") {
         Ok(metadata) if metadata.is_dir() => {}
@@ -367,7 +367,21 @@ fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolErr
             _ => return Ok(Err(UNSUPPORTED_LAYOUT)),
         }
     }
-    let index = match open_optional(&git_dir, "index").and_then(|file| {
+    Ok(Ok(Repository {
+        identity: super::fs::identity(&git_dir)?,
+        git_dir,
+        head,
+        index: None,
+        links,
+    }))
+}
+
+fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolError> {
+    let mut repository = match inspect_layout(workspace)? {
+        Ok(repository) => repository,
+        Err(reason) => return Ok(Err(reason)),
+    };
+    repository.index = match open_optional(&repository.git_dir, "index").and_then(|file| {
         file.map(|file| {
             let modified = file
                 .metadata()
@@ -381,13 +395,7 @@ fn inspect(workspace: &Path) -> Result<Result<Repository, &'static str>, ToolErr
         Err(ToolError::Path) => return Ok(Err(UNSUPPORTED_LAYOUT)),
         Err(error) => return Err(error),
     };
-    Ok(Ok(Repository {
-        identity: super::fs::identity(&git_dir)?,
-        git_dir,
-        head,
-        index,
-        links,
-    }))
+    Ok(Ok(repository))
 }
 
 // The fixed config, HEAD and index copies every view starts from.

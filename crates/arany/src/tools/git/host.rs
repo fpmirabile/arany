@@ -1,4 +1,6 @@
-use super::{CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect, read_optional, valid_branch};
+use super::{
+    CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect_layout, read_optional, valid_branch,
+};
 use crate::tools::config::Config;
 use crate::tools::types::{EffectIntent, HostIntent, ToolCall, ToolDisposition, ToolObservation};
 use crate::tools::{Attestation, CacheUpdate, Cancellation, ToolError, UnguardedReceipt};
@@ -155,21 +157,28 @@ pub(crate) fn pin(workspace: &Path, call: &ToolCall) -> Result<HostIntent, ToolE
     if !valid(call) {
         return Err(ToolError::Configuration);
     }
+    let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
+    pin_from_git(&repository.git_dir, call)
+}
+
+fn pin_from_git(git: &Dir, call: &ToolCall) -> Result<HostIntent, ToolError> {
+    if !valid(call) {
+        return Err(ToolError::Configuration);
+    }
     let branch = match call {
         ToolCall::GitPush { branch, .. } => branch,
         ToolCall::GhPrCreate { head, .. } => head,
         _ => return Err(ToolError::Configuration),
     };
-    let repository = inspect(workspace)?.map_err(|_| ToolError::Path)?;
     let name = format!("refs/heads/{branch}");
-    let oid = match read_ref(&repository.git_dir, &name)? {
+    let oid = match read_ref(git, &name)? {
         Some(bytes) => String::from_utf8(bytes)
             .map_err(|_| ToolError::Path)?
             .trim_end_matches('\n')
             .to_owned(),
         None => {
-            let packed = read_optional(&repository.git_dir, "packed-refs", MAX_PRIVATE_BYTES)?
-                .ok_or(ToolError::Path)?;
+            let packed =
+                read_optional(git, "packed-refs", MAX_PRIVATE_BYTES)?.ok_or(ToolError::Path)?;
             std::str::from_utf8(&packed)
                 .map_err(|_| ToolError::Path)?
                 .lines()
@@ -233,10 +242,10 @@ fn private_view(
     root: &Path,
     intent: &EffectIntent,
 ) -> Result<PathBuf, ToolError> {
-    if Some(&pin(workspace, &intent.call)?) != intent.host.as_ref() {
+    let repository = inspect_layout(workspace)?.map_err(|_| ToolError::Path)?;
+    if Some(&pin_from_git(&repository.git_dir, &intent.call)?) != intent.host.as_ref() {
         return Err(ToolError::ChangedInput);
     }
-    let repository = inspect(workspace)?.map_err(|_| ToolError::Path)?;
     let view = root.join(".git");
     std::fs::create_dir(&view).map_err(|_| ToolError::Operation)?;
     std::fs::write(view.join("config"), VIEW_CONFIG).map_err(|_| ToolError::Operation)?;
@@ -380,44 +389,108 @@ fn private_file(path: &Path, bytes: &[u8], mode: u32) -> Result<std::fs::File, T
     Ok(file)
 }
 
-fn lease(root: &Path) -> Result<std::fs::File, ToolError> {
-    let file = private_file(&root.join("lease"), b"arany-host-v1", 0o600)?;
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-        .map_err(|_| ToolError::Operation)?;
-    Ok(file)
+const SCRATCH_SLOTS: usize = 64;
+
+fn scratch_parent(
+    state: &crate::store::StateRoot,
+    create: bool,
+) -> Result<crate::private_fs::PrivateDirectory, ToolError> {
+    state.readmit().map_err(|_| ToolError::Path)?;
+    crate::private_fs::open_directory(&state.path().join("host-scratch"), create)
+        .map_err(|_| ToolError::Path)
 }
 
-pub(crate) fn sweep_stale(parent: &Path) {
+fn slot_lease(parent: &Dir, slot: usize) -> Result<Option<std::fs::File>, ToolError> {
+    use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
+    use cap_std::fs::OpenOptionsExt;
     use std::os::unix::fs::MetadataExt;
-    let Ok(entries) = std::fs::read_dir(parent) else {
+    let mut options = cap_std::fs::OpenOptions::new();
+    options
+        .read(true)
+        .write(true)
+        .create(true)
+        .mode(0o600)
+        .follow(FollowSymlinks::No)
+        .custom_flags(nix::libc::O_NONBLOCK);
+    let file = parent
+        .open_with(format!("lease-{slot}"), &options)
+        .map_err(|_| ToolError::Path)?
+        .into_std();
+    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+    if !metadata.is_file()
+        || metadata.uid() != rustix::process::geteuid().as_raw()
+        || metadata.mode() & 0o077 != 0
+        || metadata.nlink() != 1
+        || metadata.len() != 0
+    {
+        return Err(ToolError::Path);
+    }
+    crate::private_fs::check_acl(&file, true).map_err(|_| ToolError::Path)?;
+    match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(Some(file)),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(None),
+        Err(_) => Err(ToolError::Operation),
+    }
+}
+
+fn remove_slot(parent: &Dir, slot: usize) -> Result<(), ToolError> {
+    let name = format!("slot-{slot}");
+    match parent.open_dir_nofollow(&name) {
+        Ok(dir) => crate::private_fs::check_directory(&dir, true).map_err(|_| ToolError::Path)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(ToolError::Path),
+    }
+    parent
+        .remove_dir_all(name)
+        .map_err(|_| ToolError::Operation)
+}
+
+struct Scratch {
+    parent: crate::private_fs::PrivateDirectory,
+    slot: usize,
+    path: PathBuf,
+    _lease: std::fs::File,
+}
+
+impl Scratch {
+    fn acquire(state: &crate::store::StateRoot) -> Result<Self, ToolError> {
+        let parent = scratch_parent(state, true)?;
+        for slot in 0..SCRATCH_SLOTS {
+            let Some(lease) = slot_lease(&parent.dir, slot)? else {
+                continue;
+            };
+            remove_slot(&parent.dir, slot)?;
+            let path = parent.path.join(format!("slot-{slot}"));
+            // The lease is outside the root and locked before publishing any scratch directory.
+            private_directory(&path)?;
+            return Ok(Self {
+                parent,
+                slot,
+                path,
+                _lease: lease,
+            });
+        }
+        Err(ToolError::Limit)
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = remove_slot(&self.parent.dir, self.slot);
+    }
+}
+
+pub(crate) fn sweep_stale(state: &crate::store::StateRoot) {
+    let Ok(parent) = scratch_parent(state, false) else {
         return;
     };
-    for entry in entries.take(4096).flatten() {
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with("arany-host-")
-        {
-            continue;
-        }
-        let path = entry.path();
-        let private = |m: &std::fs::Metadata| {
-            m.uid() == rustix::process::geteuid().as_raw() && m.mode() & 0o077 == 0
-        };
-        if !std::fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir() && private(&m)) {
-            continue;
-        }
-        let Some(name) = path.join("lease").to_str().map(str::to_owned) else {
-            continue;
-        };
-        let Ok(file) = crate::tools::fs::open_absolute(&name) else {
-            continue;
-        };
-        if !file.metadata().is_ok_and(|m| m.is_file() && private(&m)) {
-            continue;
-        }
-        if rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok() {
-            let _ = std::fs::remove_dir_all(path);
+    for slot in 0..SCRATCH_SLOTS {
+        if let Ok(Some(_lease)) = slot_lease(&parent.dir, slot) {
+            let _ = remove_slot(&parent.dir, slot);
         }
     }
 }
@@ -763,6 +836,7 @@ async fn prepare(
 pub(crate) async fn run(
     config: &Config,
     authentication: Option<&Authentication>,
+    state: Option<&crate::store::StateRoot>,
     workspace: &Path,
     intent: EffectIntent,
     cancellation: Cancellation,
@@ -770,15 +844,23 @@ pub(crate) async fn run(
     let Some(authentication) = authentication else {
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
     };
-    let prepared = tempfile::Builder::new()
-        .prefix("arany-host-")
-        .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-        .tempdir();
-    let Ok(root) = prepared else {
+    let Some(state) = state else {
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
     };
-    let Ok(_lease) = lease(root.path()) else {
-        return observation(intent, ToolDisposition::Denied, REFUSED, None);
+    let root = match Scratch::acquire(state) {
+        Ok(root) => root,
+        Err(error) => {
+            return observation(
+                intent,
+                ToolDisposition::Denied,
+                if matches!(error, ToolError::Limit) {
+                    "host: all 64 State scratch slots are in use; nothing dispatched."
+                } else {
+                    REFUSED
+                },
+                None,
+            );
+        }
     };
     let backing = if matches!(intent.call, ToolCall::GitPush { .. }) {
         match backing_identity(workspace) {
@@ -1396,19 +1478,24 @@ mod tests {
             return;
         }
         use std::os::unix::fs::PermissionsExt;
-        let parent = tempfile::tempdir().unwrap();
-        let live = tempfile::Builder::new()
-            .prefix("arany-host-")
-            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .tempdir_in(parent.path())
-            .unwrap();
-        let live_lease = lease(live.path()).unwrap();
-        let stale = tempfile::Builder::new()
-            .prefix("arany-host-")
-            .permissions(std::os::unix::fs::PermissionsExt::from_mode(0o700))
-            .tempdir_in(parent.path())
-            .unwrap();
-        drop(lease(stale.path()).unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let home = std::fs::canonicalize(temp.path()).unwrap();
+        let state = crate::store::StateRoot::admit(&home.join("state")).unwrap();
+        sweep_stale(&state);
+        assert!(!state.path().join("host-scratch").exists());
+        let live = Scratch::acquire(&state).unwrap();
+        let parent = scratch_parent(&state, false).unwrap();
+        let unpublished_lease = slot_lease(&parent.dir, 1).unwrap().unwrap();
+        sweep_stale(&state);
+        let stale = parent.path.join("slot-1");
+        private_directory(&stale).unwrap();
+        private_file(&stale.join("credential"), b"synthetic", 0o600).unwrap();
+        sweep_stale(&state);
+        assert!(
+            stale.exists(),
+            "sweep cannot race publication after the slot is locked"
+        );
+        drop(unpublished_lease);
         let gh = live.path().join("gh");
         private_directory(&gh).unwrap();
         private_file(&gh.join("hosts.yml"), b"synthetic", 0o600).unwrap();
@@ -1425,12 +1512,30 @@ mod tests {
                 & 0o777,
             0o600
         );
-        sweep_stale(parent.path());
+        sweep_stale(&state);
         assert!(live.path().exists());
-        assert!(!stale.path().exists());
-        drop(live_lease);
-        sweep_stale(parent.path());
-        assert!(!live.path().exists());
+        assert!(!stale.exists());
+        let other: Vec<_> = (1..SCRATCH_SLOTS)
+            .map(|_| Scratch::acquire(&state).unwrap())
+            .collect();
+        assert!(matches!(Scratch::acquire(&state), Err(ToolError::Limit)));
+        sweep_stale(&state);
+        assert!(other.iter().all(|scratch| scratch.path().exists()));
+        drop(other);
+        let path = live.path().to_owned();
+        drop(live);
+        assert!(
+            !path.exists(),
+            "normal teardown removes scratch before releasing its lease"
+        );
+        let mut unsafe_permissions = std::fs::metadata(&parent.path).unwrap().permissions();
+        unsafe_permissions.set_mode(0o777);
+        std::fs::set_permissions(&parent.path, unsafe_permissions).unwrap();
+        assert!(Scratch::acquire(&state).is_err());
+        std::fs::set_permissions(&parent.path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::rename(&parent.path, home.join("moved")).unwrap();
+        std::os::unix::fs::symlink(home.join("moved"), &parent.path).unwrap();
+        assert!(Scratch::acquire(&state).is_err());
     }
 
     fn synthetic_peer(prepared: &Command, program: &Path, args: &[std::ffi::OsString]) -> Command {
@@ -1525,7 +1630,15 @@ mod tests {
             &home,
             &["init", "--bare", "-q", bare.to_str().unwrap()],
         );
+        let index = std::fs::OpenOptions::new()
+            .write(true)
+            .open(workspace.join(".git/index"))
+            .unwrap();
+        index
+            .set_len((super::super::MAX_SNAPSHOT_BYTES + 1) as u64)
+            .unwrap();
         let intent = intent(&workspace, push());
+        assert!(intent.host.is_some());
         let markers = arm_hostile(temp.path(), &workspace);
         let large = std::fs::File::create(workspace.join(".git/objects/pack/unused.keep")).unwrap();
         large.set_len(33 * 1024 * 1024).unwrap();

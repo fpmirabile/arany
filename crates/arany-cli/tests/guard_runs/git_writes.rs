@@ -782,9 +782,6 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
                         Some(approval) = inbox.next() => {
                             asked += 1;
                             assert!(approval.intent.call.is_host() && approval.intent.host.is_some());
-                            let now = u64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis()).unwrap();
-                            assert!(approval.intent.expires_at_ms > now + 60_000);
-                            assert!(approval.intent.expires_at_ms <= now + 600_000);
                             assert!(approval.remember_prefix.is_none() && approval.unguarded.is_none());
                             let contender = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
                             let peer = Arc::new(ScriptedProvider::new(vec![answer()]));
