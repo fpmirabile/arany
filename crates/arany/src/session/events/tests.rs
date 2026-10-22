@@ -1071,6 +1071,7 @@ mod subscription_compaction_tests {
     #[test]
     fn subscription_compaction_pins_account_and_weaker_bound() {
         let mut record = CompactionRecord {
+            rate_limits: None,
             covered_run_id: RunId::new(),
             covered_sequence: 1,
             source_digest: [1; 32],
@@ -1164,6 +1165,7 @@ mod provider_call_tests {
         let run = RunId::new();
         let agent = AgentRunId::new();
         let mut record = ProviderCallRecord {
+            rate_limits: None,
             delegation: None,
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
@@ -1240,6 +1242,7 @@ mod provider_call_tests {
     fn rejects_unbounded_or_unearned_provider_metadata() {
         let current = payload_version("ProviderCallRecorded").expect("payload version");
         let mut record = ProviderCallRecord {
+            rate_limits: None,
             delegation: None,
             phase: crate::provider::AgentPhase::RootPlan,
             disposition: ProviderCallDisposition::Finished,
@@ -1372,6 +1375,7 @@ mod provider_call_tests {
                 ProviderCallDisposition::TaskPanic,
             ] {
                 let record = ProviderCallRecord {
+                    rate_limits: None,
                     delegation: None,
                     phase: crate::provider::AgentPhase::RootPlan,
                     disposition,
@@ -2326,6 +2330,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
+        rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::InvalidResponse,
@@ -2352,6 +2357,55 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
+    let old = decode_call(&valid, 16).unwrap();
+    let bytes = old.payload().unwrap();
+    assert!(!bytes.contains("rate_limits"));
+    let (run, actor) = old.scope();
+    assert_eq!(
+        Event::decode(old.kind(), old.version(), &bytes, run, actor)
+            .unwrap()
+            .payload()
+            .unwrap(),
+        bytes
+    );
+    let mut observed = valid.clone();
+    observed["rate_limits"] =
+        serde_json::to_value(crate::test_support::routing::plan_sample(1234)).unwrap();
+    let with_limits = decode_call(&observed, 16).unwrap();
+    assert_eq!(with_limits.version(), old.version());
+    let current = with_limits.payload().unwrap();
+    assert_eq!(
+        Event::decode(
+            with_limits.kind(),
+            with_limits.version(),
+            &current,
+            run,
+            actor
+        )
+        .unwrap(),
+        with_limits
+    );
+    for (field, value) in [
+        ("source", serde_json::json!("unknown")),
+        ("observed_at", serde_json::json!(-1)),
+        ("used_percent", serde_json::json!(101)),
+        ("window_minutes", serde_json::json!(0)),
+        ("reset_at", serde_json::json!(253402300800_i64)),
+        ("account_id", serde_json::json!("CANARY")),
+    ] {
+        let mut forged = observed.clone();
+        forged["rate_limits"]["primary"][field] = value;
+        assert!(
+            decode_call(&forged, 16).is_err(),
+            "invalid limit field {field}"
+        );
+    }
+    let mut missing = observed.clone();
+    missing["rate_limits"]["primary"]
+        .as_object_mut()
+        .unwrap()
+        .remove("reset_at");
+    assert!(decode_call(&missing, 16).is_err());
     assert!(decode_call(&valid, 16).is_ok());
     assert!(decode_call(&valid, 15).is_err());
     for (field, value) in [
@@ -2421,6 +2475,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
 #[test]
 fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     let record = ProviderCallRecord {
+        rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
         disposition: ProviderCallDisposition::PlanRecorded,

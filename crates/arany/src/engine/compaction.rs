@@ -161,6 +161,7 @@ impl Engine {
             .await?
             .min(identity.limits.deadline);
         let provider_trace = trace.begin_provider(&requested_identity.model);
+        let limits = crate::provider::RateLimitSlot::default();
         let (status, response_id, usage, wire_provenance, provider) = self
             .compaction_call(
                 providers,
@@ -168,12 +169,13 @@ impl Engine {
                 provider,
                 request,
                 provider_deadline,
+                limits.clone(),
             )
             .await?;
         let identity = provider.identity();
         let provider_outcome = ProviderTraceOutcome::from(&status);
         provider_trace.finish_with_usage(provider_outcome, usage.input_tokens, usage.output_tokens);
-        let record = compaction_record(
+        let mut record = compaction_record(
             CompactionSource {
                 covered_run_id,
                 covered_sequence,
@@ -187,6 +189,7 @@ impl Engine {
             usage,
             wire_provenance,
         );
+        record.rate_limits = limits.take();
         let committed = self
             .journal
             .append(
@@ -343,6 +346,7 @@ impl Engine {
         provider: std::sync::Arc<dyn crate::provider::Provider>,
         request: CompactionRequest,
         provider_deadline: Duration,
+        limits: crate::provider::RateLimitSlot,
     ) -> Result<
         (
             CompactionStatus,
@@ -369,6 +373,7 @@ impl Engine {
                         *actor,
                         tokio::time::Instant::now() + provider_deadline,
                         crate::RunCancellation::new(),
+                        limits,
                     )
                     .await?
                     .ok_or(EngineError::CoordinatorFailed)?;
@@ -377,9 +382,12 @@ impl Engine {
                 (status, response_id, usage, wire_provenance, provider)
             }
             None => {
-                let response = tokio::time::timeout(provider_deadline, provider.compact(request))
-                    .await
-                    .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
+                let response = tokio::time::timeout(
+                    provider_deadline,
+                    provider.compact_observed(request, limits),
+                )
+                .await
+                .unwrap_or(Err(crate::provider::ProviderError::CallTimedOut));
                 let (status, response_id, usage, wire_provenance) =
                     compaction_outcome(response, provider.identity().limits.output_token_bound);
                 (
@@ -470,6 +478,7 @@ fn compaction_record(
         source_bytes,
     } = source;
     CompactionRecord {
+        rate_limits: None,
         covered_run_id,
         covered_sequence,
         source_digest,

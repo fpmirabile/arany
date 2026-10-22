@@ -1459,6 +1459,7 @@ mod tests {
             arany::ProviderIdentity::new("openai", model, arany::Provenance::native())
         };
         let switch = arany::ProviderFallback {
+            rate_limits: None,
             role: arany::ProviderRole::Compaction,
             call_index: 0,
             failure: arany::ProviderCallDisposition::Unavailable,
@@ -1479,6 +1480,7 @@ mod tests {
         let summary = "\u{1b}[31muntrusted summary";
         let summary_bytes = summary.len() as u32;
         let mut record = CompactionRecord {
+            rate_limits: None,
             covered_run_id: arany::RunId::new(),
             covered_sequence: 1,
             source_digest: [0; 32],

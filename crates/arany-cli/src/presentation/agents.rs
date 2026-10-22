@@ -845,6 +845,7 @@ pub(crate) mod tests {
             (Some(u32::MAX), Some(u32::MAX)),
         ] {
             let first = arany::ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: arany::AgentPhase::RootPlan,
                 disposition: arany::ProviderCallDisposition::Delegated,

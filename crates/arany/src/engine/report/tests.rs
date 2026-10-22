@@ -148,6 +148,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 (
                     AgentRunId::new(),
                     crate::provider::ProviderFallback {
+                        rate_limits: None,
                         role: crate::provider::ProviderRole::Child,
                         call_index: 0,
                         failure: crate::session::ProviderCallDisposition::Unavailable,

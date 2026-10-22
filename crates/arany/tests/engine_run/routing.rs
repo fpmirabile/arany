@@ -510,6 +510,11 @@ async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted
         .with_chatgpt_account(account, [1; 32])
         .with_before_call(0, tokio::time::pause);
     first.responses = unavailable_attempts(1);
+    first
+        .rate_limits
+        .get_mut()
+        .unwrap()
+        .extend((0..=MAX_PROVIDER_RETRIES).map(|index| Some(plan_sample(1000 + i64::from(index)))));
     let first = route(first);
     let second = route(
         ScriptedProvider::new(vec![finish("fallback answer")])
@@ -527,6 +532,15 @@ async fn tool_enabled_fallback_between_models_of_one_chatgpt_account_is_admitted
     engine.close().await.unwrap();
     let (_, view) = reopen(&state, result.session_id).await;
     assert_eq!(view.runs[0].provider_fallbacks.len(), 1);
+    assert_eq!(
+        view.runs[0].provider_fallbacks[0].1.rate_limits,
+        Some(plan_sample(1003))
+    );
+    assert!(
+        view.runs[0].agents[0].provider_calls[0]
+            .rate_limits
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -1614,6 +1628,7 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
                 .map(|(&(cause, delay_ms), attempt)| (
                     primary_id,
                     ProviderRetry {
+                        rate_limits: None,
                         role: ProviderRole::Primary,
                         call_index: 0,
                         attempt,
@@ -1683,13 +1698,18 @@ async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_fur
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
         let state = temp.path().join("state");
-        let mut primary =
-            ScriptedProvider::new(vec![finish("never")]).with_profile("scripted", "primary");
+        let mut primary = ScriptedProvider::new(vec![finish("never")])
+            .with_chatgpt_account(Uuid::now_v7(), [1; 32]);
         primary
             .responses
             .get_mut()
             .unwrap()
             .push_front(Err(ProviderError::RemoteHttp(503)));
+        primary
+            .rate_limits
+            .get_mut()
+            .unwrap()
+            .push_back(Some(plan_sample(1000)));
         let primary = route(primary);
         let engine = open(&state);
         let session = engine
@@ -1732,6 +1752,17 @@ async fn lost_retry_acknowledgement_and_cancellation_in_the_backoff_start_no_fur
         let (events, view) = reopen(&state, session).await;
         let run = &view.runs[0];
         assert_eq!(run.provider_retries.len(), 1, "lost {lost}");
+        assert_eq!(
+            run.provider_retries[0].1.rate_limits,
+            Some(plan_sample(1000))
+        );
+        assert!(
+            run.agents[0]
+                .provider_calls
+                .iter()
+                .all(|call| call.rate_limits.is_none()),
+            "retry drain cannot duplicate a sample"
+        );
         assert_eq!(
             events
                 .iter()
@@ -1918,4 +1949,187 @@ async fn a_single_route_boundary_compaction_retries_a_transient_failure_then_sav
         [(ProviderRole::Compaction, 1, arany::RetryCause::ServerError)]
     );
     assert_eq!(compaction.compact_requests.lock().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn plan_observations_settle_each_attempt_and_replay_without_dispatch_or_backfill() {
+    for cancelled in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = temp.path().join("state");
+        let cancellation = RunCancellation::new();
+        let mut primary = ScriptedProvider::new(vec![finish("done")])
+            .with_chatgpt_account(Uuid::now_v7(), [1; 32]);
+        primary
+            .rate_limits
+            .get_mut()
+            .unwrap()
+            .extend([Some(plan_sample(1000)), Some(plan_sample(900))]);
+        if cancelled {
+            primary.cancel_at_completion = Some((AgentPhase::RootPlan, cancellation.clone()));
+        } else {
+            primary
+                .responses
+                .get_mut()
+                .unwrap()
+                .push_front(Err(ProviderError::RateLimited(None)));
+            primary
+                .compact_responses
+                .get_mut()
+                .unwrap()
+                .push_back(Err(ProviderError::InvalidOutcome));
+            primary
+                .compact_rate_limits
+                .get_mut()
+                .unwrap()
+                .push_back(Some(plan_sample(1100)));
+        }
+        let primary = route(primary);
+        let engine = open(&state);
+        let session = engine
+            .create_session(workspace.clone(), Some("Plan observations".into()))
+            .await
+            .unwrap();
+        arany::FaultPlan::skip_retry_backoff(session);
+        let mut request = input(&workspace);
+        request.session_id = Some(session);
+        request.title = None;
+        let result = run_routed(
+            &engine,
+            routes(&primary),
+            request,
+            RunControls {
+                cancellation,
+                ..RunControls::default()
+            },
+        )
+        .await
+        .unwrap();
+        if !cancelled {
+            let record = engine
+                .compact_session(&routes(&primary), session, workspace.clone())
+                .await
+                .unwrap();
+            assert_eq!(record.rate_limits, Some(plan_sample(1100)));
+        }
+        let fork = engine
+            .fork_session(
+                session,
+                workspace.clone(),
+                Some("Inherited observations".into()),
+            )
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        let (events, view) = reopen(&state, session).await;
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let fork_view = store.load_view(fork).await.unwrap();
+        let inherited = store.load_session(session).await.unwrap();
+        assert_eq!(fork_view.unwrap().usage.plan_limits, view.usage.plan_limits);
+        for original in &events {
+            let copy = inherited
+                .iter()
+                .find(|e| e.session_id == original.session_id && e.sequence == original.sequence)
+                .unwrap();
+            assert_eq!(
+                copy.event.payload().unwrap(),
+                original.event.payload().unwrap()
+            );
+        }
+        store.close().await.unwrap();
+        let calls = &view.runs[0].agents[0].provider_calls;
+        assert_eq!(
+            calls[0].rate_limits,
+            Some(plan_sample(if cancelled { 1000 } else { 900 }))
+        );
+        if !cancelled {
+            assert_eq!(
+                view.runs[0].provider_retries[0].1.rate_limits,
+                Some(plan_sample(1000))
+            );
+        }
+        if !cancelled {
+            let before_compaction = events
+                .iter()
+                .position(|event| matches!(event.event, Event::ContextCompacted { .. }))
+                .unwrap();
+            let prefix = &events[..before_compaction];
+            let ordered = SessionView::replay(session, prefix).unwrap().unwrap();
+            assert_eq!(
+                ordered.usage.plan_limits[0]
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .observed_at,
+                1000,
+                "a later settlement with an older receipt cannot overwrite the newer receipt"
+            );
+            let mut tied = prefix.to_vec();
+            let record = tied
+                .iter_mut()
+                .find_map(|event| match &mut event.event {
+                    Event::ProviderCallRecorded { record, .. } => Some(record),
+                    _ => None,
+                })
+                .unwrap();
+            let window = record
+                .rate_limits
+                .as_mut()
+                .unwrap()
+                .primary
+                .as_mut()
+                .unwrap();
+            window.observed_at = 1000;
+            window.used_percent = Some(arany::UsedPercent::try_from(50.0).unwrap());
+            assert_eq!(
+                SessionView::replay(session, &tied)
+                    .unwrap()
+                    .unwrap()
+                    .usage
+                    .plan_limits[0]
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .used_percent
+                    .map(f64::from),
+                Some(50.0),
+                "committed sequence breaks a receipt-time tie"
+            );
+        }
+        let group = &view.usage.plan_limits[0];
+        assert_eq!(
+            group.primary.as_ref().unwrap().observed_at,
+            if cancelled { 1000 } else { 1100 }
+        );
+        assert_eq!(
+            SessionView::replay(session, &events)
+                .unwrap()
+                .unwrap()
+                .usage,
+            view.usage
+        );
+        assert_eq!(
+            primary.requests.lock().unwrap().len(),
+            if cancelled { 1 } else { 2 }
+        );
+        assert_eq!(result.run.status == RunStatus::Cancelled, cancelled);
+        let mut forged = events.clone();
+        let record = forged
+            .iter_mut()
+            .find_map(|e| match &mut e.event {
+                Event::ProviderCallRecorded { record, .. } => Some(record),
+                _ => None,
+            })
+            .unwrap();
+        record
+            .rate_limits
+            .as_mut()
+            .unwrap()
+            .primary
+            .as_mut()
+            .unwrap()
+            .window_minutes = Some(0);
+        assert!(SessionView::replay(session, &forged).is_err());
+    }
 }

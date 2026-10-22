@@ -63,7 +63,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Persistent worker assignment views](./worker-assignment-views/README.md) | Future C3 assignment-long Guard views, read-only assignment-time cache and MCP invocation exclusion; admission gate remains |
 | [Goal RPI](./goal-rpi/README.md) | Proposed durable phases, plan gate, bounded grilling, phase context and explicit headless RPI |
 | [Goal activity presentation](./goal-progress/README.md) | Proposed bounded agent notes and Goal activity/usage/question views |
-| [Terminal usage view](./usage-view/README.md) | `In progress`: U1 implemented; next U2 passive ChatGPT plan windows, then U3 API/custom rate limits |
+| [Terminal usage view](./usage-view/README.md) | `In progress`: U1 and U2 implemented; next U3 API/custom rate limits |
 | [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |

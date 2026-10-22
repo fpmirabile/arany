@@ -882,6 +882,7 @@ mod tests {
                     | ProviderCallDisposition::InvalidResponse
             );
             ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: arany::AgentPhase::RootPlan,
                 disposition,

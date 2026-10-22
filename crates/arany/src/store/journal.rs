@@ -127,7 +127,9 @@ fn admit_in_transaction(
     let observations =
         i64::try_from(tool_observations.min(event_slots)).map_err(|_| StoreError::ReplayLimit)?;
     let event_bytes = slots
-        * (super::MAX_EVENT_BYTES as i64 + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
+        * (super::MAX_EVENT_BYTES as i64
+            + crate::provider::MAX_RATE_LIMIT_BYTES as i64
+            + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
         + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64;
     let run_start_extra = if run_start {
         super::RUN_START_EXTRA_BYTES as i64
