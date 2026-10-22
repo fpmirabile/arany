@@ -2433,7 +2433,12 @@ impl AttachedTerminal {
             panel.rows = lines.len();
             let page = panel.page;
             let pages = panel.pages.len();
-            self.draw_dialog(Some(session), 20, |frame, area| {
+            let height = if self.mode == TerminalMode::Classic {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(u16::MAX)
+            } else {
+                20
+            };
+            self.draw_dialog(Some(session), height, |frame, area| {
                 view::draw_usage_frame(
                     frame,
                     area,
