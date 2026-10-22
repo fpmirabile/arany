@@ -145,7 +145,7 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let mut threads = 0usize;
+    let (mut threads, mut verified) = (0usize, 0usize);
     for entry in
         std::fs::read_dir("/proc/self/task").map_err(|_| ToolError::ProtectionUnavailable)?
     {
@@ -159,9 +159,11 @@ pub(super) fn harden() -> Result<(), ToolError> {
             .join("status");
         if let Some(status) = thread_status(&path)? {
             verify_hardened_status(&status)?;
+            verified += 1;
         }
     }
-    if threads == 0 {
+    // The calling thread is alive, so at least its own status must verify.
+    if verified == 0 {
         return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
