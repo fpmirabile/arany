@@ -3335,6 +3335,8 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         store.close().await.expect("close interrupted Store");
 
         std::fs::remove_file(&pinned_include).expect("remove the originally admitted input");
+        // Reading the replacement must fail locally with a different error, before Provider dispatch.
+        std::fs::write(workspace.join("missing.txt"), [0xff]).expect("unrecorded include");
         let released = contender(Some(goal_id));
         assert!(!released.status.success());
         assert_eq!(released.stdout, b"");
