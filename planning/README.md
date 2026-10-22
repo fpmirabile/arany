@@ -30,6 +30,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Status
 
 - `Draft`
+- `Ready` (Plan gate passed; implementation may depend on a linked slice)
 - `In progress`
 - `Blocked`
 - `Done`
@@ -44,7 +45,8 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Three slices: omit ignored and oversized inputs, larger bounded repositories, larger bounded changesets; owner gate pending |
+| [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Draft: three command slices; exact parser dependency awaits owner approval; placement decided with implementation gates |
+| [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Draft: typed discovery/suggestions, then Git disclosure; shares parser approval and explicitly depends on snapshot PR1 (selector and enforced preparation) |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
