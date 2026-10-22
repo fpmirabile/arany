@@ -1149,8 +1149,13 @@ impl RunLoop<'_> {
             guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
             interactive: self.controls.approvals.is_some(),
         };
-        let remember_prefix =
-            remember_candidate(grant, config.is_some(), permission, &hooks, &intent.call);
+        let remember_prefix = remember_candidate(
+            grant,
+            config.map(|config| config.mode()),
+            permission,
+            &hooks,
+            &intent.call,
+        );
         let approval = match facts.ask() {
             Some(mode) => Some(
                 Box::pin(self.ask(
@@ -2241,15 +2246,20 @@ struct AfterAsk {
     deadline_reached: bool,
 }
 
+// A typed allow takes effect only in `default`; the other modes ignore it or never ask.
+fn typed_allow_takes_effect(mode: Option<crate::tools::permissions::PermissionMode>) -> bool {
+    mode == Some(crate::tools::permissions::PermissionMode::Default)
+}
+
 fn remember_candidate(
     grant: &Grant<'_>,
-    configured: bool,
+    mode: Option<crate::tools::permissions::PermissionMode>,
     permission: Permission,
     hooks: &HookFold,
     call: &ToolCall,
 ) -> Option<crate::tools::permissions::TypedGitPrefix> {
     (matches!(grant, Grant::Primary { .. })
-        && configured
+        && typed_allow_takes_effect(mode)
         && permission.decision == Decision::Ask
         && permission.basis == PermissionSource::Mode
         && hooks.restriction.is_none())
@@ -3143,6 +3153,21 @@ mod tests {
         ] {
             let [paused, cancelled, deadline] = flags;
             assert_eq!(refusal_cause(paused, cancelled, deadline), expected);
+        }
+    }
+
+    #[test]
+    fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
+        use crate::tools::permissions::PermissionMode as M;
+        assert!(typed_allow_takes_effect(Some(M::Default)));
+        for mode in [
+            None,
+            Some(M::AcceptEdits),
+            Some(M::Plan),
+            Some(M::Auto),
+            Some(M::DontAsk),
+        ] {
+            assert!(!typed_allow_takes_effect(mode), "{mode:?}");
         }
     }
 

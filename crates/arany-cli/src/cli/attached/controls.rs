@@ -389,41 +389,53 @@ fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
     Ok(record.preferences)
 }
 
-const SETTINGS_UNCONFIRMED: &str = "settings change not confirmed; check /settings";
+#[derive(Debug, Eq, PartialEq)]
+enum SaveError {
+    Unconfirmed,
+    Failed(&'static str),
+}
 
-fn save_failure_notice(error: &str) -> String {
-    if error == SETTINGS_UNCONFIRMED {
-        format!("Error: {error}")
-    } else {
-        format!("Error: {error}; current settings kept")
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unconfirmed => "settings change not confirmed; check /settings",
+            Self::Failed(message) => message,
+        })
     }
 }
 
-async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
+fn save_failure_notice(error: &SaveError) -> String {
+    match error {
+        SaveError::Unconfirmed => format!("Error: {error}"),
+        SaveError::Failed(_) => format!("Error: {error}; current settings kept"),
+    }
+}
+
+async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), SaveError> {
     if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
-        return Err("invalid settings".into());
+        return Err(SaveError::Failed("invalid settings"));
     }
     let path = admission.state_dir.clone();
     let workspace = admission.workspace.clone();
     tokio::task::spawn_blocking(move || {
-        let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
+        let root = StateRoot::admit(&path)
+            .map_err(|_| SaveError::Failed("display settings unavailable or unsafe"))?;
         let record = serde_json::to_vec(&UiPreferences {
             version: UI_PREFERENCES_VERSION,
             preferences,
         })
-        .map_err(|_| "display settings unavailable")?;
+        .map_err(|_| SaveError::Failed("display settings unavailable"))?;
         root.with_account_replacement_lock(&workspace, || {
             root.record(RecordKind::UiPreferences).replace(&record)
         })
-        .map_err(|_| "display settings busy or unsafe")?
+        .map_err(|_| SaveError::Failed("display settings busy or unsafe"))?
         .map_err(|error| match error {
-            arany::StoreError::ReplaceUnconfirmed => SETTINGS_UNCONFIRMED,
-            _ => "could not save display settings",
+            arany::StoreError::ReplaceUnconfirmed => SaveError::Unconfirmed,
+            _ => SaveError::Failed("could not save display settings"),
         })
     })
     .await
-    .map_err(|_| "display settings unavailable".to_owned())?
-    .map_err(str::to_owned)
+    .map_err(|_| SaveError::Failed("display settings unavailable"))?
 }
 
 async fn choose_settings(
@@ -1928,10 +1940,10 @@ mod tests {
         let unconfirmed = save_settings(&admission, Preferences::default())
             .await
             .unwrap_err();
-        assert_eq!(unconfirmed, SETTINGS_UNCONFIRMED);
+        assert_eq!(unconfirmed, SaveError::Unconfirmed);
         assert!(!save_failure_notice(&unconfirmed).contains("kept"));
         assert!(
-            save_failure_notice("could not save display settings")
+            save_failure_notice(&SaveError::Failed("could not save display settings"))
                 .ends_with("current settings kept")
         );
     }
