@@ -15,6 +15,8 @@ pub(super) use archive::{
 };
 mod build_cache;
 pub(crate) mod checkpoints;
+#[cfg(unix)]
+mod inventory;
 mod lock;
 #[cfg(test)]
 pub(crate) use build_cache::capture_archive;
@@ -26,6 +28,11 @@ pub(crate) use build_cache::{
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
+#[cfg(unix)]
+pub use inventory::{
+    StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
+    collect_storage,
+};
 pub(crate) use lock::{HistoryLock, SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [

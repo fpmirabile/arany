@@ -300,7 +300,26 @@ owns methodology; [next steps](../../NEXT_STEPS.md#daily-use-first) owns the rem
 named-host evidence and provisional objectives. This does not claim macOS, cold
 disk, long-history, large-snapshot or live Provider latency support.
 
-### D-24 — Selected Rust and honest Guard-only test omissions
+### D-24 — User-local known-owner storage metadata
+
+The 2026-10-22 lead default permits explicit local aggregated private-storage
+metadata, including secret-containing files only in category totals. Ownership
+comes from existing directory admission and storage owners, not ambient search
+or filename prefixes. This avoids opening malformed history or credentials just
+to explain disk usage. The report is not model authority or a Tool disclosure.
+
+OpenCode's [known-path uninstall preview](https://github.com/anomalyco/opencode/blob/b42c31613fdcbd220e859bea357fea48260a6c7a/packages/cli/src/commands/handlers/uninstall.ts#L23)
+supplies the explicit-coverage inspection precedent. The inspected
+[Codex command inventory](https://github.com/openai/codex/blob/61f34c35af77777db4d77d0ea2aeb8547a6b4523/codex-rs/cli/src/main.rs#L149-L250)
+and [OpenCode stats](https://github.com/anomalyco/opencode/blob/b42c31613fdcbd220e859bea357fea48260a6c7a/packages/cli/src/commands/handlers/stats.ts#L95)
+establish no shared disk-report schema; Arany uses existing local text conventions.
+No cleanup implementation or public JSON protocol is justified. Allocation is
+separate from logical size and reclaimability because filesystem sharing and
+sparse backing make those quantities different. The
+[Tool contract](../specs/tools.md#local-storage-inventory) owns accepted behavior;
+the [remaining plan](../../planning/arany-storage/README.md) owns Guard expansion.
+
+### D-25 — Selected Rust and honest Guard-only test omissions
 
 The owner accepted selected offline Rust defaults and conditional IPC omissions on 2026-10-22. Reuse the existing command environment, exact runtime/cache selections and cache transaction; a Cargo-specific executor or wider home mount is unnecessary. [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags) gives encoded Rust flags precedence; [Cargo fingerprints](https://github.com/rust-lang/cargo/blob/cf29d0e0b1f7b03c4ceda5211cc4dc493bfc542e/src/compiler/fingerprint/mod.rs#L1110) include those flags in compilation identity. The fixed marker makes omissions follow the compiled environment while native enforcement remains independent.
 
