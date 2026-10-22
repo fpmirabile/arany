@@ -90,7 +90,7 @@ fn enum_label(value: Option<&str>, allowed: &[&'static str]) -> &'static str {
 }
 
 fn cache_public_failure_stage(output: &str) -> &'static str {
-    match output {
+    match output.split(" Cause:").next().unwrap_or(output) {
         "Guard admission unavailable before dispatch; no operation was dispatched." => "admission",
         "Guard pinned input unavailable before dispatch; no operation was dispatched." => {
             "pinned-input"

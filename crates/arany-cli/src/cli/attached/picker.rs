@@ -26,7 +26,8 @@ pub(super) async fn pick_quick_action(
         0 => Selector::Models,
         1 => Selector::Agents,
         2 => Selector::Resume,
-        _ => Selector::Setup,
+        3 => Selector::Setup,
+        _ => Selector::Usage,
     };
     let mut selected = if view.defaults.provider.is_none() {
         3
@@ -49,14 +50,14 @@ pub(super) async fn pick_quick_action(
             .next_input()
             .await
             .map_err(|error| error.to_string())?;
-        if let Some(index) = input.choice_index(4) {
+        if let Some(index) = input.choice_index(5) {
             return Ok(QuickChoice::Selected(action(index)));
         }
         match input {
             TerminalInput::Up => selected = selected.saturating_sub(1),
-            TerminalInput::Down => selected = (selected + 1).min(3),
+            TerminalInput::Down => selected = (selected + 1).min(4),
             TerminalInput::Home => selected = 0,
-            TerminalInput::End => selected = 3,
+            TerminalInput::End => selected = 4,
             TerminalInput::Submit => return Ok(QuickChoice::Selected(action(selected))),
             TerminalInput::Suspend => terminal
                 .suspend_and_resume(composer.input_capacity())

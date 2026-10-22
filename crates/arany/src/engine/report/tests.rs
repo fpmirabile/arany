@@ -205,6 +205,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         budget_closed: false,
     };
     let view = crate::session::SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: session_id,
         title: "Report bounded evidence".into(),
@@ -788,6 +789,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         active_ceiling_ms: 0,
     };
     let view = crate::session::SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: SessionId::new(),
         title: "Report".into(),

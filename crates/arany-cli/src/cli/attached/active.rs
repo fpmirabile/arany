@@ -986,6 +986,16 @@ pub(super) async fn submit_objective(
                                 }
                                 None
                             }
+                            ActiveSubmission::OpenUsage { status } => {
+                                if terminal
+                                    .open_usage(view, status, Some(starting_sequence))
+                                    .await
+                                    .is_err()
+                                {
+                                    break "terminal rendering failed".to_owned();
+                                }
+                                None
+                            }
                             ActiveSubmission::OpenHelp => {
                                 if terminal.open_help(view).await.is_err() {
                                     break "terminal rendering failed".to_owned();

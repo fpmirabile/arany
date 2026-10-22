@@ -252,6 +252,24 @@ impl LinearState {
         writer.flush()
     }
 
+    pub(super) fn write_usage(
+        &mut self,
+        writer: &mut impl Write,
+        pages: &[String],
+    ) -> io::Result<()> {
+        if self.newline_pending || self.line_open {
+            writeln!(writer)?;
+        }
+        self.newline_pending = false;
+        self.line_open = false;
+        for (index, page) in pages.iter().enumerate() {
+            writeln!(writer, "Usage page {} of {}", index + 1, pages.len())?;
+            write!(writer, "{page}")?;
+        }
+        self.prompt_needed = true;
+        Ok(())
+    }
+
     pub(super) fn write_help(&mut self, writer: &mut impl Write) -> io::Result<()> {
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
@@ -1151,6 +1169,7 @@ mod tests {
     #[test]
     fn linear_presentation_is_labeled_append_only_and_control_free() {
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "bad\u{1b}[31m\nSession: forged".into(),
@@ -1290,7 +1309,8 @@ mod tests {
                 "Command: /setup; Set up an account; during Run: locked\n",
                 "Command: /paste; Paste clipboard into draft; during Run: view-only\n",
                 "Command: /copy; Copy the latest answer to the clipboard; during Run: locked\n",
-                "Command: /status; Session status; during Run: available\n",
+                "Command: /usage; Reported token usage; during Run: available\n",
+                "Command: /status; Session status and usage; during Run: available\n",
                 "Command: /new; New Session; during Run: locked\n",
                 "Command: /clear; New Session; during Run: locked\n",
                 "Command: /rewind; Restore code, conversation or both; compare changes; during Run: locked\n",
@@ -1742,5 +1762,92 @@ mod tests {
             .expect("hostile profile label");
         assert!(String::from_utf8_lossy(&hostile).contains("Models: bad\\u{001b}[31m"));
         assert!(!hostile.contains(&0x1b));
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use arany::{TokenCount, UsageGroup};
+
+    #[test]
+    fn usage_report_pages_keep_scopes_unknowns_and_complete_linear_text() {
+        let mut view = crate::presentation::team_view();
+        view.defaults.provider = Some("chatgpt".into());
+        let run_id = view.runs.last().unwrap().id;
+        let known = |value| TokenCount {
+            known: Some(value),
+            unreported: 0,
+        };
+        for index in 0..20 {
+            view.usage.groups.push(UsageGroup {
+                session_id: view.id,
+                run_id,
+                provider: if index == 0 {
+                    "chatgpt".into()
+                } else {
+                    format!("custom:route-{index:02}")
+                },
+                model: format!("model-{index:02}\u{1b}[31m"),
+                input: known(12_340),
+                output: TokenCount {
+                    known: Some(8),
+                    unreported: 1,
+                },
+                cache_read: known(0),
+                cache_creation: TokenCount {
+                    known: None,
+                    unreported: 1,
+                },
+            });
+        }
+        let inherited = arany::SessionId::new();
+        let mut group = view.usage.groups[0].clone();
+        group.session_id = inherited;
+        group.input = known(999);
+        view.usage.groups.push(group);
+        view.usage.pending.push((view.id, run_id, None));
+        let pages = crate::presentation::usage::usage_pages(&view, true, None);
+        assert!(pages.len() > 2);
+        for page in &pages {
+            assert!(page.len() <= crate::presentation::usage::MAX_USAGE_PAGE_BYTES);
+            assert!(page.matches("Provider: ").count() <= 16);
+            assert!(page.contains("totals incomplete"));
+            assert_eq!(page.matches("Groups ").count(), 1);
+        }
+        let mut linear = LinearState::new("screen-reader");
+        linear.line_open = true;
+        let mut bytes = Vec::new();
+        linear.write_usage(&mut bytes, &pages).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let mut expected = String::from("\n");
+        for (index, page) in pages.iter().enumerate() {
+            use std::fmt::Write;
+            writeln!(expected, "Usage page {} of {}", index + 1, pages.len()).unwrap();
+            expected.push_str(page);
+        }
+        assert_eq!(text, expected);
+        assert!(text.contains("Output: 8 known; some calls unreported"));
+        assert!(text.contains("Cache read (included in input): 0 known; some calls unreported"));
+        assert!(text.contains("Cache write (included in input): unknown (not reported)"));
+        assert!(text.contains("ChatGPT weekly: unknown (not reported)"));
+        assert_eq!(
+            text.matches("ChatGPT weekly: unknown (not reported)")
+                .count(),
+            text.matches("Provider: chatgpt\n").count()
+        );
+        assert!(!text.contains("5-hour"));
+        assert!(text.contains("Session totals\nProvider: chatgpt\nModel: model-00\\u{001b}[31m\nInput: 12,340 known; some calls unreported"));
+        assert!(text.contains("Inherited history (excluded from Session totals)\nProvider: chatgpt\nModel: model-00\\u{001b}[31m\nInput: 999\n"));
+        assert!(!text.contains(['\r', '\u{1b}']));
+        assert!(linear.prompt_needed);
+        view.usage.groups.truncate(1);
+        view.usage.pending.clear();
+        let pages = crate::presentation::usage::usage_pages(&view, false, None);
+        assert_eq!(pages.len(), 1);
+        assert!(!pages[0].contains("Groups "));
+        view.usage.groups.clear();
+        let pages = crate::presentation::usage::usage_pages(&view, false, None);
+        assert_eq!(pages[0].matches("ChatGPT weekly:").count(), 1);
     }
 }

@@ -70,6 +70,26 @@ async fn role_selection_pins_primary_child_and_compaction_and_rejects_inconsiste
         assert_eq!(record.model, "compact-model");
         engine.close().await.unwrap();
         let (events, view) = reopen(&state, result.session_id).await;
+        let mut models: Vec<_> = view
+            .usage
+            .groups
+            .iter()
+            .map(|group| group.model.as_str())
+            .collect();
+        models.sort_unstable();
+        assert_eq!(models, ["child-model", "compact-model", "primary-model"]);
+        assert!(view.usage.pending.is_empty());
+        assert_eq!(
+            view.usage
+                .groups
+                .iter()
+                .find(|group| group.model == "compact-model")
+                .unwrap()
+                .input
+                .unreported,
+            1
+        );
+
         assert_eq!(
             view.runs[0]
                 .config
@@ -1615,6 +1635,14 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         assert_eq!(primary.requests.lock().unwrap().len(), dispatched, "{case}");
         assert_eq!(view.goals[0].provider_calls as usize, dispatched, "{case}");
         assert_eq!(run.agents[0].provider_calls.len(), 1, "{case}");
+        let usage = &view.usage.groups[0];
+        assert_eq!(usage.input.unreported as usize, retries.len() + 1);
+        assert_eq!(
+            usage.output.unreported as usize,
+            retries.len() + usize::from(!success)
+        );
+        assert!(view.usage.pending.is_empty());
+
         if success {
             assert_eq!(result.run.status, RunStatus::Finished, "{case}");
             assert!(view.goals[0].token_usage_unknown);
