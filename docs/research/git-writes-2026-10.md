@@ -26,8 +26,9 @@ The shared usability pattern is remembered command authorization with restrictiv
 [Typed Git writes](../specs/tools.md#typed-git-writes) own local publication;
 [execution migration](../specs/execution.md#journal-migration) owns format changes.
 The [migration module](../../crates/arany/src/store/migrate.rs) is present.
-The active plan owns remaining host-write and prefix-authorization decisions;
-the source-check date above applies to peer evidence, not an implementation
+The Tools specification owns accepted [typed prefix rules](../specs/tools.md#typed-prefix-rules);
+the active plan owns remaining host-write and future, unaccepted decisions.
+The source-check date above applies to peer evidence, not an implementation
 snapshot.
 
 ## Git and GitHub configuration risks

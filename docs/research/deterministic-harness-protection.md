@@ -150,7 +150,7 @@ Source baseline: 2026-10-04; source inspection is not native containment evidenc
   Denying `ptrace` alone does not deny [`/proc/pid/mem`](https://man7.org/linux/man-pages/man5/proc_pid_mem.5.html);
   supervisor dumpability is a separate boundary.
 
-Native Windows, plugin VMs and multi-tenant backends are outside the current
+Native Windows is outside the current
 [D-17 platform decision](./next-step-decision-register.md#d-17--product-identity-platforms-and-license).
 
 ## 5. Lessons from the reviewed Codex and Claude Code behavior

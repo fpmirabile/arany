@@ -9,9 +9,12 @@ Source baseline: 2026-10-04. The initial review used primary sources without lau
 The 2026-10-04 review compared [2026-07-28 versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning)
 and [discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)
 with the [2025-11-25 lifecycle](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle).
-It found per-request version/capabilities and discovery replacing the legacy
-initialization handshake. This dated observation is not a fresh claim about the
-latest standard. Any upgrade needs an explicit lifecycle/transport review;
+Modern requests carry version/capabilities without `initialize`; modern servers
+implement `server/discover`, which clients may call before other requests.
+Legacy peers retain `initialize`. Dual-era clients use transport-specific
+fallback: stdio probes discovery before falling back on non-modern errors or a
+timeout; HTTP uses its version/error responses. These are dated observations,
+not a claim about the latest standard. Any upgrade needs a lifecycle/transport review;
 [local MCP](../specs/tools.md#local-mcp) owns Arany's admitted generation.
 
 The [Agent Skills format](https://agentskills.io/specification) review on the

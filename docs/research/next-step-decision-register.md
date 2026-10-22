@@ -198,12 +198,8 @@ The macOS resource supervisor uses physical footprint because resident size
 alone can miss compressed or swapped memory. Signature verdict reuse is bound
 to executable stamps within one process; it does not cache authority across
 processes. The [Tool contract](../specs/tools.md) owns enforcement and bounds.
-Fixture capture on 2026-10-13: an over-limit payload stayed below the 512 MiB
-resident-size threshold under memory pressure and reached its 30-second
-deadline, and the per-Run Security signature scan cost about 1.3 seconds (up
-to 5 seconds under parallel load); after both fixes the case completed in about
-4 seconds across three `arany_ci` suites. A recurrence is a new defect: capture
-its stages through the fixture before changing budgets.
+A recurrence of the macOS stopped-command timeout is a new defect: capture its
+stages through the fixture before changing budgets.
 
 ### D-16 — Evidence-dense testing
 
