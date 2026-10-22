@@ -6,9 +6,9 @@ use super::super::types::{
     ToolCall, hex_digest, valid_relative,
 };
 use super::{
-    CAPTURE_BYTES, Captured, MAX_GIT_RUNTIME, Repository, VIEW, environment, failure, inspect,
-    object_id, owned, pathspecs_of, read_optional, records, valid_branch, verify_pin,
-    write_view_base,
+    CAPTURE_BYTES, Captured, MAX_GIT_RUNTIME, REF_BYTES, Repository, VIEW, environment, failure,
+    inspect, object_id, owned, pathspecs_of, read_optional, records, resolve, valid_branch,
+    verify_pin, write_view_base,
 };
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
@@ -21,7 +21,6 @@ use std::time::Duration;
 // Git never writes an alternate, so nothing reaches the real `.git` before publication.
 const WRITE_CONFIG: &[u8] = b"[core]\n\trepositoryformatversion = 0\n\tbare = false\n\tfsmonitor = false\n\thooksPath = /dev/null\n\tuntrackedCache = false\n\tlogAllRefUpdates = false\n[commit]\n\tgpgSign = false\n[gc]\n\tauto = 0\n[maintenance]\n\tauto = false\n";
 const MAX_REF_ENTRIES: usize = 4096;
-const REF_BYTES: usize = 1024;
 const MAX_OBJECTS: usize = 4096;
 const MAX_LISTED_CONFLICTS: usize = 10;
 // Room for the largest result and receipt; checked before any effect so the receipt always fits.
@@ -236,6 +235,7 @@ pub(super) async fn execute(
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
+            ..
         } => branch(&git, &repository, &snapshot, name, start_point.as_deref()).await?,
         ToolCall::GitSwitch { branch } => switch(&git, &repository, branch).await?,
         _ => return Err(ToolError::Configuration),
@@ -897,40 +897,6 @@ fn new_objects(view: &Dir, index_bytes: usize) -> Result<Vec<String>, ToolError>
     }
     names.sort();
     Ok(names)
-}
-
-// A branch's object name, from its loose file or else `packed-refs`, never following links.
-fn resolve(git_dir: &Dir, name: &str) -> Result<Option<String>, ToolError> {
-    let (parent, leaf) = name.rsplit_once('/').ok_or(ToolError::Operation)?;
-    let mut directory = git_dir.try_clone().map_err(|_| ToolError::Operation)?;
-    let mut loose = true;
-    for part in parent.split('/') {
-        match directory.open_dir_nofollow(part) {
-            Ok(next) => directory = next,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                loose = false;
-                break;
-            }
-            Err(_) => return Err(ToolError::Path),
-        }
-    }
-    if loose && let Some(bytes) = read_optional(&directory, leaf, REF_BYTES)? {
-        let oid = bytes.strip_suffix(b"\n").unwrap_or(&bytes);
-        return object_id(oid).map(|oid| Some(oid.to_owned()));
-    }
-    let Some(packed) = read_optional(git_dir, "packed-refs", MAX_SNAPSHOT_BYTES)? else {
-        return Ok(None);
-    };
-    for line in packed.split(|byte| *byte == b'\n') {
-        if let Some((oid, reference)) = std::str::from_utf8(line)
-            .ok()
-            .and_then(|line| line.split_once(' '))
-            && reference == name
-        {
-            return object_id(oid.as_bytes()).map(|oid| Some(oid.to_owned()));
-        }
-    }
-    Ok(None)
 }
 
 // A Git-compatible `<path>.lock`: exclusive creation, removed unless committed by rename.

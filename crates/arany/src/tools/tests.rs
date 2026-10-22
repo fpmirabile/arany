@@ -1422,7 +1422,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 12);
+    assert_eq!(rows.len(), 13);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))
@@ -2188,6 +2188,58 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
     for call in &invalid {
         assert!(!call.valid(), "{call:?}");
     }
+    let legacy = r#"{"operation":"git_branch","name":null,"start_point":null}"#;
+    let call: ToolCall = serde_json::from_str(legacy).unwrap();
+    assert!(call.valid());
+    assert_eq!(serde_json::to_string(&call).unwrap(), legacy);
+    let model = model_call(&call);
+    for field in ["scope", "base", "max_count"] {
+        assert_eq!(model.get(field), Some(&Value::Null));
+    }
+    for scope in [None, Some("local"), Some("remote"), Some("all")] {
+        for count in [None, Some(1), Some(256)] {
+            let call = ToolCall::GitBranch {
+                name: None,
+                start_point: None,
+                scope: scope.map(str::to_owned),
+                base: Some("HEAD~1".into()),
+                max_count: count,
+            };
+            assert!(call.valid());
+            assert!(call.is_goal_plan_prelude() && !call.mutates() && !call.is_child_research());
+            assert_eq!(
+                serde_json::from_value::<ToolCall>(serde_json::to_value(&call).unwrap()).unwrap(),
+                call
+            );
+        }
+    }
+    for fields in [
+        json!({"scope":"live"}),
+        json!({"max_count":0}),
+        json!({"max_count":257}),
+        json!({"base":"main..topic"}),
+        json!({"base":"--all"}),
+        json!({"start_point":"main"}),
+    ] {
+        let mut value: Value = serde_json::from_str(legacy).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(!serde_json::from_value::<ToolCall>(value).unwrap().valid());
+    }
+    for fields in [
+        json!({"scope":"local"}),
+        json!({"base":"HEAD"}),
+        json!({"max_count":1}),
+    ] {
+        let mut value = json!({"operation":"git_branch","name":"topic","start_point":null});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(!serde_json::from_value::<ToolCall>(value).unwrap().valid());
+    }
     let missing_head = json!({"operation":"git_diff","path":".","base":null,"staged":false});
     assert!(serde_json::from_value::<ToolCall>(missing_head).is_err());
     let with_head =
@@ -2391,6 +2443,9 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         config.allows(&ToolCall::GitBranch {
             name: Some("topic".into()),
             start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
         }),
         super::guard::git_writes_available()
     );
@@ -2439,6 +2494,13 @@ fn child_research_excludes_git_reads() {
             path: ".".into(),
             revision: None,
             max_count: 1,
+        },
+        ToolCall::GitBranch {
+            name: None,
+            start_point: None,
+            scope: Some("all".into()),
+            base: Some("main".into()),
+            max_count: Some(256),
         },
     ] {
         assert!(call.is_goal_plan_prelude());
@@ -2576,10 +2638,23 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
         unguarded_rules: None,
         context_limit_bytes: MAX_TOOL_CONTEXT_BYTES,
         cache_state: None,
-        config: serde_json::from_value(config).unwrap(),
+        config: serde_json::from_value(config.clone()).unwrap(),
         workspace: workspace.to_owned(),
         workspace_identity: super::fs::workspace_identity(&root).unwrap(),
         reads: Some(super::InProcessReads {
+            skills: serde_json::from_value::<Config>(config.clone())
+                .unwrap()
+                .skills
+                .iter()
+                .map(|skill| {
+                    (
+                        skill.name.clone(),
+                        super::fs::open_directory(std::path::Path::new(&skill.directory))
+                            .ok()
+                            .map(std::sync::Arc::new),
+                    )
+                })
+                .collect(),
             root: std::sync::Arc::new(root),
             slots: std::sync::Arc::new(tokio::sync::Semaphore::new(super::MAX_IN_PROCESS_READS)),
         }),
@@ -3863,4 +3938,219 @@ fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
         config.evaluate(&call)
     );
     assert!(runtime.context().unwrap().catalog().contains("root skill"));
+}
+
+#[tokio::test]
+async fn an_unavailable_skill_root_does_not_disable_other_tools_or_renew_its_pin() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let good = temp.path().join("good-skill");
+    let unavailable = temp.path().join("missing-skill");
+    std::fs::create_dir(&workspace).unwrap();
+    std::fs::create_dir(&good).unwrap();
+    std::fs::write(workspace.join("note.txt"), "workspace fact").unwrap();
+    std::fs::write(good.join("SKILL.md"), "good instructions").unwrap();
+    let config = serde_json::from_value(json!({
+        "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+        "skills":[
+            {"name":"good","description":"available","directory":good,"files":{"SKILL.md":hex_digest(b"good instructions")}},
+            {"name":"missing","description":"unavailable","directory":unavailable,"files":{"SKILL.md":hex_digest(b"late instructions")}}
+        ]
+    })).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let runtime = super::ToolRuntime::admit(
+        config,
+        None,
+        None,
+        &workspace,
+        &state,
+        temp.path().join("missing-guard"),
+    )
+    .expect("unrelated Tools remain available");
+    assert_eq!(
+        run_in_process(
+            &runtime,
+            ToolCall::Read {
+                path: "note.txt".into(),
+                offset: None,
+                limit: None
+            }
+        )
+        .await
+        .disposition,
+        ToolDisposition::Succeeded
+    );
+    assert_eq!(
+        run_in_process(
+            &runtime,
+            ToolCall::Skill {
+                name: "good".into(),
+                resource: None
+            }
+        )
+        .await
+        .output,
+        "good instructions"
+    );
+    let missing = ToolCall::Skill {
+        name: "missing".into(),
+        resource: None,
+    };
+    assert_eq!(
+        run_in_process(&runtime, missing.clone()).await.disposition,
+        ToolDisposition::Failed
+    );
+    std::fs::create_dir(&unavailable).unwrap();
+    std::fs::write(unavailable.join("SKILL.md"), "late instructions").unwrap();
+    assert_eq!(
+        run_in_process(&runtime, missing).await.disposition,
+        ToolDisposition::Failed
+    );
+}
+
+#[tokio::test]
+async fn skill_text_reads_are_bounded_inert_and_pinned_without_guard_execution() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let directory = temp.path().join("skills/review");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::create_dir_all(directory.join("references")).unwrap();
+    let body = format!(
+        "---\nname: review\ndescription: !execute touch marker\n---\n{}",
+        "é\n\"\u{1}".repeat(2000)
+    );
+    std::fs::write(directory.join("SKILL.md"), &body).unwrap();
+    std::fs::write(directory.join("references/note.txt"), "reference").unwrap();
+    let runtime = in_process_runtime(
+        &workspace,
+        json!({
+            "version":1,"workspace_paths":["."],"write":false,"commands":[],"mcp":[],
+            "skills":[{"name":"review","description":"Reviewed guidance","directory":directory,
+                "files":{"SKILL.md":hex_digest(body.as_bytes()),"references/note.txt":hex_digest(b"reference")}}]
+        }),
+    );
+    let call = ToolCall::Skill {
+        name: "review".into(),
+        resource: None,
+    };
+    for limit in [128, 1024, MAX_TOOL_RESULT_BYTES] {
+        let mut intent =
+            runtime.intent(crate::RunId::new(), crate::AgentRunId::new(), call.clone());
+        intent.limits.result_bytes = limit as u32;
+        let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+        assert!(matches!(
+            observation.attestation,
+            Some(Attestation::InProcess { .. })
+        ));
+        assert!(serde_json::to_string(&observation.output).unwrap().len() <= limit);
+        assert_eq!(
+            observation.output.contains(" lines omitted;"),
+            limit < MAX_TOOL_RESULT_BYTES
+        );
+        assert!(observation.valid());
+        let mut guarded = observation.clone();
+        guarded.attestation = Some(Attestation::Guard(GuardReceipt {
+            contract_version: 1,
+            intent_digest: guarded.intent.digest(),
+            enforcement_digest: guarded.intent.enforcement_digest,
+            limits: guarded.intent.limits.clone(),
+        }));
+        assert!(!guarded.valid(), "Skill reads cannot carry Guard receipts");
+        guarded.attestation = None;
+        guarded.disposition = ToolDisposition::Failed;
+        guarded.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
+        assert!(
+            !guarded.valid(),
+            "Skill reads cannot claim Guard bootstrap failure"
+        );
+    }
+    assert!(!workspace.join("marker").exists());
+    let reference = ToolCall::Skill {
+        name: "review".into(),
+        resource: Some("references/note.txt".into()),
+    };
+    assert_eq!(
+        run_in_process(&runtime, reference.clone()).await.output,
+        "reference"
+    );
+    std::fs::write(directory.join("SKILL.md"), "changed after admission").unwrap();
+    assert_ne!(
+        run_in_process(&runtime, call.clone()).await.disposition,
+        ToolDisposition::Succeeded
+    );
+    std::fs::rename(
+        directory.join("references/note.txt"),
+        directory.join("references/original.txt"),
+    )
+    .unwrap();
+    std::os::unix::fs::symlink("original.txt", directory.join("references/note.txt")).unwrap();
+    assert_eq!(
+        run_in_process(&runtime, reference).await.disposition,
+        ToolDisposition::Denied
+    );
+    assert_eq!(
+        run_in_process(
+            &runtime,
+            ToolCall::Skill {
+                name: "review".into(),
+                resource: Some("references/original.txt".into())
+            }
+        )
+        .await
+        .disposition,
+        ToolDisposition::Denied
+    );
+    std::fs::rename(&directory, temp.path().join("original-skill")).unwrap();
+    std::fs::create_dir(&directory).unwrap();
+    std::fs::write(directory.join("SKILL.md"), &body).unwrap();
+    assert_ne!(
+        run_in_process(&runtime, call).await.disposition,
+        ToolDisposition::Succeeded
+    );
+}
+
+#[test]
+fn undispatched_guard_failures_explain_safe_causes_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = in_process_runtime(temp.path(), config_value());
+    for (error, cause, next) in [
+        (
+            super::ToolError::GuardRejected(super::guard::GuardStage::NamespaceBootstrap),
+            "namespace bootstrap",
+            "Enable unprivileged user namespaces",
+        ),
+        (
+            super::ToolError::GuardRejected(super::guard::GuardStage::NativeManager),
+            "native manager",
+            "Restore the user service manager",
+        ),
+        (
+            super::ToolError::Operation,
+            "exact cause was not reported",
+            "Check the Guard executable",
+        ),
+    ] {
+        let intent = runtime.intent(
+            crate::RunId::new(),
+            crate::AgentRunId::new(),
+            ToolCall::Command {
+                program: "script".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+        );
+        let observation = super::unstarted_observation(intent, error);
+        assert_eq!(observation.disposition, ToolDisposition::Failed);
+        assert!(observation.attestation.is_none());
+        assert!(observation.output.contains(cause));
+        assert!(observation.output.contains(next));
+        assert!(observation.output.contains("resend your message"));
+        assert!(!observation.output.contains("/goal resume"));
+        assert_eq!(
+            observation.output.contains("development.log"),
+            cfg!(debug_assertions)
+        );
+        assert!(observation.output.contains("no operation was dispatched"));
+    }
 }

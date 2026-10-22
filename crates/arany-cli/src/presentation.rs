@@ -10,6 +10,7 @@ mod agents;
 mod model;
 pub mod rewind;
 pub mod storage;
+pub(crate) mod usage;
 #[cfg(test)]
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
@@ -21,6 +22,7 @@ pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };
+pub use usage::usage_pages;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Output {
@@ -215,6 +217,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
+            ..
         } => match start_point {
             Some(start) => format!("Git branch({name} from {start})"),
             None => format!("Git branch({name})"),
@@ -1092,6 +1095,7 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
+            ..
         } => lines.push(format!(
             "Create branch {} at {} without switching",
             escape_terminal(name),
@@ -2495,6 +2499,9 @@ mod peer_row_tests {
                 ToolCall::GitBranch {
                     name: Some("topic".into()),
                     start_point: Some("HEAD~1".into()),
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 serde_json::json!({"branch": "topic", "oid": oid}),
                 "⏺ Git branch(topic from HEAD~1)\n  ⎿ created topic at aaaaaaaaaaaa",
@@ -2525,6 +2532,9 @@ mod peer_row_tests {
             ToolCall::GitBranch {
                 name: Some("topic".into()),
                 start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
             },
             &serde_json::json!({"branch": hostile, "oid": oid}).to_string(),
         ));

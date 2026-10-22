@@ -343,6 +343,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             })
             .unwrap();
         let mut terminal: Value = serde_json::from_str(data).unwrap();
+        terminal["response"]["usage"]["input_tokens_details"] = json!({"cache_write_tokens": 3});
         let mut item = terminal["response"]["output"][0].clone();
         item["id"] = json!("msg_synthetic");
         item["phase"] = json!("final_answer");
@@ -376,11 +377,14 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
                 }
                 let body = body.unwrap();
                 if operation == "Run" {
-                    wire::decode_streamed_run(&body, &scope_for(&request()))
+                    let response = wire::decode_streamed_run(&body, &scope_for(&request()))
                         .expect("complete streamed Run");
+                    assert_eq!(response.usage.cache_creation_input_tokens, Some(3));
+                    assert_eq!(response.usage.cache_read_input_tokens, None);
                 } else {
-                    wire::decode_streamed_compaction(&body, "model-a")
+                    let response = wire::decode_streamed_compaction(&body, "model-a")
                         .expect("complete streamed compaction");
+                    assert_eq!(response.usage.cache_creation_input_tokens, Some(3));
                 }
             }
         }

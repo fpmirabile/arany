@@ -324,6 +324,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
     prefix.rewinds.checkpoints.pop();
     prefix.last_sequence = new_start - 2;
     let inherited = ForkInheritance {
+        usage: prefix.usage.clone(),
         workspace_identity: prefix.workspace_identity,
         runs: prefix.runs.clone(),
         compactions: Vec::new(),
