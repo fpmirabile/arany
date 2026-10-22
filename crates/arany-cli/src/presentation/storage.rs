@@ -1,5 +1,5 @@
 use super::escape_terminal;
-use arany::{StorageReport, StorageStatus, StorageUsage};
+use arany::{StorageReason, StorageReport, StorageStatus, StorageUsage};
 use std::fmt::Write;
 
 pub const STORAGE_OUTPUT_LIMIT: usize = 64 * 1024;
@@ -20,8 +20,8 @@ pub fn render_storage(report: &StorageReport) -> (String, bool) {
                 StorageStatus::Unavailable => "unavailable",
             };
             let mut summary = format!("{}: {status}\n  {}\n", row.name, usage(row.usage));
-            if let Some(reason) = row.reason {
-                let _ = writeln!(summary, "  {reason}");
+            if let Some(value) = row.reason {
+                let _ = writeln!(summary, "  {}", reason(value));
             }
             summary
         })
@@ -61,6 +61,46 @@ pub fn render_storage(report: &StorageReport) -> (String, bool) {
         ),
         complete,
     )
+}
+
+fn reason(value: StorageReason) -> &'static str {
+    match value {
+        StorageReason::Cancelled => "cancelled",
+        StorageReason::Deadline => "scan deadline reached",
+        StorageReason::EntryLimit => "entry limit reached",
+        StorageReason::IndexLimit => "identity/path index limit reached",
+        StorageReason::PathLimit => "path limit reached",
+        StorageReason::DepthLimit => "depth limit reached",
+        StorageReason::CacheIdentityLimit => "cache identity limit reached",
+        StorageReason::ByteOverflow => "byte count overflow",
+        StorageReason::CountOverflow => "count overflow",
+        StorageReason::UnsafeDirectory => "unsafe private directory",
+        StorageReason::DirectoryUnavailable => "directory metadata unavailable",
+        StorageReason::DirectoryChangedOrUnavailable => "directory changed or unavailable",
+        StorageReason::MetadataUnavailable => "metadata unavailable",
+        StorageReason::UnownedMount => "unowned mount excluded",
+        StorageReason::UnexpectedCacheObject => "unexpected cache object",
+        StorageReason::Changed => "storage changed during scan",
+        StorageReason::UnknownCacheRecord => "unknown cache record",
+        StorageReason::PendingCache => {
+            "pending or active cache data retained; no recovery attempted"
+        }
+        StorageReason::UnsafeObject => "unsafe private object excluded",
+        StorageReason::RootPathLimit => "root path limit reached",
+        StorageReason::WorkspaceOverlap => "Workspace overlap excluded",
+        StorageReason::DuplicateRoot => "same admitted root counted once",
+        StorageReason::RootMetadataUnavailable => "root metadata unavailable",
+        StorageReason::RootUnavailable => "root unsafe or inaccessible",
+        StorageReason::RootChanged => "root changed during scan",
+        StorageReason::UnsafeAcl => "unsafe private ACL",
+        StorageReason::ObjectUnavailable => {
+            if cfg!(target_os = "linux") {
+                "unsafe, mounted or unavailable object excluded"
+            } else {
+                "unsafe or unavailable object excluded"
+            }
+        }
+    }
 }
 
 fn usage(value: StorageUsage) -> String {
@@ -114,5 +154,43 @@ mod tests {
         let (text, success) = render_storage(&report);
         assert!(!success);
         assert!(text.contains("detail row limit reached"));
+        for (value, expected) in [
+            (StorageReason::Deadline, "scan deadline reached"),
+            (
+                StorageReason::CacheIdentityLimit,
+                "cache identity limit reached",
+            ),
+            (
+                StorageReason::PendingCache,
+                "pending or active cache data retained; no recovery attempted",
+            ),
+            (StorageReason::RootChanged, "root changed during scan"),
+            (
+                StorageReason::ObjectUnavailable,
+                if cfg!(target_os = "linux") {
+                    "unsafe, mounted or unavailable object excluded"
+                } else {
+                    "unsafe or unavailable object excluded"
+                },
+            ),
+        ] {
+            let report = StorageReport {
+                categories: vec![StorageCategory {
+                    path: None,
+                    status: StorageStatus::Partial,
+                    reason: Some(value),
+                    ..row()
+                }],
+                subtotal: StorageUsage::default(),
+            };
+            let (text, success) = render_storage(&report);
+            assert!(!success);
+            assert_eq!(
+                text,
+                format!(
+                    "Arany storage: partial; known subtotal only\nKnown owned subtotal: allocated 0 B; logical 0 B; 0 files; 0 directories\nPrivate storage: partial\n  allocated 0 B; logical 0 B; 0 files; 0 directories\n  {expected}\n{COVERAGE}"
+                )
+            );
+        }
     }
 }

@@ -27,6 +27,71 @@ pub enum StorageStatus {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StorageReason {
+    Cancelled,
+    Deadline,
+    EntryLimit,
+    IndexLimit,
+    PathLimit,
+    DepthLimit,
+    CacheIdentityLimit,
+    ByteOverflow,
+    CountOverflow,
+    UnsafeDirectory,
+    DirectoryUnavailable,
+    DirectoryChangedOrUnavailable,
+    MetadataUnavailable,
+    UnownedMount,
+    UnexpectedCacheObject,
+    Changed,
+    UnknownCacheRecord,
+    PendingCache,
+    UnsafeObject,
+    RootPathLimit,
+    WorkspaceOverlap,
+    DuplicateRoot,
+    RootMetadataUnavailable,
+    RootUnavailable,
+    RootChanged,
+    UnsafeAcl,
+    ObjectUnavailable,
+}
+
+impl StorageReason {
+    fn is_fatal(self) -> bool {
+        match self {
+            Self::CacheIdentityLimit
+            | Self::ByteOverflow
+            | Self::CountOverflow
+            | Self::DepthLimit => true,
+            Self::Cancelled
+            | Self::Deadline
+            | Self::EntryLimit
+            | Self::IndexLimit
+            | Self::PathLimit
+            | Self::UnsafeDirectory
+            | Self::DirectoryUnavailable
+            | Self::DirectoryChangedOrUnavailable
+            | Self::MetadataUnavailable
+            | Self::UnownedMount
+            | Self::UnexpectedCacheObject
+            | Self::Changed
+            | Self::UnknownCacheRecord
+            | Self::PendingCache
+            | Self::UnsafeObject
+            | Self::RootPathLimit
+            | Self::WorkspaceOverlap
+            | Self::DuplicateRoot
+            | Self::RootMetadataUnavailable
+            | Self::RootUnavailable
+            | Self::RootChanged
+            | Self::UnsafeAcl
+            | Self::ObjectUnavailable => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct StorageUsage {
     pub allocated_bytes: u64,
@@ -36,24 +101,24 @@ pub struct StorageUsage {
 }
 
 impl StorageUsage {
-    fn add(&mut self, other: Self) -> Result<(), &'static str> {
+    fn add(&mut self, other: Self) -> Result<(), StorageReason> {
         let next = Self {
             allocated_bytes: self
                 .allocated_bytes
                 .checked_add(other.allocated_bytes)
-                .ok_or("byte count overflow")?,
+                .ok_or(StorageReason::ByteOverflow)?,
             logical_bytes: self
                 .logical_bytes
                 .checked_add(other.logical_bytes)
-                .ok_or("byte count overflow")?,
+                .ok_or(StorageReason::ByteOverflow)?,
             files: self
                 .files
                 .checked_add(other.files)
-                .ok_or("count overflow")?,
+                .ok_or(StorageReason::CountOverflow)?,
             directories: self
                 .directories
                 .checked_add(other.directories)
-                .ok_or("count overflow")?,
+                .ok_or(StorageReason::CountOverflow)?,
         };
         *self = next;
         Ok(())
@@ -66,7 +131,7 @@ pub struct StorageCategory {
     pub path: Option<PathBuf>,
     pub status: StorageStatus,
     pub usage: StorageUsage,
-    pub reason: Option<&'static str>,
+    pub reason: Option<StorageReason>,
 }
 
 impl StorageCategory {
@@ -80,7 +145,7 @@ impl StorageCategory {
         }
     }
 
-    fn partial(&mut self, reason: &'static str) {
+    fn partial(&mut self, reason: StorageReason) {
         self.status = StorageStatus::Partial;
         self.reason = Some(reason);
     }
@@ -118,24 +183,27 @@ struct Scan<'a> {
 }
 
 impl Scan<'_> {
-    fn check(&self) -> Result<(), &'static str> {
+    fn check(&self) -> Result<(), StorageReason> {
         if self.cancelled.load(Ordering::Acquire) {
-            return Err("cancelled");
+            return Err(StorageReason::Cancelled);
         }
         if Instant::now() >= self.deadline {
-            return Err("scan deadline reached");
+            return Err(StorageReason::Deadline);
         }
         Ok(())
     }
 
-    fn entry(&mut self, path_bytes: usize) -> Result<(), &'static str> {
+    fn entry(&mut self, path_bytes: usize) -> Result<(), StorageReason> {
         self.check()?;
-        self.remaining = self.remaining.checked_sub(1).ok_or("entry limit reached")?;
+        self.remaining = self
+            .remaining
+            .checked_sub(1)
+            .ok_or(StorageReason::EntryLimit)?;
         self.index_bytes = self
             .index_bytes
             .checked_add(path_bytes + std::mem::size_of::<Identity>() + 64)
             .filter(|bytes| *bytes <= MAX_INDEX_BYTES)
-            .ok_or("identity/path index limit reached")?;
+            .ok_or(StorageReason::IndexLimit)?;
         Ok(())
     }
 
@@ -143,7 +211,7 @@ impl Scan<'_> {
         &mut self,
         metadata: &Metadata,
         row: &mut StorageCategory,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), StorageReason> {
         if self.seen.contains(&identity(metadata)) {
             return Ok(());
         }
@@ -151,7 +219,7 @@ impl Scan<'_> {
             allocated_bytes: metadata
                 .blocks()
                 .checked_mul(512)
-                .ok_or("byte count overflow")?,
+                .ok_or(StorageReason::ByteOverflow)?,
             logical_bytes: metadata.len(),
             files: u64::from(metadata.is_file()),
             directories: u64::from(metadata.is_dir()),
@@ -169,24 +237,24 @@ impl Scan<'_> {
         depth: usize,
         path_bytes: usize,
         cache_root: bool,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), StorageReason> {
         self.check()?;
         let before = dir_metadata(dir)?;
-        private_fs::check_directory(dir, true).map_err(|_| "unsafe private directory")?;
+        private_fs::check_directory(dir, true).map_err(|_| StorageReason::UnsafeDirectory)?;
         self.account(&before, if cache_root { cache } else { row })?;
         let entries = dir
             .entries()
-            .map_err(|_| "directory metadata unavailable")?;
+            .map_err(|_| StorageReason::DirectoryUnavailable)?;
         let mut cache_tokens = BTreeSet::new();
         for entry in entries {
             self.entry(path_bytes)?;
             let name = entry
-                .map_err(|_| "directory changed or unavailable")?
+                .map_err(|_| StorageReason::DirectoryChangedOrUnavailable)?
                 .file_name();
             let next_bytes = path_bytes
                 .checked_add(name.len() + 1)
                 .filter(|bytes| *bytes <= MAX_PATH_BYTES)
-                .ok_or("path limit reached")?;
+                .ok_or(StorageReason::PathLimit)?;
             // Guard records and backing storage have a separate ownership collector.
             if depth == 0 && name == "guard" && !cache_root {
                 continue;
@@ -195,7 +263,9 @@ impl Scan<'_> {
             let result = (|| {
                 self.check()?;
                 let object = metadata_file(dir, Path::new(&name), false)?;
-                let metadata = object.metadata().map_err(|_| "metadata unavailable")?;
+                let metadata = object
+                    .metadata()
+                    .map_err(|_| StorageReason::MetadataUnavailable)?;
                 if identity(&metadata) == self.workspace {
                     return Ok(());
                 }
@@ -203,22 +273,22 @@ impl Scan<'_> {
                     return Ok(());
                 }
                 if metadata.dev() != before.dev() {
-                    return Err("unowned mount excluded");
+                    return Err(StorageReason::UnownedMount);
                 }
                 check_private(&object, &metadata)?;
                 if metadata.is_dir() {
                     if cache_root {
-                        return Err("unexpected cache object");
+                        return Err(StorageReason::UnexpectedCacheObject);
                     }
                     if depth >= MAX_DEPTH {
-                        return Err("depth limit reached");
+                        return Err(StorageReason::DepthLimit);
                     }
                     let opened = metadata_file(dir, Path::new(&name), true)?;
                     let current = opened
                         .metadata()
-                        .map_err(|_| "directory metadata unavailable")?;
+                        .map_err(|_| StorageReason::DirectoryUnavailable)?;
                     if !same(&metadata, &current) {
-                        return Err("storage changed during scan");
+                        return Err(StorageReason::Changed);
                     }
                     let child = Dir::from_std_file(opened);
                     if is_cache {
@@ -232,34 +302,32 @@ impl Scan<'_> {
                     }
                 } else if metadata.is_file() {
                     if cache_root {
-                        let name = name.to_str().ok_or("unknown cache record")?;
+                        let name = name.to_str().ok_or(StorageReason::UnknownCacheRecord)?;
                         let (token, pending) = super::build_cache::inventory_record(name)
-                            .ok_or("unknown cache record")?;
+                            .ok_or(StorageReason::UnknownCacheRecord)?;
                         if let Some(token) = token
                             && !cache_tokens.contains(token)
                         {
                             if cache_tokens.len() == super::build_cache::MAX_IDENTITIES {
-                                return Err("cache identity limit reached");
+                                return Err(StorageReason::CacheIdentityLimit);
                             }
                             cache_tokens.insert(token.to_owned());
                         }
                         if pending && cache.status == StorageStatus::Complete {
                             cache.status = StorageStatus::Busy;
-                            cache.reason = Some(
-                                "pending or active cache data retained; no recovery attempted",
-                            );
+                            cache.reason = Some(StorageReason::PendingCache);
                         }
                     }
                     self.account(&metadata, if cache_root { cache } else { row })?;
                     self.check()?;
                     let current = metadata_file(dir, Path::new(&name), false)?
                         .metadata()
-                        .map_err(|_| "metadata unavailable")?;
+                        .map_err(|_| StorageReason::MetadataUnavailable)?;
                     if !same(&metadata, &current) {
-                        return Err("storage changed during scan");
+                        return Err(StorageReason::Changed);
                     }
                 } else {
-                    return Err("unsafe private object excluded");
+                    return Err(StorageReason::UnsafeObject);
                 }
                 Ok(())
             })();
@@ -269,13 +337,7 @@ impl Scan<'_> {
                 } else {
                     row.partial(reason);
                 }
-                if matches!(
-                    reason,
-                    "cache identity limit reached"
-                        | "byte count overflow"
-                        | "count overflow"
-                        | "depth limit reached"
-                ) {
+                if reason.is_fatal() {
                     return Err(reason);
                 }
                 self.check()?;
@@ -283,7 +345,7 @@ impl Scan<'_> {
         }
         self.check()?;
         if !same(&before, &dir_metadata(dir)?) {
-            return Err("storage changed during scan");
+            return Err(StorageReason::Changed);
         }
         Ok(())
     }
@@ -353,10 +415,10 @@ fn collect(
     ] {
         let mut row = StorageCategory::new(name);
         let directory = if scan.check().is_err() {
-            row.partial("scan deadline reached");
+            row.partial(StorageReason::Deadline);
             None
         } else if path.as_os_str().len() > MAX_PATH_BYTES || path.components().count() > MAX_DEPTH {
-            row.partial("root path limit reached");
+            row.partial(StorageReason::RootPathLimit);
             None
         } else {
             match private_fs::open_directory_checked(path, false, || {
@@ -367,19 +429,19 @@ fn collect(
                 Ok(directory) => {
                     if directory.ancestors.contains(&scan.workspace) {
                         row.status = StorageStatus::Unavailable;
-                        row.reason = Some("Workspace overlap excluded");
+                        row.reason = Some(StorageReason::WorkspaceOverlap);
                         None
                     } else if let Ok(metadata) = dir_metadata(&directory.dir) {
                         if scan.roots.insert(identity(&metadata)) {
                             row.path = Some(directory.path.clone());
                             Some(directory)
                         } else {
-                            row.reason = Some("same admitted root counted once");
+                            row.reason = Some(StorageReason::DuplicateRoot);
                             None
                         }
                     } else {
                         row.status = StorageStatus::Unavailable;
-                        row.reason = Some("root metadata unavailable");
+                        row.reason = Some(StorageReason::RootMetadataUnavailable);
                         None
                     }
                 }
@@ -390,12 +452,12 @@ fn collect(
                     None
                 }
                 Err(_) if scan.check().is_err() => {
-                    row.partial("scan deadline reached");
+                    row.partial(StorageReason::Deadline);
                     None
                 }
                 Err(_) => {
                     row.status = StorageStatus::Unavailable;
-                    row.reason = Some("root unsafe or inaccessible");
+                    row.reason = Some(StorageReason::RootUnavailable);
                     None
                 }
             }
@@ -430,7 +492,7 @@ fn collect(
             }
         }
         if subtotal.add(row.usage).is_err() || subtotal.add(cache.usage).is_err() {
-            row.partial("byte count overflow");
+            row.partial(StorageReason::ByteOverflow);
         }
         categories.push(row);
         if cache.path.is_some() || cache.status != StorageStatus::Absent {
@@ -448,8 +510,8 @@ fn collect(
 
 fn recheck_root(
     directory: &PrivateDirectory,
-    check: impl Fn() -> Result<(), &'static str>,
-) -> Result<(), &'static str> {
+    check: impl Fn() -> Result<(), StorageReason>,
+) -> Result<(), StorageReason> {
     let check_reason = std::cell::Cell::new(None);
     match private_fs::open_directory_checked(&directory.path, false, || {
         check().map_err(|reason| {
@@ -465,7 +527,7 @@ fn recheck_root(
         {
             Ok(())
         }
-        _ => Err(check_reason.get().unwrap_or("root changed during scan")),
+        _ => Err(check_reason.get().unwrap_or(StorageReason::RootChanged)),
     }
 }
 
@@ -486,27 +548,27 @@ fn same(left: &Metadata, right: &Metadata) -> bool {
         && left.ctime_nsec() == right.ctime_nsec()
 }
 
-fn dir_metadata(dir: &Dir) -> Result<Metadata, &'static str> {
+fn dir_metadata(dir: &Dir) -> Result<Metadata, StorageReason> {
     dir.try_clone()
-        .map_err(|_| "directory metadata unavailable")?
+        .map_err(|_| StorageReason::DirectoryUnavailable)?
         .into_std_file()
         .metadata()
-        .map_err(|_| "directory metadata unavailable")
+        .map_err(|_| StorageReason::DirectoryUnavailable)
 }
 
-fn check_private(file: &File, metadata: &Metadata) -> Result<(), &'static str> {
+fn check_private(file: &File, metadata: &Metadata) -> Result<(), StorageReason> {
     if metadata.uid() != rustix::process::geteuid().as_raw()
         || metadata.mode() & 0o077 != 0
         || metadata.mode() & 0o7000 != 0
         || !(metadata.is_dir() || metadata.is_file())
         || metadata.is_file() && metadata.nlink() != 1
     {
-        return Err("unsafe private object excluded");
+        return Err(StorageReason::UnsafeObject);
     }
-    private_fs::check_acl(file, true).map_err(|_| "unsafe private ACL")
+    private_fs::check_acl(file, true).map_err(|_| StorageReason::UnsafeAcl)
 }
 
-fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'static str> {
+fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, StorageReason> {
     use rustix::fs::{Mode, OFlags};
     let flags = OFlags::CLOEXEC | OFlags::NOFOLLOW;
     #[cfg(target_os = "linux")]
@@ -529,7 +591,7 @@ fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'stat
                 | ResolveFlags::NO_XDEV,
         )
         .map(File::from)
-        .map_err(|_| "unsafe, mounted or unavailable object excluded")
+        .map_err(|_| StorageReason::ObjectUnavailable)
     }
     #[cfg(target_os = "macos")]
     {
@@ -541,7 +603,7 @@ fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'stat
         };
         rustix::fs::openat(dir, name, flags | access, Mode::empty())
             .map(File::from)
-            .map_err(|_| "unsafe or unavailable object excluded")
+            .map_err(|_| StorageReason::ObjectUnavailable)
     }
 }
 
@@ -733,13 +795,62 @@ mod tests {
                 .find(|row| row.name == "Private build cache")
                 .expect("cache category");
             assert_eq!(cache.status, StorageStatus::Partial, "{prefix}");
-            assert_eq!(cache.reason, Some("cache identity limit reached"));
+            assert_eq!(cache.reason, Some(StorageReason::CacheIdentityLimit));
             assert_eq!(cache.usage.files, MAX_IDENTITIES as u64);
             assert_eq!(
                 std::fs::read_dir(&cache_path)
                     .expect("retained cache records")
                     .count(),
                 MAX_IDENTITIES + 1
+            );
+        }
+    }
+
+    #[test]
+    fn fatal_metadata_limits_stop_the_walk_with_partial_known_usage() {
+        for reason in [
+            StorageReason::ByteOverflow,
+            StorageReason::CountOverflow,
+            StorageReason::DepthLimit,
+        ] {
+            let temp = tempfile::tempdir().expect("scan limit fixture");
+            let state = temp.path().join("state");
+            directory(&state);
+            let depth = if reason == StorageReason::DepthLimit {
+                directory(&state.join("nested"));
+                MAX_DEPTH
+            } else {
+                file(&state.join("record"), b"retained");
+                0
+            };
+            let admitted = private_fs::open_directory(&state, false).expect("admitted root");
+            let mut row = StorageCategory::new("Selected StateRoot");
+            if reason == StorageReason::ByteOverflow {
+                row.usage.logical_bytes =
+                    u64::MAX - dir_metadata(&admitted.dir).expect("root metadata").len();
+            } else if reason == StorageReason::CountOverflow {
+                row.usage.files = u64::MAX;
+            }
+            let mut cache = StorageCategory::new("Private build cache");
+            let cancelled = AtomicBool::new(false);
+            let mut scan = Scan {
+                cancelled: &cancelled,
+                deadline: Instant::now() + DEADLINE,
+                remaining: MAX_ENTRIES,
+                index_bytes: 0,
+                seen: BTreeSet::new(),
+                roots: BTreeSet::new(),
+                workspace: (0, 0),
+            };
+            assert_eq!(
+                scan.walk(&admitted.dir, &mut row, &mut cache, depth, 0, false),
+                Err(reason)
+            );
+            assert_eq!(row.status, StorageStatus::Partial);
+            assert_eq!(row.reason, Some(reason));
+            assert_eq!(
+                std::fs::read_dir(&state).expect("retained record").count(),
+                1
             );
         }
     }
@@ -832,7 +943,7 @@ mod tests {
         }
         let admitted = private_fs::open_directory(&state, false).expect("admitted storage root");
         assert_eq!(recheck_root(&admitted, || Ok(())), Ok(()));
-        for reason in ["scan deadline reached", "cancelled"] {
+        for reason in [StorageReason::Deadline, StorageReason::Cancelled] {
             let checks = std::cell::Cell::new(0);
             assert_eq!(
                 recheck_root(&admitted, || {
@@ -852,7 +963,7 @@ mod tests {
         directory(&state);
         assert_eq!(
             recheck_root(&admitted, || Ok(())),
-            Err("root changed during scan")
+            Err(StorageReason::RootChanged)
         );
         std::fs::remove_dir(&state).expect("remove empty replacement");
         std::fs::rename(&retained, &state).expect("restore original fixture root");

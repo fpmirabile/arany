@@ -30,7 +30,8 @@ pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_a
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
 #[cfg(unix)]
 pub use inventory::{
-    StorageCategory, StorageError, StorageReport, StorageStatus, StorageUsage, collect_storage,
+    StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
+    collect_storage,
 };
 pub(crate) use lock::{HistoryLock, SessionRunLock, WorkspaceRunLock};
 

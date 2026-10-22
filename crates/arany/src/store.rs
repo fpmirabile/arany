@@ -870,5 +870,6 @@ impl Drop for Store {
 
 #[cfg(unix)]
 pub use state::{
-    StorageCategory, StorageError, StorageReport, StorageStatus, StorageUsage, collect_storage,
+    StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
+    collect_storage,
 };

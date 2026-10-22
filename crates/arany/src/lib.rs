@@ -105,5 +105,6 @@ pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(
 
 #[cfg(unix)]
 pub use store::{
-    StorageCategory, StorageError, StorageReport, StorageStatus, StorageUsage, collect_storage,
+    StorageCategory, StorageError, StorageReason, StorageReport, StorageStatus, StorageUsage,
+    collect_storage,
 };
