@@ -1300,6 +1300,9 @@ impl ToolContext {
                     .is_some_and(|stderr| stderr.contains("not a git repository"))
             {
                 value["hint"] = json!(hint);
+                if value.to_string().len() > MAX_TOOL_RESULT_BYTES {
+                    value.as_object_mut().expect("model result").remove("hint");
+                }
             }
             value
         }

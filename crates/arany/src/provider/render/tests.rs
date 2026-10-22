@@ -623,6 +623,48 @@ fn command_git_hint_bytes_are_included_in_context_and_reservations() {
 }
 
 #[test]
+fn command_git_hint_respects_the_complete_model_result_ceiling() {
+    use crate::tools::types::MAX_TOOL_RESULT_BYTES;
+
+    let with_git = ToolContext::new(catalog());
+    let without_git = ToolContext::new(json!({"git": "unavailable"}));
+    let failed_command = |stdout: &str| {
+        let mut command = command_step(Some(128), stdout, GIT_REPOSITORY_ERROR);
+        command.observations[0].disposition = ToolDisposition::Failed;
+        command
+    };
+    let seed_stdout = "x".repeat(MAX_TOOL_RESULT_BYTES / 2);
+    let seed = failed_command(&seed_stdout);
+    let seed_bytes = without_git.model_result(&seed, 0).to_string().len();
+    let hint_bytes = with_git.model_result(&seed, 0).to_string().len() - seed_bytes;
+    for (result_bytes, expect_hint) in [
+        (MAX_TOOL_RESULT_BYTES - 1, false),
+        (MAX_TOOL_RESULT_BYTES - hint_bytes, true),
+        (MAX_TOOL_RESULT_BYTES - hint_bytes + 1, false),
+    ] {
+        let stdout = "x".repeat(seed_stdout.len() + result_bytes - seed_bytes);
+        let mut command = failed_command(&stdout);
+        let observed = &command.observations[0];
+        assert!(observed.valid());
+        let recorded = serde_json::to_vec(observed).unwrap();
+        let mut expected = without_git.model_result(&command, 0);
+        assert_eq!(expected.to_string().len(), result_bytes);
+        if expect_hint {
+            expected["hint"] = json!(crate::tools::catalog::COMMAND_GIT_HINT.concat());
+            assert_eq!(expected.to_string().len(), MAX_TOOL_RESULT_BYTES);
+        }
+        let rendered = with_git.model_result(&command, 0);
+        assert!(rendered.to_string().len() <= MAX_TOOL_RESULT_BYTES);
+        assert_eq!(rendered, expected);
+        command.observations[0] = serde_json::from_slice(&recorded).unwrap();
+        assert_eq!(
+            with_git.model_result(&command, 0).to_string(),
+            rendered.to_string()
+        );
+    }
+}
+
+#[test]
 fn delegate_step_carries_child_results_once() {
     let mut delegated = request(vec![ToolStep {
         plan: None,
