@@ -71,7 +71,10 @@ pub(crate) fn publication(intent: &EffectIntent) -> bool {
     intent.target == EffectTarget::Workspace
         && matches!(
             intent.call,
-            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::ApplyChangeset { .. }
+            ToolCall::Write { .. }
+                | ToolCall::Edit { .. }
+                | ToolCall::MultiEdit { .. }
+                | ToolCall::ApplyChangeset { .. }
         )
 }
 
@@ -84,6 +87,11 @@ pub(crate) fn before_versions(run: &RunView, call: &ToolCall) -> Vec<(String, Op
         } => vec![(path.clone(), expected_digest.clone())],
         ToolCall::Edit {
             path,
+            expected_digest,
+            ..
+        }
+        | ToolCall::MultiEdit {
+            file_path: path,
             expected_digest,
             ..
         } => vec![(path.clone(), Some(expected_digest.clone()))],
@@ -133,7 +141,11 @@ pub(crate) fn capture_needed(view: &SessionView, run_id: RunId, path: &str, befo
         .filter_map(|tool| tool.observation.as_ref())
         .filter(|o| o.disposition == ToolDisposition::Succeeded && publication(&o.intent))
         .find_map(|o| match &o.intent.call {
-            ToolCall::Write { path: p, .. } | ToolCall::Edit { path: p, .. } if p == path => {
+            ToolCall::Write { path: p, .. }
+            | ToolCall::Edit { path: p, .. }
+            | ToolCall::MultiEdit { file_path: p, .. }
+                if p == path =>
+            {
                 let output: serde_json::Value = serde_json::from_str(&o.output).ok()?;
                 Some(
                     output
