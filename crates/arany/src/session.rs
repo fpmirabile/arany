@@ -77,7 +77,7 @@ pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
     private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
-pub use stop::{GoalLimit, RunStop};
+pub use stop::{GoalLimit, RunFailureFeedback, RunStop};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

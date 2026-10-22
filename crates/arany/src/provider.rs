@@ -36,7 +36,7 @@ pub use catalog::{
     ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
-pub(crate) use conversation::max_turn_bytes;
+pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes};
 pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
@@ -571,6 +571,7 @@ impl ProviderRequest {
             return Err(ProviderError::Rejected);
         }
         if !role_fits
+            || !root && (input.outcome_correction || input.previous_run_failure.is_some())
             || self.phase == AgentPhase::ChildWork
                 && (self.collaboration != CollaborationPolicy::Single
                     || input.goal_context_facts.is_some())

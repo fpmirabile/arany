@@ -90,6 +90,7 @@ pub(super) struct RunFacts {
     // The plan criterion is unmet and the Goal admits no next Run.
     pub(super) criterion_closed: bool,
     pub(super) autonomous: bool,
+    pub(super) outcome_correction_pending: bool,
 }
 
 impl RunFacts {
@@ -145,6 +146,9 @@ impl RunFacts {
                 && goal.compaction_call_reserved.is_none();
             let facts = Self {
                 action_cancelled,
+                outcome_correction_pending: current
+                    .primary()
+                    .is_some_and(|agent| agent.outcome_correction_pending()),
                 hook_stop: current.hooks_settled() && current.hook_stop_reason().is_some(),
                 uncertain,
                 settleable: goal_open

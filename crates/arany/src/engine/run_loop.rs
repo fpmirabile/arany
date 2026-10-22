@@ -517,6 +517,9 @@ impl<'a> RunLoop<'a> {
                         break end;
                     }
                 }
+                PrimaryDecision::CorrectOutcome => {
+                    root_request.input.outcome_correction = true;
+                }
                 PrimaryDecision::Refused(cause) => {
                     if self.primary_refusal()?.1 {
                         break PrimaryEnd::Stopped(StopCause::Refused(cause));
@@ -1418,6 +1421,7 @@ enum PrimaryDecision {
     ToolStep(Vec<crate::ToolRequest>, crate::provider::ProviderTurn),
     // The refusal is journaled; the loop continues unless the refusal streak is full.
     Refused(ProposalRefusalCause),
+    CorrectOutcome,
     // A wave proposal waits for the workers to settle.
     Defer,
     Stop(StopCause),
@@ -1470,6 +1474,22 @@ fn decide_primary_call(
             }
             if facts.active_time_exhausted {
                 return PrimaryDecision::Stop(StopCause::ActiveTime);
+            }
+            if matches!(
+                result,
+                CallResult::Failed(CallFailure::InvalidResponse(Some(
+                    ProviderFailureReason::OutcomeContract
+                )))
+            ) && facts.outcome_correction_pending
+            {
+                if let Some(cause) = facts.observed() {
+                    return PrimaryDecision::Stop(cause);
+                }
+                return if facts.tool_admitted() {
+                    PrimaryDecision::CorrectOutcome
+                } else {
+                    PrimaryDecision::Stop(StopCause::Budget)
+                };
             }
             let CallResult::Response(ProviderResponse { outcome, turn, .. }) = result else {
                 return PrimaryDecision::Fail(RunFailure::ProviderCall);
@@ -1531,6 +1551,7 @@ mod decision_tests {
         Delegate,
         ToolStep,
         Refused(ProposalRefusalCause),
+        CorrectOutcome,
         Defer,
         Stop(StopCause),
         Fail(RunFailure),
@@ -1553,6 +1574,7 @@ mod decision_tests {
             PrimaryDecision::Delegate(..) => Kind::Delegate,
             PrimaryDecision::ToolStep(..) => Kind::ToolStep,
             PrimaryDecision::Refused(cause) => Kind::Refused(*cause),
+            PrimaryDecision::CorrectOutcome => Kind::CorrectOutcome,
             PrimaryDecision::Defer => Kind::Defer,
             PrimaryDecision::Stop(cause) => Kind::Stop(*cause),
             PrimaryDecision::Fail(failure) => Kind::Fail(*failure),
@@ -1644,7 +1666,61 @@ mod decision_tests {
         let ok = Ok(());
         let refused = Err(ProposalRefusalCause::AnswerInvalid);
         let lease = Err(ProposalRefusalCause::LeaseOverlap);
+        let malformed = || {
+            CallResult::Failed(CallFailure::InvalidResponse(Some(
+                ProviderFailureReason::OutcomeContract,
+            )))
+        };
+        let corrective = open.with(|facts| facts.outcome_correction_pending = true);
         let rows: Vec<Row> = vec![
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective,
+                Kind::CorrectOutcome,
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                open,
+                Kind::Fail(RunFailure::ProviderCall),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.calls_left = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.tokens_open = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.uncertain = true),
+                Kind::Stop(StopCause::Uncertain),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.cancel_requested = true),
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
             (loop_, answer(), ok, open, Kind::Finish, true),
             (
                 loop_,

@@ -59,8 +59,23 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
             json!({"last_answer_refused": note}),
         )]));
     }
+    let system = system_blocks(request);
+    if system
+        .iter()
+        .filter(|block| {
+            matches!(
+                block,
+                SystemBlock::PreviousRunFailure(_) | SystemBlock::OutcomeCorrection
+            )
+        })
+        .map(|block| block.text().len())
+        .sum::<usize>()
+        > super::conversation::MAX_HARNESS_FEEDBACK_BYTES
+    {
+        return Err(ProviderError::Rejected);
+    }
     Ok(Conversation {
-        system: system_blocks(request),
+        system,
         tools,
         messages,
         outcome: if input.role == PromptRole::ToolReview {
@@ -107,6 +122,12 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
         AgentPhase::RootPlan | AgentPhase::RootSynthesis
     ) {
         system.push(SystemBlock::Policy(request.collaboration));
+    }
+    if let Some(failure) = request.input.previous_run_failure {
+        system.push(SystemBlock::PreviousRunFailure(failure));
+    }
+    if request.input.outcome_correction {
+        system.push(SystemBlock::OutcomeCorrection);
     }
     system
 }

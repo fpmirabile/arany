@@ -96,6 +96,45 @@ fn serialized(messages: &[Message]) -> Vec<String> {
 }
 
 #[test]
+fn harness_failure_and_correction_feedback_is_closed_bounded_system_context() {
+    for (failure, reason) in [
+        (
+            crate::session::RunFailure::ProviderCall,
+            Some(super::super::ProviderFailureReason::OutcomeContract),
+        ),
+        (crate::session::RunFailure::ToolContextFull, None),
+        (crate::session::RunFailure::BudgetExhausted, None),
+        (
+            crate::session::RunFailure::WorkersUnverified,
+            Some(super::super::ProviderFailureReason::UsageTemporarilyUnavailable),
+        ),
+    ] {
+        let mut request = request(vec![step("call_1", "src/lib.rs")]);
+        request.input.previous_run_failure = Some(crate::session::RunFailureFeedback {
+            failure,
+            provider_disposition: Some(crate::session::ProviderCallDisposition::InvalidResponse),
+            provider_failure: reason,
+        });
+        request.input.outcome_correction = true;
+        let rendered = conversation(&request).expect("render");
+        let feedback: String = rendered.system[2..].iter().map(SystemBlock::text).collect();
+        assert!(
+            feedback.len() <= crate::provider::conversation::MAX_HARNESS_FEEDBACK_BYTES,
+            "feedback fits its reserved framing"
+        );
+        assert!(feedback.contains("committed Events"));
+        assert!(feedback.contains("plain assistant text"));
+        assert!(feedback.contains(&serde_json::to_string(&failure).expect("failure")));
+        for canary in CANARIES {
+            assert!(
+                !feedback.contains(canary),
+                "untrusted input cannot enter feedback"
+            );
+        }
+    }
+}
+
+#[test]
 fn render_never_places_untrusted_text_in_system() {
     let mut request = request(vec![step("call_1", "src/lib.rs")]);
     request.input.child_results = vec![ChildResult {
@@ -104,7 +143,6 @@ fn render_never_places_untrusted_text_in_system() {
         result: "child canary".into(),
     }];
     let rendered = conversation(&request).unwrap();
-    // SystemBlock is a closed enum: a frozen prompt file or the policy sentence, nothing else.
     for block in &rendered.system {
         let text = block.text();
         for canary in CANARIES {

@@ -3304,6 +3304,129 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 }
 
 #[tokio::test]
+async fn malformed_outcomes_get_one_journaled_correction_and_keep_the_failure_cause() {
+    for failures in [1, 2] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut script = vec![crate::tool_outcome(facts_read())];
+        script.extend((0..failures).map(|_| finish_with("rejected placeholder")));
+        script.push(finish_with("The answer from the valid response"));
+        let provider = ScriptedProvider::new(script);
+        for response in provider
+            .responses
+            .lock()
+            .expect("responses")
+            .iter_mut()
+            .skip(1)
+            .take(failures)
+        {
+            *response = Err(ProviderError::InvalidOutcomeContract);
+        }
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Read the facts and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded outcome correction");
+        engine.close().await.expect("close before replay");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(run.tools.len(), 1, "the read is never redispatched");
+        assert_eq!(run.agents[0].provider_calls.len(), 3);
+        assert_eq!(
+            run.failure,
+            (failures == 2).then_some(arany::RunFailure::ProviderCall)
+        );
+        assert_eq!(
+            run.assistant_message.as_deref(),
+            (failures == 1).then_some("The answer from the valid response")
+        );
+        for end in 1..=events.len() {
+            SessionView::replay(outcome.session_id, &events[..end])
+                .expect("every committed prefix replays");
+        }
+        let calls = &run.agents[0].provider_calls;
+        assert_eq!(
+            calls[1].failure_reason,
+            Some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        assert_eq!(
+            calls[2].failure_reason,
+            (failures == 2).then_some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert_eq!(requests.len(), 3);
+            assert!(!requests[1].input.outcome_correction);
+            assert!(requests[2].input.outcome_correction);
+            assert_eq!(
+                requests[1].input.tools.as_ref().expect("Tools").steps[0].observations,
+                requests[2].input.tools.as_ref().expect("Tools").steps[0].observations,
+                "settled observations survive correction"
+            );
+        }
+        if failures == 2 {
+            let refusal = events.iter().position(|event| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)))
+                .expect("first malformed call");
+            let second = events.iter().enumerate().skip(refusal + 1).find_map(|(index, event)| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)).then_some(index))
+                .expect("second malformed call");
+            let mut forbidden = events[..=second].to_vec();
+            let mut extra = forbidden
+                .iter()
+                .rev()
+                .find(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .expect("prior admitted reservation")
+                .clone();
+            extra.sequence = forbidden.last().expect("last Event").sequence + 1;
+            forbidden.push(extra);
+            assert!(
+                SessionView::replay(outcome.session_id, &forbidden).is_err(),
+                "replay refuses a third attempt"
+            );
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let follow_up = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new turn");
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, follow_up.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let feedback = requests[3]
+                .input
+                .previous_run_failure
+                .expect("prior failure after Tools");
+            assert_eq!(feedback.failure, arany::RunFailure::ProviderCall);
+            assert_eq!(
+                feedback.provider_failure,
+                Some(arany::ProviderFailureReason::OutcomeContract)
+            );
+            assert!(
+                !requests[3].input.outcome_correction,
+                "a new Run has its own correction bound"
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
+    }
+}
+
+#[tokio::test]
 async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "original");
@@ -3432,8 +3555,8 @@ async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file(
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
-    // 71 bytes of the 37,768 admitted are the rendered AGENTS.md heading and wrapper.
-    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_697)).expect("instructions");
+    // 71 bytes of the 36,744 admitted are the rendered AGENTS.md heading and wrapper.
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(36_673)).expect("instructions");
     std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
     std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
     std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");

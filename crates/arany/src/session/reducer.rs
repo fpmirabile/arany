@@ -224,6 +224,28 @@ pub struct AgentView {
 const MAX_PRIMARY_REFUSALS: usize = 8;
 
 impl AgentView {
+    pub(crate) fn outcome_correction_pending(&self) -> bool {
+        self.provider_calls.last().is_some_and(|call| {
+            call.failure_reason == Some(crate::provider::ProviderFailureReason::OutcomeContract)
+                && call.phase != crate::provider::AgentPhase::ToolReview
+        }) && self
+            .provider_calls
+            .iter()
+            .filter(|call| {
+                call.failure_reason == Some(crate::provider::ProviderFailureReason::OutcomeContract)
+                    && call.phase != crate::provider::AgentPhase::ToolReview
+            })
+            .count()
+            == 1
+    }
+
+    pub(crate) fn outcome_correction_exhausted(&self) -> bool {
+        self.provider_calls.last().is_some_and(|call| {
+            call.failure_reason == Some(crate::provider::ProviderFailureReason::OutcomeContract)
+                && call.phase != crate::provider::AgentPhase::ToolReview
+        }) && !self.outcome_correction_pending()
+    }
+
     pub(crate) fn refusal_limit_reached(&self) -> bool {
         let Some(refusal) = self
             .provider_calls

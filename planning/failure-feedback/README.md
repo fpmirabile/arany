@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `Ready` (remaining C1–C2; prior-Run cause reinjection is delivered by the [Session contract](../../docs/specs/session.md#context-and-compaction))
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-22`
 - Next action: implement C1 after [approvals wait A1](../approvals-wait/README.md#vertical-slices), then C2. [Budget feedback](../budget-feedback/README.md) is independent.

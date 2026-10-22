@@ -30,7 +30,41 @@ pub enum RunStop {
     Failed(RunFailure),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct RunFailureFeedback {
+    pub failure: RunFailure,
+    pub provider_disposition: Option<super::ProviderCallDisposition>,
+    pub provider_failure: Option<crate::provider::ProviderFailureReason>,
+}
+
 impl SessionView {
+    pub(crate) fn previous_run_failure(&self) -> Option<RunFailureFeedback> {
+        let run = self.runs.last()?;
+        let failure = match self.run_stop(run) {
+            Some(RunStop::GoalExhausted(_)) => RunFailure::BudgetExhausted,
+            Some(RunStop::Failed(failure)) => failure,
+            None => run.failure?,
+            Some(
+                RunStop::Paused
+                | RunStop::Cancelled
+                | RunStop::StoppedByHook
+                | RunStop::Uncertain
+                | RunStop::Interrupted,
+            ) => return None,
+        };
+        let call = run
+            .primary()?
+            .provider_calls
+            .iter()
+            .rev()
+            .find(|call| call.phase != crate::provider::AgentPhase::ToolReview);
+        Some(RunFailureFeedback {
+            failure,
+            provider_disposition: call.map(|call| call.disposition),
+            provider_failure: call.and_then(|call| call.failure_reason),
+        })
+    }
+
     /// The one stop projection for live results and history; `None` while `run` is open or when
     /// it finished without stopping its Goal.
     #[must_use]

@@ -646,7 +646,16 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                 })
                 && (plan_recorded && !awaiting_plan)
                 && run.hooks_settled();
-            let valid = plan_continuation
+            let outcome_correction = agent.role == AgentRole::Primary
+                && agent.outcome_correction_pending()
+                && agent
+                    .provider_calls
+                    .last()
+                    .is_some_and(|call| call.phase == record.phase)
+                && run.hooks_settled()
+                && run.tools.iter().all(ToolView::settled_without_stop);
+            let valid = outcome_correction
+                || plan_continuation
                 || refusal_continuation
                 || gate_continuation
                 || stop_continuation
@@ -668,6 +677,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
                     _ => false,
                 };
             if agent.status != AgentStatus::Active
+                || agent.role == AgentRole::Primary && agent.outcome_correction_exhausted()
                 || !valid
                 || record.disposition == ProviderCallDisposition::PlanRecorded
                     && !(tools_enabled

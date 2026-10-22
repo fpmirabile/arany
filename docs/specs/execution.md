@@ -26,6 +26,8 @@ Child identities and assignments retain ordinal order even when calls finish out
 
 A delegation abort preserves its original failure when sibling draining also fails; the drain failure is diagnostic only.
 
+A primary outcome-contract failure is committed as `ProviderCallRecorded` with `invalid_response` and `outcome_contract` before the [single corrective call](./provider.md#structured-outcomes-and-tool-encoding) can reserve and dispatch. Replay permits that same-phase continuation only after the first such failure, with settled Tools and hooks, and rejects another reservation after the second. Reservations and unknown usage remain charged normally; no effect is replayed. If correction also fails, the Run records `provider_call` and retains the final typed parse reason. Subsequent context uses the [committed failure projection](./session.md#context-and-compaction), never an invented causal explanation.
+
 ## Researcher children
 
 One delegation active-time segment covers child calls and child Tools, including their shared Guard capacity waits. Pause also takes effect before each child step.

@@ -81,7 +81,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 content: "hello".into(),
             })
         };
-        let attempts = if known_reason { 1 } else { 3 };
+        let attempts = if known_reason { 2 } else { 3 };
         let provider = ScriptedProvider::new(
             (0..attempts)
                 .map(|_| refused_write())
@@ -91,12 +91,15 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .collect(),
         );
         if known_reason {
-            *provider
+            for response in provider
                 .responses
                 .lock()
                 .expect("responses")
-                .front_mut()
-                .expect("first response") = Err(ProviderError::InvalidOutcomeContract);
+                .iter_mut()
+                .take(attempts)
+            {
+                *response = Err(ProviderError::InvalidOutcomeContract);
+            }
         }
         let observed = provider.requests.clone();
         let provider = Arc::new(provider);
@@ -155,6 +158,12 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         assert_eq!(requests.len(), attempts + 1);
         assert!(provider.responses.lock().expect("responses").is_empty());
         let follow_up_request = &requests[attempts];
+        let feedback = follow_up_request
+            .input
+            .previous_run_failure
+            .expect("committed failure cause");
+        assert_eq!(feedback.failure, first.run.failure.expect("failed Run"));
+        assert_eq!(feedback.provider_failure, call.failure_reason);
         assert_eq!(
             follow_up_request.input.objective,
             "why couldn't you write it?"

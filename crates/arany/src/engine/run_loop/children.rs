@@ -1288,6 +1288,7 @@ impl RunLoop<'_> {
             | PrimaryDecision::Finish(..)
             | PrimaryDecision::Delegate(..)
             | PrimaryDecision::Refused(_)
+            | PrimaryDecision::CorrectOutcome
             | PrimaryDecision::Fail(_) => {
                 return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
             }

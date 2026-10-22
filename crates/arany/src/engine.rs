@@ -747,7 +747,7 @@ fn goal_context_metadata_reservation(
         } else {
             0
         })
-        .and_then(|bytes| bytes.checked_add(64))
+        .and_then(|bytes| bytes.checked_add(64 + crate::provider::MAX_HARNESS_FEEDBACK_BYTES))
         .ok_or(EngineError::ContextTooLarge)
 }
 
@@ -1364,6 +1364,10 @@ impl Engine {
             )
             .await?;
         let prepared = self.prepare_turn(submission, &request, identity, &admitted)?;
+        let previous_run_failure = admitted
+            .history
+            .as_ref()
+            .and_then(|view| view.previous_run_failure());
         let AdmittedTurn {
             session_id,
             workspace_identity,
@@ -1452,7 +1456,7 @@ impl Engine {
                     },
                 )
                 .await?;
-                let provider_request = root_request(
+                let mut provider_request = root_request(
                     CallScope {
                         session_id,
                         run_id,
@@ -1476,6 +1480,7 @@ impl Engine {
                         summary,
                     },
                 );
+                provider_request.input.previous_run_failure = previous_run_failure;
                 if let Some(steering) = &submission.steering {
                     steering.begin_run(session_id, run_id);
                 }
