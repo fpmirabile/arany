@@ -1377,23 +1377,22 @@ fn checkpoint_regular_journal_that_survives_recovery_refuses_untouched() {
     checkpoint_fixture(&root);
     let database = path.join(checkpoints::FILES[0]);
     let journal_path = path.join(checkpoints::FILES[1]);
-    let hot = hot_checkpoint_journal(temp.path(), &database, &journal_path);
-    let reader = Connection::open(&database).unwrap();
-    reader
-        .execute_batch("BEGIN; SELECT COUNT(*) FROM refs;")
-        .unwrap();
-    install_hot_journal(&hot, &database, &journal_path);
+    create_private(&root.dir, checkpoints::FILES[1]).unwrap();
     let database_bytes = std::fs::read(&database).unwrap();
-    let journal_bytes = std::fs::read(&journal_path).unwrap();
     let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
-    assert!(checkpoint_below_floor(&root).is_err());
-    assert!(root.archive_incompatible_history().is_err());
+    assert!(matches!(
+        checkpoint_below_floor(&root),
+        Err(StoreError::InvalidStateDirectory)
+    ));
+    assert!(matches!(
+        root.archive_incompatible_history(),
+        Err(StoreError::InvalidStateDirectory)
+    ));
     assert!(journal_path.symlink_metadata().unwrap().is_file());
-    assert_eq!(std::fs::read(&journal_path).unwrap(), journal_bytes);
+    assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), 0);
     assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
     assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
     assert!(!path.join("archive").exists() && !path.join(DIR).exists());
-    drop(reader);
     replays(&root, &sessions);
 }
 
