@@ -1271,7 +1271,17 @@ enum BranchCompletion {
     Failed(Value),
 }
 
-type PackedUpstreams = BTreeMap<String, &'static str>;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum UpstreamStatus {
+    Present,
+    Gone,
+    Unavailable,
+    Unsupported,
+    NotApplicable,
+}
+
+type PackedUpstreams = BTreeMap<String, UpstreamStatus>;
 
 impl BranchRead<'_> {
     fn packed_upstreams(
@@ -1285,7 +1295,7 @@ impl BranchRead<'_> {
                 let name = std::str::from_utf8(record.split(|byte| *byte == 0).next()?).ok()?;
                 let branch = name.strip_prefix("refs/heads/")?;
                 let target = config?.upstream(branch).ok()??;
-                Some((target, "gone"))
+                Some((target, UpstreamStatus::Gone))
             })
             .collect();
         if targets.is_empty() {
@@ -1300,7 +1310,7 @@ impl BranchRead<'_> {
                 Err(_) => {
                     targets
                         .values_mut()
-                        .for_each(|status| *status = "unsupported");
+                        .for_each(|status| *status = UpstreamStatus::Unsupported);
                     return Ok(targets);
                 }
             };
@@ -1312,12 +1322,12 @@ impl BranchRead<'_> {
                 .ok()
                 .and_then(|line| line.split_once(' '))
                 && let Some(status) = targets.get_mut(name)
-                && *status == "gone"
+                && *status == UpstreamStatus::Gone
             {
                 *status = if object_id(oid.as_bytes()).is_ok() {
-                    "present"
+                    UpstreamStatus::Present
                 } else {
-                    "unsupported"
+                    UpstreamStatus::Unsupported
                 };
             }
         }
@@ -1591,7 +1601,7 @@ fn branch_row(
     let symbolic_text = String::from_utf8_lossy(symbolic);
     let symbolic = (!symbolic.is_empty()).then_some(symbolic_text.as_ref());
     let (upstream, status) = if local && !name_exact {
-        (None, "unsupported")
+        (None, UpstreamStatus::Unsupported)
     } else {
         upstream_status(config, git_dir, packed, name)
     };
@@ -1675,21 +1685,27 @@ fn upstream_status(
     git_dir: &Dir,
     packed: &PackedUpstreams,
     name: &str,
-) -> (Option<String>, &'static str) {
+) -> (Option<String>, UpstreamStatus) {
     let Some(branch) = name.strip_prefix("refs/heads/") else {
-        return (None, "not_applicable");
+        return (None, UpstreamStatus::NotApplicable);
     };
     match config.map(|config| config.upstream(branch)) {
         Some(Ok(Some(target))) => match loose_ref(git_dir, &target) {
-            Ok(Some(_)) => (Some(target), "present"),
-            Ok(None) => match packed.get(&target).copied().unwrap_or("unsupported") {
-                "unsupported" => (None, "unsupported"),
-                status => (Some(target), status),
+            Ok(Some(_)) => (Some(target), UpstreamStatus::Present),
+            Ok(None) => match packed
+                .get(&target)
+                .copied()
+                .unwrap_or(UpstreamStatus::Unsupported)
+            {
+                status @ (UpstreamStatus::Present | UpstreamStatus::Gone) => (Some(target), status),
+                UpstreamStatus::Unavailable
+                | UpstreamStatus::Unsupported
+                | UpstreamStatus::NotApplicable => (None, UpstreamStatus::Unsupported),
             },
-            Err(_) => (None, "unsupported"),
+            Err(_) => (None, UpstreamStatus::Unsupported),
         },
-        Some(Ok(None)) => (None, "unavailable"),
-        Some(Err(())) | None => (None, "unsupported"),
+        Some(Ok(None)) => (None, UpstreamStatus::Unavailable),
+        Some(Err(())) | None => (None, UpstreamStatus::Unsupported),
     }
 }
 
@@ -2666,7 +2682,10 @@ pub(super) mod tests {
         for branch in ["refs/heads/topic", "refs/heads/alias"] {
             assert_eq!(
                 upstream_status(Some(&config), &repository.git_dir, &packed, branch),
-                (Some("refs/remotes/review/topic".into()), "present")
+                (
+                    Some("refs/remotes/review/topic".into()),
+                    UpstreamStatus::Present
+                )
             );
         }
         std::fs::write(
@@ -2682,7 +2701,7 @@ pub(super) mod tests {
                 &malformed,
                 "refs/heads/topic"
             ),
-            (None, "unsupported")
+            (None, UpstreamStatus::Unsupported)
         );
         let loose = workspace.join(".git/refs/remotes/review/topic");
         std::fs::create_dir_all(loose.parent().unwrap()).unwrap();
@@ -2694,7 +2713,10 @@ pub(super) mod tests {
                 &malformed,
                 "refs/heads/topic"
             ),
-            (Some("refs/remotes/review/topic".into()), "present")
+            (
+                Some("refs/remotes/review/topic".into()),
+                UpstreamStatus::Present
+            )
         );
         std::fs::remove_file(&loose).unwrap();
         std::os::unix::fs::symlink(workspace.join("src/main.rs"), &loose).unwrap();
@@ -2705,7 +2727,7 @@ pub(super) mod tests {
                 &packed,
                 "refs/heads/topic"
             ),
-            (None, "unsupported")
+            (None, UpstreamStatus::Unsupported)
         );
     }
 

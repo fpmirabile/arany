@@ -328,21 +328,7 @@ async fn native_git_journey_helper() {
     assert!(failed.attestation.is_some());
 
     let branches = output(4);
-    assert_eq!(branches["comparison_base"]["revision"], "HEAD~1");
-    assert_eq!(branches["history_complete"], true);
-    let rows = branches["branches"].as_array().unwrap();
-    assert_eq!(rows.len(), 3);
-    for row in [&rows[0], &rows[2]] {
-        assert_eq!(row["subject"], "second commit");
-        assert_eq!(row["ahead"], 1);
-        assert_eq!(row["behind"], 0);
-    }
-    assert_eq!(rows[0]["name"], "refs/heads/main");
-    assert_eq!(rows[1]["name"], "refs/heads/protected");
-    assert!(rows[1]["subject"].is_null());
-    assert_eq!(rows[1]["subject_withheld"], true);
-    assert_eq!(rows[2]["name"], "refs/remotes/review/topic");
-    assert_eq!(rows[2]["kind"], "remote");
+    crate::assert_git_branch_journey(&branches, &workspace);
     let observation = outcome.run.tools[4].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     assert!(observation.attestation.is_some());
