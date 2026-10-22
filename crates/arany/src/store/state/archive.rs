@@ -58,7 +58,10 @@ impl StateRoot {
         &self,
         registry: &migrate::Registry<'_>,
     ) -> Result<Option<ArchivedHistory>, StoreError> {
-        if self.archive_plan()?.is_none() && !migrate::pending(self)? {
+        if self.archive_plan()?.is_none()
+            && !migrate::pending(self)?
+            && !migrate::checkpoint_journal_present(self)?
+        {
             let _shared = self.lock_history(false)?;
             let _checkpoints = checkpoints::lock(self)?;
             match check_history(self) {

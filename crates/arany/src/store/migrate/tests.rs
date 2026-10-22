@@ -1318,21 +1318,54 @@ fn checkpoint_below_floor_archives_history_intact_under_existing_locks() {
 }
 
 #[test]
-fn checkpoint_hot_journal_fails_read_only_eligibility_without_mutation() {
+fn checkpoint_hot_journal_recovers_before_eligibility() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("state");
-    let History { root, .. } = forked_history(&path);
+    let History { root, sessions } = forked_history(&path);
     checkpoint_fixture(&root);
     create_private(&root.dir, checkpoints::FILES[1]).unwrap();
     std::fs::write(path.join(checkpoints::FILES[1]), vec![0xA5; 512]).unwrap();
-    let originals: Vec<_> = [checkpoints::FILES[0], checkpoints::FILES[1]]
-        .into_iter()
-        .map(|name| (name, std::fs::read(path.join(name)).unwrap()))
-        .collect();
+    let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    assert!(!checkpoint_below_floor(&root).unwrap());
+    assert!(!path.join(checkpoints::FILES[1]).exists());
+    assert_eq!(
+        std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
+        original
+    );
+    assert!(root.archive_incompatible_history().unwrap().is_none());
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists());
+    replays(&root, &sessions);
+}
+
+#[test]
+fn checkpoint_journal_that_survives_recovery_refuses_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let target = path.join("elsewhere");
+    std::fs::write(&target, vec![0xA5; 512]).unwrap();
+    std::os::unix::fs::symlink(&target, path.join(checkpoints::FILES[1])).unwrap();
+    let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
     assert!(checkpoint_below_floor(&root).is_err());
-    for (name, original) in originals {
-        assert_eq!(std::fs::read(path.join(name)).unwrap(), original, "{name}");
-    }
+    assert!(root.archive_incompatible_history().is_err());
+    assert!(
+        path.join(checkpoints::FILES[1])
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), vec![0xA5; 512]);
+    assert_eq!(
+        std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
+        original
+    );
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+    replays(&root, &sessions);
 }
 
 #[test]

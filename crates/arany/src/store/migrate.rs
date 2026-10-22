@@ -760,26 +760,45 @@ pub(super) enum Inspection {
     Inconclusive,
 }
 
+pub(super) fn checkpoint_journal_present(root: &StateRoot) -> Result<bool, StoreError> {
+    Ok(identity_of(&root.dir, checkpoints::FILES[1])?.is_some())
+}
+
+// The caller holds the exclusive history and checkpoint locks.
 pub(super) fn checkpoint_below_floor(root: &StateRoot) -> Result<bool, StoreError> {
     let records = checkpoints::records(root)?;
     if records[0].as_ref().is_none_or(|file| file.len() == 0) {
         return Ok(false);
     }
+    let path = root.path().join(checkpoints::FILES[0]);
+    let unreadable = |error: &StoreError| {
+        matches!(
+            error,
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                )
+        )
+    };
+    if checkpoint_journal_present(root)? {
+        match open_source(&path, false) {
+            Ok(connection) => drop(connection),
+            Err(error) if unreadable(&error) => {}
+            Err(error) => return Err(error),
+        }
+        if checkpoint_journal_present(root)? {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+    }
     let inspect = || -> Result<i64, StoreError> {
-        let connection = open_source(&root.path().join(checkpoints::FILES[0]), true)?;
+        let connection = open_source(&path, true)?;
         connection.busy_timeout(std::time::Duration::ZERO)?;
         Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
     };
     match inspect() {
         Ok(version) => Ok(version < CHECKPOINT_SCHEMA.floor),
-        Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
-            if matches!(
-                code.code,
-                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
-            ) =>
-        {
-            Ok(false)
-        }
+        Err(error) if unreadable(&error) => Ok(false),
         Err(error) => Err(error),
     }
 }
