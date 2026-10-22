@@ -1317,6 +1317,36 @@ fn checkpoint_below_floor_archives_history_intact_under_existing_locks() {
     );
 }
 
+fn hot_checkpoint_journal(
+    temp: &std::path::Path,
+    database: &std::path::Path,
+    journal: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let scratch = temp.join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let writer = Connection::open(database).unwrap();
+    writer.execute_batch("PRAGMA cache_size=1; BEGIN;").unwrap();
+    writer.execute_batch("CREATE TABLE junk(x BLOB);").unwrap();
+    for _ in 0..300 {
+        writer
+            .execute("INSERT INTO junk VALUES (randomblob(4000))", [])
+            .unwrap();
+    }
+    std::fs::copy(database, scratch.join("db")).unwrap();
+    std::fs::copy(journal, scratch.join("journal")).unwrap();
+    drop(writer);
+    (scratch.join("db"), scratch.join("journal"))
+}
+
+fn install_hot_journal(
+    (db, hot): &(std::path::PathBuf, std::path::PathBuf),
+    database: &std::path::Path,
+    journal: &std::path::Path,
+) {
+    std::fs::copy(db, database).unwrap();
+    std::fs::copy(hot, journal).unwrap();
+}
+
 #[test]
 fn checkpoint_hot_journal_recovers_before_eligibility() {
     let temp = tempfile::tempdir().unwrap();
@@ -1327,21 +1357,8 @@ fn checkpoint_hot_journal_recovers_before_eligibility() {
     let journal_path = path.join(checkpoints::FILES[1]);
     let original = std::fs::read(&database).unwrap();
     let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
-    let scratch = temp.path().join("scratch");
-    std::fs::create_dir(&scratch).unwrap();
-    let writer = Connection::open(&database).unwrap();
-    writer.execute_batch("PRAGMA cache_size=1; BEGIN;").unwrap();
-    writer.execute_batch("CREATE TABLE junk(x BLOB);").unwrap();
-    for _ in 0..300 {
-        writer
-            .execute("INSERT INTO junk VALUES (randomblob(4000))", [])
-            .unwrap();
-    }
-    std::fs::copy(&database, scratch.join("db")).unwrap();
-    std::fs::copy(&journal_path, scratch.join("journal")).unwrap();
-    drop(writer);
-    std::fs::copy(scratch.join("db"), &database).unwrap();
-    std::fs::copy(scratch.join("journal"), &journal_path).unwrap();
+    let hot = hot_checkpoint_journal(temp.path(), &database, &journal_path);
+    install_hot_journal(&hot, &database, &journal_path);
     assert_ne!(std::fs::read(&database).unwrap(), original);
     assert!(!checkpoint_below_floor(&root).unwrap());
     assert!(!journal_path.exists());
@@ -1349,6 +1366,34 @@ fn checkpoint_hot_journal_recovers_before_eligibility() {
     assert!(root.archive_incompatible_history().unwrap().is_none());
     assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
     assert!(!path.join("archive").exists());
+    replays(&root, &sessions);
+}
+
+#[test]
+fn checkpoint_regular_journal_that_survives_recovery_refuses_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let database = path.join(checkpoints::FILES[0]);
+    let journal_path = path.join(checkpoints::FILES[1]);
+    let hot = hot_checkpoint_journal(temp.path(), &database, &journal_path);
+    let reader = Connection::open(&database).unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT COUNT(*) FROM refs;")
+        .unwrap();
+    install_hot_journal(&hot, &database, &journal_path);
+    let database_bytes = std::fs::read(&database).unwrap();
+    let journal_bytes = std::fs::read(&journal_path).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    assert!(checkpoint_below_floor(&root).is_err());
+    assert!(root.archive_incompatible_history().is_err());
+    assert!(journal_path.symlink_metadata().unwrap().is_file());
+    assert_eq!(std::fs::read(&journal_path).unwrap(), journal_bytes);
+    assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+    drop(reader);
     replays(&root, &sessions);
 }
 
