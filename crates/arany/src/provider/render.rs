@@ -24,8 +24,8 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     request.validate_scope()?;
     let input = &request.input;
     let catalog = input.tools.as_ref().map(|tools| {
-        crate::tools::parse_json(tools.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES)
-            .unwrap_or_else(|_| json!(tools.catalog))
+        crate::tools::parse_json(tools.catalog().as_bytes(), MAX_TOOL_CATALOG_BYTES)
+            .unwrap_or_else(|_| json!(tools.catalog()))
     });
     let tools = catalog
         .as_ref()
@@ -276,6 +276,11 @@ fn append_steps(
 }
 
 fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>, ProviderError> {
+    let tools = request
+        .input
+        .tools
+        .as_ref()
+        .ok_or(ProviderError::Rejected)?;
     let mut requests = step.requests.iter();
     let mut results = Vec::new();
     if let Some(plan) = &step.plan {
@@ -291,17 +296,17 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
         if narrowed {
             integrations.push(data_block(
                 "hook_narrowing (untrusted result data)",
-                step.model_result(index, observation),
+                tools.model_result(step, index),
             ));
         } else if matches!(observation.intent.call, ToolCall::ApplyChangeset { .. }) {
             integrations.push(data_block(
                 "engine_integration (untrusted result data)",
-                step.model_result(index, observation),
+                tools.model_result(step, index),
             ));
         } else {
             let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
             // The replayed turn already carries the call; the result adds only what was observed.
-            let mut output = step.model_result(index, observation);
+            let mut output = tools.model_result(step, index);
             if !step.cleared
                 && let Some(fields) = output.as_object_mut()
             {

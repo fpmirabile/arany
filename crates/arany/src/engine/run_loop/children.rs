@@ -2085,7 +2085,7 @@ impl RunLoop<'_> {
                 }
             }
             let mut catalog: serde_json::Value =
-                serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+                serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
             if let Some(fields) = catalog.as_object_mut() {
                 fields.remove("last_answer_refused");
                 fields.remove("hook_reruns");
@@ -2106,7 +2106,7 @@ impl RunLoop<'_> {
                     catalog = offered;
                 }
             }
-            tools.catalog = catalog.to_string();
+            tools.set_catalog(&catalog);
         }
         Ok(())
     }
@@ -2346,16 +2346,17 @@ impl RunLoop<'_> {
                 Some(step) => step.calls_remaining = Some(child.tool_calls_remaining),
                 None => {
                     if child.editor {
-                        let mut catalog: serde_json::Value =
-                            serde_json::from_str(&tools.catalog)
-                                .map_err(|_| EngineError::InvalidRequest)?;
+                        let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog())
+                            .map_err(|_| EngineError::InvalidRequest)?;
                         catalog["tool_calls_remaining"] =
                             serde_json::json!(child.tool_calls_remaining);
-                        tools.catalog = catalog.to_string();
+                        tools.set_catalog(&catalog);
                     } else {
-                        tools.catalog = runtime
-                            .research_context(child.tool_calls_remaining)?
-                            .catalog;
+                        let refreshed = runtime.research_context(child.tool_calls_remaining)?;
+                        tools.set_catalog(
+                            &serde_json::from_str(refreshed.catalog())
+                                .map_err(|_| EngineError::InvalidRequest)?,
+                        );
                     }
                     // Only the first call rebuilds the catalog; later calls keep this restriction.
                     if !child.editor
@@ -2437,10 +2438,10 @@ impl RunLoop<'_> {
             if let (Some((reason, _)), Some(tools)) =
                 (queue.deferred.take(), root_request.input.tools.as_mut())
             {
-                let mut catalog: serde_json::Value = serde_json::from_str(&tools.catalog)
+                let mut catalog: serde_json::Value = serde_json::from_str(tools.catalog())
                     .map_err(|_| EngineError::InvalidRequest)?;
                 catalog["last_answer_refused"] = serde_json::json!(reason.text());
-                tools.catalog = catalog.to_string();
+                tools.set_catalog(&catalog);
             }
             root_request.phase = AgentPhase::RootSynthesis;
             match self
@@ -2586,7 +2587,7 @@ fn restrict_catalog(
     definition: &crate::tools::definitions::AgentDefinition,
 ) -> Result<(), EngineError> {
     let mut catalog: serde_json::Value =
-        serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+        serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
     let operations: Vec<_> = [
         ToolCall::List { path: ".".into() },
         ToolCall::Read {
@@ -2616,7 +2617,7 @@ fn restrict_catalog(
     .map(|call| call.label())
     .collect();
     catalog["operations"] = serde_json::json!(operations);
-    tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
+    tools.set_catalog(&catalog);
     Ok(())
 }
 

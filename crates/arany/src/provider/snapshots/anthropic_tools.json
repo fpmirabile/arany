@@ -380,7 +380,7 @@
       "name": "arany_edit"
     },
     {
-      "description": "Run an admitted command in an offline project snapshot. Large output keeps a head and tail with byte and line totals; narrow it with grep, sed -n or tail. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes.",
+      "description": "Run an admitted command in an offline project snapshot. Large output keeps a head and tail with byte and line totals; narrow it with grep, sed -n or tail. Bounded file changes are validated and integrated separately; only an applied integration receipt confirms Workspace changes. The command's project copy has no .git; use git_status / git_diff / git_log for repository state and history.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {

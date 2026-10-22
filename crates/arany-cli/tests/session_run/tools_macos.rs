@@ -184,7 +184,7 @@ impl Provider for Journey {
             .tools
             .as_ref()
             .ok_or(ProviderError::InvalidOutcome)?;
-        let catalog: serde_json::Value = serde_json::from_str(&context.catalog).unwrap();
+        let catalog: serde_json::Value = serde_json::from_str(context.catalog()).unwrap();
         assert_eq!(catalog["commands"][0]["name"], "shell");
         assert_eq!(catalog["mcp_servers"][0]["name"], "synthetic");
         assert_eq!(

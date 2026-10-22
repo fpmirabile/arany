@@ -16,7 +16,7 @@ const CANARIES: [&str; 8] = [
     "catalog canary",
 ];
 
-fn catalog() -> String {
+fn catalog() -> Value {
     json!({
         "write": true,
         "commands": [{"name": "cargo"}],
@@ -25,7 +25,6 @@ fn catalog() -> String {
         "git": {"operations": ["git_status", "git_diff", "git_log"]},
         "note": "catalog canary",
     })
-    .to_string()
 }
 
 use crate::provider::test_support::observation;
@@ -78,12 +77,10 @@ fn request(steps: Vec<ToolStep>) -> ProviderRequest {
                 assistant: "history assistant canary".into(),
             }],
             goal_budget: Some(GoalBudget::default()),
-            tools: Some(ToolContext {
-                invoked_skill: None,
-                stop_bytes: 0,
-                catalog: catalog(),
-                history_summary: None,
-                steps,
+            tools: Some({
+                let mut context = ToolContext::new(catalog());
+                context.steps = steps;
+                context
             }),
             ..RunInput::new(PromptRole::Primary, "objective".into())
         },
@@ -487,6 +484,142 @@ fn results_pair_with_request_ids_and_integrations_are_labelled_data() {
     );
     assert!(matches!(&results[2], Block::Text(text) if text.contains("note after results")));
     assert!(matches!(&results[3], Block::Text(text) if text.contains("goal_context_facts")));
+}
+
+const GIT_REPOSITORY_ERROR: &str =
+    "fatal: not a git repository (or any of the parent directories): .git\n";
+
+fn command_step(exit_code: Option<i32>, stdout: &str, stderr: &str) -> ToolStep {
+    let mut command = step("call_git", "src/lib.rs");
+    let call = ToolCall::Command {
+        program: "cargo".into(),
+        args: vec!["git".into()],
+        cwd: ".".into(),
+    };
+    let output = json!({
+        "exit_code": exit_code, "stdout": stdout, "stderr": stderr,
+        "stdout_total": {"bytes": stdout.len(), "lines": stdout.lines().count()},
+        "stderr_total": {"bytes": stderr.len(), "lines": stderr.lines().count()},
+        "changeset": crate::tools::CommandChangeset::default(),
+    });
+    command.requests[0].call = call.clone();
+    command.observations = vec![observation(call, &output.to_string())];
+    assert!(command.observations[0].valid());
+    command
+}
+
+fn rendered_tool_result(request: &ProviderRequest) -> Value {
+    conversation(request)
+        .unwrap()
+        .messages
+        .last()
+        .unwrap()
+        .blocks
+        .iter()
+        .find_map(|block| match block {
+            Block::ToolResult { output, .. } => Some(output.clone()),
+            _ => None,
+        })
+        .unwrap()
+}
+
+#[test]
+fn command_git_hint_uses_kept_stderr_and_cataloged_tools_and_survives_replay() {
+    let mut cleared = command_step(Some(128), "", GIT_REPOSITORY_ERROR);
+    cleared.cleared = true;
+    let mut unguarded = command_step(Some(128), "", GIT_REPOSITORY_ERROR);
+    let call = ToolCall::CommandUnguarded {
+        program: "cargo".into(),
+        args: vec!["git".into()],
+        cwd: ".".into(),
+        justification: "Retry the failed command?".into(),
+    };
+    unguarded.requests[0].call = call.clone();
+    unguarded.observations[0] = observation(call, &unguarded.observations[0].output);
+    let mut other_tool = step("call_read", "src/lib.rs");
+    other_tool.observations[0].output = command_step(Some(128), "", GIT_REPOSITORY_ERROR)
+        .observations[0]
+        .output
+        .clone();
+    let mut filtered = catalog();
+    filtered["operations"] = json!(["command", "git_status", "git_diff"]);
+    for (command, matches) in [
+        (command_step(Some(128), "", GIT_REPOSITORY_ERROR), true),
+        (command_step(Some(0), "", GIT_REPOSITORY_ERROR), false),
+        (command_step(None, "", GIT_REPOSITORY_ERROR), false),
+        (command_step(Some(1), "", "permission denied"), false),
+        (command_step(Some(128), GIT_REPOSITORY_ERROR, ""), false),
+        (cleared, false),
+        (unguarded, false),
+        (other_tool, false),
+    ] {
+        for (catalog, available) in [
+            (catalog(), true),
+            (json!({"git": "unavailable"}), false),
+            (filtered.clone(), false),
+            (json!("invalid catalog"), false),
+        ] {
+            let mut request = request(vec![command.clone()]);
+            request.input.tools.as_mut().unwrap().set_catalog(&catalog);
+            let rendered = rendered_tool_result(&request);
+            let expected = (matches && available)
+                .then(|| json!(crate::tools::catalog::COMMAND_GIT_HINT.concat()));
+            assert_eq!(rendered.get("hint"), expected.as_ref());
+            if !command.cleared {
+                assert_eq!(
+                    rendered["output"],
+                    serde_json::from_str::<Value>(&command.observations[0].output).unwrap()
+                );
+            }
+            let recorded = serde_json::to_vec(&command.observations[0]).unwrap();
+            request.input.tools.as_mut().unwrap().steps[0].observations[0] =
+                serde_json::from_slice(&recorded).unwrap();
+            assert_eq!(
+                rendered_tool_result(&request).to_string(),
+                rendered.to_string()
+            );
+        }
+    }
+}
+
+#[test]
+fn command_git_hint_bytes_are_included_in_context_and_reservations() {
+    let command = command_step(Some(128), "", GIT_REPOSITORY_ERROR);
+    let mut with_git = ToolContext::new(catalog());
+    with_git.steps.push(command.clone());
+    let mut without_git = with_git.clone();
+    let mut unavailable = catalog();
+    unavailable["git"] = json!("unavailable");
+    without_git.set_catalog(&unavailable);
+    let mut pending = command.clone();
+    pending.observations.clear();
+    let calls = [&pending.requests[0].call];
+    let hint_bytes = with_git.model_result(&command, 0).to_string().len()
+        - without_git.model_result(&command, 0).to_string().len();
+    let result_bytes = |context: &ToolContext| context.rendered_len() - context.catalog().len();
+    let reserved_bytes =
+        |context: &ToolContext| context.reserved_len(&pending, &calls) - context.rendered_len();
+    assert_eq!(
+        result_bytes(&with_git) - result_bytes(&without_git),
+        hint_bytes
+    );
+    assert_eq!(
+        reserved_bytes(&with_git) - reserved_bytes(&without_git),
+        hint_bytes
+    );
+    assert_eq!(
+        with_git.model_observations(1)[0]["hint"],
+        crate::tools::catalog::COMMAND_GIT_HINT.concat()
+    );
+    with_git.steps[0].cleared = true;
+    without_git.steps[0].cleared = true;
+    assert_eq!(result_bytes(&with_git), result_bytes(&without_git));
+    assert!(
+        with_git
+            .model_result(&with_git.steps[0], 0)
+            .get("hint")
+            .is_none()
+    );
 }
 
 #[test]
@@ -905,10 +1038,15 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
         cause: crate::session::ProposalRefusalCause::PlanInvalid,
     });
     for catalog in [
-        json!({"padding": "x".repeat(MAX_TOOL_CATALOG_BYTES - 20)}).to_string(),
-        "[]".into(),
+        json!({"padding": "x".repeat(MAX_TOOL_CATALOG_BYTES - 20)}),
+        json!([]),
     ] {
-        request.input.tools.as_mut().expect("Tools").catalog = catalog;
+        request
+            .input
+            .tools
+            .as_mut()
+            .expect("Tools")
+            .set_catalog(&catalog);
         assert!(conversation(&request).is_ok());
     }
     request

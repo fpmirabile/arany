@@ -3350,7 +3350,7 @@ fn invoked_skill_is_pinned_journaled_and_read_before_provider_egress() {
                 body
             );
             assert_eq!(
-                serde_json::from_str::<serde_json::Value>(&tools.catalog).unwrap()["skills"],
+                serde_json::from_str::<serde_json::Value>(tools.catalog()).unwrap()["skills"],
                 serde_json::json!([])
             );
         }

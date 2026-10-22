@@ -387,6 +387,8 @@ Native Linux and macOS lanes run the same executor code; a live attached journey
 
 ## Commands
 
+Command project copies exclude `.git`; the command description points to typed Git reads when they are cataloged. Following the Run's pinned catalog, a nonzero command exit whose kept stderr contains `not a git repository` receives a fixed hint in the model result's `hint` field when `git_status`, `git_diff` and `git_log` are available; the hint is derived deterministically from the recorded observation.
+
 Each `commands` entry declares a reviewed executable and its SHA-256, whether it is an interpreter, and any additional pinned input files:
 
 ```json

@@ -935,7 +935,7 @@ async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
             })
         );
         let primary_catalog: Value =
-            serde_json::from_str(&seen.calls[4].input.tools.as_ref().unwrap().catalog).unwrap();
+            serde_json::from_str(seen.calls[4].input.tools.as_ref().unwrap().catalog()).unwrap();
         assert_eq!(primary_catalog.get("hook_reruns").is_some(), explicit);
         let session = seen.outcome.session_id;
         let (_, view) = host.reopen(session).await;

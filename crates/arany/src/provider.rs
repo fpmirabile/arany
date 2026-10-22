@@ -620,7 +620,7 @@ pub(crate) fn restrict_outcome_schema(
             .input
             .tools
             .as_ref()
-            .and_then(|t| serde_json::from_str::<Value>(&t.catalog).ok())
+            .and_then(|t| serde_json::from_str::<Value>(t.catalog()).ok())
             .is_some_and(|c| {
                 c["agents"].as_array().is_some_and(|agents| {
                     agents
@@ -664,7 +664,7 @@ fn assignment_schema(mut schema: Value, request: &ProviderRequest) -> Value {
         ["profile"]["enum"] = json!(profiles);
     if request.input.role == PromptRole::Primary
         && let Some(tools) = &request.input.tools
-        && let Ok(catalog) = serde_json::from_str::<Value>(&tools.catalog)
+        && let Ok(catalog) = serde_json::from_str::<Value>(tools.catalog())
         && let Some(agents) = catalog["agents"].as_array()
     {
         let calls = crate::tools::catalog::catalog_call_schemas(&catalog);
@@ -1276,13 +1276,9 @@ mod tests {
     }
 
     fn context() -> crate::tools::ToolContext {
-        crate::tools::ToolContext {
-            invoked_skill: None,
-stop_bytes: 0,
-            catalog: json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}).to_string(),
-            history_summary: None,
-            steps: Vec::new(),
-        }
+        crate::tools::ToolContext::new(
+            json!({"write": false, "commands": [], "skills": [], "mcp_servers": [], "tool_calls_remaining": 2}),
+        )
     }
 
     #[test]
@@ -1292,9 +1288,9 @@ stop_bytes: 0,
             max_active_children: 3,
         };
         let tools = before.input.tools.as_mut().unwrap();
-        let mut catalog: Value = serde_json::from_str(&tools.catalog).unwrap();
+        let mut catalog: Value = serde_json::from_str(tools.catalog()).unwrap();
         catalog["agents"] = json!([{"name": "editor", "editor": true, "supported": true, "digest": "d", "max_turns": 4}]);
-        tools.catalog = catalog.to_string();
+        tools.set_catalog(&catalog);
         let mut after = before.clone();
         after.input.goal_plan_contract = Some(test_support::goal_plan_contract());
         assert_eq!(run_outcome_schema(&before), run_outcome_schema(&after));
