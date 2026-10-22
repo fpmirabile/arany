@@ -1677,9 +1677,13 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             "team answer",
         );
         let deadline = Instant::now() + Duration::from_secs(10);
+        // The agents panel also shows "team answer" while the Run is still active.
         while !super::screen_rows(&transcript, 100, 30)
-            .join(" ")
-            .contains("ready")
+            .iter()
+            .any(|row| row.trim() == "team answer")
+            || !super::screen_rows(&transcript, 100, 30)
+                .join(" ")
+                .contains("ready")
         {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(Instant::now() < deadline, "team returns to ready composer");
