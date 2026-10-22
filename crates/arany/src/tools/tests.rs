@@ -1422,7 +1422,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 12);
+    assert_eq!(rows.len(), 13);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))
@@ -2189,6 +2189,58 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
     for call in &invalid {
         assert!(!call.valid(), "{call:?}");
     }
+    let legacy = r#"{"operation":"git_branch","name":null,"start_point":null}"#;
+    let call: ToolCall = serde_json::from_str(legacy).unwrap();
+    assert!(call.valid());
+    assert_eq!(serde_json::to_string(&call).unwrap(), legacy);
+    let model = model_call(&call);
+    for field in ["scope", "base", "max_count"] {
+        assert_eq!(model.get(field), Some(&Value::Null));
+    }
+    for scope in [None, Some("local"), Some("remote"), Some("all")] {
+        for count in [None, Some(1), Some(256)] {
+            let call = ToolCall::GitBranch {
+                name: None,
+                start_point: None,
+                scope: scope.map(str::to_owned),
+                base: Some("HEAD~1".into()),
+                max_count: count,
+            };
+            assert!(call.valid());
+            assert!(call.is_goal_plan_prelude() && !call.mutates() && !call.is_child_research());
+            assert_eq!(
+                serde_json::from_value::<ToolCall>(serde_json::to_value(&call).unwrap()).unwrap(),
+                call
+            );
+        }
+    }
+    for fields in [
+        json!({"scope":"live"}),
+        json!({"max_count":0}),
+        json!({"max_count":257}),
+        json!({"base":"main..topic"}),
+        json!({"base":"--all"}),
+        json!({"start_point":"main"}),
+    ] {
+        let mut value: Value = serde_json::from_str(legacy).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(!serde_json::from_value::<ToolCall>(value).unwrap().valid());
+    }
+    for fields in [
+        json!({"scope":"local"}),
+        json!({"base":"HEAD"}),
+        json!({"max_count":1}),
+    ] {
+        let mut value = json!({"operation":"git_branch","name":"topic","start_point":null});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        assert!(!serde_json::from_value::<ToolCall>(value).unwrap().valid());
+    }
     let missing_head = json!({"operation":"git_diff","path":".","base":null,"staged":false});
     assert!(serde_json::from_value::<ToolCall>(missing_head).is_err());
     let with_head =
@@ -2392,6 +2444,9 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
         config.allows(&ToolCall::GitBranch {
             name: Some("topic".into()),
             start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
         }),
         super::guard::git_writes_available()
     );
@@ -2440,6 +2495,13 @@ fn child_research_excludes_git_reads() {
             path: ".".into(),
             revision: None,
             max_count: 1,
+        },
+        ToolCall::GitBranch {
+            name: None,
+            start_point: None,
+            scope: Some("all".into()),
+            base: Some("main".into()),
+            max_count: Some(256),
         },
     ] {
         assert!(call.is_goal_plan_prelude());

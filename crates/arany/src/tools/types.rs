@@ -351,6 +351,12 @@ pub enum ToolCall {
         name: Option<String>,
         #[serde(deserialize_with = "required_nullable")]
         start_point: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scope: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_count: Option<u32>,
     },
     GitSwitch {
         branch: String,
@@ -1562,6 +1568,16 @@ impl ToolContext {
 
 pub(crate) fn model_call(call: &ToolCall) -> Value {
     match call {
+        ToolCall::GitBranch {
+            name,
+            start_point,
+            scope,
+            base,
+            max_count,
+        } => json!({
+            "operation": "git_branch", "name": name, "start_point": start_point,
+            "scope": scope, "base": base, "max_count": max_count,
+        }),
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt { changeset, .. },
         } => json!({"operation":"apply_changeset", "changeset": changeset}),
