@@ -107,11 +107,15 @@ pub(super) enum GoalStart {
 pub(super) fn goal_request(
     view: &SessionView,
     start: GoalStart,
+    settings: super::controls::Preferences,
 ) -> Result<arany::GoalRequest, String> {
     if start == GoalStart::Resume {
         return view
             .interrupted_goal_id()
-            .map(|id| arany::GoalRequest::resume(id, true))
+            .map(|id| arany::GoalRequest {
+                resource_settings: settings.resources,
+                ..arany::GoalRequest::resume(id, true)
+            })
             .ok_or_else(|| "No interrupted Goal is available to resume".into());
     }
     if let Some(goal) = view.active_goal() {
@@ -126,19 +130,21 @@ pub(super) fn goal_request(
             .map(|source| {
                 arany::GoalRequest::continue_from(
                     source.id,
-                    arany::GoalBudget::default(),
-                    arany::ToolResourceSettings::default(),
+                    settings.goal_budget,
+                    settings.resources,
                 )
             })
             .ok_or_else(|| "No exhausted Goal is available to continue".into());
     }
-    Ok(match start {
-        GoalStart::Autonomous => arany::GoalRequest::autonomous(
-            arany::GoalBudget::default(),
-            arany::GoalPhase::Implementation,
-        ),
+    let mut request = match start {
+        GoalStart::Autonomous => {
+            arany::GoalRequest::autonomous(settings.goal_budget, arany::GoalPhase::Implementation)
+        }
         _ => arany::GoalRequest::default(),
-    })
+    };
+    request.budget = Some(settings.goal_budget);
+    request.resource_settings = settings.resources;
+    Ok(request)
 }
 
 fn draft_retained_notice(autonomous: bool) -> &'static str {
@@ -346,7 +352,7 @@ pub(super) fn preflight_idle_run(
             account_id: view.defaults.account_id,
         })?;
     }
-    goal_request(view, start).map_err(|error| format!("Error: {error}"))?;
+    goal_request(view, start, Default::default()).map_err(|error| format!("Error: {error}"))?;
     if matches!(start, GoalStart::Resume | GoalStart::Continue) && has_images {
         return Err(
             "Error: /goal resume and /goal continue take no image attachments; clear them first"
@@ -440,11 +446,7 @@ pub(super) async fn submit_objective(
     let mut approval_review_notice = false;
     let include_paths = objective_includes(admission, mention_source(view, goal, &objective))?;
     let execution_settings = super::controls::settings_or_defaults(admission).await?;
-    let mut goal = goal_request(view, goal)?;
-    if goal.id.is_none() {
-        goal.budget = Some(execution_settings.goal_budget);
-    }
-    goal.resource_settings = execution_settings.resources;
+    let goal = goal_request(view, goal, execution_settings)?;
     let request = RunRequest {
         skill,
         session_id: Some(view.id),
@@ -1708,14 +1710,15 @@ mod goal_request_tests {
         let mut view = session_with_goal(false);
         view.goals.clear();
         assert_eq!(
-            goal_request(&view, GoalStart::Plain),
+            goal_request(&view, GoalStart::Plain, Default::default()),
             Ok(arany::GoalRequest::default())
         );
-        let autonomous = goal_request(&view, GoalStart::Autonomous).expect("autonomous start");
+        let autonomous = goal_request(&view, GoalStart::Autonomous, Default::default())
+            .expect("autonomous start");
         assert!(autonomous.autonomous);
         assert_eq!(autonomous.id, None);
         assert_eq!(
-            goal_request(&view, GoalStart::Resume),
+            goal_request(&view, GoalStart::Resume, Default::default()),
             Err("No interrupted Goal is available to resume".into())
         );
     }
@@ -1902,10 +1905,16 @@ mod goal_request_tests {
         let mut view = session_with_goal(true);
         let refusal = Err("No exhausted Goal is available to continue".to_owned());
         view.goals[0].status = arany::GoalStatus::Interrupted;
-        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
+        assert_eq!(
+            goal_request(&view, GoalStart::Continue, Default::default()),
+            refusal
+        );
         view.goals[0].status = arany::GoalStatus::Failed;
         view.goals[0].budget.max_runs = 0;
-        assert_eq!(goal_request(&view, GoalStart::Continue), refusal);
+        assert_eq!(
+            goal_request(&view, GoalStart::Continue, Default::default()),
+            refusal
+        );
     }
 
     #[test]
@@ -1914,14 +1923,15 @@ mod goal_request_tests {
         view.goals[0].status = arany::GoalStatus::Interrupted;
         let id = view.goals[0].id;
         assert_eq!(
-            goal_request(&view, GoalStart::Resume),
+            goal_request(&view, GoalStart::Resume, Default::default()),
             Ok(arany::GoalRequest::resume(id, true))
         );
         assert_eq!(
-            goal_request(&view, GoalStart::Plain),
+            goal_request(&view, GoalStart::Plain, Default::default()),
             Ok(arany::GoalRequest::default())
         );
-        let autonomous = goal_request(&view, GoalStart::Autonomous).expect("autonomous start");
+        let autonomous = goal_request(&view, GoalStart::Autonomous, Default::default())
+            .expect("autonomous start");
         assert!(autonomous.autonomous);
     }
 

@@ -3077,7 +3077,7 @@ mod tests {
                             compaction_content_digest: None,
                             tool_policy: None,
                         },
-                        active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
+                        active_deadline_ms: None,
                     },
                     Event::AgentSpawned {
                         profile: None,
