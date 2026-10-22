@@ -418,6 +418,7 @@ fn native_journey_with_rust_sysroot(helper: &str, rust_sysroot: Option<&Path>) {
         .env("XDG_STATE_HOME", fixture_root.join("environment-state"))
         .env("XDG_DATA_HOME", fixture_root.join("environment-data"))
         .current_dir(&fixture_root);
+    crate::process::isolate_host_authentication(&mut command, &fixture_root.join("home"));
     if let Some(rust_sysroot) = rust_sysroot {
         command.env("ARANY_TEST_RUST_SYSROOT", rust_sysroot);
     }
@@ -852,6 +853,7 @@ async fn native_file_journey_helper() {
                 assert_eq!(receipt.limits, observation.intent.limits);
             }
             arany::Attestation::Unguarded(_) => panic!("macOS journeys never run unguarded"),
+            arany::Attestation::Host(_) => panic!("macOS journeys never run host Tools"),
             arany::Attestation::WorkerRead { .. }
             | arany::Attestation::WorkerMutation { .. }
             | arany::Attestation::WorkerData { .. }
