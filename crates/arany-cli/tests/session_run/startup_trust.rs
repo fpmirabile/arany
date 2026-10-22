@@ -1137,7 +1137,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "trusted startup screen stage missing: {}",
+                "trusted startup screen stage {needle:?} missing: {}",
                 super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
             );
             thread::yield_now();
@@ -1201,6 +1201,21 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut transcript,
         &mut answered,
         "New conversation",
+    );
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Up/Down · Left/Right page · Esc close",
+    );
+    input.write_all(b"\x1b").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Ask a question, or type / for commands",
     );
     input.write_all(b"\x03").unwrap();
     wait(
