@@ -74,6 +74,8 @@ pub(crate) struct Journal {
     store: Store,
     tap: broadcast::Sender<Arc<EventEnvelope>>,
     diagnostics: Option<std::thread::JoinHandle<()>>,
+    #[cfg(feature = "test-support")]
+    pub(crate) tool_latency: std::sync::OnceLock<Arc<crate::test_support::latency::Recorder>>,
 }
 
 impl Journal {
@@ -101,6 +103,8 @@ impl Journal {
             store,
             tap,
             diagnostics,
+            #[cfg(feature = "test-support")]
+            tool_latency: Default::default(),
         }
     }
 
@@ -127,7 +131,12 @@ impl Journal {
         event: Event,
         first: impl FnOnce(&EventEnvelope) -> T,
     ) -> Result<(Arc<EventEnvelope>, T), StoreError> {
-        let envelope = Arc::new(self.store.append(session_id, event).await?);
+        let envelope = self.store.append(session_id, event).await?;
+        #[cfg(feature = "test-support")]
+        if let Some(recorder) = self.tool_latency.get() {
+            recorder.committed(&envelope, std::time::Instant::now());
+        }
+        let envelope = Arc::new(envelope);
         let read = first(&envelope);
         // Without subscribers the send fails; a full ring overwrites its oldest Event.
         let _ = self.tap.send(Arc::clone(&envelope));
@@ -169,6 +178,8 @@ impl Journal {
             store,
             tap,
             diagnostics,
+            #[cfg(feature = "test-support")]
+                tool_latency: _,
         } = self;
         drop(tap);
         let closed = store.close().await;
