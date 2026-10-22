@@ -117,25 +117,9 @@ renewal, permission and logout behavior.
 
 ## Storage and recovery
 
-Accounts belong to the effective OS user across Sessions. `--state-dir` changes
-Session/Tool configuration storage, not saved-account scope. Linux uses Secret
-Service; macOS uses Keychain Services. A locked or pinned keyring failure never
-silently changes to a private file. For a new unpinned account, an unavailable
-store can offer Use private file with explicit plaintext consent; Cancel starts
-focused. Reconnect retains its pinned backend.
-
-Private permissions do not encrypt files or exclude another same-user or
-privileged process. Session history is also unencrypted. OS-store authorization
-has a bounded interactive wait; routine store operations have shorter deadlines.
-An uncertain write or deletion is not a confirmed rollback. Unlock the selected
-store and retry deliberately, or follow the explicit new-account storage choice.
-
-Malformed or unsupported saved account data keeps access unconfigured and
-provides `/setup` recovery. A confirmed local reset removes only the disclosed,
-checked records for the selected route and saved model choices. It preserves
-conversations, folder trust and other-route accounts, but does not revoke remote
-access or remove old password-store entries. Back cancels; cancelling subsequent
-setup cannot restore records already reset.
+Use `/setup` to recover selected-route account data. See the
+[credential storage and recovery contract](./specs/credentials.md#storage-replacement-and-recovery)
+for account scope, storage consent and reset behavior.
 
 History recovery is separate. Unsupported or damaged history offers Retry,
 Reset history and Exit. Reset requires explicit warning confirmation and discards
@@ -396,7 +380,7 @@ Replace the placeholders with saved IDs. Inspection does not invoke a Provider
 or change history; JSONL can contain original image bytes and private task data.
 After uncertainty, inspect saved facts and actual files before an intentional
 retry. Development builds expose bounded safe failure categories in the
-[local diagnostic log](./development-diagnostics.md).
+[local diagnostic log](./specs/diagnostics.md).
 
 [Next steps](../NEXT_STEPS.md) owns pending native, live and accessibility checks.
 Developers running an explicitly authorized live gate should follow the

@@ -394,7 +394,7 @@ The shared Responses decoder validates all assistant text parts, distinguishes e
 
 OTLP is part of the beta milestone but added after the Session/team/provider proof. It is runtime opt-in and cannot change canonical truth or a Run outcome.
 
-Development-only local diagnostics are a separate private owner, not an OTLP extension or an Engine behavior seam. The CLI enables it after ordinary attached Session/`exec` admission and writes an activation marker. The Engine supplies failed Provider/Tool/Run/compaction facts and typed operation errors; CLI callers supply closed admission/catalog/setup/exit stages. The subscription adapter records compiled failure stages and numeric counters, including rejected Tool argument shape, with bounded local stack frames. StateRoot admits the private, fixed-size log with nonblocking locking. No content, credential, argument value, upstream text or source path is recorded or exported. Optimized builds leave it disabled, and canonical replay retains its existing coarse failure categories. [The diagnostic guide](../development-diagnostics.md) specifies retention and non-claims.
+Development-only local diagnostics are a separate private owner, not an OTLP extension or an Engine behavior seam. The CLI enables it after ordinary attached Session/`exec` admission and writes an activation marker. The Engine supplies failed Provider/Tool/Run/compaction facts and typed operation errors; CLI callers supply closed admission/catalog/setup/exit stages. The subscription adapter records compiled failure stages and numeric counters, including rejected Tool argument shape, with bounded local stack frames. StateRoot admits the private, fixed-size log with nonblocking locking. No content, credential, argument value, upstream text or source path is recorded or exported. Optimized builds leave it disabled, and canonical replay retains its existing coarse failure categories. [The diagnostic guide](../specs/diagnostics.md) specifies retention and non-claims.
 
 The [telemetry contract](../specs/telemetry.md#spans) owns span topology, commit timing and failure isolation.
 
@@ -448,7 +448,7 @@ It does not force private users or hosted services to show a public “Powered b
 ## 15. Implementation order
 
 [Next steps](../../NEXT_STEPS.md) owns remaining execution priority; the
-[team plan](../../planning/agentic-teams/README.md) defines the live team slices. This architecture does not
+[planning index](../../planning/README.md#active-plans) locates the remaining feature plans. This architecture does not
 retain a second task sequence for already implemented foundations. Accepted
 contracts stay with their mapped owners; completed work and checks stay in the
 handoff and Git/PR/CI history. Missing live, native or accessibility evidence
