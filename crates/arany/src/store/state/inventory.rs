@@ -264,6 +264,11 @@ impl Scan<'_> {
                 Ok(())
             })();
             if let Err(reason) = result {
+                if cache_root || is_cache {
+                    cache.partial(reason);
+                } else {
+                    row.partial(reason);
+                }
                 if matches!(
                     reason,
                     "cache identity limit reached"
@@ -272,11 +277,6 @@ impl Scan<'_> {
                         | "depth limit reached"
                 ) {
                     return Err(reason);
-                }
-                if cache_root || is_cache {
-                    cache.partial(reason);
-                } else {
-                    row.partial(reason);
                 }
                 self.check()?;
             }
@@ -526,6 +526,7 @@ fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'stat
 
 #[cfg(test)]
 mod tests {
+    use super::super::build_cache::MAX_IDENTITIES;
     use super::*;
     use std::io::Write;
     use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt, symlink};
@@ -643,6 +644,50 @@ mod tests {
                 .sum::<u64>();
         assert_eq!(report.subtotal.allocated_bytes, expected_allocated);
         assert_eq!(std::fs::read_dir(&cache).expect("cache records").count(), 1);
+    }
+
+    #[test]
+    fn cache_identity_exhaustion_marks_its_known_subtotal_partial_without_mutation() {
+        let temp = tempfile::tempdir().expect("cache inventory fixture");
+        let workspace = temp.path().join("workspace");
+        directory(&workspace);
+        for (prefix, extension) in [("cache", "arc"), ("reserve", "reserve")] {
+            let state = temp.path().join(prefix);
+            directory(&state);
+            let cache_path = state.join("build-cache");
+            directory(&cache_path);
+            for index in 0..=MAX_IDENTITIES {
+                file(
+                    &cache_path.join(format!("{prefix}-{index:064x}.{extension}")),
+                    b"",
+                );
+            }
+            let report = collect(
+                &workspace,
+                &state,
+                &state,
+                &state,
+                &AtomicBool::new(false),
+                MAX_ENTRIES,
+                DEADLINE,
+            )
+            .expect("limited cache inventory");
+            assert!(!report.complete());
+            let cache = report
+                .categories
+                .iter()
+                .find(|row| row.name == "Private build cache")
+                .expect("cache category");
+            assert_eq!(cache.status, StorageStatus::Partial, "{prefix}");
+            assert_eq!(cache.reason, Some("cache identity limit reached"));
+            assert_eq!(cache.usage.files, MAX_IDENTITIES as u64);
+            assert_eq!(
+                std::fs::read_dir(&cache_path)
+                    .expect("retained cache records")
+                    .count(),
+                MAX_IDENTITIES + 1
+            );
+        }
     }
 
     #[test]
