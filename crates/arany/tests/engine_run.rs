@@ -1286,8 +1286,8 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
         for (index, (prefix, policy, admitted, tools, branch, previews)) in [
             (9986, CollaborationPolicy::Single, false, false, false, false),
             (9985, CollaborationPolicy::Single, true, false, false, false),
-            (9978, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
-            (9976, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
+            (9977, CollaborationPolicy::Team { max_active_children: 1 }, false, false, false, false),
+            (9975, CollaborationPolicy::Team { max_active_children: 1 }, true, false, false, false),
             (9985, CollaborationPolicy::Single, false, true, false, false),
             (9984, CollaborationPolicy::Single, true, true, false, false),
             (9985, CollaborationPolicy::Single, false, false, true, false),
@@ -1400,9 +1400,10 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
             }
             store.close().await.unwrap();
         }
-        // Two children in two slots form one wave with a 4N+6 = 14 Event tail plus three retry facts for each
-        // child call and the synthesis call (23): 9969 admits and the root call reserves one more for a recorded plan.
-        for (prefix, admitted) in [(9969_i64, true), (9971, false)] {
+        // Two children in two slots form one wave with a 5N+6 = 16 Event tail (each child call may also record a
+        // steering note) plus three retry facts for each child call and the synthesis call (23): 9967 admits and
+        // the root call reserves one more for a recorded plan.
+        for (prefix, admitted) in [(9967_i64, true), (9969, false)] {
             let path = temp.path().join(format!("two-child-{prefix}"));
             let finish = || ProviderOutcome::Answer(Answer { text: "answer".into() });
             let provider = Arc::new(ScriptedProvider::new(vec![finish()]));
