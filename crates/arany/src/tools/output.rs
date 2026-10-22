@@ -114,7 +114,7 @@ impl Window {
         )
     }
 
-    fn fitted(&self, budget: usize) -> Result<String, ToolError> {
+    pub(super) fn fitted(&self, budget: usize) -> Result<String, ToolError> {
         let full = self.preview(self.cap);
         if encoded_len(&full) <= budget {
             return Ok(full);
