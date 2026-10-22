@@ -45,10 +45,10 @@ Single Edit validation supplies these errors to MultiEdit in 1.0.88 (`ZY`, aroun
 
 The transformer separately reports a later old string contained in an earlier replacement, an edit that cannot change the working string, or a final file identical to the original. The schema reports that at least one edit is required. The 1.0.128 call-time freshness failure asks for another read. Permission denial identifies the path; permission requests identify the requested write or special protected configuration. These are descriptions of the emitted errors, not a proposed Arany error vocabulary.
 
-## Consequences for the Arany plan
+## Application to Arany
 
 - Ordered same-file batches, a nonempty edit list, per-edit `replace_all: false`, equal-string rejection and delegation to existing edit permission machinery have direct Claude Code precedent.
-- Unrestricted intermediate-result semantics agree with Claude's prompt but differ from its shipped validator and substring guard. The plan must record the owner's explicit sequential-semantics decision and the independently verified OpenCode precedent instead of claiming full Claude implementation parity.
+- Unrestricted intermediate-result semantics agree with Claude's prompt but differ from its shipped validator and substring guard. [Arany's contract](../specs/tools.md#atomic-single-file-multiedit) records the owner's sequential-semantics decision and OpenCode precedent, rather than claiming full Claude implementation parity.
 - Existing-file-only scope and the 64-edit ceiling are owner decisions, not Claude defaults. Claude's public creation behavior and lack of a schema count ceiling must remain visible in the comparison.
 - All-or-nothing behavior on edit-validation failure already exists in Claude's implementation. Arany's stronger publication/failure guarantees require its existing Guard, validated changeset and receipt path; Claude's non-atomic fallback cannot supply those guarantees. Do not add a separate generic transaction framework merely to imitate an advertised atomic Tool.
 

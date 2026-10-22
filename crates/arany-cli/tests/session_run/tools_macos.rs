@@ -227,6 +227,7 @@ impl Provider for Journey {
                                     ToolCall::Command { .. }
                                         | ToolCall::Write { .. }
                                         | ToolCall::Edit { .. }
+                                        | ToolCall::MultiEdit { .. }
                                         | ToolCall::Mkdir { .. }
                                         | ToolCall::Skill { .. }
                                         | ToolCall::McpCall { .. }
@@ -609,10 +610,16 @@ async fn native_file_journey_helper() {
             limit: None,
         },
         ToolCall::Edit {
-            path: "src/main.txt".into(),
-            expected_digest: hash(b"before\n"),
-            old: "before".into(),
-            new: "after".into(),
+            path: "src/main.txt".into(), expected_digest: hash(b"before\n"),
+            old: "before".into(), new: "first".into(),
+        },
+        ToolCall::MultiEdit {
+            file_path: "src/main.txt".into(),
+            expected_digest: hash(b"first\n"),
+            edits: vec![
+                arany::LiteralEdit { old_string: "first".into(), new_string: "middle".into(), replace_all: false },
+                arany::LiteralEdit { old_string: "middle".into(), new_string: "after".into(), replace_all: false },
+            ],
         },
         ToolCall::Mkdir {
             path: "src/generated".into(),
@@ -768,7 +775,7 @@ async fn native_file_journey_helper() {
     assert!(
         !workspace.join("src/deleted.txt").exists(),
         "delete publication: {:?}",
-        &outcome.run.tools[9..11]
+        &outcome.run.tools[10..12]
     );
     let store = Store::open_read_only(StateRoot::admit(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
@@ -786,7 +793,7 @@ async fn native_file_journey_helper() {
             source: arany::worker::ChangesetSource::CommandReceipt { changeset, .. },
         } = &observation.intent.call
         {
-            assert_eq!(index, 10);
+            assert_eq!(index, 11);
             assert_eq!(
                 changeset
                     .files
@@ -805,8 +812,8 @@ async fn native_file_journey_helper() {
         assert_eq!(
             observation.disposition,
             match index {
-                13 | 14 => ToolDisposition::Conflict,
-                15 => ToolDisposition::Denied,
+                14 | 15 => ToolDisposition::Conflict,
+                16 => ToolDisposition::Denied,
                 _ => ToolDisposition::Succeeded,
             }
         );
@@ -851,13 +858,13 @@ async fn native_file_journey_helper() {
         }
     }
     let command: serde_json::Value =
-        serde_json::from_str(&run.tools[9].observation.as_ref().unwrap().output).unwrap();
+        serde_json::from_str(&run.tools[10].observation.as_ref().unwrap().output).unwrap();
     assert_eq!(command["exit_code"], 0);
     assert_eq!(command["stdout"], "native-command-success");
     assert_eq!(command["stderr"], "");
     assert_eq!(command["changeset"]["files"].as_array().unwrap().len(), 3);
     let mcp: serde_json::Value =
-        serde_json::from_str(&run.tools[12].observation.as_ref().unwrap().output).unwrap();
+        serde_json::from_str(&run.tools[13].observation.as_ref().unwrap().output).unwrap();
     assert_eq!(mcp["content"][0]["text"], "native MCP success");
     let observed = format!("{:?}", requests.lock().unwrap()).into_bytes();
     let journal = format!("{events:?}").into_bytes();
