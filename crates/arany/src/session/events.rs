@@ -12,8 +12,9 @@ use super::{
 };
 
 pub use goal::{
-    GoalBudget, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
-    GoalSuccessCriterion, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
+    BudgetAction, BudgetChargeBasis, BudgetRefusal, BudgetRefusalCause, GoalBudget, GoalMcpTool,
+    GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
+    MAX_BUDGET_REFUSAL_BYTES, MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_CONTRACT_BYTES,
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS,
 };
@@ -158,7 +159,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),
     ("GoalStarted", 7),
-    ("GoalFinished", 7),
+    ("GoalFinished", 8),
     ("SupervisorVerdictRecorded", 1),
     ("WorkspaceRewindStarted", 1),
     ("WorkspaceRewindFinished", 1),
@@ -283,6 +284,7 @@ pub enum Event {
         report: GoalReport,
         /// A Failed Goal closed because its budget ran out, not because a Run failed for another reason.
         exhausted: bool,
+        budget_refusal: Option<BudgetRefusal>,
     },
     MessageAccepted {
         skill: Option<String>,
@@ -557,6 +559,8 @@ struct GoalFinishedPayload {
     active_ms: u64,
     report: GoalReport,
     exhausted: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    budget_refusal: Option<BudgetRefusal>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -924,12 +928,14 @@ impl Event {
                 active_ms,
                 report,
                 exhausted,
+                budget_refusal,
             } => serialize(&GoalFinishedPayload {
                 goal_id: *goal_id,
                 status: *status,
                 active_ms: *active_ms,
                 exhausted: *exhausted,
                 report: report.clone(),
+                budget_refusal: *budget_refusal,
             }),
             Self::MessageAccepted {
                 text,
@@ -1217,6 +1223,7 @@ impl Event {
                     active_ms: data.active_ms,
                     report: data.report,
                     exhausted: data.exhausted,
+                    budget_refusal: data.budget_refusal,
                 }
             }
             "MessageAccepted" if run_id.is_some() && agent_run_id.is_none() => {
@@ -1773,6 +1780,21 @@ pub(crate) fn run_started_v19_to_v20(value: serde_json::Value) -> Option<serde_j
 }
 
 const USER_DIGEST_FIELD: &str = r#""user_instruction_digest":null,"#;
+
+pub(crate) fn goal_finished_v7_to_v8(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let payload = value.as_object_mut()?;
+    if payload.contains_key("budget_refusal") {
+        return None;
+    }
+    payload.insert("budget_refusal".into(), serde_json::Value::Null);
+    Some(value)
+}
+
+pub(crate) fn goal_finished_v7_payload(payload: &str) -> Option<String> {
+    let value = goal_finished_v7_to_v8(serde_json::from_str(payload).ok()?)?;
+    let text = serialize(&parse::<GoalFinishedPayload>(&value.to_string()).ok()?).ok()?;
+    Some(text.replace(r#","budget_refusal":null"#, ""))
+}
 
 // Version 19's hashed text: the current text without the null user digest.
 pub(crate) fn run_started_v19_payload(payload: &str) -> Option<String> {

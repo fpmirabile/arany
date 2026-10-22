@@ -571,7 +571,8 @@ fn history_updates<'a>(
     let session = result.thread.id;
     result.turns.iter().flat_map(move |turn| {
         turn.items.iter().flat_map(move |item| match item {
-            Item::UserMessage { text, images, .. } => vec![json!({
+            Item::UserMessage { text, images, .. } => {
+                let mut update = json!({
                 "jsonrpc":"2.0", "method":"session/update", "params":{
                     "sessionId":session, "update":{
                         "sessionUpdate":"user_message_chunk",
@@ -580,7 +581,17 @@ fn history_updates<'a>(
                             "arany.images":images}
                     }
                 }
-            })],
+                });
+                if turn.goal.as_ref().is_some_and(|goal| {
+                    matches!(goal.stopped, Some(GoalStop::GoalExhausted { .. }))
+                }) {
+                    update["params"]["update"]["_meta"]["arany.budgetRefusal"] =
+                        json!(turn.goal.as_ref().and_then(|goal| goal.budget_refusal));
+                    update["params"]["update"]["_meta"]["arany.status"] =
+                        json!(turn.error.as_ref().map(|error| &error.message));
+                }
+                vec![update]
+            }
             Item::AgentMessage { text, .. } => vec![wire::answer(session, text)],
             _ => [true, false]
                 .into_iter()
@@ -1350,6 +1361,17 @@ async fn finish(
     };
     if active.uncertain > 0 && response.get("result").is_some() {
         response["result"]["_meta"]["arany.uncertainEffects"] = json!(active.uncertain);
+    }
+    if turn
+        .goal
+        .as_ref()
+        .is_some_and(|goal| matches!(goal.stopped, Some(GoalStop::GoalExhausted { .. })))
+        && response.get("result").is_some()
+    {
+        response["result"]["_meta"]["arany.budgetRefusal"] =
+            json!(turn.goal.as_ref().and_then(|goal| goal.budget_refusal));
+        response["result"]["_meta"]["arany.status"] =
+            json!(turn.error.as_ref().map(|error| &error.message));
     }
     if incomplete && response.get("result").is_some() {
         response["result"]["_meta"]["arany.incompleteUpdates"] = json!(true);

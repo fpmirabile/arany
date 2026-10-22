@@ -162,6 +162,8 @@ base64, count and aggregate-byte admission; serve's existing image path checks
 PNG structure and bounds under the [terminal image contract](./terminal.md#paste-and-attachments).
 Other content types and overflow reject the whole prompt with invalid-params.
 
+Budget-stop prompt results retain their existing `max_tokens` or `max_turn_requests` reason and add `_meta["arany.budgetRefusal"]` (the committed canonical record, or null when unavailable) and `_meta["arany.status"]` (the shared bounded Arany status). Loaded history carries the same fields on its existing user-message update; no assistant message is fabricated. These follow the [Goal refusal contract](./goals.md#budget-refusal-feedback) and preserve unknown-effect/cancellation precedence.
+
 ### Tool updates and permissions
 
 Only committed serve items produce Tool updates. `item/started` becomes

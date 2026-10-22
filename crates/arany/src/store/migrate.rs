@@ -196,6 +196,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         expiry_step!("ToolFinished", 24),
         expiry_step!("HookStarted", 8),
         expiry_step!("HookFinished", 13),
+        EventStep {
+            kind: "GoalFinished",
+            from: 7,
+            transform: crate::session::goal_finished_v7_to_v8,
+            canonical: crate::session::goal_finished_v7_payload,
+        },
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),

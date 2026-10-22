@@ -6,7 +6,8 @@ use crate::tools::{CacheUpdate, ToolDisposition};
 
 /// The Goal budget dimension that admitted no next Run.
 #[must_use]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GoalLimit {
     Calls,
     Runs,
@@ -31,6 +32,40 @@ pub enum RunStop {
 }
 
 impl SessionView {
+    pub fn budget_stop_goal(&self, run: &RunView) -> Option<&GoalView> {
+        let goal = self
+            .goals
+            .iter()
+            .find(|goal| goal.run_ids.contains(&run.id))?;
+        match self.run_stop(run)? {
+            RunStop::GoalExhausted(_) => Some(goal),
+            RunStop::Failed(RunFailure::BudgetExhausted)
+                if goal.effective_budget().spent(GoalUsage {
+                    runs: self
+                        .runs
+                        .iter()
+                        .filter(|candidate| goal.run_ids.contains(&candidate.id))
+                        .count(),
+                    active_ms: goal.active_ms,
+                    provider_calls: goal.provider_calls,
+                    known_tokens: goal.known_tokens,
+                    token_usage_unknown: goal.token_usage_unknown,
+                }) =>
+            {
+                Some(goal)
+            }
+            RunStop::Paused
+            | RunStop::Cancelled
+            | RunStop::StoppedByHook
+            | RunStop::Uncertain
+            | RunStop::Interrupted
+            | RunStop::Failed(_) => None,
+        }
+    }
+
+    pub fn budget_stop_limit(&self, run: &RunView) -> Option<GoalLimit> {
+        self.budget_stop_goal(run).map(exhausted_limit)
+    }
     /// The one stop projection for live results and history; `None` while `run` is open or when
     /// it finished without stopping its Goal.
     #[must_use]
@@ -105,6 +140,9 @@ fn hook_unknown(hook: &super::reducer::HookView) -> bool {
 
 // Replay accepts `budget_closed` only on a spent budget, so the last dimension is the one left.
 fn exhausted_limit(goal: &GoalView) -> GoalLimit {
+    if let Some(refusal) = goal.budget_refusal {
+        return refusal.dimension;
+    }
     let budget = goal.effective_budget();
     if budget
         .max_tokens
@@ -124,6 +162,39 @@ fn exhausted_limit(goal: &GoalView) -> GoalLimit {
     } else {
         GoalLimit::Runs
     }
+}
+
+pub fn escape_status_text(value: &str) -> std::borrow::Cow<'_, str> {
+    if !value.chars().any(status_character_needs_escape) {
+        return std::borrow::Cow::Borrowed(value);
+    }
+    let mut safe = String::with_capacity(value.len());
+    for character in value.chars() {
+        let code = character as u32;
+        if status_character_needs_escape(character) {
+            safe.push_str(&format!("\\u{{{code:04x}}}"));
+        } else {
+            safe.push(character);
+        }
+    }
+    std::borrow::Cow::Owned(safe)
+}
+
+pub(crate) fn status_character_needs_escape(character: char) -> bool {
+    character.is_control()
+        || matches!(
+            character as u32,
+            0x00ad
+                | 0x061c
+                | 0x180e
+                // Zero-width joiners stay: emoji and many scripts need them.
+                | 0x200b
+                | 0x200e
+                | 0x200f
+                | 0x2028..=0x202e
+                | 0x2060..=0x2069
+                | 0xfeff
+        )
 }
 
 #[cfg(test)]
@@ -172,6 +243,8 @@ mod tests {
             finished_sequence: None,
             continues: None,
             budget_closed,
+            budget_refusal: None,
+            run_start_usage: Default::default(),
         }
     }
 
@@ -459,5 +532,23 @@ mod tests {
             assert_eq!(view.run_stop(&view.runs[1]), Some(expected));
             assert_eq!(view.goals[0].run_ids.len(), 3);
         }
+        view.goals[0].budget.max_runs = 3;
+        view.goals[0].provider_calls = 4;
+        view.runs[1].status = RunStatus::Failed;
+        view.runs[1].failure = Some(RunFailure::BudgetExhausted);
+        assert_eq!(
+            view.run_stop(&view.runs[1]),
+            Some(RunStop::Failed(RunFailure::BudgetExhausted))
+        );
+        assert_eq!(
+            view.budget_stop_limit(&view.runs[1]),
+            Some(GoalLimit::Calls)
+        );
+        view.goals[0].provider_calls = 3;
+        assert_eq!(
+            view.budget_stop_limit(&view.runs[1]),
+            None,
+            "an unaccepted link never proves exhaustion"
+        );
     }
 }

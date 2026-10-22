@@ -1542,7 +1542,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
 }
 
 #[test]
-fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
+fn worker_protocol_requires_current_versions_nulls_and_closed_records() {
     let mut f = fixture();
     f.mutation();
     let data = f.finish_worker();

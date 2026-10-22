@@ -9,6 +9,8 @@ mod reducer;
 pub mod rewind;
 mod stop;
 #[cfg(test)]
+pub(crate) use reducer::HookView;
+#[cfg(test)]
 pub(crate) mod tests;
 pub mod worker;
 
@@ -39,11 +41,12 @@ pub(crate) use context::CompiledContext;
 #[cfg(test)]
 pub(crate) use events::PAYLOAD_VERSIONS;
 pub use events::{
-    AgentDisposition, AgentRole, AgentRunId, ChildGrant, CollaborationPolicy, CompactionFailure,
-    CompactionRecord, CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory,
-    DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase,
-    GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion,
-    InstructionFile, InstructionSource, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
+    AgentDisposition, AgentRole, AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal,
+    BudgetRefusalCause, ChildGrant, CollaborationPolicy, CompactionFailure, CompactionRecord,
+    CompactionStatus, ContextUsage, DISPLAY_LIMIT_TEXT, DisplayCategory, DisplayChunk, Event,
+    EventEnvelope, ForkLineage, GoalBudget, GoalId, GoalMcpTool, GoalPhase, GoalPlanContract,
+    GoalReport, GoalSkillBinding, GoalStatus, GoalSuccessCriterion, InstructionFile,
+    InstructionSource, MAX_BUDGET_REFUSAL_BYTES, MAX_DISPLAY_CHUNK_BYTES, MAX_DISPLAY_CHUNKS,
     MAX_DISPLAY_COMMENTARY_ITEMS, MAX_DISPLAY_TEXT_BYTES, MAX_GOAL_ACTIVE_MS,
     MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS, MAX_GOAL_REPORT_BYTES,
     MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition,
@@ -52,7 +55,8 @@ pub use events::{
 };
 pub(crate) use events::{
     GoalSuccessState, GoalUsage, MAX_CHILD_TOOL_CALLS, MAX_CHILD_TURNS,
-    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
+    MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS,
+    goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version,
 };
 pub(crate) use events::{
     expiring_intent_text, expiring_payload, intent_without_expiry, pre_git_write_payload,
@@ -81,7 +85,7 @@ pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
     private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
-pub use stop::{GoalLimit, RunStop};
+pub use stop::{GoalLimit, RunStop, escape_status_text};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

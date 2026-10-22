@@ -205,6 +205,8 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         active_ceiling_ms: 0,
         continues: None,
         budget_closed: false,
+        budget_refusal: None,
+        run_start_usage: Default::default(),
     };
     let view = crate::session::SessionView {
         usage: Default::default(),
@@ -258,6 +260,251 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             .any(|item| item.contains("token usage is incomplete"))
     );
     assert!(serde_json::to_vec(&report).unwrap().len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+
+    let mut budget_view = view.clone();
+    let mut budget_goal = goal.clone();
+    budget_goal.budget.max_provider_calls = Some(1);
+    let mut refusal = budget_goal
+        .budget
+        .refusal(
+            crate::session::GoalUsage {
+                runs: 1,
+                provider_calls: 1,
+                active_ms: 0,
+                known_tokens: 0,
+                token_usage_unknown: true,
+            },
+            crate::BudgetAction::Tool,
+        )
+        .unwrap();
+    refusal.run_id = Some(run_id);
+    refusal.agent_run_id = Some(budget_view.runs[0].agents[0].id);
+    budget_goal.budget_refusal = Some(refusal);
+    let actor = budget_view.runs[0].agents[0].id;
+    for (index, tool) in budget_view.runs[0].tools.iter_mut().enumerate() {
+        tool.intent.agent_run_id = actor;
+        tool.finished_sequence = Some(index as u64);
+        let observation = tool.observation.as_mut().unwrap();
+        observation.intent = tool.intent.clone();
+        observation.attestation = Some(Attestation::for_site(&tool.intent));
+        observation.disposition = if index % 2 == 0 {
+            ToolDisposition::Failed
+        } else {
+            ToolDisposition::Denied
+        };
+        observation.output = if index % 2 == 0 {
+            format!("error-{index} \u{1b}[31m\u{202e}{}", "x".repeat(8_000))
+        } else {
+            "PRIVATE_DENIAL_CANARY".into()
+        };
+        if observation.disposition == ToolDisposition::Denied {
+            use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+            tool.permission_verdict = Some(PermissionVerdict {
+                host: None,
+                intent_digest: tool.intent.digest(),
+                decision: Decision::Deny,
+                mode: None,
+                basis: PermissionSource::Mode,
+                source: PermissionSource::Human,
+                approved: false,
+                hook_restriction: (index % 4 == 3).then_some(Decision::Deny),
+                hooks: 1,
+                narrowed: true,
+            });
+            tool.hooks.push(crate::session::HookView {
+                sequence: index as u64,
+                invocation: crate::tools::permissions::HookInvocation {
+                    event: crate::tools::permissions::HookEvent::PreToolUse,
+                    group: 0,
+                    handler: 0,
+                    subject_digest: tool.intent.digest(),
+                    intent: tool.intent.clone(),
+                    input_digest: [0; 32],
+                    active_ceiling_ms: None,
+                },
+                outcome: Some(crate::tools::permissions::HookOutcome {
+                    observation: observation.clone(),
+                    result: crate::tools::permissions::HookResult::Blocked {
+                        reason: Some("PRIVATE_HOOK_REASON_CANARY\u{1b}[31m\u{202e}".into()),
+                    },
+                    boundary_active_ms: None,
+                }),
+                idle: false,
+            });
+        }
+    }
+    let report = goal_report(&budget_view, &budget_view.runs[0], &budget_goal);
+    assert!(
+        report.unresolved[0]
+            .contains("Provider calls; exhausted; used at refusal 1, pinned limit 1")
+    );
+    assert!(report.unresolved[0].contains("requested 1; required minimum 1"));
+    let encoded = serde_json::to_vec(&report).unwrap();
+    assert!(encoded.len() <= crate::session::MAX_GOAL_REPORT_BYTES);
+    assert!(
+        !encoded
+            .windows(b"PRIVATE_DENIAL_CANARY".len())
+            .any(|part| part == b"PRIVATE_DENIAL_CANARY")
+    );
+    assert!(!String::from_utf8_lossy(&encoded).contains("PRIVATE_HOOK_REASON_CANARY"));
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("Tool failure(s) omitted"))
+    );
+    assert_eq!(
+        report
+            .unresolved
+            .iter()
+            .filter(|item| item.starts_with("primary:"))
+            .count(),
+        8
+    );
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("hook_denied"))
+    );
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("human approval not granted"))
+    );
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .all(|item| !item.contains("user_declined"))
+    );
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .all(|item| !item.contains('\u{1b}') && !item.contains('\u{202e}'))
+    );
+    assert!(
+        report
+            .unresolved
+            .iter()
+            .any(|item| item.contains("\\u{001b}[31m\\u{202e}"))
+    );
+    assert_eq!(
+        report
+            .unresolved
+            .iter()
+            .filter(|item| item.contains("Tool failure(s) omitted"))
+            .count(),
+        1
+    );
+    let mut full_report = GoalReport {
+        summary: "s".repeat(2048),
+        changes: vec!["c".repeat(2048); 2],
+        evidence: vec![String::new()],
+        unresolved: vec!["Critical uncertainty remains unknown.".into()],
+        cached_input_tokens: 0,
+    };
+    full_report.evidence[0] = "e".repeat(
+        crate::session::MAX_GOAL_REPORT_BYTES
+            - serde_json::to_vec(&full_report).unwrap().len()
+            - 128,
+    );
+    let mut omitted = false;
+    push_budget_tool_facts(&mut full_report, &budget_view, &budget_goal, &mut omitted);
+    assert_eq!(
+        full_report.unresolved,
+        [
+            "Critical uncertainty remains unknown.",
+            "16 earlier Tool failure(s) omitted."
+        ]
+    );
+    full_report.validate().unwrap();
+    let mut full_items = full_report.clone();
+    full_items.summary.clear();
+    full_items.unresolved =
+        vec!["Critical uncertainty remains unknown.".into(); GOAL_REPORT_ITEM_LIMIT - 1];
+    let before = full_items.clone();
+    push_budget_tool_facts(&mut full_items, &budget_view, &budget_goal, &mut omitted);
+    assert_eq!(full_items, before);
+    assert!(omitted);
+
+    let mut child_view = budget_view.clone();
+    let mut child = child_view.runs[0].agents[0].clone();
+    child.id = AgentRunId::new();
+    child.role = AgentRole::Child;
+    child.ordinal = 1;
+    let mut child_tool = child_view.runs[0].tools[0].clone();
+    child_tool.finished_sequence = Some(100);
+    child_tool.intent.agent_run_id = child.id;
+    let observation = child_tool.observation.as_mut().unwrap();
+    observation.intent = child_tool.intent.clone();
+    observation.disposition = ToolDisposition::Limit;
+    observation.limit_cause = Some(crate::tools::LimitCause::Resource);
+    observation.attestation = None;
+    observation.cache_update = CacheUpdate::NotApplicable;
+    child.tools = vec![child_tool];
+    child_view.runs[0].agents.push(child);
+    let child_report = goal_report(&child_view, &child_view.runs[0], &budget_goal);
+    assert_eq!(child_report.unresolved[0], report.unresolved[0]);
+    assert_eq!(
+        child_report
+            .unresolved
+            .iter()
+            .find(|item| item.starts_with("primary:") || item.starts_with("child "))
+            .map(String::as_str),
+        Some("child 1: command limited; limit resource")
+    );
+    assert!(
+        child_report
+            .unresolved
+            .iter()
+            .any(|item| item == "9 earlier Tool failure(s) omitted.")
+    );
+    for disposition in [
+        None,
+        Some(ToolDisposition::Uncertain),
+        Some(ToolDisposition::Cancelled),
+    ] {
+        let mut interrupted_view = budget_view.clone();
+        interrupted_view.runs[0].status = RunStatus::Interrupted;
+        let tool = &mut interrupted_view.runs[0].tools[0];
+        tool.intent.call = ToolCall::Write {
+            path: "notes/pending.txt".into(),
+            expected_digest: None,
+            content: "pending".into(),
+        };
+        tool.observation = disposition.map(|disposition| {
+            let mut observation = tool.observation.clone().unwrap();
+            observation.intent = tool.intent.clone();
+            observation.disposition = disposition;
+            observation.attestation = None;
+            observation.output.clear();
+            observation.cache_update = CacheUpdate::NotApplicable;
+            observation
+        });
+        let interrupted_report =
+            goal_report(&interrupted_view, &interrupted_view.runs[0], &budget_goal);
+        let warning = if disposition.is_some() {
+            "write notes/pending.txt has an uncertain or cancelled outcome; inspect Workspace state before retrying."
+        } else {
+            "write notes/pending.txt has no committed Tool outcome."
+        };
+        let warning_index = interrupted_report
+            .unresolved
+            .iter()
+            .position(|item| item == warning)
+            .unwrap();
+        let details_index = interrupted_report
+            .unresolved
+            .iter()
+            .position(|item| item.starts_with("primary:"))
+            .unwrap();
+        assert!(warning_index < details_index);
+        assert_eq!(interrupted_report.unresolved[0], report.unresolved[0]);
+        interrupted_report.validate().unwrap();
+    }
 
     let mut checkpoint_view = view.clone();
     let tool = &mut checkpoint_view.runs[0].tools[1];
@@ -763,6 +1010,8 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
     let goal = GoalView {
         continues: None,
         budget_closed: false,
+        budget_refusal: None,
+        run_start_usage: Default::default(),
         id: goal_id,
         objective: "Report".into(),
         workspace_identity: WorkspaceIdentity {
