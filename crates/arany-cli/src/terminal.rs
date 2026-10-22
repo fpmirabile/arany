@@ -43,7 +43,7 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     invoked_objective, parse_submission, skill_invocation, transcript_agents,
 };
-pub use composer::{CompletionLayout, Composer, ComposerEdit};
+pub use composer::{CompletionLayout, Composer, ComposerEdit, NewlineShortcut};
 use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
@@ -56,6 +56,8 @@ use view::{
     draw_setup_text_frame, draw_setup_warning_frame, history_top_padding, screen_terminal,
     session_picker_index,
 };
+
+pub const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
 // Button, drag and SGR reporting only; any-motion (1003) and urxvt (1015) stay off.
@@ -420,6 +422,7 @@ fn pointer_modes(
 }
 
 pub struct AttachedTerminal {
+    newline_shortcut: NewlineShortcut,
     waiting_tool: Option<uuid::Uuid>,
     terminal: Option<Terminal<TerminalBackend>>,
     mode: TerminalMode,
@@ -737,6 +740,7 @@ impl AttachedTerminal {
         let pointer_modes = pointer_modes(mode, mode_label.is_some(), pointer.mouse.effective())?;
         Ok(Self {
             terminal,
+            newline_shortcut: NewlineShortcut::default(),
             waiting_tool: None,
             mode,
             classic_pinned: false,
@@ -786,11 +790,32 @@ impl AttachedTerminal {
         })
     }
 
+    pub fn set_newline_shortcut(&mut self, shortcut: NewlineShortcut) {
+        self.newline_shortcut = shortcut;
+    }
+
     pub fn defer_input(&mut self, input: TerminalInput) {
         self.deferred_input = Some(input);
     }
 
     pub async fn next_input(&mut self) -> Result<TerminalInput, TerminalError> {
+        self.read_input(false).await
+    }
+
+    pub async fn next_chat_input(&mut self) -> Result<TerminalInput, TerminalError> {
+        self.read_input(
+            !self.help_open()
+                && !self.transcript_open
+                && !self.scrollback_dump
+                && !self.agents_open(),
+        )
+        .await
+    }
+
+    async fn read_input(&mut self, chat: bool) -> Result<TerminalInput, TerminalError> {
+        if let Some(input) = &mut self.input {
+            input.set_chat_input(chat, self.agent_chat.is_some());
+        }
         self.clipboard_paste = None;
         if let Some(input) = self.deferred_input.take() {
             return Ok(input);
@@ -2247,7 +2272,8 @@ impl AttachedTerminal {
         };
         self.draw_dialog(
             Some(session),
-            view::settings_height(rows, width, max_rows),
+            view::settings_height(rows, width, max_rows)
+                .saturating_add(notice.map_or(0, |text| view::guidance_height(text, width))),
             |frame, area| draw_settings_frame(frame, area, rows, selected, armed, notice, palette),
         )?;
         Ok(())
@@ -2624,6 +2650,7 @@ impl AttachedTerminal {
     }
 
     fn replace_released(&mut self, mut replacement: Self) {
+        replacement.newline_shortcut = self.newline_shortcut;
         replacement.history = std::mem::take(&mut self.history);
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.dialog_armed = self.dialog_armed;

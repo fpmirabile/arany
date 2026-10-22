@@ -42,9 +42,33 @@ impl CompletionLayout {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NewlineShortcut {
+    #[default]
+    ShiftEnter,
+    AltEnter,
+    CtrlEnter,
+}
+
+impl NewlineShortcut {
+    pub const ALL: [Self; 3] = [Self::ShiftEnter, Self::AltEnter, Self::CtrlEnter];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ShiftEnter => "Shift+Enter",
+            Self::AltEnter => "Alt+Enter",
+            Self::CtrlEnter => "Ctrl+Enter",
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Composer {
     text: String,
+    continuation: Option<usize>,
+    newline_shortcut: NewlineShortcut,
+    shortcut_received: bool,
     text_only: bool,
     images: Vec<ImageAttachment>,
     cursor: usize,
@@ -62,6 +86,63 @@ pub struct Composer {
 }
 
 impl Composer {
+    pub fn newline_shortcut(&self) -> NewlineShortcut {
+        self.newline_shortcut
+    }
+
+    pub fn set_newline_shortcut(&mut self, shortcut: NewlineShortcut) {
+        if self.newline_shortcut != shortcut {
+            self.shortcut_received = false;
+        }
+        self.newline_shortcut = shortcut;
+    }
+
+    pub(super) fn newline_hint(&self) -> &'static str {
+        if self.shortcut_received {
+            self.newline_shortcut.label()
+        } else {
+            "\\ then Enter"
+        }
+    }
+
+    pub fn disarm_continuation(&mut self) {
+        self.continuation = None;
+    }
+
+    pub fn continue_line(&mut self) -> bool {
+        if self.continuation.take() != Some(self.cursor)
+            || self.cursor == 0
+            || self.text.as_bytes()[self.cursor - 1] != b'\\'
+        {
+            return false;
+        }
+        self.text.replace_range(self.cursor - 1..self.cursor, "\n");
+        self.vertical_grapheme_column = None;
+        true
+    }
+
+    pub fn observe_input(&mut self, input: TerminalInput) {
+        if !matches!(
+            input,
+            TerminalInput::Submit | TerminalInput::Resize | TerminalInput::PointerMove { .. }
+        ) {
+            self.disarm_continuation();
+        }
+    }
+
+    pub fn chat_input(&mut self, input: TerminalInput) -> TerminalInput {
+        self.observe_input(input);
+        if let TerminalInput::ModifiedEnter(shortcut) = input {
+            if shortcut == self.newline_shortcut {
+                self.shortcut_received = true;
+            }
+            if shortcut == NewlineShortcut::ShiftEnter || shortcut == self.newline_shortcut {
+                return TerminalInput::Newline;
+            }
+        }
+        input
+    }
+
     pub(super) fn text_only() -> Self {
         Self {
             text_only: true,
@@ -233,6 +314,7 @@ impl Composer {
     }
 
     pub fn attach_image(&mut self, image: ImageAttachment) -> Result<(), &'static str> {
+        self.disarm_continuation();
         if self.text_only {
             return Err("Child messages are text only; draft retained");
         }
@@ -283,6 +365,7 @@ impl Composer {
     }
 
     pub fn insert_paste(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
+        self.disarm_continuation();
         if text.len() > MAX_DRAFT_BYTES {
             return Ok(ComposerEdit::AtCapacity);
         }
@@ -318,6 +401,7 @@ impl Composer {
     }
 
     pub fn clear(&mut self) {
+        self.disarm_continuation();
         self.skills_tab = false;
         self.text.clear();
         self.images.clear();
@@ -328,6 +412,7 @@ impl Composer {
     }
 
     pub fn take(&mut self) -> String {
+        self.disarm_continuation();
         self.skills_tab = false;
         self.cursor = 0;
         self.vertical_grapheme_column = None;
@@ -442,6 +527,10 @@ impl Composer {
     }
 
     pub fn apply(&mut self, input: TerminalInput) -> ComposerEdit {
+        let input = self.chat_input(input);
+        if input == TerminalInput::Submit && self.continue_line() {
+            return ComposerEdit::Changed;
+        }
         if input == TerminalInput::Up
             && self.is_empty()
             && let Some((draft, images)) = self.recalled_draft.take()
@@ -576,6 +665,9 @@ impl Composer {
             }
         }
         let edit = self.apply_edit(input);
+        if input == TerminalInput::Character('\\') && edit == ComposerEdit::Changed {
+            self.continuation = Some(self.cursor);
+        }
         if edit == ComposerEdit::Changed {
             self.completion_index = 0;
             self.completion_hidden = false;
@@ -753,6 +845,105 @@ fn next_word_boundary(text: &str, cursor: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newline_gestures_preserve_provenance_caret_capacity_and_aliases() {
+        for text in ["a", "e\u{301}🙂", "\\"] {
+            let mut composer = Composer::default();
+            composer.insert_paste(text).unwrap();
+            composer.apply(TerminalInput::Character('\\'));
+            composer.apply(TerminalInput::Resize);
+            assert_eq!(composer.apply(TerminalInput::Submit), ComposerEdit::Changed);
+            assert_eq!(composer.text(), format!("{text}\n"));
+            composer.apply(TerminalInput::Character('b'));
+            assert_eq!(
+                composer.apply(TerminalInput::Submit),
+                ComposerEdit::Unchanged
+            );
+            assert_eq!(composer.text(), format!("{text}\nb"));
+        }
+        let mut composer = Composer::default();
+        composer.insert_paste("a🙂b").unwrap();
+        composer.apply(TerminalInput::Left);
+        composer.apply(TerminalInput::Character('\\'));
+        assert_eq!(composer.apply(TerminalInput::Submit), ComposerEdit::Changed);
+        assert_eq!(composer.text(), "a🙂\nb");
+        assert_eq!(composer.cursor_byte_offset(), "a🙂\n".len());
+        for action in [
+            TerminalInput::Left,
+            TerminalInput::Backspace,
+            TerminalInput::Tab,
+            TerminalInput::Escape,
+            TerminalInput::AgentNext,
+            TerminalInput::ClipboardPaste,
+            TerminalInput::LineRejected,
+            TerminalInput::LineContinued,
+            TerminalInput::IgnoredKey,
+        ] {
+            composer.clear();
+            composer.apply(TerminalInput::Character('\\'));
+            composer.observe_input(action);
+            assert_eq!(
+                composer.apply(TerminalInput::Submit),
+                ComposerEdit::Unchanged,
+                "{action:?}"
+            );
+            assert_eq!(composer.text(), "\\");
+        }
+        for paste in ["", "pasted\\"] {
+            composer.clear();
+            composer.apply(TerminalInput::Character('\\'));
+            composer.insert_paste(paste).unwrap();
+            assert_eq!(
+                composer.apply(TerminalInput::Submit),
+                ComposerEdit::Unchanged
+            );
+        }
+        composer.remember_and_clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(
+            composer.apply(TerminalInput::Submit),
+            ComposerEdit::Unchanged
+        );
+        composer.clear();
+        composer.apply(TerminalInput::Character('\\'));
+        composer.apply(TerminalInput::Character('\\'));
+        assert_eq!(composer.apply(TerminalInput::Submit), ComposerEdit::Changed);
+        assert_eq!(composer.text(), "\\\n");
+        composer.clear();
+        composer
+            .insert_paste(&"x".repeat(MAX_DRAFT_BYTES - 1))
+            .unwrap();
+        composer.apply(TerminalInput::Character('\\'));
+        assert_eq!(composer.apply(TerminalInput::Submit), ComposerEdit::Changed);
+        assert_eq!(composer.text().len(), MAX_DRAFT_BYTES);
+        assert!(composer.text().ends_with('\n'));
+        for selected in NewlineShortcut::ALL {
+            composer.set_newline_shortcut(selected);
+            assert_eq!(composer.newline_hint(), "\\ then Enter");
+            for received in NewlineShortcut::ALL {
+                composer.clear();
+                composer.apply(TerminalInput::Character('\\'));
+                let enabled = received == selected || received == NewlineShortcut::ShiftEnter;
+                assert_eq!(
+                    composer.apply(TerminalInput::ModifiedEnter(received)),
+                    if enabled {
+                        ComposerEdit::Changed
+                    } else {
+                        ComposerEdit::Unchanged
+                    }
+                );
+                assert_eq!(composer.text(), if enabled { "\\\n" } else { "\\" });
+                assert_eq!(
+                    composer.apply(TerminalInput::Submit),
+                    ComposerEdit::Unchanged
+                );
+            }
+            composer.clear();
+            composer.apply(TerminalInput::Newline);
+            assert_eq!(composer.text(), "\n");
+        }
+    }
 
     #[test]
     fn rewind_restored_prompts_remain_objective_data_and_clear_is_recallable() {
