@@ -253,6 +253,7 @@ fn method(call: &ToolCall) -> &'static str {
         }
         ToolCall::Write { .. }
         | ToolCall::Edit { .. }
+        | ToolCall::MultiEdit { .. }
         | ToolCall::Mkdir { .. }
         | ToolCall::ApplyChangeset { .. } => "item/fileChange/requestApproval",
         _ => "item/tool/requestApproval",
