@@ -1218,8 +1218,15 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                     Some(arany::ApprovalCause::ChildTimeout) => "Child approval wait timed out.",
                     Some(arany::ApprovalCause::Declined) | None => "Action denied.",
                 };
+                let recovery = if observation.approval_cause
+                    == Some(arany::ApprovalCause::ChannelUnavailable)
+                {
+                    "Submit a new request to open a fresh approval channel."
+                } else {
+                    "Use /permissions or Shift+Tab to review approval settings."
+                };
                 return Some(format!(
-                    "{disposition} No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings."
+                    "{disposition} No further action ran; earlier completed actions remain. {recovery}"
                 ));
             }
             if let Some(tool) = run.tools.last()

@@ -1174,12 +1174,20 @@ mod tests {
             observation.disposition = arany::ToolDisposition::Denied;
             observation.attestation = None;
             observation.approval_cause = Some(cause);
-            assert_eq!(
-                run_feedback(run).unwrap(),
-                format!(
-                    "{expected} No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings."
-                )
-            );
+            let feedback = run_feedback(run).unwrap();
+            if cause == arany::ApprovalCause::ChannelUnavailable {
+                assert_eq!(
+                    feedback,
+                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Submit a new request to open a fresh approval channel."
+                );
+            } else {
+                assert_eq!(
+                    feedback,
+                    format!(
+                        "{expected} No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings."
+                    )
+                );
+            }
             if matches!(
                 cause,
                 arany::ApprovalCause::Cancelled | arany::ApprovalCause::Paused

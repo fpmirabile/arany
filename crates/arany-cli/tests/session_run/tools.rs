@@ -2989,16 +2989,19 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             allowed.then_some("Action completed")
         );
         if outcome.run.status == RunStatus::Failed {
-            assert!(
-                arany_cli::presentation::run_feedback(&replay.runs[0])
-                    .unwrap()
-                    .contains(if decision == "drop" {
-                        "Approval channel unavailable"
-                    } else {
-                        "Action denied"
-                    }),
-                "{name}: a failed optional review must not hide the approval outcome"
-            );
+            let feedback = arany_cli::presentation::run_feedback(&replay.runs[0]).unwrap();
+            if decision == "drop" {
+                assert_eq!(
+                    feedback,
+                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Submit a new request to open a fresh approval channel.",
+                    "{name}: closed replay preserves approval channel recovery"
+                );
+            } else {
+                assert!(
+                    feedback.contains("Action denied"),
+                    "{name}: a failed optional review must not hide the approval outcome"
+                );
+            }
         }
         assert!(
             replay.runs[0].tools[0]
