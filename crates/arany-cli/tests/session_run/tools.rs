@@ -2993,7 +2993,7 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             if decision == "drop" {
                 assert_eq!(
                     feedback,
-                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Submit a new request to open a fresh approval channel.",
+                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Start a new request from an interactive approval channel.",
                     "{name}: closed replay preserves approval channel recovery"
                 );
             } else {

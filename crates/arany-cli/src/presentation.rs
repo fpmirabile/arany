@@ -1273,7 +1273,7 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
                 let recovery = if observation.approval_cause
                     == Some(arany::ApprovalCause::ChannelUnavailable)
                 {
-                    "Submit a new request to open a fresh approval channel."
+                    "Start a new request from an interactive approval channel."
                 } else {
                     "Use /permissions or Shift+Tab to review approval settings."
                 };

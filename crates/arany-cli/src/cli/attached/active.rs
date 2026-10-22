@@ -50,6 +50,18 @@ fn linear_approval_choice(
     }
 }
 
+async fn withdraw_abandoned_approval(
+    pending: &mut Option<arany::ToolApproval>,
+    answer: &mut Composer,
+) {
+    match pending.as_mut() {
+        Some(approval) => approval.abandoned().await,
+        None => std::future::pending().await,
+    }
+    pending.take();
+    answer.clear();
+}
+
 // A continuation submits no text, so its @-mentions come from the source Goal's objective.
 pub(super) fn mention_source<'a>(
     view: &'a SessionView,
@@ -522,8 +534,15 @@ pub(super) async fn submit_objective(
             .as_mut()
             .map(|handle| (&mut handle.result, &mut handle.events))
             .unzip();
+        let approval_pending = pending.is_some();
         tokio::select! {
-            approval = inbox.next(), if pending.is_none() => {
+            () = withdraw_abandoned_approval(&mut pending, &mut approval_answer) => {
+                terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                    break "terminal rendering failed".to_owned();
+                }
+            }
+            approval = inbox.next(), if !approval_pending => {
                 pending = approval;
                 if pending.is_some() { composer.disarm_continuation(); }
                 approval_page = 0;
@@ -664,7 +683,7 @@ pub(super) async fn submit_objective(
                 }
             }
             input = async {
-                if pending.is_some() { terminal.next_input().await } else { terminal.next_chat_input().await }
+                if approval_pending { terminal.next_input().await } else { terminal.next_chat_input().await }
             }, if !exit_after_run => {
                 let input = match input {
                     Ok(input) => input,
@@ -2211,8 +2230,74 @@ mod escape_tests {
 
 #[cfg(test)]
 mod approval_reply_tests {
-    use super::linear_approval_choice;
+    use super::{linear_approval_choice, withdraw_abandoned_approval};
     use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
+    use crate::terminal::{Composer, TerminalInput};
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn child_timeout_withdraws_the_dialog_and_discards_its_partial_answer() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+            let intent = arany::EffectIntent {
+                host: None,
+                target: arany::worker::EffectTarget::Workspace,
+                id: uuid::Uuid::now_v7(),
+                run_id: arany::RunId::new(),
+                agent_run_id: arany::AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: arany::ToolCall::Mkdir {
+                    path: "directory".into(),
+                },
+                limits: arany::ToolLimits::default(),
+                use_count: 1,
+            };
+            let child_approvals = approvals.clone();
+            let child_intent = intent.clone();
+            let child = tokio::spawn(async move {
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    arany::test_support::approval::ask(&child_approvals, &child_intent),
+                )
+                .await
+            });
+            let mut pending = Some(inbox.next().await.expect("child approval"));
+            let mut answer = Composer::default();
+            answer.apply(TerminalInput::Character('y'));
+            assert!(
+                tokio::time::timeout(
+                    Duration::ZERO,
+                    withdraw_abandoned_approval(&mut pending, &mut answer),
+                )
+                .await
+                .is_err(),
+                "a live approval stays answerable"
+            );
+            assert!(pending.is_some());
+            assert_eq!(answer.text(), "y");
+            tokio::time::advance(Duration::from_secs(31)).await;
+            assert!(child.await.expect("child waiter").is_err());
+            withdraw_abandoned_approval(&mut pending, &mut answer).await;
+            assert!(pending.is_none(), "the dialog releases approval input");
+            assert_eq!(
+                answer.text(),
+                "",
+                "partial answers cannot reach a later approval"
+            );
+            let (approved, ()) = tokio::join!(
+                arany::test_support::approval::ask(&approvals, &intent),
+                async {
+                    inbox.next().await.expect("next approval").decide(true);
+                },
+            );
+            assert!(approved, "the parent can continue with a fresh approval");
+        })
+        .await
+        .expect("approval withdrawal deadline");
+    }
 
     #[test]
     fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {

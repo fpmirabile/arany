@@ -1180,7 +1180,7 @@ mod tests {
             if cause == arany::ApprovalCause::ChannelUnavailable {
                 assert_eq!(
                     feedback,
-                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Submit a new request to open a fresh approval channel."
+                    "Approval channel unavailable. No further action ran; earlier completed actions remain. Start a new request from an interactive approval channel."
                 );
             } else {
                 assert_eq!(
