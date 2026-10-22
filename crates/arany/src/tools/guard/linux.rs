@@ -145,7 +145,10 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
-    let (mut threads, mut verified) = (0usize, 0usize);
+    let own = thread_status(Path::new("/proc/thread-self/status"))?
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    verify_hardened_status(&own)?;
+    let mut threads = 0usize;
     for entry in
         std::fs::read_dir("/proc/self/task").map_err(|_| ToolError::ProtectionUnavailable)?
     {
@@ -159,17 +162,12 @@ pub(super) fn harden() -> Result<(), ToolError> {
             .join("status");
         if let Some(status) = thread_status(&path)? {
             verify_hardened_status(&status)?;
-            verified += 1;
         }
-    }
-    // The calling thread is alive, so at least its own status must verify.
-    if verified == 0 {
-        return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
 }
 
-// A thread that exited after the directory listing is gone, not unfiltered: later threads inherit the filter.
+// A listed thread whose status is gone is safe because TSYNC filtered it or its creator and clones inherit the filter.
 fn thread_status(path: &Path) -> Result<Option<String>, ToolError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -1660,7 +1658,16 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
+        std::thread::Builder::new()
+            .spawn(|| ())
+            .unwrap()
+            .join()
+            .unwrap();
         harden().expect("production Guard hardening");
+        let own = thread_status(Path::new("/proc/thread-self/status"))
+            .unwrap()
+            .expect("the caller's own status");
+        verify_hardened_status(&own).unwrap();
         for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
             assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
             assert_eq!(
