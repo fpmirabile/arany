@@ -598,8 +598,10 @@ async fn load_while_owned(
             result = &mut query, if at_input_boundary => break result.map_err(|error| {
                 ModelBrowse::Notice(super::Feedback::History(format!("Error: Model catalog unavailable: {error}. Review the selected account or retry /model.")))
             }),
-            input = terminal.next_input() => {
-                match input.map_err(|error| error.to_string())? {
+            input = terminal.next_chat_input() => {
+                let input = input.map_err(|error| error.to_string())?;
+                composer.observe_input(input);
+                match input {
                     TerminalInput::ClipboardPaste => {
                         let notice = match terminal.request_clipboard_paste() {
                             Ok(()) => super::Feedback::Transient("Reading clipboard... draft retained".into()),
@@ -616,6 +618,7 @@ async fn load_while_owned(
                     }
                     input @ (TerminalInput::Character(_)
                     | TerminalInput::Newline
+                    | TerminalInput::ModifiedEnter(_)
                     | TerminalInput::Backspace
                     | TerminalInput::Delete
                     | TerminalInput::Left
@@ -657,6 +660,9 @@ async fn load_while_owned(
                         ))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Submit => {
+                        if !terminal.is_linear() {
+                            composer.continue_line();
+                        }
                         terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
                         terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }

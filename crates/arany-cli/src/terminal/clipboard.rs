@@ -1048,6 +1048,7 @@ pub(super) mod cleanup_tests {
         linear: Option<crate::terminal::linear::LinearState>,
     ) -> super::super::AttachedTerminal {
         super::super::AttachedTerminal {
+            newline_shortcut: super::super::NewlineShortcut::default(),
             waiting_tool: None,
             terminal: None,
             mode: super::super::TerminalMode::Classic,

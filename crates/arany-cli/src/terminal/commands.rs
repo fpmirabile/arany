@@ -210,7 +210,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
     let description = match spec.command {
         InteractiveCommand::Help => "List commands",
         InteractiveCommand::Setup => "Set up an account",
-        InteractiveCommand::Settings => "Slash menu and chat view",
+        InteractiveCommand::Settings => "Slash menu, chat view and newline shortcut",
         InteractiveCommand::Transcript => {
             "Write or toggle transcript details; agents lists this Run's agent chats"
         }

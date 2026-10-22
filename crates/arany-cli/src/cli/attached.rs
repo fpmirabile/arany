@@ -500,7 +500,11 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         .await?;
     }
     match restored_settings {
-        Ok(restored) => composer.set_completion_layout(restored.completion),
+        Ok(restored) => {
+            composer.set_completion_layout(restored.completion);
+            composer.set_newline_shortcut(restored.newline);
+            terminal.set_newline_shortcut(restored.newline);
+        }
         Err(error) => append_notice(
             &mut setup_notice,
             &format!("Error: {error}; using default settings"),
@@ -725,9 +729,13 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .map_err(|error| error.to_string())?;
         let input = loop {
             let input = terminal
-                .next_input()
+                .next_chat_input()
                 .await
                 .map_err(|error| error.to_string())?;
+            composer.observe_input(input);
+            if terminal.agent_chat_open() || terminal.help_open() {
+                composer.disarm_continuation();
+            }
             if !terminal.help_open()
                 && (terminal.ignores_page_key(input) || terminal.ignores_pointer(input))
             {
@@ -784,6 +792,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
         if input != TerminalInput::Escape {
             idle_escape = None;
         }
+        let input = composer.chat_input(input);
         match input {
             TerminalInput::Escape if !composer.has_open_menu() => {
                 if idle_escape
@@ -902,6 +911,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                         return Err(format!("terminated by {}", signal.name()));
                     }
                 }
+                empty_interrupt = None;
+            }
+            TerminalInput::Submit if !terminal.is_linear() && composer.continue_line() => {
                 empty_interrupt = None;
             }
             TerminalInput::Submit if terminal.clipboard_loading() => {

@@ -301,6 +301,10 @@ impl Decoder {
                 _ => None,
             },
             Mode::Escape => match byte {
+                b'\r' => {
+                    self.reset();
+                    key(KeyCode::Enter, KeyModifiers::ALT, KeyEventKind::Press)
+                }
                 b'[' | b'O' => {
                     self.sequence.push(byte);
                     self.mode = if byte == b'[' { Mode::Csi } else { Mode::Ss3 };
@@ -545,7 +549,7 @@ fn codepoint(value: u32) -> Option<KeyCode> {
         13 => Some(KeyCode::Enter),
         27 => Some(KeyCode::Esc),
         127 => Some(KeyCode::Backspace),
-        57344..=63743 => None,
+        57344..=63743 => Some(KeyCode::Null),
         _ => char::from_u32(value).map(KeyCode::Char),
     }
 }
@@ -553,6 +557,13 @@ fn codepoint(value: u32) -> Option<KeyCode> {
 fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
     let end = *bytes.last()?;
     let text = std::str::from_utf8(&bytes[2..bytes.len() - 1]).ok()?;
+    if bytes.starts_with(b"\x1bO") && text.is_empty() && (b'P'..=b'S').contains(&end) {
+        return key(
+            KeyCode::F(end - b'P' + 1),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        );
+    }
     if end == b'R' && bytes.starts_with(b"\x1b[") {
         let (row, column) = text.split_once(';')?;
         if !row.bytes().all(|byte| byte.is_ascii_digit())
@@ -607,6 +618,9 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
             "3" => KeyCode::Delete,
             "5" => KeyCode::PageUp,
             "6" => KeyCode::PageDown,
+            "11" | "12" | "13" | "14" | "15" | "17" | "18" | "19" | "20" | "21" | "23" | "24" => {
+                KeyCode::Null
+            }
             _ => return None,
         },
         b'u' if third.is_none() => {
@@ -749,6 +763,8 @@ mod tests {
                     thread: Some(thread),
                     pending: VecDeque::from([TerminalInput::Character('1'), TerminalInput::Submit]),
                     remaining_bytes: crate::terminal::MAX_DRAFT_BYTES - 1,
+                    chat: false,
+                    child: false,
                     epoch: 0,
                     admission,
                 })
@@ -849,6 +865,23 @@ mod tests {
                     *expected,
                     "linear={linear}: partial records before admission are discarded and later bytes delivered"
                 );
+            }
+            if linear {
+                for segment in [b"\x1b[200~\n".as_slice(), b"1\n", b"\x1b[201~\n"] {
+                    master.write_all(segment).unwrap();
+                    assert_eq!(
+                        tokio::time::timeout(Duration::from_secs(2), reader.recv())
+                            .await
+                            .unwrap()
+                            .unwrap(),
+                        TerminalInput::LineRejected,
+                        "admission must not release paste contents as approval input"
+                    );
+                    reader.discard_typeahead().await.unwrap();
+                }
+                master.write_all(b"n\n").unwrap();
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Character('n'));
+                assert_eq!(next_input(&mut reader).await, TerminalInput::Submit);
             }
             reader.stop();
         }

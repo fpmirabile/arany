@@ -412,7 +412,7 @@ fn private_file(path: &std::path::Path, bytes: &[u8]) {
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn saved_ui_preferences(completion: &str, view: &str) -> Vec<u8> {
     format!(
-        r#"{{"version":4,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}},"mouse":"wheel_and_clicks","copy_on_select":true}}}}"#
+        r#"{{"version":5,"preferences":{{"completion":"{completion}","view":"{view}","goal_budget":{{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16}},"resources":{{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}},"mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"}}}}"#
     )
     .into_bytes()
 }
