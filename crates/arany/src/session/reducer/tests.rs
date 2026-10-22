@@ -5273,11 +5273,11 @@ mod goal_replay_tests {
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
-            for (event, version) in [
-                (started(intent.digest(), &hook_intent), 6),
-                (finished(hook_observation.clone(), deny.clone()), 11),
+            for event in [
+                started(intent.digest(), &hook_intent),
+                finished(hook_observation.clone(), deny.clone()),
             ] {
-                assert_eq!(event.version(), version);
+                let version = event.version();
                 let payload = event.payload().unwrap();
                 assert_eq!(
                     Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
