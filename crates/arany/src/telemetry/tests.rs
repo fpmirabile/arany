@@ -658,6 +658,7 @@ fn provider_record(
     usage: (Option<u32>, Option<u32>),
 ) -> ProviderCallRecord {
     ProviderCallRecord {
+        rate_limits: None,
         delegation: None,
         phase,
         disposition,
@@ -1196,6 +1197,7 @@ fn fallback_switches_mark_the_run_and_keep_each_call_on_its_requested_route() {
     let primary = segment.spawn(AgentRole::Primary);
     let switch =
         |role, from: &ProviderIdentity, to: &ProviderIdentity| crate::provider::ProviderFallback {
+            rate_limits: None,
             role,
             call_index: 0,
             failure: ProviderCallDisposition::Unavailable,
@@ -1347,6 +1349,7 @@ fn a_child_fallback_switch_keeps_other_agents_on_their_requested_routes() {
         run_id: segment.run_id,
         agent_run_id: child,
         fallback: crate::provider::ProviderFallback {
+            rate_limits: None,
             role: ProviderRole::Child,
             call_index: 0,
             failure: ProviderCallDisposition::Unavailable,
@@ -1454,6 +1457,7 @@ fn goal_view() -> GoalView {
 
 fn compaction_record(status: CompactionStatus) -> crate::session::CompactionRecord {
     crate::session::CompactionRecord {
+        rate_limits: None,
         covered_run_id: RunId::new(),
         covered_sequence: 1,
         source_digest: [0; 32],

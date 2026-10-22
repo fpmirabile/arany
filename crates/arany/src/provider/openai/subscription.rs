@@ -2,7 +2,8 @@ use super::{ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
-use crate::provider::ResponsePreview;
+use crate::provider::{RateLimitSlot, ResponsePreview};
+mod limits;
 use crate::provider::conversation::Conversation;
 use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFramer};
 use crate::provider::{
@@ -93,20 +94,8 @@ impl Provider for ChatGptProvider {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        request.validate_scope()?;
-        if request.model != self.identity.model {
-            return Err(ProviderError::Rejected);
-        }
-        invoke_at_with_preview(
-            &self.client,
-            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-            &self.access_token,
-            &request,
-            self.effort,
-            crate::provider::request_ceiling(self.context_window_tokens),
-            None,
-        )
-        .await
+        self.invoke_observed(request, None, RateLimitSlot::default())
+            .await
     }
 
     async fn invoke_with_preview(
@@ -114,18 +103,47 @@ impl Provider for ChatGptProvider {
         request: ProviderRequest,
         preview: ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
+        self.invoke_observed(request, Some(preview), RateLimitSlot::default())
+            .await
+    }
+
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<ResponsePreview>,
+        limits: RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
         request.validate_scope()?;
         if request.model != self.identity.model {
             return Err(ProviderError::Rejected);
         }
-        invoke_at_with_preview(
+        invoke_at_observed(
             &self.client,
             Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
             &self.access_token,
             &request,
             self.effort,
             crate::provider::request_ceiling(self.context_window_tokens),
-            Some(preview),
+            (preview, limits),
+        )
+        .await
+    }
+
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        if request.model != self.identity.model {
+            return Err(ProviderError::Rejected);
+        }
+        compact_at_observed(
+            &self.client,
+            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+            &self.access_token,
+            &request,
+            self.effort,
+            limits,
         )
         .await
     }
@@ -134,17 +152,8 @@ impl Provider for ChatGptProvider {
         &self,
         request: CompactionRequest,
     ) -> Result<CompactionResponse, ProviderError> {
-        if request.model != self.identity.model {
-            return Err(ProviderError::Rejected);
-        }
-        compact_at(
-            &self.client,
-            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-            &self.access_token,
-            &request,
-            self.effort,
-        )
-        .await
+        self.compact_observed(request, RateLimitSlot::default())
+            .await
     }
 }
 
@@ -271,6 +280,28 @@ async fn invoke_at_with_preview(
     max_request_bytes: usize,
     preview: Option<ResponsePreview>,
 ) -> Result<ProviderResponse, ProviderError> {
+    invoke_at_observed(
+        client,
+        endpoint,
+        access_token,
+        request,
+        effort,
+        max_request_bytes,
+        (preview, RateLimitSlot::default()),
+    )
+    .await
+}
+
+async fn invoke_at_observed(
+    client: &Client,
+    endpoint: Url,
+    access_token: &str,
+    request: &ProviderRequest,
+    effort: Effort,
+    max_request_bytes: usize,
+    observations: (Option<ResponsePreview>, RateLimitSlot),
+) -> Result<ProviderResponse, ProviderError> {
+    let (preview, limits) = observations;
     if !(1..=crate::provider::DEFAULT_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
@@ -286,6 +317,7 @@ async fn invoke_at_with_preview(
         access_token,
         body,
         preview.map(|preview| (preview, request.model.as_str())),
+        limits,
     )
     .await?;
     let decoded = wire::decode_streamed_run(
@@ -323,6 +355,25 @@ async fn compact_at(
     request: &CompactionRequest,
     effort: Effort,
 ) -> Result<CompactionResponse, ProviderError> {
+    compact_at_observed(
+        client,
+        endpoint,
+        access_token,
+        request,
+        effort,
+        RateLimitSlot::default(),
+    )
+    .await
+}
+
+async fn compact_at_observed(
+    client: &Client,
+    endpoint: Url,
+    access_token: &str,
+    request: &CompactionRequest,
+    effort: Effort,
+    limits: RateLimitSlot,
+) -> Result<CompactionResponse, ProviderError> {
     if !(1..=1024).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
@@ -331,7 +382,7 @@ async fn compact_at(
         body: completed,
         counts,
         reasoning_tokens,
-    } = completed_at(client, endpoint, access_token, body).await?;
+    } = completed_at_with_preview(client, endpoint, access_token, body, None, limits).await?;
     let result = wire::decode_streamed_compaction(&completed, &request.model)
         .map_err(|error| response_failure(error, counts))?;
     accept_result(
@@ -392,21 +443,13 @@ struct CompletedStream {
     reasoning_tokens: u32,
 }
 
-async fn completed_at(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
-    body: Vec<u8>,
-) -> Result<CompletedStream, ProviderError> {
-    completed_at_with_preview(client, endpoint, access_token, body, None).await
-}
-
 async fn completed_at_with_preview(
     client: &Client,
     endpoint: Url,
     access_token: &str,
     body: Vec<u8>,
     preview: Option<(ResponsePreview, &str)>,
+    limits: RateLimitSlot,
 ) -> Result<CompletedStream, ProviderError> {
     if access_token.is_empty()
         || access_token.len() > MAX_ACCESS_TOKEN_BYTES
@@ -455,6 +498,7 @@ async fn completed_at_with_preview(
             counts,
         ));
     }
+    limits::headers(response.headers(), access_token, &limits)?;
     let status = response.status();
     if status != reqwest::StatusCode::OK {
         let error = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -495,6 +539,7 @@ async fn completed_at_with_preview(
         Some((preview, model)) => StreamDecoder::with_preview(access_token, model, Some(preview)),
         None => StreamDecoder::new(access_token),
     };
+    decoder.limits = limits;
     let body = read_events(&mut decoder, &mut response).await?;
     Ok(CompletedStream {
         body,
@@ -674,6 +719,7 @@ fn streaming_body(mut body: Value, max_request_bytes: usize) -> Result<Vec<u8>, 
 }
 
 struct StreamDecoder<'a> {
+    limits: RateLimitSlot,
     token: &'a str,
     framer: SseFramer,
     preview: Option<ResponsesPreview<'a>>,
@@ -706,6 +752,7 @@ impl<'a> StreamDecoder<'a> {
         Self {
             token,
             framer: SseFramer::new(),
+            limits: RateLimitSlot::default(),
             preview: None,
             stage: Stage::EventFraming,
             response_shape: ResponseShape::default(),
@@ -756,6 +803,10 @@ impl<'a> StreamDecoder<'a> {
             })?;
         }
         match kind {
+            "codex.rate_limits" => {
+                limits::event(&value, &self.limits);
+                Ok(None)
+            }
             "response.created" => {
                 self.stage = Stage::CompletedResponse;
                 let created: CreatedEvent = serde_json::from_slice(&data)

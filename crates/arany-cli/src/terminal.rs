@@ -2316,7 +2316,12 @@ impl AttachedTerminal {
         starting_sequence: Option<u64>,
     ) -> Result<(), TerminalError> {
         self.cancel_clipboard_paste();
-        let pages = crate::presentation::usage::usage_pages(session, status, starting_sequence);
+        let pages = crate::presentation::usage::usage_pages_at(
+            session,
+            status,
+            starting_sequence,
+            usage_now(),
+        );
         if let Some(linear) = &mut self.linear {
             return linear
                 .write_usage(&mut io::stderr(), &pages)
@@ -2417,10 +2422,11 @@ impl AttachedTerminal {
         let armed = self.dialog_armed;
         if let Some(panel) = &mut self.usage_panel {
             if panel.sequence != session.last_sequence {
-                panel.pages = crate::presentation::usage::usage_pages(
+                panel.pages = crate::presentation::usage::usage_pages_at(
                     session,
                     panel.status,
                     panel.starting_sequence,
+                    usage_now(),
                 );
                 panel.sequence = session.last_sequence;
                 panel.page = panel.page.min(panel.pages.len() - 1);
@@ -3558,4 +3564,11 @@ mod error_line_tests {
             "error: locks: .git/refs/heads/\\u{202e}kcol.x\\u{001b}[2J; remove them"
         );
     }
+}
+
+fn usage_now() -> Option<i64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }

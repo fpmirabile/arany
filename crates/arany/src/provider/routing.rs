@@ -249,6 +249,8 @@ mod tests {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderFallback {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<crate::provider::RateLimits>,
     pub role: ProviderRole,
     pub call_index: u32,
     pub failure: crate::session::ProviderCallDisposition,
@@ -278,6 +280,8 @@ pub enum RetryCause {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderRetry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limits: Option<crate::provider::RateLimits>,
     pub role: ProviderRole,
     pub call_index: u32,
     pub attempt: u8,

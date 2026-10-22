@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `In progress` — U1 implemented; U2 is next.
+- Status: `In progress` — U1 and U2 implemented; U3 is next.
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-22
-- Remaining scope: U2 passive ChatGPT plan windows, then U3 API/custom rate limits.
+- Remaining scope: U3 API/custom rate limits.
 
 ## Outcome and scope
 
@@ -48,9 +48,10 @@ and cache-read tokens with uncertainty, and the
 [views](../../crates/arany/src/session/reducer.rs) now retain U1's separate-counter
 usage projection, including in-Run compaction usage.
 
-[Subscription](../../crates/arany/src/provider/openai/subscription.rs) and
-[custom transport](../../crates/arany/src/provider/custom/transport.rs) have no
-normalized quota snapshot; [HTTP failures](../../crates/arany/src/provider.rs)
+[Subscription](../../crates/arany/src/provider/openai/subscription.rs) now collects
+bounded passive plan observations through every attempt owner;
+[custom transport](../../crates/arany/src/provider/custom/transport.rs) still has no
+normalized API-limit snapshot; [HTTP failures](../../crates/arany/src/provider.rs)
 and [retry records](../../crates/arany/src/provider/routing.rs) retain limited
 retry guidance. The [registry](../../crates/arany-cli/src/terminal/commands.rs)
 exposes `/usage`; [attached `/status`](../../crates/arany-cli/src/cli/attached/controls.rs)
@@ -319,26 +320,12 @@ Implemented. Current token mapping, scope and interaction live in the
 
 ### U2 — Show ChatGPT plan windows from committed response observations
 
-One PR delivers weekly and reported 5-hour usage/reset/age. Authorized subscription
-HTTP response or recognized event → bounded metadata slot → every attempt's
-committed fact → strict replay → the U1 report is the complete path. Include
-failure, cancellation, retry and compaction in this PR, not a subsequent wiring
-slice. Update Provider, ChatGPT, Session and Execution for acquisition, optional
-facts and bounds; Terminal owns freshness and reset labels.
-
-Extend the [subscription corpus](../../crates/arany/src/provider/openai/subscription/tests.rs),
-[routing journey](../../crates/arany/tests/engine_run/routing.rs),
-[Store crash corpus](../../crates/arany/src/store/journal/crash_tests.rs),
-[Event corpus](../../crates/arany/src/session/events/tests.rs) and
-[offline HTTPS ChatGPT journey](../../crates/arany-cli/tests/session_run/setup/offline_https/chatgpt/checked_turn.rs).
-Exercise both windows, weekly-only, reversed slots, missing duration/reset,
-header/event precedence, concurrent old responses, 429 with valid headers,
-malformed/duplicate/over-bound headers, token reflection, body failure after
-headers, cancellation, append failure and crash before/after commitment.
-Replay and historical inspection dispatch nothing; old records stay byte-identical.
-Prove one observation-clock read per receipt and unchanged stored timestamps
-through commitment, replay and rendering. Use explicit current-time inputs for
-reset-passed, unknown-age and reopen rendering; replay has no clock access.
+Implemented. Passive acquisition, bounded samples and all-attempt settlement now live in the
+[Provider](../../docs/specs/provider.md#passive-plan-limit-observations),
+[ChatGPT](../../docs/specs/chatgpt.md#catalog-checks-and-runs),
+[Execution](../../docs/specs/execution.md#admission-persistence-and-recovery),
+[Session](../../docs/specs/session.md#persistence-facts) and
+[Terminal](../../docs/specs/terminal.md#reported-usage) contracts. U3 reuses this path.
 
 ### U3 — Show API and custom-route rate-limit facts where exposed
 

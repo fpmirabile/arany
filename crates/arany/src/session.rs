@@ -71,8 +71,8 @@ pub(crate) use reducer::worker_tests::{
     completed_fixture as worker_protocol_fixture, host_protocol_fixture,
 };
 pub use reducer::{
-    AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, TokenCount,
-    ToolView, UsageGroup, UsageView,
+    AgentStatus, AgentView, CompactionView, GoalView, PlanUsage, RunStatus, RunView, SessionView,
+    TokenCount, ToolView, UsageGroup, UsageView,
 };
 pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,

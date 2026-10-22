@@ -15,7 +15,12 @@ mod image;
 #[cfg(any(test, feature = "test-support"))]
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
+mod limits;
 mod native_check;
+pub use limits::{
+    LimitFailure, LimitSource, LimitUnavailable, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES,
+    PlanWindow, RateLimitSlot, RateLimits, UsedPercent,
+};
 mod openai;
 pub(crate) mod prompts;
 mod render;
@@ -1204,6 +1209,26 @@ pub trait Provider: Send + Sync {
         self.invoke(request).await
     }
 
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<ResponsePreview>,
+        _limits: RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        match preview {
+            Some(preview) => self.invoke_with_preview(request, preview).await,
+            None => self.invoke(request).await,
+        }
+    }
+
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        _limits: RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        self.compact(request).await
+    }
+
     /// Summarizes accepted conversation data without Workspace guidance or effects.
     /// Unsupported compaction returns `Unavailable`. Adapters enforce the declared
     /// output bound; a local-only bound requires explicit account consent and cannot
@@ -1233,6 +1258,21 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
         preview: ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
         (**self).invoke_with_preview(request, preview).await
+    }
+    async fn invoke_observed(
+        &self,
+        request: ProviderRequest,
+        preview: Option<ResponsePreview>,
+        limits: RateLimitSlot,
+    ) -> Result<ProviderResponse, ProviderError> {
+        (**self).invoke_observed(request, preview, limits).await
+    }
+    async fn compact_observed(
+        &self,
+        request: CompactionRequest,
+        limits: RateLimitSlot,
+    ) -> Result<CompactionResponse, ProviderError> {
+        (**self).compact_observed(request, limits).await
     }
     async fn compact(
         &self,
