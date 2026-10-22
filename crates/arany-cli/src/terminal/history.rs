@@ -98,6 +98,7 @@ struct Selection {
 #[derive(Clone)]
 pub(super) struct HistoryRow {
     pub(super) text: String,
+    pub(super) slash_cells: usize,
     pub(super) speaker: MessageKind,
     pub(super) heading: bool,
     pub(super) matched: bool,
@@ -463,7 +464,7 @@ impl History {
         let Some(text) = text else {
             return Vec::new();
         };
-        let rows = display_rows(MessageKind::Preview, &text, self.width);
+        let rows = display_rows(MessageKind::Preview, &text, self.width, None);
         rows.into_iter()
             .rev()
             .take(self.height)
@@ -1045,6 +1046,15 @@ impl History {
             }
             let text = message_text(view, message, &self.notices);
             let rows = message_rows(message.kind, &text, self.width);
+            let slash = if message.kind == MessageKind::User {
+                let skill = match message.source {
+                    MessageSource::User(run) => view.runs[run].skill.as_deref(),
+                    _ => None,
+                };
+                super::commands::slash_token(&text, skill)
+            } else {
+                None
+            };
             let chrome = chrome(message.kind, &text);
             for offset in 0..rows.len() {
                 let row = message.start + offset;
@@ -1052,13 +1062,11 @@ impl History {
                     let selected = range.and_then(|range| {
                         selected_cells(message.kind, &text, &rows, &chrome, offset, index, range)
                     });
-                    visible.push(HistoryRow {
-                        speaker: message.kind,
-                        heading: offset == 0,
-                        matched: self.matched_row == Some(row),
-                        text: rows[offset].text.clone(),
-                        selected,
-                    });
+                    let mut displayed =
+                        display_row(message.kind, &rows[offset], offset, slash, self.width);
+                    displayed.matched = self.matched_row == Some(row);
+                    displayed.selected = selected;
+                    visible.push(displayed);
                 }
             }
         }
@@ -1084,7 +1092,12 @@ pub(super) fn scrollback_transcript(view: &SessionView) -> String {
     for run in view.runs.iter().rev().take(MAX_CLASSIC_HISTORY_RUNS) {
         let objective = image_message_text(&run.objective, &run.images);
         let details = super::linear::transcript_details(run);
-        let mut lines = vec![("", "You:")];
+        let heading = super::commands::slash_token(&run.objective, run.skill.as_deref())
+            .map_or_else(
+                || "You:".to_owned(),
+                |token| format!("You ({}):", token.kind),
+            );
+        let mut lines = vec![("", heading.as_str())];
         lines.extend(objective.split('\n').map(|text| ("  ", text)));
         lines.extend(
             details
@@ -1245,6 +1258,9 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
     }
     let (mut bytes, mut rows) =
         classic_message_cost(MessageKind::User, user_body_bytes, user_body_rows);
+    if let Some(token) = super::commands::slash_token(&run.objective, run.skill.as_deref()) {
+        bytes = bytes.saturating_add(token.kind.len() + 3);
+    }
     let mut add_message = |kind, text: &str| {
         let (message_bytes, message_rows) = if kind == MessageKind::Tool {
             let rendered = message_rows(kind, text, width);
@@ -1364,18 +1380,46 @@ fn message_text<'a>(
     }
 }
 
-pub(super) fn display_rows(kind: MessageKind, text: &str, width: usize) -> Vec<HistoryRow> {
+pub(super) fn display_rows(
+    kind: MessageKind,
+    text: &str,
+    width: usize,
+    skill: Option<&str>,
+) -> Vec<HistoryRow> {
+    let slash = (kind == MessageKind::User)
+        .then(|| super::commands::slash_token(text, skill))
+        .flatten();
     message_rows(kind, text, width)
-        .into_iter()
+        .iter()
         .enumerate()
-        .map(|(index, row)| HistoryRow {
-            text: row.text,
-            speaker: kind,
-            heading: index == 0,
-            matched: false,
-            selected: None,
-        })
+        .map(|(index, row)| display_row(kind, row, index, slash, width))
         .collect()
+}
+
+fn display_row(
+    kind: MessageKind,
+    row: &MessageRow,
+    index: usize,
+    slash: Option<super::commands::SlashToken<'_>>,
+    width: usize,
+) -> HistoryRow {
+    HistoryRow {
+        text: match slash.filter(|_| index == 0) {
+            Some(token) => safe_truncate(&format!("You ({}):", token.kind), width),
+            None => row.text.clone(),
+        },
+        slash_cells: slash.filter(|_| index > 0).map_or(0, |token| {
+            token
+                .text
+                .len()
+                .saturating_sub(row.source_byte)
+                .min(row.text.len().saturating_sub(2))
+        }),
+        speaker: kind,
+        heading: index == 0,
+        matched: false,
+        selected: None,
+    }
 }
 
 // A message's text as a bounded head and a borrowed tail; only selected bytes are ever joined.
@@ -1816,6 +1860,50 @@ mod tests {
             provider_fallbacks: Vec::new(),
             provider_retries: Vec::new(),
         }
+    }
+
+    #[test]
+    fn skill_transcript_preserves_submitted_text_and_labels_recognition_outside_the_body() {
+        let text = "/ask-matt   do X  \nnext";
+        let mut view = session();
+        let mut invoked = run(text, "answer");
+        let plain_cost = classic_run_cost(&invoked, 80);
+        invoked.skill = Some("ask-matt".into());
+        assert_eq!(
+            classic_run_cost(&invoked, 80),
+            (plain_cost.0 + 8, plain_cost.1)
+        );
+        view.runs.push(invoked);
+        let mut history = History::default();
+        history.sync(&view, 80, 20);
+        let rows = history.visible(&view);
+        assert_eq!(rows[0].text, "You (skill):");
+        assert_eq!(rows[1].text, "  /ask-matt   do X  ");
+        assert_eq!(rows[1].slash_cells, 9);
+        assert_eq!(rows[2].text, "  next");
+        assert_eq!(rows[2].slash_cells, 0);
+        history.selection = Some(Selection {
+            anchor: TextPoint {
+                source: MessageSource::User(0),
+                byte: 0,
+                boundary: true,
+            },
+            head: TextPoint {
+                source: MessageSource::User(0),
+                byte: text.len(),
+                boundary: true,
+            },
+            shown: true,
+        });
+        assert_eq!(history.selection_text(&view).unwrap().unwrap(), text);
+        let native = display_rows(MessageKind::User, text, 80, Some("ask-matt"));
+        assert_eq!(native[0].text, rows[0].text);
+        assert_eq!(native[1].text, rows[1].text);
+        assert_eq!(native[1].slash_cells, rows[1].slash_cells);
+        assert!(
+            scrollback_transcript(&view)
+                .contains("You (skill):\r\n  /ask-matt   do X  \r\n  next\r\n")
+        );
     }
 
     #[test]

@@ -10,6 +10,85 @@ fn buffer_row(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
 }
 
 #[test]
+fn recognized_slash_tokens_are_accented_and_bold_without_changing_text() {
+    let model = PresentationModel {
+        status_line: "ready".into(),
+        activity_lines: Vec::new(),
+        setup_required: false,
+        draft_action: DraftAction::Submit,
+        empty_chat: false,
+        agent_switch: false,
+    };
+    for (text, kind, token_len) in [
+        ("/ask-matt task", Some("skill"), 9),
+        ("/help task", Some("command"), 5),
+        ("/unknown task", None, 0),
+    ] {
+        for color in [false, true] {
+            let mut composer = Composer::default();
+            composer.set_runtime_skills(&["ask-matt".into(), "help".into()]);
+            composer.insert_paste(text).unwrap();
+            let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+            terminal
+                .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color }))
+                .unwrap();
+            let y = terminal.get_cursor_position().unwrap().y;
+            let buffer = terminal.backend().buffer();
+            assert!(buffer_row(buffer, y).starts_with(&format!("> {text}")));
+            for x in 0..text.len() {
+                let cell = &buffer[(2 + x as u16, y)];
+                assert_eq!(cell.modifier.contains(Modifier::BOLD), x < token_len);
+                assert_eq!(
+                    cell.fg,
+                    if color && x < token_len {
+                        Color::Cyan
+                    } else {
+                        Color::Reset
+                    }
+                );
+            }
+            let rows =
+                super::super::history::display_rows(MessageKind::User, text, 40, Some("ask-matt"));
+            assert_eq!(
+                rows[0].text,
+                kind.map_or("You:".into(), |kind| format!("You ({kind}):"))
+            );
+            for native in [false, true] {
+                terminal
+                    .draw(|frame| {
+                        if native {
+                            frame.render_widget(
+                                Paragraph::new(
+                                    rows.iter()
+                                        .map(|row| native_line(row, 40, Palette { color }))
+                                        .collect::<Vec<_>>(),
+                                ),
+                                frame.area(),
+                            );
+                        } else {
+                            draw_history_rows(frame, frame.area(), &rows, Palette { color });
+                        }
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                for x in 0..text.len() {
+                    let cell = &buffer[(2 + x as u16, 1)];
+                    assert_eq!(cell.modifier.contains(Modifier::BOLD), x < token_len);
+                    assert_eq!(
+                        cell.fg,
+                        if color && x < token_len {
+                            Color::Cyan
+                        } else {
+                            Color::Reset
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn classic_dialogs_fill_their_content_sized_viewport() {
     for screen_height in [8, 24, 50] {
         for (panel, height) in [
@@ -907,6 +986,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                     None,
                     Palette { color: false },
                     &[HistoryRow {
+                        slash_cells: 0,
                         text: "You:".into(),
                         speaker: MessageKind::User,
                         heading: true,
@@ -1234,6 +1314,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
     };
     let rows = vec![
         HistoryRow {
+            slash_cells: 0,
             text: "You:".into(),
             speaker: MessageKind::User,
             heading: true,
@@ -1241,6 +1322,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            slash_cells: 0,
             text: "  committed objective".into(),
             speaker: MessageKind::User,
             heading: false,
@@ -1248,6 +1330,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            slash_cells: 0,
             text: "Arany:".into(),
             speaker: MessageKind::Assistant,
             heading: true,
@@ -1301,6 +1384,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         let mut wide = Terminal::new(TestBackend::new(80, 12)).expect("wide terminal");
         let mut feedback_rows = rows.clone();
         feedback_rows.push(HistoryRow {
+            slash_cells: 0,
             text: "Arany · error:".into(),
             speaker: MessageKind::Error,
             heading: true,
@@ -1308,6 +1392,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         });
         feedback_rows.push(HistoryRow {
+            slash_cells: 0,
             text: "  Retry /setup; your draft is retained".into(),
             speaker: MessageKind::Error,
             heading: false,
@@ -1421,6 +1506,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
     conversation[1].text = "  e\u{301}👩‍💻".into();
     conversation.extend([
         HistoryRow {
+            slash_cells: 0,
             text: "  continued".into(),
             speaker: MessageKind::User,
             heading: false,
@@ -1428,6 +1514,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
             selected: None,
         },
         HistoryRow {
+            slash_cells: 0,
             text: String::new(),
             speaker: MessageKind::User,
             heading: false,
@@ -1436,6 +1523,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
         },
         rows[2].clone(),
         HistoryRow {
+            slash_cells: 0,
             text: "  You: is quoted".into(),
             speaker: MessageKind::Assistant,
             heading: false,
@@ -1818,10 +1906,9 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
     }
     composer.apply(TerminalInput::Down);
     let cursor = composer.cursor_byte_offset();
-    composer.set_completion_layout(super::super::CompletionLayout::Combined);
     composer.set_runtime_skills(&["review".into(), "help".into()]);
     for (prefix, focused, category) in [
-        ("/rev", "review", "Skill"),
+        ("/rev", "review", "(skill)"),
         ("/he", "help", "Cmd"),
         ("/resum", "resume", "Cmd"),
         ("/permissio", "permissions", "Cmd"),
@@ -1946,7 +2033,10 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                         assert!(labels.iter().any(|row| row.starts_with("No Skills")));
                     }
                     if last {
-                        assert!(labels.iter().any(|row| row.starts_with("> Skill /skill-")));
+                        assert!(labels.iter().any(|row| row.starts_with(&safe_truncate(
+                            "> (skill) /skill-63",
+                            usize::from(width),
+                        ))));
                     }
                     if width >= 79 && height == 24 && !skills_tab && !last {
                         let shown = 18;
@@ -3757,6 +3847,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                 MessageKind::Supervisor,
                 &text,
                 usize::from(width),
+                None,
             );
             let mut terminal = Terminal::new(TestBackend::new(width, 20)).unwrap();
             terminal
@@ -3831,6 +3922,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
             MessageKind::Tool,
             &crate::presentation::tool_summary(&tool),
             usize::from(width),
+            None,
         );
         for color in [false, true] {
             let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
@@ -3868,6 +3960,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 MessageKind::Tool,
                 &crate::presentation::tool_summary(&limited),
                 usize::from(width),
+                None,
             );
             terminal
                 .draw(|frame| {
@@ -3897,6 +3990,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 MessageKind::Tool,
                 &crate::presentation::tool_summary(&command),
                 usize::from(width),
+                None,
             );
             terminal
                 .draw(|frame| {
@@ -3929,6 +4023,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                 MessageKind::Tool,
                 &crate::presentation::tool_summary(&long),
                 usize::from(width),
+                None,
             );
             let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
             terminal
@@ -3963,6 +4058,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
 fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
     let rows = [
         HistoryRow {
+            slash_cells: 0,
             text: "  selected text".into(),
             speaker: MessageKind::Assistant,
             heading: false,
@@ -3970,6 +4066,7 @@ fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
             selected: Some((2, 10)),
         },
         HistoryRow {
+            slash_cells: 0,
             text: "  body".into(),
             speaker: MessageKind::User,
             heading: false,
@@ -3977,6 +4074,7 @@ fn selection_highlight_is_inverse_video_on_text_cells_without_color() {
             selected: Some((2, 6)),
         },
         HistoryRow {
+            slash_cells: 0,
             text: "Arany:".into(),
             speaker: MessageKind::Assistant,
             heading: true,
@@ -4014,11 +4112,13 @@ fn pager_frame_gives_history_every_row_above_one_inert_footer() {
             MessageKind::Commentary,
             "hostile \u{1b}]52;c;eA==\u{7} tail",
             usize::from(width),
+            None,
         );
         rows.extend(super::super::history::display_rows(
             MessageKind::Assistant,
             &"line\n".repeat(usize::from(height)),
             usize::from(width),
+            None,
         ));
         let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("pager terminal");
         let mut history_area = Rect::default();

@@ -424,20 +424,35 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
 }
 
 pub fn skill_invocation<'a>(text: &'a str, skills: &[String]) -> Option<(&'a str, &'a str)> {
-    let control = text.strip_prefix('/')?;
-    let (name, task) = control
-        .split_once(char::is_whitespace)
-        .unwrap_or((control, ""));
-    (skills.iter().any(|skill| skill == name) && !command_completions("/").contains(&name))
-        .then_some((name, task.trim()))
+    let token = slash_token(text, skills.iter().map(String::as_str))?;
+    (token.kind == "skill").then_some((&token.text[1..], text[token.text.len()..].trim()))
 }
 
-pub fn invoked_objective(name: &str, task: &str) -> String {
-    if task.is_empty() {
-        format!("/{name}")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SlashToken<'a> {
+    pub(super) text: &'a str,
+    pub(super) kind: &'static str,
+}
+
+pub(super) fn slash_token<'a, 's>(
+    text: &'a str,
+    skills: impl IntoIterator<Item = &'s str>,
+) -> Option<SlashToken<'a>> {
+    let control = text.strip_prefix('/')?;
+    let name = control
+        .split_once(char::is_whitespace)
+        .map_or(control, |(name, _)| name);
+    let kind = if COMMANDS.iter().any(|command| command.name == name) {
+        "command"
+    } else if skills.into_iter().any(|skill| skill == name) {
+        "skill"
     } else {
-        task.to_owned()
-    }
+        return None;
+    };
+    Some(SlashToken {
+        text: &text[..name.len() + 1],
+        kind,
+    })
 }
 
 pub fn command_completions(prefix: &str) -> Vec<&'static str> {
