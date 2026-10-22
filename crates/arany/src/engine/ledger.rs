@@ -35,20 +35,20 @@ impl Action {
             Self::Child {
                 in_flight,
                 research,
-            } => (if research { 14_usize } else { 9_usize }).saturating_add(
+            } => (if research { 15_usize } else { 10_usize }).saturating_add(
                 usize::try_from(in_flight)
                     .unwrap_or(usize::MAX)
                     .saturating_mul(2),
             ),
             Self::Tool | Self::Review => 8,
-            Self::Worker { chunks } => chunks.saturating_add(12 + 4 * 8 + 6),
+            Self::Worker { chunks } => chunks.saturating_add(12 + 5 * 8 + 6),
             Self::Compaction => 6,
             Self::BoundaryCompaction { goal } => 1 + usize::from(goal),
             Self::Delegation { children, research } => {
                 if research {
-                    children * (7 * MAX_CHILD_TOOL_CALLS + 4) + 8
+                    children * (8 * MAX_CHILD_TOOL_CALLS + 5) + 8
                 } else {
-                    4 * children + 6
+                    5 * children + 6
                 }
             }
         }

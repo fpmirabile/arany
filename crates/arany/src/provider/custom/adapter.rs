@@ -46,7 +46,7 @@ impl CustomProvider {
         }
         let key = std::env::var(profile.credential_env())
             .map_err(|_| CustomProfileError::CredentialUnavailable)?;
-        let transport = CustomTransport::new(&destination, key)?;
+        let transport = CustomTransport::new(&profile, &destination, key)?;
         let mut identity = ProviderIdentity::new(
             format!("custom:{}", profile.name()),
             profile.model(),
@@ -188,77 +188,104 @@ mod tests {
     async fn readonly_custom_admission_cannot_dispatch_tools_or_child_authority() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let profile = CustomProfile {
-            name: "local".into(),
-            endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
-            model: "model-1".into(),
-            credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
-            capability_evidence_version: 2,
-            efforts: Vec::new(),
-        };
-        let destination = profile.resolve_destination().await.unwrap();
-        let provider = CustomProvider {
-            identity: ProviderIdentity::new(
-                "custom:local",
-                "model-1",
-                Provenance::Custom(CustomProfileProvenance {
-                    endpoint: profile.endpoint().into(),
-                    evidence_digest: fingerprint(&profile),
-                    capability_evidence_version: 2,
-                }),
-            ),
-            transport: CustomTransport::new(&destination, "synthetic-key".into()).unwrap(),
-        };
-        assert_eq!(
-            provider.identity().limits.deadline,
-            std::time::Duration::from_secs(120)
-        );
-        for (phase, collaboration, tools) in [
-            (
-                AgentPhase::RootPlan,
-                CollaborationPolicy::Single,
-                Some(crate::tools::ToolContext {
-                    invoked_skill: None,
-                    stop_bytes: 0,
-                    catalog: "NO_DISCLOSURE".into(),
-                    history_summary: None,
-                    steps: Vec::new(),
-                }),
-            ),
-            (
-                AgentPhase::ChildWork,
-                CollaborationPolicy::Team {
-                    max_active_children: 1,
-                },
-                None,
-            ),
-            (
-                AgentPhase::RootPlan,
-                CollaborationPolicy::Team {
-                    max_active_children: 0,
-                },
-                None,
-            ),
-        ] {
-            let request = ProviderRequest {
-                session_id: crate::session::SessionId::new(),
-                run_id: RunId::new(),
-                agent_run_id: AgentRunId::new(),
-                phase,
-                collaboration,
+        for messages in [false, true] {
+            let mut profile = CustomProfile {
+                name: "local".into(),
+                protocol: super::super::Protocol::OpenaiResponses,
+                endpoint: format!("http://127.0.0.1:{port}/v1/responses"),
                 model: "model-1".into(),
-                max_output_tokens: 4096,
-                input: RunInput {
-                    tools,
-                    ..RunInput::new(PromptRole::ReadOnly, "NO_DISCLOSURE".into())
-                },
+                credential_env: "ARANY_PROVIDER_LOCAL_KEY".into(),
+                capability_evidence_version: 2,
+                efforts: Vec::new(),
             };
-            assert!(matches!(
-                tokio::time::timeout(std::time::Duration::from_secs(5), provider.invoke(request))
-                    .await
+            if messages {
+                let base_url = format!("http://127.0.0.1:{port}/anthropic");
+                profile.endpoint = format!("{base_url}/v1/messages");
+                profile.protocol = super::super::Protocol::AnthropicMessages {
+                    base_url,
+                    auth: super::super::MessagesAuth::ApiKey,
+                };
+            }
+            let destination = profile.resolve_destination().await.unwrap();
+            let provider = CustomProvider {
+                identity: ProviderIdentity::new(
+                    "custom:local",
+                    "model-1",
+                    Provenance::Custom(CustomProfileProvenance {
+                        endpoint: profile.endpoint().into(),
+                        evidence_digest: fingerprint(&profile),
+                        capability_evidence_version: 2,
+                    }),
+                ),
+                transport: CustomTransport::new(&profile, &destination, "synthetic-key".into())
                     .unwrap(),
+            };
+            assert_eq!(
+                provider.identity().limits.deadline,
+                std::time::Duration::from_secs(120)
+            );
+            let mut image_request = crate::provider::test_support::read_only_request("model-1");
+            image_request
+                .input
+                .images
+                .push(crate::provider::ProviderImage {
+                    origin: crate::provider::ImageOrigin::Objective,
+                    image: crate::provider::test_image(),
+                });
+            assert!(matches!(
+                provider.invoke(image_request).await,
                 Err(ProviderError::Rejected)
             ));
+            for (phase, collaboration, tools) in [
+                (
+                    AgentPhase::RootPlan,
+                    CollaborationPolicy::Single,
+                    Some(crate::tools::ToolContext {
+                        invoked_skill: None,
+                        stop_bytes: 0,
+                        catalog: "NO_DISCLOSURE".into(),
+                        history_summary: None,
+                        steps: Vec::new(),
+                    }),
+                ),
+                (
+                    AgentPhase::ChildWork,
+                    CollaborationPolicy::Team {
+                        max_active_children: 1,
+                    },
+                    None,
+                ),
+                (
+                    AgentPhase::RootPlan,
+                    CollaborationPolicy::Team {
+                        max_active_children: 0,
+                    },
+                    None,
+                ),
+            ] {
+                let request = ProviderRequest {
+                    session_id: crate::session::SessionId::new(),
+                    run_id: RunId::new(),
+                    agent_run_id: AgentRunId::new(),
+                    phase,
+                    collaboration,
+                    model: "model-1".into(),
+                    max_output_tokens: 4096,
+                    input: RunInput {
+                        tools,
+                        ..RunInput::new(PromptRole::ReadOnly, "NO_DISCLOSURE".into())
+                    },
+                };
+                assert!(matches!(
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        provider.invoke(request)
+                    )
+                    .await
+                    .unwrap(),
+                    Err(ProviderError::Rejected)
+                ));
+            }
         }
         assert!(
             listener

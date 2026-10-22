@@ -1,5 +1,5 @@
 use super::report;
-use crate::loopback::{ChildGuard, check_profile, send_response, wait_product, write_profile};
+use crate::loopback::{ChildGuard, check_profile, send_response_for, wait_product, write_profile};
 use arany::{
     CollaborationPolicy, Event, RunId, RunStatus, SessionId, SessionView, StateRoot, Store,
 };
@@ -137,7 +137,8 @@ fn startup_upper_bound_two_files_on_named_host() {
                 }
                 serde_json::json!("startup answer")
             };
-            send_response(&mut stream, index, text);
+            let text = arany::semantic::compaction_probe_reply(&wire, text);
+            send_response_for(&mut stream, index, text, wire["stream"] == true);
         }
     });
     check_profile(&workspace, &state);

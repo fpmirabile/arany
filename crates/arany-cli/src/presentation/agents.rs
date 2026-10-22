@@ -5,8 +5,13 @@ use arany::{
     AgentRole, AgentRunId, AgentStatus, AgentView, RunId, RunStatus, RunView, SessionView,
 };
 
-const MAX_RECENT_RUNS: usize = 16;
+pub(crate) const STEERING_NOTE_HEADING: &str = "Steering note (sent during the child's work):";
+pub(crate) const MAX_RECENT_RUNS: usize = 16;
 const MAX_AGENTS_PER_RUN: usize = 9;
+const MAX_EXPANDED_IDLE: usize = 3;
+const MAX_OBJECTIVE_PREVIEW: usize = 64;
+pub(crate) const MAX_AGENT_SEARCH: usize = 64;
+pub(crate) const MAX_AGENT_ROWS: usize = 10;
 const MAX_TRANSCRIPT_BYTES: usize = 64 * 1024;
 const MAX_TRANSCRIPT_ROWS: usize = 4096;
 // Rows are counted at the narrowest inline width, 16 columns less the indent, so wider layouts stay within the bound.
@@ -15,25 +20,56 @@ const TRANSCRIPT_OMITTED: &str =
     "Earlier activity omitted; arany show prints the whole conversation";
 const TEXT_OMITTED: &str = "Text exceeds the transcript limit; arany show prints it";
 
+// A picker row keyed by canonical identity, so committed changes never retarget it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum AgentRow {
+    Agent(RunId, AgentRunId),
+    Idle,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum AgentFocus {
+    // The first row, resolved by the draw that follows a user action.
+    #[default]
+    First,
+    Row(AgentRow),
+    // Nothing matched; a later row takes focus only after a user action.
+    Nothing,
+}
+
+#[derive(Default)]
+pub(crate) struct AgentQuery {
+    pub(crate) filter: String,
+    pub(crate) expanded: bool,
+    pub(crate) focus: AgentFocus,
+}
+
 pub(crate) struct AgentInspectorModel {
-    pub(crate) selected: usize,
+    pub(crate) selected: Option<usize>,
     pub(crate) choices: Vec<String>,
+    pub(crate) rows: Vec<AgentRow>,
+    // The first collapsed idle row, which expanding the group focuses.
+    pub(crate) first_hidden: Option<AgentRow>,
+    pub(crate) search: String,
+    // The leading `lines` describe the Session; the rest describe the focused row.
+    pub(crate) header: usize,
     pub(crate) lines: Vec<String>,
 }
 
 impl AgentInspectorModel {
-    pub(crate) fn recent_agent_count(view: &SessionView) -> usize {
-        view.runs
-            .iter()
-            .rev()
-            .take(MAX_RECENT_RUNS)
-            .map(|run| run.agents.len().min(MAX_AGENTS_PER_RUN))
-            .sum()
+    // What `query.focus` becomes once this model is shown.
+    pub(crate) fn shown_focus(&self, focus: AgentFocus) -> AgentFocus {
+        match focus {
+            AgentFocus::First => self.selected.map_or(AgentFocus::Nothing, |index| {
+                AgentFocus::Row(self.rows[index])
+            }),
+            focus => focus,
+        }
     }
 
     pub(crate) fn from_session(
         view: &SessionView,
-        selected: usize,
+        query: &AgentQuery,
         width: u16,
         locked: bool,
     ) -> Self {
@@ -51,21 +87,73 @@ impl AgentInspectorModel {
                     .map(move |agent| (view.runs.len() - index, run, agent))
             })
             .collect::<Vec<_>>();
-        let count = entries.len();
-        let selected = selected.min(count.saturating_sub(1));
-        let choices = entries
+        let total = entries.len();
+        let needle = query.filter.to_ascii_lowercase();
+        let matches = entries
             .iter()
-            .map(|(run_number, _, agent)| {
-                let role = match agent.role {
-                    AgentRole::Primary => "primary".to_owned(),
-                    AgentRole::Child => format!("child {}", agent.ordinal),
-                };
-                safe_truncate(
-                    &format!("Run {run_number}: {role}; {}", agent.status),
-                    width.saturating_sub(2),
-                )
+            .filter_map(|(run_number, run, agent)| {
+                let objective = agent.objective.as_deref().unwrap_or(&run.objective);
+                let label = format!(
+                    "Run {run_number}: {}; {} · {}",
+                    agent_label(agent),
+                    agent.status,
+                    safe_truncate(objective, MAX_OBJECTIVE_PREVIEW)
+                );
+                label.to_ascii_lowercase().contains(&needle).then_some((
+                    AgentRow::Agent(run.id, agent.id),
+                    *run,
+                    *agent,
+                    label,
+                ))
             })
-            .collect();
+            .collect::<Vec<_>>();
+        let found = matches.len();
+        // Settled idle rows beyond the first few collapse into one row; focus keeps its own row visible.
+        let mut idle = 0;
+        let mut hidden = Vec::new();
+        let mut shown = Vec::new();
+        for entry in matches {
+            if entry.2.status == AgentStatus::Finished {
+                idle += 1;
+                if idle > MAX_EXPANDED_IDLE
+                    && !query.expanded
+                    && query.focus != AgentFocus::Row(entry.0)
+                {
+                    hidden.push(entry.0);
+                    continue;
+                }
+            }
+            shown.push(entry);
+        }
+        let mut rows = shown.iter().map(|entry| entry.0).collect::<Vec<_>>();
+        let mut choices = shown
+            .iter()
+            .map(|entry| safe_truncate(&entry.3, width.saturating_sub(2)))
+            .collect::<Vec<_>>();
+        if !hidden.is_empty() {
+            rows.push(AgentRow::Idle);
+            choices.push(safe_truncate(
+                &idle_agents(hidden.len()),
+                width.saturating_sub(2),
+            ));
+        }
+        let selected = match query.focus {
+            AgentFocus::First => (!rows.is_empty()).then_some(0),
+            AgentFocus::Row(row) => rows.iter().position(|shown| *shown == row),
+            AgentFocus::Nothing => None,
+        };
+        let plural = |count: usize| if count == 1 { "" } else { "s" };
+        let search = if query.filter.is_empty() {
+            format!("Type to search {total} agent{}", plural(total))
+        } else if found == 0 {
+            format!("Search: {} · no matching agents", query.filter)
+        } else {
+            format!(
+                "Search: {} · {found} of {total} agent{}",
+                query.filter,
+                plural(total)
+            )
+        };
         let hidden_runs = view.runs.len().saturating_sub(MAX_RECENT_RUNS);
         let mut lines = vec![
             match view.runs.last() {
@@ -77,7 +165,7 @@ impl AgentInspectorModel {
                         "Last"
                     },
                     run.agents.len(),
-                    if run.agents.len() == 1 { "" } else { "s" },
+                    plural(run.agents.len()),
                     run.agents
                         .iter()
                         .filter(|agent| agent.role == AgentRole::Child)
@@ -86,7 +174,7 @@ impl AgentInspectorModel {
                 None => "No Runs yet".into(),
             },
             format!(
-                "History: {count} agents in {} recent Runs; {} older Runs",
+                "History: {total} agents in {} recent Runs; {} older Runs",
                 view.runs.len().min(MAX_RECENT_RUNS),
                 hidden_runs
             ),
@@ -106,12 +194,22 @@ impl AgentInspectorModel {
         } else {
             lines.push("Set next Run: /agents single|auto N|team N".into());
         }
-        if let Some((_, run, agent)) = entries.get(selected) {
-            lines.extend(agent_lines(view, run, agent, selected, count));
-        } else if view.runs.last().is_some_and(|run| run.agents.is_empty()) {
-            lines.push("Run admission in progress; no AgentRuns yet".into());
-        } else {
-            lines.push("No AgentRuns yet".into());
+        let header = lines.len();
+        match selected.map(|index| (index, rows[index])) {
+            Some((index, AgentRow::Agent(..))) => {
+                let (_, run, agent, _) = shown[index];
+                lines.extend(agent_lines(view, run, agent, index, shown.len()));
+            }
+            Some((_, AgentRow::Idle)) => lines.push(format!(
+                "{} collapsed; Enter or its number shows them",
+                idle_agents(hidden.len())
+            )),
+            None if total == 0 && view.runs.last().is_some_and(|run| run.agents.is_empty()) => {
+                lines.push("Run admission in progress; no AgentRuns yet".into());
+            }
+            None if total == 0 => lines.push("No AgentRuns yet".into()),
+            None if found == 0 => lines.push("No matching agents; edit the search".into()),
+            None => lines.push("No agent focused; Up or Down focuses one".into()),
         }
         if hidden_runs > 0
             || entries
@@ -123,6 +221,10 @@ impl AgentInspectorModel {
         Self {
             selected,
             choices,
+            rows,
+            first_hidden: hidden.first().copied(),
+            search: safe_truncate(&search, width),
+            header,
             lines: lines
                 .into_iter()
                 .map(|line| {
@@ -137,6 +239,10 @@ impl AgentInspectorModel {
     }
 }
 
+fn idle_agents(count: usize) -> String {
+    format!("{count} idle agent{}", if count == 1 { "" } else { "s" })
+}
+
 fn agent_lines(
     view: &SessionView,
     run: &RunView,
@@ -144,10 +250,7 @@ fn agent_lines(
     selected: usize,
     count: usize,
 ) -> Vec<String> {
-    let role = match agent.role {
-        AgentRole::Primary => "primary".to_owned(),
-        AgentRole::Child => format!("child {}", agent.ordinal),
-    };
+    let role = agent_label(agent);
     let mut lines = vec![
         format!("Agent {}/{count}: {role}; {}", selected + 1, agent.status),
         format!("Session: {}", view.id),
@@ -223,6 +326,7 @@ fn agent_lines(
     lines
 }
 
+#[derive(Clone)]
 pub(crate) struct AgentTarget {
     pub(crate) id: AgentRunId,
     // Bounded inert `label · status · objective` text for numbered linear choices.
@@ -239,30 +343,31 @@ pub(crate) fn agent_label(agent: &AgentView) -> String {
 // Replay pins children to their spawn ordinals, so completion never reorders them.
 pub(crate) fn agent_targets(view: &SessionView) -> Option<(RunId, Vec<AgentTarget>)> {
     let run = view.runs.last()?;
-    Some((
-        run.id,
-        run.agents
-            .iter()
-            .map(|agent| {
-                let status =
-                    if agent.role == AgentRole::Primary && agent.status == AgentStatus::Active {
-                        "working"
-                    } else {
-                        agent.status.label()
-                    };
-                let mut line = format!("{} · {status}", agent_label(agent));
-                if let Some(objective) = agent
-                    .objective
-                    .as_deref()
-                    .filter(|_| agent.role == AgentRole::Child)
-                {
-                    line.push_str(" · ");
-                    line.push_str(&safe_truncate(objective, 64));
-                }
-                AgentTarget { id: agent.id, line }
-            })
-            .collect(),
-    ))
+    Some((run.id, run_targets(run)))
+}
+
+pub(crate) fn run_targets(run: &RunView) -> Vec<AgentTarget> {
+    run.agents
+        .iter()
+        .map(|agent| {
+            let status = if agent.role == AgentRole::Primary && agent.status == AgentStatus::Active
+            {
+                "working"
+            } else {
+                agent.status.label()
+            };
+            let mut line = format!("{} · {status}", agent_label(agent));
+            if let Some(objective) = agent
+                .objective
+                .as_deref()
+                .filter(|_| agent.role == AgentRole::Child)
+            {
+                line.push_str(" · ");
+                line.push_str(&safe_truncate(objective, 64));
+            }
+            AgentTarget { id: agent.id, line }
+        })
+        .collect()
 }
 
 // A one-Run view, so the ordinary History renderer escapes and lays out the child's records.
@@ -272,12 +377,14 @@ pub(crate) struct AgentTranscript {
     pub(crate) notices: Vec<String>,
     // The child's index of the first kept Tool, so appended rows stay keyed across windows.
     tool_offset: usize,
+    note_offset: usize,
 }
 
 // What an append-only surface (Classic scrollback, linear output) already holds of one transcript.
 #[derive(Default)]
 pub(crate) struct Appended {
     assignment: bool,
+    notes: usize,
     tools: usize,
     result: bool,
     status: Option<String>,
@@ -287,6 +394,7 @@ pub(crate) struct Appended {
 #[derive(Debug, PartialEq)]
 pub(crate) enum TranscriptPart<'a> {
     Assignment(&'a str),
+    SteeringNote(&'a str),
     Tool(String),
     Result(&'a str),
     Notice(&'a str),
@@ -302,6 +410,7 @@ impl TranscriptPart<'_> {
         };
         match self {
             Self::Assignment(text) => section("Assignment:", text),
+            Self::SteeringNote(text) => section(STEERING_NOTE_HEADING, text),
             Self::Tool(text) => super::plain_tool_summary(text)
                 .split('\n')
                 .map(str::to_owned)
@@ -353,6 +462,15 @@ impl AgentTranscript {
             .as_deref()
             .or(agent.summary.as_deref())
             .map(&mut bounded);
+        let first_note = (0..agent.steering_notes.len())
+            .rev()
+            .take_while(|&index| {
+                budget.take(&format!("{STEERING_NOTE_HEADING}\n"))
+                    && budget.take(&agent.steering_notes[index])
+            })
+            .last()
+            .unwrap_or(agent.steering_notes.len());
+        omitted |= first_note > 0;
         // Grouping consecutive reads only shortens rows, so per-Tool costs bound the grouped text.
         let first_tool = (0..agent.tools.len())
             .rev()
@@ -409,7 +527,7 @@ impl AgentTranscript {
                     tool_results_cleared_count: 0,
                     definitions: Default::default(),
                     display: Vec::new(),
-                    steering_notes: Vec::new(),
+                    steering_notes: agent.steering_notes[first_note..].to_vec(),
                     lifecycle_hooks: Vec::new(),
                     lifecycle_hook_sequence: None,
                     provider_sequences: Default::default(),
@@ -419,6 +537,7 @@ impl AgentTranscript {
             },
             notices,
             tool_offset: first_tool,
+            note_offset: first_note,
         })
     }
 
@@ -471,6 +590,12 @@ impl AgentTranscript {
             if self.tool_offset + range.start >= appended.tools {
                 appended.tools = self.tool_offset + range.end;
                 parts.push(TranscriptPart::Tool(text));
+            }
+        }
+        for (index, text) in run.steering_notes.iter().enumerate() {
+            if self.note_offset + index >= appended.notes {
+                appended.notes = self.note_offset + index + 1;
+                parts.push(TranscriptPart::SteeringNote(text));
             }
         }
         if let Some(answer) = &run.assistant_message
@@ -577,6 +702,14 @@ pub(crate) mod tests {
         }
     }
 
+    fn focused(view: &SessionView, run: usize, agent: usize) -> AgentQuery {
+        let run = &view.runs[run];
+        AgentQuery {
+            focus: AgentFocus::Row(AgentRow::Agent(run.id, run.agents[agent].id)),
+            ..AgentQuery::default()
+        }
+    }
+
     fn run(ordinal: usize) -> RunView {
         RunView {
             skill: None,
@@ -598,6 +731,7 @@ pub(crate) mod tests {
                     summary: Some("safe\u{1b}[31m\u{202e} summary".into()),
                     result: Some("Result\nforged line".into()),
                     provider_calls: Vec::new(),
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Finished,
@@ -613,6 +747,7 @@ pub(crate) mod tests {
                     summary: None,
                     result: None,
                     provider_calls: Vec::new(),
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Failed,
@@ -645,7 +780,8 @@ pub(crate) mod tests {
         run.supervisor = crate::presentation::supervisor_fixture(run.agents[0].id, 256);
         view.runs.push(run);
         for width in [80, 120, 200] {
-            let primary = AgentInspectorModel::from_session(&view, 0, width, false);
+            let primary =
+                AgentInspectorModel::from_session(&view, &AgentQuery::default(), width, false);
             let lines: Vec<_> = primary
                 .lines
                 .iter()
@@ -660,7 +796,8 @@ pub(crate) mod tests {
                 lines[255].as_str(),
                 "Supervisor (shadow): possible loop, possible probing, possibly disproportionate changes; no action taken; verdict limit reached"
             );
-            let child = AgentInspectorModel::from_session(&view, 1, width, false);
+            let child =
+                AgentInspectorModel::from_session(&view, &focused(&view, 0, 1), width, false);
             assert!(
                 !child
                     .lines
@@ -674,9 +811,11 @@ pub(crate) mod tests {
     fn recent_agents_are_newest_run_first_and_primary_first() {
         let mut view = view();
         view.runs = (0..18).map(run).collect();
-        let first = AgentInspectorModel::from_session(&view, 0, 120, false);
-        assert_eq!(AgentInspectorModel::recent_agent_count(&view), 32);
-        assert_eq!(first.choices.len(), 32);
+        let first = AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, false);
+        // 16 failed children stay; three idle primaries stay and 13 collapse into one row.
+        assert_eq!(first.choices.len(), 20);
+        assert_eq!(first.choices[19], "13 idle agents");
+        assert_eq!(first.search, "Type to search 32 agents");
         assert!(first.choices[0].contains("primary"));
         assert!(first.choices[1].contains("child 1"));
         assert_eq!(first.lines[0], "Last Run: 2 agents; children: 1");
@@ -686,7 +825,7 @@ pub(crate) mod tests {
         assert!(first.lines.iter().any(|line| line.contains("primary")));
         assert!(first.lines.iter().any(|line| line.contains("Run 17")));
         assert!(!first.lines.iter().any(|line| line == "Objective: Run 1"));
-        let child = AgentInspectorModel::from_session(&view, 1, 120, false);
+        let child = AgentInspectorModel::from_session(&view, &focused(&view, 17, 1), 120, false);
         assert!(child.lines.iter().any(|line| line.contains("child 1")));
         assert!(
             child
@@ -694,7 +833,7 @@ pub(crate) mod tests {
                 .iter()
                 .any(|line| line.contains("Child assignment"))
         );
-        let prior = AgentInspectorModel::from_session(&view, 2, 120, false);
+        let prior = AgentInspectorModel::from_session(&view, &focused(&view, 16, 0), 120, false);
         assert!(prior.lines.iter().any(|line| line.contains("Run 16")));
         for (input, output) in [
             (Some(12), Some(8)),
@@ -726,7 +865,8 @@ pub(crate) mod tests {
                 ..first.clone()
             };
             view.runs.last_mut().unwrap().agents[0].provider_calls = vec![first, last];
-            let inspector = AgentInspectorModel::from_session(&view, 0, 40, false);
+            let inspector =
+                AgentInspectorModel::from_session(&view, &AgentQuery::default(), 40, false);
             for (label, count) in [("input", input), ("output", output)] {
                 let expected = count.map_or_else(|| "unknown".into(), |value| value.to_string());
                 assert!(
@@ -743,13 +883,171 @@ pub(crate) mod tests {
         }
     }
 
+    // An active primary and six children: child 3 failed, the other five finished and idle.
+    fn large_team() -> SessionView {
+        let mut view = view();
+        let mut run = run(0);
+        run.status = RunStatus::Active;
+        run.agents[0].status = AgentStatus::Active;
+        let template = run.agents[1].clone();
+        run.agents.truncate(1);
+        for ordinal in 1..=6 {
+            let mut child = template.clone();
+            child.id = AgentRunId::new();
+            child.ordinal = ordinal;
+            child.objective = Some(format!("task {ordinal}"));
+            child.status = if ordinal == 3 {
+                AgentStatus::Failed
+            } else {
+                AgentStatus::Finished
+            };
+            run.agents.push(child);
+        }
+        view.runs.push(run);
+        view
+    }
+
+    #[test]
+    fn picker_detail_counts_only_visible_agents() {
+        let view = large_team();
+        for (query, expected) in [
+            (AgentQuery::default(), "Agent 1/5: primary; active"),
+            (focused(&view, 0, 4), "Agent 5/5: child 4; finished"),
+        ] {
+            let model = AgentInspectorModel::from_session(&view, &query, 80, true);
+            assert_eq!(model.rows.last(), Some(&AgentRow::Idle));
+            assert_eq!(model.lines[model.header], expected);
+        }
+    }
+
+    #[test]
+    fn picker_search_collapses_idle_rows_and_keeps_focus_by_identity() {
+        let mut view = large_team();
+        let agents = view.runs[0].agents.clone();
+        let run_id = view.runs[0].id;
+        let id = |index: usize| AgentRow::Agent(run_id, agents[index].id);
+        let pick = |filter: &str, expanded: bool, focus: AgentFocus| AgentQuery {
+            filter: filter.into(),
+            expanded,
+            focus,
+        };
+        let all = AgentInspectorModel::from_session(&view, &AgentQuery::default(), 80, true);
+        // Three idle rows stay; the failed child keeps its place; the rest wait behind one row.
+        assert_eq!(
+            all.rows,
+            [id(0), id(1), id(2), id(3), id(4), AgentRow::Idle]
+        );
+        assert_eq!(all.choices[1], "Run 1: child 1; finished · task 1");
+        assert_eq!(all.choices[5], "2 idle agents");
+        assert_eq!(all.first_hidden, Some(id(5)));
+        assert_eq!(all.search, "Type to search 7 agents");
+        assert_eq!(all.selected, Some(0));
+        assert_eq!(all.shown_focus(AgentFocus::First), AgentFocus::Row(id(0)));
+        let group = AgentInspectorModel::from_session(
+            &view,
+            &pick("", false, AgentFocus::Row(AgentRow::Idle)),
+            80,
+            true,
+        );
+        assert_eq!(group.selected, Some(5));
+        assert_eq!(
+            group.lines[group.header],
+            "2 idle agents collapsed; Enter or its number shows them"
+        );
+        // Expansion shows every row in its committed order; a focused idle row is never hidden.
+        let expanded = AgentInspectorModel::from_session(
+            &view,
+            &pick("", true, AgentFocus::Row(id(5))),
+            80,
+            true,
+        );
+        assert_eq!(expanded.rows, (0..7).map(id).collect::<Vec<_>>());
+        assert_eq!(expanded.selected, Some(5));
+        let focused = AgentInspectorModel::from_session(
+            &view,
+            &pick("", false, AgentFocus::Row(id(6))),
+            80,
+            true,
+        );
+        assert_eq!(
+            focused.rows,
+            [id(0), id(1), id(2), id(3), id(4), id(6), AgentRow::Idle]
+        );
+        assert_eq!(focused.choices[6], "1 idle agent");
+        // Search is local, ASCII case-insensitive and covers the row's label and objective.
+        let search = AgentInspectorModel::from_session(
+            &view,
+            &pick("TASK 3", false, AgentFocus::First),
+            80,
+            true,
+        );
+        assert_eq!(search.rows, [id(3)]);
+        assert_eq!(search.search, "Search: TASK 3 · 1 of 7 agents");
+        assert!(
+            search
+                .lines
+                .contains(&"Agent 1/1: child 3; failed".to_owned())
+        );
+        let failed = AgentInspectorModel::from_session(
+            &view,
+            &pick("failed", false, AgentFocus::First),
+            80,
+            true,
+        );
+        assert_eq!(failed.rows, [id(3)]);
+        // No match focuses nothing, and a later match takes no focus until the user acts.
+        let none = AgentInspectorModel::from_session(
+            &view,
+            &pick("zz", false, AgentFocus::First),
+            80,
+            true,
+        );
+        assert!(none.rows.is_empty());
+        assert_eq!(none.selected, None);
+        assert_eq!(none.search, "Search: zz · no matching agents");
+        assert_eq!(
+            none.lines[none.header],
+            "No matching agents; edit the search"
+        );
+        assert_eq!(none.shown_focus(AgentFocus::First), AgentFocus::Nothing);
+        let later = AgentInspectorModel::from_session(
+            &view,
+            &pick("", false, AgentFocus::Nothing),
+            80,
+            true,
+        );
+        assert_eq!(later.selected, None);
+        // Committed changes keep the focused identity: a newer Run and a finished child move rows.
+        let chosen = pick("", false, AgentFocus::Row(id(4)));
+        assert_eq!(
+            AgentInspectorModel::from_session(&view, &chosen, 80, true).selected,
+            Some(4)
+        );
+        view.runs[0].agents[3].status = AgentStatus::Finished;
+        view.runs.push(run(1));
+        let moved = AgentInspectorModel::from_session(&view, &chosen, 80, true);
+        assert_eq!(moved.selected, Some(5));
+        assert_eq!(moved.rows[5], id(4));
+        assert!(moved.lines.contains(&"Objective: task 4".to_owned()));
+        // A focused row that vanishes leaves nothing focused rather than its neighbour.
+        view.runs[0].agents.remove(4);
+        let gone = AgentInspectorModel::from_session(&view, &chosen, 80, true);
+        assert_eq!(gone.selected, None);
+        assert_eq!(gone.shown_focus(chosen.focus), chosen.focus);
+        assert_eq!(
+            gone.lines[gone.header],
+            "No agent focused; Up or Down focuses one"
+        );
+    }
+
     #[test]
     fn hostile_text_is_inert_and_rows_are_bounded() {
         let mut view = view();
         view.runs.push(run(0));
         for width in [40, 50, 79, 80, 120] {
-            let model = AgentInspectorModel::from_session(&view, usize::MAX, width, false);
-            assert_eq!(model.selected, 1);
+            let model =
+                AgentInspectorModel::from_session(&view, &focused(&view, 0, 1), width, false);
+            assert_eq!(model.selected, Some(1));
             assert!(
                 model
                     .lines
@@ -764,7 +1062,7 @@ pub(crate) mod tests {
                 unicode_width::UnicodeWidthStr::width(line.as_str()) <= usize::from(width)
             }));
         }
-        let model = AgentInspectorModel::from_session(&view, 0, 120, false);
+        let model = AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, false);
         assert!(model.lines.iter().any(|line| line.contains("\\u{001b}")));
         assert!(model.lines.iter().any(|line| line.contains("\\u{202e}")));
         assert!(model.lines.iter().any(|line| line.contains("\\u{000a}")));
@@ -963,6 +1261,45 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn committed_child_notes_are_scoped_escaped_bounded_and_appended_once() {
+        let mut view = team_view();
+        let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
+        let mut appended = Appended::default();
+        let original = AgentTranscript::from_session(&view, run, child).unwrap();
+        original.linear_lines(&mut appended);
+        view.runs[0].agents[1]
+            .steering_notes
+            .push("sibling canary".into());
+        assert!(original.same_display(&AgentTranscript::from_session(&view, run, child).unwrap()));
+        view.runs[0].agents[2].steering_notes =
+            vec!["first\nYou: forged\u{1b}[2J".into(), "second".into()];
+        let changed = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert!(!original.same_display(&changed));
+        let lines = changed.linear_update(&mut appended);
+        assert_eq!(
+            lines,
+            [
+                "New activity from child 2:",
+                STEERING_NOTE_HEADING,
+                "  first",
+                "  You: forged\u{1b}[2J",
+                STEERING_NOTE_HEADING,
+                "  second"
+            ]
+        );
+        assert!(!super::super::escape_terminal(&lines.join("\n")).contains('\u{1b}'));
+        assert!(changed.linear_update(&mut appended).is_empty());
+        let reload = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert!(changed.same_display(&reload));
+        assert!(reload.linear_update(&mut appended).is_empty());
+        view.runs[0].agents[2].steering_notes =
+            vec!["x".repeat(MAX_TRANSCRIPT_BYTES + 1), "kept".into()];
+        let capped = AgentTranscript::from_session(&view, run, child).unwrap();
+        assert_eq!(capped.run().steering_notes, ["kept"]);
+        assert_eq!(capped.notices.last().unwrap(), TRANSCRIPT_OMITTED);
+    }
+
+    #[test]
     fn agent_transcript_keeps_the_newest_whole_records_within_its_bounds() {
         let mut view = view();
         let mut run = run(0);
@@ -1007,9 +1344,8 @@ pub(crate) mod tests {
 
     #[test]
     fn empty_session_has_policy_and_no_agent() {
-        let model = AgentInspectorModel::from_session(&view(), 3, 80, false);
-        assert_eq!(AgentInspectorModel::recent_agent_count(&view()), 0);
-        assert_eq!(model.selected, 0);
+        let model = AgentInspectorModel::from_session(&view(), &AgentQuery::default(), 80, false);
+        assert_eq!(model.selected, None);
         assert!(model.choices.is_empty());
         assert!(
             model
@@ -1019,7 +1355,7 @@ pub(crate) mod tests {
         );
         assert!(model.lines.iter().any(|line| line.contains("Set next Run")));
 
-        let active = AgentInspectorModel::from_session(&view(), 0, 80, true);
+        let active = AgentInspectorModel::from_session(&view(), &AgentQuery::default(), 80, true);
         assert!(
             active
                 .lines

@@ -142,6 +142,28 @@ pub(super) struct RunIdentity {
     pub(super) primary_id: AgentRunId,
 }
 
+impl Drop for RunLoop<'_> {
+    fn drop(&mut self) {
+        if let Some(steering) = &self.controls.steering {
+            steering.end_run(self.session_id, self.run_id);
+        }
+    }
+}
+
+fn place_steering_note(input: &mut crate::provider::RunInput, text: String) {
+    if let Some(feedback) = continuation_feedback(input) {
+        feedback.steering_notes.push(text);
+    } else if let Some(step) = input
+        .tools
+        .as_mut()
+        .and_then(|tools| tools.steps.last_mut())
+    {
+        step.steering_notes.push(text);
+    } else {
+        input.steering_notes.push(text);
+    }
+}
+
 impl<'a> RunLoop<'a> {
     pub(super) fn new(
         journal: &'a Journal,
@@ -196,9 +218,43 @@ impl<'a> RunLoop<'a> {
     }
 
     async fn append_inner(&self, event: Event) -> Result<(), EngineError> {
+        let fact = matches!(
+            event,
+            Event::AgentSpawned { .. } | Event::AgentFinished { .. } | Event::RunFinished { .. }
+        )
+        .then(|| event.clone());
         self.ledger
             .append(self.journal, self.session_id, event)
             .await?;
+        if let (Some(steering), Some(fact)) = (&self.controls.steering, fact) {
+            match fact {
+                Event::AgentSpawned {
+                    run_id,
+                    agent_run_id,
+                    role: crate::session::AgentRole::Child,
+                    ..
+                } => {
+                    steering.register_child(super::ChildSteeringTarget {
+                        session_id: self.session_id,
+                        run_id,
+                        agent_run_id,
+                    });
+                }
+                Event::AgentFinished {
+                    run_id,
+                    agent_run_id,
+                    ..
+                } => {
+                    steering.close_child(super::ChildSteeringTarget {
+                        session_id: self.session_id,
+                        run_id,
+                        agent_run_id,
+                    });
+                }
+                Event::RunFinished { run_id, .. } => steering.end_run(self.session_id, run_id),
+                _ => {}
+            }
+        }
         Ok(())
     }
 
@@ -299,19 +355,7 @@ impl<'a> RunLoop<'a> {
         })
         .await?;
         steering.note_recorded();
-        if let Some(feedback) = continuation_feedback(&mut request.input) {
-            feedback.steering_notes.push(text);
-        } else {
-            match request
-                .input
-                .tools
-                .as_mut()
-                .and_then(|tools| tools.steps.last_mut())
-            {
-                Some(step) => step.steering_notes.push(text),
-                None => request.input.steering_notes.push(text),
-            }
-        }
+        place_steering_note(&mut request.input, text);
         Ok(())
     }
 

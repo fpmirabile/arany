@@ -35,6 +35,7 @@ pub use approval::{
 };
 pub use cancel::Cancellation;
 use config::Config;
+pub(crate) use git::recover_locks as report_git_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
 pub(crate) use workspace::WORKSPACE_PERMISSIONS;
@@ -134,6 +135,10 @@ pub enum ToolError {
     Operation,
     #[error("Tool effect completion is uncertain")]
     Uncertain,
+    #[error(
+        "Git locks left by an interrupted write: {0}; remove them after checking that no git process is running"
+    )]
+    StaleGitLocks(String),
     #[error("Guard rejected its {0} stage")]
     GuardRejected(guard::GuardStage),
     #[error("Guard rejected at {0}")]
@@ -149,6 +154,7 @@ pub(crate) struct PermissionSnapshot {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     config: Config,
+    git_writes_available: bool,
     worker: Option<std::sync::Arc<worker::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
@@ -676,6 +682,12 @@ impl ToolRuntime {
             grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
         }
         let workspace_identity = fs::workspace_identity(&root)?;
+        let permissions = permissions.map(|mut snapshot| {
+            let mut config = (*snapshot.config).clone();
+            config.scope_to(workspace, workspace_identity);
+            snapshot.config = std::sync::Arc::new(config);
+            snapshot
+        });
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
@@ -713,6 +725,7 @@ impl ToolRuntime {
         Ok(Self {
             definitions: std::sync::Arc::new(definitions),
             config,
+            git_writes_available: guard::git_writes_available(),
             worker: None,
             handover: None,
             permissions,
@@ -826,6 +839,28 @@ impl ToolRuntime {
         )
     }
 
+    pub(crate) fn record_typed_prefix_rule(
+        &self,
+        prefix: permissions::TypedGitPrefix,
+    ) -> Result<(), ToolError> {
+        fs::validate_workspace(self)?;
+        let state = self
+            .cache_state
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        permissions::PermissionSettings::remember(
+            state,
+            &self.workspace,
+            self.workspace_identity,
+            prefix,
+        )
+        .map_err(|error| match error {
+            permissions::SettingsError::Busy => ToolError::AccountBusy,
+            permissions::SettingsError::NotConfirmed => ToolError::Uncertain,
+            _ => ToolError::Configuration,
+        })
+    }
+
     pub(crate) fn allows_skill(&self, name: &str) -> bool {
         self.config.allows(&ToolCall::Skill {
             name: name.to_owned(),
@@ -864,7 +899,8 @@ impl ToolRuntime {
             "skills": self.skill_rows(),
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
-                serde_json::json!({"operations":catalog::git_operations(),"scope":catalog::GIT_SCOPE})
+                let write = self.config.write && self.git_writes_available;
+                serde_json::json!({"write":write,"operations":catalog::git_operations(write),"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },
@@ -1289,7 +1325,7 @@ fn cancelled_read(intent: EffectIntent) -> ToolObservation {
     }
 }
 
-fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) -> CacheUpdate {
+pub(super) fn guard_error_cache_update(call: &ToolCall, cache_selected: bool) -> CacheUpdate {
     if cache_selected && matches!(call, ToolCall::Command { .. }) {
         CacheUpdate::NotAttempted
     } else {
@@ -1364,7 +1400,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
     }
 }
 
-fn uncertain_observation(
+pub(super) fn uncertain_observation(
     intent: EffectIntent,
     error: ToolError,
     cache_update: crate::tools::CacheUpdate,

@@ -2,8 +2,8 @@ use super::provider::select::ProviderArg;
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{
-    AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission,
-    TerminalInput, invoked_objective, transcript_agents,
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
+    Submission, TerminalInput, invoked_objective, transcript_agents,
 };
 use arany::{
     CollaborationPolicy, Effort, Engine, EngineError, RunOutcome, RunStatus, SessionDefaults,
@@ -701,6 +701,14 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             view.defaults.model.as_deref(),
             view.defaults.account_id,
         );
+        if terminal.agent_chat_open()
+            && let AgentChatFollow::Closed(text) = terminal
+                .follow_agent_chat(&view)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            notice = Some(Feedback::History(text.into()));
+        }
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
@@ -734,6 +742,13 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .await
             .map_err(|error| error.to_string())?
         {
+            AgentChatInput::ChildMessage { .. } => {
+                notice = Some(Feedback::Transient(
+                    "Historical children are read-only; draft retained".into(),
+                ));
+                continue;
+            }
+            AgentChatInput::ChildEdited(_) => continue,
             AgentChatInput::Pass => {}
             AgentChatInput::Handled | AgentChatInput::Returned => {
                 idle_escape = None;
@@ -860,17 +875,18 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                         ));
                     }
                     QuickChoice::Selected(selector) => {
-                        notice = Some(feedback_or_end(
-                            run_selector(
-                                selector,
-                                &mut terminal,
-                                &mut admission,
-                                &mut session_id,
-                                &mut view,
-                                &mut composer,
-                            )
-                            .await,
-                        )?);
+                        notice = run_selector(
+                            selector,
+                            &mut terminal,
+                            &mut admission,
+                            &mut session_id,
+                            &mut view,
+                            &mut composer,
+                        )
+                        .await
+                        .transpose()
+                        .map(feedback_or_end)
+                        .transpose()?;
                     }
                     QuickChoice::Closed => {}
                     QuickChoice::Shutdown(signal) => {
@@ -1102,6 +1118,30 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
+                            match permissions::choose_area(&mut terminal).await? {
+                                None => {
+                                    terminal
+                                        .restore_draft_input(composer.text().len())
+                                        .map_err(|error| error.to_string())?;
+                                    notice =
+                                        Some(Feedback::History("Permissions unchanged".into()));
+                                    continue;
+                                }
+                                Some(permissions::PermissionArea::TypedGitRules) => {
+                                    let summary = permissions::manage_rules(
+                                        &mut terminal,
+                                        &admission.state_dir,
+                                        &admission.workspace,
+                                    )
+                                    .await?;
+                                    terminal
+                                        .restore_draft_input(composer.text().len())
+                                        .map_err(|error| error.to_string())?;
+                                    notice = Some(Feedback::History(summary));
+                                    continue;
+                                }
+                                Some(permissions::PermissionArea::FolderTrust) => {}
+                            }
                             let permissions = match permissions::open_or_recover(
                                 &mut terminal,
                                 &admission.workspace,
@@ -1187,17 +1227,18 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await
                                 .map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
-                            notice = Some(feedback_or_end(
-                                run_selector(
-                                    Selector::Resume,
-                                    &mut terminal,
-                                    &mut admission,
-                                    &mut session_id,
-                                    &mut view,
-                                    &mut composer,
-                                )
-                                .await,
-                            )?);
+                            notice = run_selector(
+                                Selector::Resume,
+                                &mut terminal,
+                                &mut admission,
+                                &mut session_id,
+                                &mut view,
+                                &mut composer,
+                            )
+                            .await
+                            .transpose()
+                            .map(feedback_or_end)
+                            .transpose()?;
                         } else if command == InteractiveCommand::Compact {
                             if view.created_sequence == 0 {
                                 notice = Some(Feedback::History(
@@ -1246,17 +1287,18 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             } else {
                                 Selector::Models
                             };
-                            notice = Some(feedback_or_end(
-                                run_selector(
-                                    selector,
-                                    &mut terminal,
-                                    &mut admission,
-                                    &mut session_id,
-                                    &mut view,
-                                    &mut composer,
-                                )
-                                .await,
-                            )?);
+                            notice = run_selector(
+                                selector,
+                                &mut terminal,
+                                &mut admission,
+                                &mut session_id,
+                                &mut view,
+                                &mut composer,
+                            )
+                            .await
+                            .transpose()
+                            .map(feedback_or_end)
+                            .transpose()?;
                         } else {
                             notice = Some(feedback_or_end(
                                 controls::handle_command(
@@ -1339,70 +1381,70 @@ async fn run_selector(
     session_id: &mut SessionId,
     view: &mut SessionView,
     composer: &mut Composer,
-) -> Result<Feedback, LoopError> {
-    match selector {
+) -> Result<Option<Feedback>, LoopError> {
+    Ok(Some(match selector {
         Selector::Setup => {
-            Ok(configure_account(terminal, admission, *session_id, view, composer).await?)
+            configure_account(terminal, admission, *session_id, view, composer).await?
         }
         Selector::Models => {
             match models::browse(terminal, admission, *session_id, view, composer).await? {
-                ModelBrowse::Notice(notice) => Ok(notice),
+                ModelBrowse::Notice(notice) => notice,
                 ModelBrowse::Shutdown(signal) => {
-                    Err(format!("terminated by {}", signal.name()).into())
+                    return Err(format!("terminated by {}", signal.name()).into());
                 }
             }
         }
         Selector::Agents => match agents::inspect(terminal, view).await? {
-            Some(signal) => Err(format!("terminated by {}", signal.name()).into()),
-            None => Ok(Feedback::Transient("Agent inspection closed".into())),
+            Err(signal) => return Err(format!("terminated by {}", signal.name()).into()),
+            Ok(Some(text)) => Feedback::Transient(text.into()),
+            // The opened agent chat owns the bottom panel.
+            Ok(None) if terminal.agent_chat_open() => return Ok(None),
+            Ok(None) => Feedback::Transient("Agent inspection closed".into()),
         },
-        Selector::Resume => {
-            let choice = pick_session(terminal, admission, Some(view)).await?;
-            match choice {
-                PickerChoice::Selected(id) => {
-                    let root = open_state(admission)?;
-                    match resume_session(root, admission.workspace.clone(), id).await {
-                        Ok(selected) => {
-                            let selected =
-                                match prepare_resume(admission, selected, Some(&view.defaults))
-                                    .await
-                                {
-                                    Ok(selected) => selected,
-                                    Err(error) => {
-                                        return Ok(Feedback::History(format!("Error: {error}")));
-                                    }
-                                };
-                            *session_id = id;
-                            *view = selected;
-                            Ok(Feedback::History(
-                                remembered_session_notice(
-                                    admission,
-                                    view,
-                                    format!(
-                                        "Resumed: {}",
-                                        crate::presentation::escape_terminal(
-                                            &view.conversation_title()
-                                        )
-                                    ),
-                                )
-                                .await,
-                            ))
-                        }
-                        Err(error) => Ok(Feedback::History(format!("Error: {error}"))),
-                    }
+        Selector::Resume => resume_selector(terminal, admission, session_id, view).await?,
+    }))
+}
+
+async fn resume_selector(
+    terminal: &mut AttachedTerminal,
+    admission: &mut Admission,
+    session_id: &mut SessionId,
+    view: &mut SessionView,
+) -> Result<Feedback, LoopError> {
+    let choice = pick_session(terminal, admission, Some(view)).await?;
+    match choice {
+        PickerChoice::Selected(id) => {
+            let root = open_state(admission)?;
+            match resume_session(root, admission.workspace.clone(), id).await {
+                Ok(selected) => {
+                    let selected =
+                        match prepare_resume(admission, selected, Some(&view.defaults)).await {
+                            Ok(selected) => selected,
+                            Err(error) => {
+                                return Ok(Feedback::History(format!("Error: {error}")));
+                            }
+                        };
+                    *session_id = id;
+                    *view = selected;
+                    Ok(Feedback::History(
+                        remembered_session_notice(
+                            admission,
+                            view,
+                            format!(
+                                "Resumed: {}",
+                                crate::presentation::escape_terminal(&view.conversation_title())
+                            ),
+                        )
+                        .await,
+                    ))
                 }
-                PickerChoice::Unavailable(error) => {
-                    Ok(Feedback::History(format!("Error: {error}")))
-                }
-                PickerChoice::Empty => {
-                    Ok(Feedback::History("No Sessions for this Workspace".into()))
-                }
-                PickerChoice::Closed => Ok(Feedback::Transient("Session selection closed".into())),
-                PickerChoice::Shutdown(signal) => {
-                    Err(format!("terminated by {}", signal.name()).into())
-                }
+                Err(error) => Ok(Feedback::History(format!("Error: {error}"))),
             }
         }
+        PickerChoice::Unavailable(error) => Ok(Feedback::History(format!("Error: {error}"))),
+        PickerChoice::Empty => Ok(Feedback::History("No Sessions for this Workspace".into())),
+        PickerChoice::Closed => Ok(Feedback::Transient("Session selection closed".into())),
+        PickerChoice::Shutdown(signal) => Err(format!("terminated by {}", signal.name()).into()),
     }
 }
 

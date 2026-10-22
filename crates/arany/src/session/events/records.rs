@@ -142,6 +142,8 @@ pub struct RunConfig {
     pub provider_concurrency: u8,
     pub workspace_device: u64,
     pub workspace_inode: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub user_instruction_digest: Option<[u8; 32]>,
     pub instruction_sources: Vec<InstructionSource>,
     pub launch_directory: String,
     pub include_digests: Vec<[u8; 32]>,
@@ -154,7 +156,7 @@ pub struct RunConfig {
     #[serde(deserialize_with = "Option::deserialize")]
     pub compaction_content_digest: Option<[u8; 32]>,
     #[serde(deserialize_with = "Option::deserialize")]
-    pub tool_policy: Option<crate::tools::ToolPolicyReceipt>,
+    pub tool_policy: Option<Box<crate::tools::ToolPolicyReceipt>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

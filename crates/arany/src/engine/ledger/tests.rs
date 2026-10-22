@@ -306,7 +306,7 @@ fn provider_action_reserves_plan_recording_and_terminal_events() {
             research: false
         }
         .max_events(),
-        13
+        14
     );
     assert_eq!(
         Action::Child {
@@ -314,7 +314,7 @@ fn provider_action_reserves_plan_recording_and_terminal_events() {
             research: true
         }
         .max_events(),
-        18
+        19
     );
     assert_eq!(Action::Tool.max_events(), 8);
     assert_eq!(Action::Review.max_events(), 8);
@@ -486,7 +486,8 @@ fn staged_bounds_never_exceed_the_first_admission() {
             children,
             research: false,
         };
-        let last_call_prefix = children + (children - 1);
+        // Each earlier child appends its call, its result and at most one steering note.
+        let last_call_prefix = children + 2 * (children - 1);
         let last_child = Action::Child {
             in_flight: u32::try_from(children - 1).unwrap(),
             research: false,

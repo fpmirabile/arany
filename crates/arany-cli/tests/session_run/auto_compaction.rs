@@ -235,6 +235,7 @@ fn synthetic_server(
             }
             _ => serde_json::json!(r#"{"summary":"derived summary"}"#),
         };
+        let text = arany::semantic::compaction_probe_reply(&wire, text);
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
 }

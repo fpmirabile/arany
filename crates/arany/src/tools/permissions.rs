@@ -1,4 +1,5 @@
 mod hooks;
+mod prefix;
 
 pub use hooks::{
     CommandHook, HOOK_RESULT_BYTES, HookConfig, HookEvent, HookGroup, HookIgnoreReason,
@@ -10,12 +11,16 @@ pub(crate) use hooks::{
     compact_subject, feedback_lines, lifecycle_input, post_tool_use_input, pre_tool_use_input,
     stop_feedback, stop_subject,
 };
+pub use prefix::{
+    PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit, TypedPrefixEntry,
+};
 
 use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::path::Path;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_RULES: usize = 128;
@@ -51,6 +56,7 @@ pub enum PermissionSource {
     PinnedGrant,
     ExactCommandRule,
     Hook,
+    TypedPrefixRule,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -97,10 +103,12 @@ pub enum ConfigError {
     Hook(&'static str),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PermissionConfig {
     mode: PermissionMode,
     rules: Vec<(Decision, Rule)>,
+    typed: Vec<prefix::TypedRule>,
+    scoped: bool,
     hooks: HookConfig,
 }
 
@@ -124,6 +132,8 @@ struct Permissions {
     deny: Vec<String>,
     #[serde(default)]
     ask: Vec<String>,
+    #[serde(default)]
+    typed_prefixes: Vec<prefix::RawTypedRule>,
 }
 
 impl PermissionConfig {
@@ -131,7 +141,12 @@ impl PermissionConfig {
         let value = super::parse_json(bytes, MAX_CONFIG_BYTES).map_err(|_| ConfigError::Json)?;
         let settings: Settings = serde_json::from_value(value).map_err(|_| ConfigError::Schema)?;
         let permissions = settings.permissions;
-        if permissions.allow.len() + permissions.deny.len() + permissions.ask.len() > MAX_RULES {
+        if permissions.allow.len()
+            + permissions.deny.len()
+            + permissions.ask.len()
+            + permissions.typed_prefixes.len()
+            > MAX_RULES
+        {
             return Err(ConfigError::Limit("128 permission rules in total"));
         }
         let mut rules = Vec::new();
@@ -152,12 +167,30 @@ impl PermissionConfig {
         Ok(Self {
             mode: permissions.default_mode,
             rules,
+            typed: prefix::parse_rules(permissions.typed_prefixes)?,
+            scoped: false,
             hooks: HookConfig::validate(settings.hooks)?,
         })
     }
 
     pub fn mode(&self) -> PermissionMode {
         self.mode
+    }
+
+    // Folder rules of another Workspace never apply; the matching ones become ordinary rules.
+    pub(crate) fn scope_to(&mut self, path: &Path, identity: crate::session::WorkspaceIdentity) {
+        self.typed
+            .retain(|rule| rule.in_folder(path, identity.device, identity.inode));
+        self.scoped = true;
+    }
+
+    fn typed_decision(&self, call: &ToolCall) -> Option<Decision> {
+        let prefix = prefix::TypedGitPrefix::of_call(call)?;
+        self.typed
+            .iter()
+            .filter(|rule| rule.prefix() == prefix && rule.applies(self.scoped))
+            .map(prefix::TypedRule::decision)
+            .reduce(Decision::narrow)
     }
 
     pub fn hooks(&self) -> &HookConfig {
@@ -214,6 +247,8 @@ impl PermissionConfig {
         Self {
             mode,
             rules: Vec::new(),
+            typed: Vec::new(),
+            scoped: true,
             hooks: HookConfig::validate(Default::default()).expect("empty hooks"),
         }
         .evaluate(call)
@@ -234,7 +269,10 @@ impl PermissionConfig {
         let (decision, source) = self.decision_with_worker_paths(call, paths);
         let approval = (decision == Decision::Ask).then_some(
             if self.mode == PermissionMode::Auto
-                && source != PermissionSource::Rule
+                && !matches!(
+                    source,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule
+                )
                 && !call.is_unguarded()
             {
                 ApprovalMode::Auto
@@ -247,7 +285,9 @@ impl PermissionConfig {
 
     // A restriction matching the call itself already denied it or had it approved, so only the others hide rows.
     pub(crate) fn hidden_paths(&self, call: &ToolCall) -> HiddenPaths {
-        use ToolCall::{GitDiff, GitLog, GitStatus, Glob, List, Search};
+        use ToolCall::{
+            GitBranch, GitCommit, GitDiff, GitLog, GitStatus, GitSwitch, Glob, List, Search,
+        };
         if !matches!(
             call,
             List { .. }
@@ -256,6 +296,9 @@ impl PermissionConfig {
                 | GitStatus { .. }
                 | GitDiff { .. }
                 | GitLog { .. }
+                | GitCommit { .. }
+                | GitBranch { .. }
+                | GitSwitch { .. }
         ) {
             return HiddenPaths::default();
         }
@@ -327,7 +370,9 @@ impl PermissionConfig {
                 || matches!(facts.family, Family::Mcp | Family::Git));
         let allow_skips_approval = !call.is_unguarded()
             && !auto_review
-            && !(self.mode == PermissionMode::AcceptEdits && facts.asks_approval && !facts.mutates);
+            && !(self.mode == PermissionMode::AcceptEdits
+                && facts.asks_approval
+                && !facts.typed_edit());
         let matched = self.rules.iter().find_map(|(decision, rule)| {
             if *decision == Decision::Allow && !allow_skips_approval {
                 None
@@ -336,11 +381,26 @@ impl PermissionConfig {
                     .then_some(*decision)
             }
         });
+        let typed = self
+            .typed_decision(call)
+            .filter(|decision| *decision != Decision::Allow || allow_skips_approval);
+        let (matched, typed_wins) = match (matched, typed) {
+            (Some(rule), Some(typed)) => {
+                let narrowed = rule.narrow(typed);
+                // On an allow tie the user-owned typed rule keeps the provenance and its prompt exemption.
+                (
+                    Some(narrowed),
+                    narrowed != rule || (rule == Decision::Allow && typed == Decision::Allow),
+                )
+            }
+            (None, Some(typed)) => (Some(typed), true),
+            (matched, None) => (matched, false),
+        };
         let decision = matched.unwrap_or_else(|| {
             if auto_review {
                 Decision::Ask
             } else if !facts.asks_approval
-                || (self.mode == PermissionMode::AcceptEdits && facts.mutates)
+                || (self.mode == PermissionMode::AcceptEdits && facts.typed_edit())
             {
                 Decision::Allow
             } else {
@@ -352,7 +412,9 @@ impl PermissionConfig {
         } else {
             (
                 decision,
-                if matched.is_some() {
+                if typed_wins {
+                    PermissionSource::TypedPrefixRule
+                } else if matched.is_some() {
                     PermissionSource::Rule
                 } else {
                     PermissionSource::Mode
@@ -534,13 +596,14 @@ impl std::io::Write for CallSize {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Rule {
     tool: Tool,
     pattern: Option<Regex>,
+    commit_prefix: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Tool {
     Bash,
     Read,
@@ -644,6 +707,7 @@ impl Rule {
                     .name,
             ),
         };
+        let mut commit_prefix = None;
         let pattern = match specifier {
             None => None,
             Some("") => return Err("empty specifier"),
@@ -670,7 +734,11 @@ impl Rule {
                 | Tool::Native(
                     "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "git_status"
                     | "git_diff" | "git_log",
-                ) => path_glob(pattern, decision)?,
+                ) => {
+                    let (pattern, prefix) = path_glob(pattern, decision)?;
+                    commit_prefix = prefix;
+                    pattern
+                }
                 Tool::Skill | Tool::Native("skill") => {
                     compile(&format!("\\A{}\\z", command_glob(pattern)))?
                 }
@@ -681,7 +749,11 @@ impl Rule {
                 }
             }),
         };
-        Ok(Self { tool, pattern })
+        Ok(Self {
+            tool,
+            pattern,
+            commit_prefix,
+        })
     }
 
     fn matches_tool(&self, call: &ToolCall, decision: Decision) -> bool {
@@ -692,7 +764,14 @@ impl Rule {
                 facts.family == Family::File && (!facts.mutates || decision == Decision::Deny)
                     || facts.family == Family::Git && decision != Decision::Allow
             }
-            Tool::Edit => facts.family == Family::File && facts.mutates,
+            Tool::Edit => {
+                facts.typed_edit()
+                    || decision != Decision::Allow
+                        && matches!(
+                            call,
+                            ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. }
+                        )
+            }
             Tool::Write => matches!(call, ToolCall::Write { .. }),
             Tool::Glob => matches!(call, ToolCall::List { .. } | ToolCall::Glob { .. }),
             Tool::Grep => matches!(call, ToolCall::Search { .. }),
@@ -763,6 +842,28 @@ impl Rule {
                             .any(|(index, _)| pattern.is_match(&text[index + 1..]))
             }
             ToolCall::Skill { name, .. } => pattern.is_match(name),
+            ToolCall::GitCommit { paths, .. }
+                if !paths.is_empty() && !paths.iter().any(|path| path == ".") =>
+            {
+                if decision == Decision::Allow {
+                    paths
+                        .iter()
+                        .all(|path| path_matches(pattern, path, decision))
+                } else {
+                    paths.iter().any(|path| {
+                        path_matches(pattern, path, decision)
+                            || self.commit_prefix.as_ref().is_some_and(|prefix| {
+                                prefix.is_empty()
+                                    || prefix
+                                        .split('/')
+                                        .zip(path.split('/'))
+                                        .all(|(left, right)| left.eq_ignore_ascii_case(right))
+                            })
+                    })
+                }
+            }
+            // A staged or whole-repository commit and a switch publish paths unknown before dispatch.
+            ToolCall::GitCommit { .. } | ToolCall::GitSwitch { .. } => decision != Decision::Allow,
             ToolCall::ApplyChangeset {
                 source:
                     crate::session::worker::ChangesetSource::WorkerHandover { .. }
@@ -849,7 +950,7 @@ fn command_glob(pattern: &str) -> String {
         .join(".*")
 }
 
-fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
+fn path_glob(input: &str, decision: Decision) -> Result<(Regex, Option<String>), &'static str> {
     if decision != Decision::Allow && !input.is_ascii() {
         return Err(
             "deny/ask path patterns require ASCII literals; non-ASCII paths conservatively match restrictions",
@@ -877,6 +978,18 @@ fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
             || (decision != Decision::Allow
                 && pattern.ends_with("/**")
                 && pattern.matches('/').count() == 1));
+    // A wildcard suffix may overlap any descendant of its literal directory prefix.
+    let commit_prefix = (decision != Decision::Allow).then(|| {
+        if anywhere {
+            String::new()
+        } else {
+            pattern
+                .split('/')
+                .take_while(|part| !part.contains(['*', '?', '[', '\\']))
+                .collect::<Vec<_>>()
+                .join("/")
+        }
+    });
     let mut expression = String::from("\\A");
     if anywhere {
         expression.push_str("(?:.*/)?");
@@ -934,11 +1047,12 @@ fn path_glob(input: &str, decision: Decision) -> Result<Regex, &'static str> {
         segment_start = ch == '/';
     }
     expression.push_str("(?:/.*)?\\z");
-    compile(&if decision == Decision::Allow {
+    let compiled = compile(&if decision == Decision::Allow {
         expression
     } else {
         format!("(?i:{expression})")
-    })
+    })?;
+    Ok((compiled, commit_prefix))
 }
 
 fn compile(pattern: &str) -> Result<Regex, &'static str> {

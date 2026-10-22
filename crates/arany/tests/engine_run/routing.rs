@@ -1447,13 +1447,47 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         Vec<(RetryCause, u32)>,
         bool,
     );
-    let cases: [Case; 4] = [
+    let cases: [Case; 8] = [
         (
             "429 honoring Retry-After, then success",
             vec![ProviderError::RateLimited(Some(Duration::from_secs(5)))],
             false,
             vec![(RetryCause::RateLimited, 5000)],
             true,
+        ),
+        (
+            "custom Messages 429 without Retry-After",
+            vec![ProviderError::RateLimited(None)],
+            false,
+            vec![(RetryCause::RateLimited, 2000)],
+            true,
+        ),
+        (
+            "custom Messages 429 exhausts three retries without Retry-After",
+            (0..=MAX_PROVIDER_RETRIES)
+                .map(|_| ProviderError::RateLimited(None))
+                .collect(),
+            false,
+            vec![
+                (RetryCause::RateLimited, 2000),
+                (RetryCause::RateLimited, 4000),
+                (RetryCause::RateLimited, 8000),
+            ],
+            false,
+        ),
+        (
+            "custom Messages quota exhaustion is terminal",
+            vec![ProviderError::QuotaExceeded],
+            false,
+            vec![],
+            false,
+        ),
+        (
+            "custom Messages 401 is terminal",
+            vec![ProviderError::RemoteHttp(401)],
+            false,
+            vec![],
+            false,
         ),
         (
             "hostile Retry-After past the action deadline",
@@ -1490,6 +1524,35 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         let state = temp.path().join("state");
         let mut primary =
             ScriptedProvider::new(vec![finish("done")]).with_profile("scripted", "primary");
+        if case.starts_with("custom Messages") {
+            primary.identity.profile = "custom:messages".into();
+            primary.identity.provenance =
+                arany::Provenance::Custom(arany::CustomProfileProvenance {
+                    endpoint: "https://example.com/anthropic/v1/messages".into(),
+                    evidence_digest: [7; 32],
+                    capability_evidence_version: 2,
+                });
+            primary.identity.limits.concurrency = 1;
+            let journal = state.join("events.sqlite3");
+            primary = primary.with_before_call(1, move || {
+                let connection = rusqlite::Connection::open_with_flags(
+                    &journal,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .unwrap();
+                let retries: i64 = connection
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE kind='ProviderRetryScheduled'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    retries, 1,
+                    "retry must be committed before its next dispatch"
+                );
+            });
+        }
         let responses = primary.responses.get_mut().unwrap();
         for failure in failures.into_iter().rev() {
             responses.push_front(Err(failure));
@@ -1509,6 +1572,20 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         let (events, view) = reopen(&state, result.session_id).await;
         let run = &view.runs[0];
         let primary_id = run.agents[0].id;
+        if case.starts_with("custom Messages") {
+            assert_eq!(run.config.as_ref().unwrap().provider, "custom:messages");
+            assert_eq!(
+                run.config
+                    .as_ref()
+                    .unwrap()
+                    .custom_profile_provenance
+                    .as_ref()
+                    .unwrap()
+                    .endpoint,
+                "https://example.com/anthropic/v1/messages"
+            );
+        }
+
         assert_eq!(
             run.provider_retries,
             retries

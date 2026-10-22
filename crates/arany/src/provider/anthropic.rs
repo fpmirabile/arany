@@ -310,18 +310,14 @@ impl Provider for AnthropicProvider {
         if !response.status().is_success() {
             return Err(super::http_failure(&mut response).await);
         }
-        super::streaming::validate_stream_response(&response)?;
-        let mut decoder = wire::MessageStream::new(&self.key, &self.identity.model, preview);
-        while let Some(chunk) = response
-            .chunk()
-            .await
-            .map_err(|_| ProviderError::PartialTransport)?
-        {
-            if let Some(bytes) = decoder.feed(&chunk)? {
-                return self.decode_run(&bytes, &request, &conversation);
-            }
-        }
-        Err(decoder.end_error())
+        let bytes = read_streamed_reply(
+            &mut response,
+            &self.key,
+            &self.identity.model,
+            Some(preview),
+        )
+        .await?;
+        self.decode_run(&bytes, &request, &conversation)
     }
 
     async fn compact(
@@ -338,6 +334,27 @@ impl Provider for AnthropicProvider {
             .await?;
         self.decode_compaction(&response, request.max_output_tokens)
     }
+}
+
+pub(super) async fn read_streamed_reply(
+    response: &mut reqwest::Response,
+    key: &str,
+    model: &str,
+    preview: Option<super::ResponsePreview>,
+) -> Result<Vec<u8>, ProviderError> {
+    super::streaming::validate_stream_response(response)?;
+    let (private_preview, _observed) = super::ResponsePreview::new();
+    let mut decoder = wire::MessageStream::new(key, model, preview.unwrap_or(private_preview));
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| ProviderError::PartialTransport)?
+    {
+        if let Some(bytes) = decoder.feed(&chunk)? {
+            return Ok(bytes);
+        }
+    }
+    Err(decoder.end_error())
 }
 
 #[cfg(test)]

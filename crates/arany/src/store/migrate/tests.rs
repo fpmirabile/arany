@@ -6,9 +6,29 @@ use crate::store::state::FAIL_AT;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
+
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// One (kind, from, input, expected) row per production step. The glob steps keep payload bytes.
-const EVENT_FIXTURES: [EventFixture<'static>; 9] = [
+// One (kind, from, input, expected) row per production step. The glob and Git write steps keep
+// payload bytes; one shape is canonical for both source versions.
+const EVENT_FIXTURES: [EventFixture<'static>; 17] = [
+    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
+    ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 9, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        7,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        14,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
     ("ToolStarted", 13, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 19, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 3, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -22,6 +42,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 9] = [
     ("AgentSpawned", 11, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("RunStarted", 17, GLOB_RUNSTARTED, GLOB_RUNSTARTED),
     ("RunStarted", 18, ROOT_RUNSTARTED, NESTED_RUNSTARTED),
+    ("RunStarted", 19, NESTED_RUNSTARTED, GLOBAL_RUNSTARTED),
     (
         "ProviderCallRecorded",
         13,
@@ -29,6 +50,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 9] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
 ];
+const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
 const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
 const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
 const GLOB_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"succeeded","enforcement_cause":null,"limit_cause":null,"output":"{\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}","attestation":{"in_process":{"policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"workspace_device":1,"workspace_inode":2}},"cache_update":"not_applicable","checkpoint":null}"#;
@@ -39,6 +61,8 @@ const GLOB_AGENTSPAWNED: &str = r#"{"profile":null,"assignment":null,"definition
 const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 // Version 18 pinned only the root file's digest; version 19 names it as the root's source.
 const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
+// Version 20 adds the explicit null user-instruction digest.
+const GLOBAL_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
 // Synthetic test-only edge: a version-5 SessionStarted stored `name` where version 6 stores `title`.
@@ -236,9 +260,7 @@ fn decode_row(row: &RawRow) -> Event {
 // stored bytes. With canonical text this is what a version-5 build wrote; noncanonical text pins
 // digests that version-5 replay rejected.
 fn downgrade_started(connection: &Connection, canonical: bool) {
-    let mut lanes = HashMap::<String, PrefixHasher>::new();
-    let mut points = HashMap::<(String, u64), [u8; 32]>::new();
-    for mut row in rows(connection) {
+    repin(connection, |row| {
         if row.kind == "SessionStarted" {
             let current: Value = serde_json::from_str(&row.payload).unwrap();
             let (name, device, inode) = (
@@ -257,6 +279,25 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
             };
             row.version = 5;
         }
+    });
+}
+
+fn downgrade_run_started(connection: &Connection) {
+    repin(connection, |row| {
+        if row.kind == "RunStarted" {
+            row.payload = row
+                .payload
+                .replacen(r#""user_instruction_digest":null,"#, "", 1);
+            row.version = 19;
+        }
+    });
+}
+
+fn repin(connection: &Connection, rewrite: impl Fn(&mut RawRow)) {
+    let mut lanes = HashMap::<String, PrefixHasher>::new();
+    let mut points = HashMap::<(String, u64), [u8; 32]>::new();
+    for mut row in rows(connection) {
+        rewrite(&mut row);
         let lane = lanes.entry(row.session_id.clone()).or_default();
         if matches!(
             row.kind.as_str(),
@@ -469,6 +510,47 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
         "{}",
         started.payload
     );
+}
+
+#[test]
+fn run_started_v19_migrates_without_reading_user_instructions() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = history(&path, true, 0);
+    std::fs::write(path.join("AGENTS.md"), "canary").unwrap();
+    std::fs::set_permissions(
+        path.join("AGENTS.md"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    let current = stored_rows(&connection);
+    let digests = fork_digests(&connection);
+    downgrade_run_started(&connection);
+    let downgraded = stored_rows(&connection);
+    assert_ne!(downgraded, current);
+    assert_ne!(fork_digests(&connection), digests);
+    drop(connection);
+
+    assert!(
+        root.upgrade_or_archive_history(&REGISTRY)
+            .unwrap()
+            .is_none()
+    );
+
+    assert!(!path.join("archive").exists());
+    replays(&root, &sessions);
+    let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    assert_eq!(stored_rows(&upgraded), current);
+    assert_eq!(fork_digests(&upgraded), digests);
+    let started = first_of(&upgraded, "RunStarted");
+    assert_eq!(started.version, 20);
+    assert!(
+        started
+            .payload
+            .contains(r#""user_instruction_digest":null"#)
+    );
+    assert!(!started.payload.contains("canary"));
 }
 
 #[test]
@@ -826,36 +908,44 @@ fn replay_validation_bounds_aggregate_work_but_not_each_lineage() {
 
 #[test]
 fn unsupported_history_in_an_uncheckpointed_wal_is_archived_byte_for_byte() {
-    let temp = tempfile::tempdir().unwrap();
-    let built = temp.path().join("built");
-    let path = temp.path().join("state");
-    forked_history(&built);
-    let writer = Connection::open(built.join(DATABASE_FILE)).unwrap();
-    writer
-        .execute_batch(
-            "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;
-             UPDATE events SET event_version = 4 WHERE kind = 'SessionStarted';",
-        )
-        .unwrap();
-    let root = StateRoot::admit(&path).unwrap();
-    let mut copied = Vec::new();
-    for name in [DATABASE_FILE, "events.sqlite3-wal"] {
-        std::fs::copy(built.join(name), path.join(name)).unwrap();
-        std::fs::set_permissions(path.join(name), std::fs::Permissions::from_mode(0o600)).unwrap();
-        copied.push((name, std::fs::read(path.join(name)).unwrap()));
-    }
-    drop(writer);
+    for file in [DATABASE_FILE, checkpoints::FILES[0]] {
+        let temp = tempfile::tempdir().unwrap();
+        let built = temp.path().join("built");
+        let path = temp.path().join("state");
+        let History { root: source, .. } = forked_history(&built);
+        checkpoint_fixture(&source);
+        let writer = Connection::open(built.join(file)).unwrap();
+        writer
+            .execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;")
+            .unwrap();
+        if file == DATABASE_FILE {
+            writer
+                .execute_batch("UPDATE events SET event_version = 4 WHERE kind = 'SessionStarted'")
+                .unwrap();
+        } else {
+            writer.pragma_update(None, "user_version", 0).unwrap();
+        }
+        let History { root, .. } = forked_history(&path);
+        let mut copied = Vec::new();
+        for name in [file.to_owned(), format!("{file}-wal")] {
+            std::fs::copy(built.join(&name), path.join(&name)).unwrap();
+            std::fs::set_permissions(path.join(&name), std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            copied.push((name.clone(), std::fs::read(path.join(&name)).unwrap()));
+        }
+        drop(writer);
 
-    let archived = root.archive_incompatible_history().unwrap().unwrap();
+        let archived = root.archive_incompatible_history().unwrap().unwrap();
 
-    for (name, bytes) in copied {
-        assert_eq!(
-            std::fs::read(archived.path().join(name)).unwrap(),
-            bytes,
-            "{name} is archived unchanged"
-        );
+        for (name, bytes) in copied {
+            assert_eq!(
+                std::fs::read(archived.path().join(&name)).unwrap(),
+                bytes,
+                "{name} is archived unchanged"
+            );
+        }
+        assert!(!path.join(DIR).exists());
     }
-    assert!(!path.join(DIR).exists());
 }
 
 // The guard: every version above its declared floor needs a registered step and fixture per edge.
@@ -913,11 +1003,15 @@ fn uncovered(
             }
         }
     }
-    for from in registry.schema_floor..schema {
-        let (Some(step), Some(target)) = (
-            registry.schema_step(from),
-            registry.expected_schema(from + 1),
-        ) else {
+    problems.extend(uncovered_schema(&registry.schema, schema));
+    problems
+}
+
+fn uncovered_schema(format: &SchemaFormat, current: i64) -> Vec<String> {
+    let mut problems = Vec::new();
+    for from in format.floor..current {
+        let (Some(step), Some(target)) = (format.step(from), format.expected_schema(from + 1))
+        else {
             problems.push(format!(
                 "schema {from} -> {} has no step and fixture",
                 from + 1
@@ -959,6 +1053,48 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
         ),
         Vec::<String>::new()
     );
+    assert_eq!(
+        uncovered_schema(&CHECKPOINT_SCHEMA, checkpoints::SCHEMA_VERSION),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        uncovered_schema(&CHECKPOINT_SCHEMA, checkpoints::SCHEMA_VERSION + 1),
+        ["schema 1 -> 2 has no step and fixture"]
+    );
+    let temp = tempfile::tempdir().unwrap();
+    let fixture = Connection::open(temp.path().join("checkpoints.sqlite")).unwrap();
+    fixture.execute_batch(CHECKPOINT_V1).unwrap();
+    assert_eq!(CHECKPOINT_SCHEMA.floor, 1);
+    assert_eq!(user_version(&fixture), CHECKPOINT_SCHEMA.floor);
+    for step in CHECKPOINT_SCHEMA.steps {
+        assert_eq!(step.from, user_version(&fixture));
+        assert_eq!(schema_objects(&fixture).unwrap(), schema_of(step.source));
+        fixture.execute_batch(step.sql).unwrap();
+        fixture
+            .pragma_update(None, "user_version", step.from + 1)
+            .unwrap();
+    }
+    assert!(exact_schema(&fixture, &CHECKPOINT_SCHEMA, CHECKPOINT_SCHEMA.current).unwrap());
+    assert_eq!(user_version(&fixture), CHECKPOINT_SCHEMA.current);
+    let kind = "AgentSteeringNoteRecorded";
+    assert_eq!(
+        EVENT_FLOOR
+            .iter()
+            .find(|(name, _)| *name == kind)
+            .map(|(_, version)| *version),
+        Some(1)
+    );
+    let fixture = r#"{"goal_id":"01900000-0000-7000-8000-000000000001","text":"child note"}"#;
+    let current = crate::Event::decode(
+        kind,
+        1,
+        fixture,
+        Some(RunId::new()),
+        Some(AgentRunId::new()),
+    )
+    .unwrap();
+    assert_eq!(current.payload().unwrap(), fixture);
+    assert!(REGISTRY.event_step(kind, 0).is_none());
     // History older than the glob Tool cannot name it, so such a row is forged and refuses.
     let forged = GLOB_TOOLSTARTED.replace(
         r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,
@@ -968,6 +1104,16 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     let step = REGISTRY.event_step("ToolStarted", 13).unwrap();
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    // Version 14 may name glob but not the later Git writes.
+    let git_step = REGISTRY.event_step("ToolStarted", 14).unwrap();
+    assert!((git_step.canonical)(&forged).is_some());
+    let forged_git = GLOB_TOOLSTARTED.replace(
+        r#"{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024}"#,
+        r#"{"operation":"git_switch","branch":"topic"}"#,
+    );
+    assert_ne!(forged_git, GLOB_TOOLSTARTED);
+    assert!((git_step.canonical)(&forged_git).is_none());
+    assert!((git_step.transform)(serde_json::from_str(&forged_git).unwrap()).is_none());
     // A version-18 row that already pins nested sources is forged; one without instructions pins none.
     let step = REGISTRY.event_step("RunStarted", 18).unwrap();
     let forged = ROOT_RUNSTARTED.replace(
@@ -976,6 +1122,14 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     );
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let step = REGISTRY.event_step("RunStarted", 19).unwrap();
+    let forged = NESTED_RUNSTARTED.replace(
+        r#""instruction_sources""#,
+        r#""user_instruction_digest":null,"instruction_sources""#,
+    );
+    assert!((step.canonical)(&forged).is_none());
+    assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let step = REGISTRY.event_step("RunStarted", 18).unwrap();
     let upgraded = (step.transform)(serde_json::from_str(GLOB_RUNSTARTED).unwrap()).unwrap();
     assert_eq!(
         upgraded["config"]["instruction_sources"],
@@ -1008,4 +1162,357 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
             "schema 5 -> 6 has no step and fixture",
         ]
     );
+}
+
+#[test]
+fn typed_prefix_verdict_migration_preserves_legacy_facts() {
+    let step = REGISTRY.event_step("ToolPermissionDecided", 4).unwrap();
+    assert_eq!(
+        (step.canonical)(VERDICT_V4).as_deref(),
+        Some(VERDICT_V4),
+        "a version-4 verdict hashes as the same text"
+    );
+    let upgraded = REGISTRY
+        .upgrade_payload("ToolPermissionDecided", 4, VERDICT_V4)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&upgraded).unwrap(),
+        serde_json::from_str::<Value>(VERDICT_V4).unwrap(),
+        "no rule or approval evidence is manufactured"
+    );
+    let verdict = Event::decode(
+        "ToolPermissionDecided",
+        5,
+        &upgraded,
+        Some(RunId::new()),
+        Some(AgentRunId::new()),
+    )
+    .unwrap();
+    assert!(matches!(verdict, Event::ToolPermissionDecided { .. }));
+    for forged in [
+        VERDICT_V4.replace(r#""basis":"rule""#, r#""basis":"typed_prefix_rule""#),
+        VERDICT_V4.replace(r#""source":"rule""#, r#""source":"typed_prefix_rule""#),
+    ] {
+        assert_ne!(forged, VERDICT_V4);
+        assert!((step.canonical)(&forged).is_none());
+        assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+        assert!(matches!(
+            REGISTRY.upgrade_payload("ToolPermissionDecided", 4, &forged),
+            Err(StoreError::InvalidHistory)
+        ));
+    }
+    assert!(
+        REGISTRY
+            .upgrade_payload("ToolPermissionDecided", 3, VERDICT_V4)
+            .is_err()
+    );
+}
+
+fn checkpoint_fixture(root: &StateRoot) {
+    create_private(&root.dir, checkpoints::FILES[0]).unwrap();
+    Connection::open(root.path().join(checkpoints::FILES[0]))
+        .unwrap()
+        .execute_batch(CHECKPOINT_V1)
+        .unwrap();
+}
+
+#[test]
+fn checkpoint_identity_fixture_preserves_references_and_rewind_bytes() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+    for _ in 0..2 {
+        assert!(root.archive_incompatible_history().unwrap().is_none());
+        let reopened = StateRoot::open_existing(&path).unwrap();
+        let connection = open_source(&path.join(checkpoints::FILES[0]), true).unwrap();
+        let references: Vec<(Vec<u8>, i64)> = connection
+            .prepare("SELECT digest, len FROM refs ORDER BY tool_sequence")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(references.len(), 2);
+        for (digest, len) in references {
+            let bytes = checkpoints::load(&reopened, digest.try_into().unwrap(), &mut None)
+                .unwrap()
+                .unwrap();
+            assert_eq!(bytes, b"original");
+            assert_eq!(bytes.len() as i64, len);
+        }
+        replays(&reopened, &sessions);
+        assert_eq!(
+            std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
+            original
+        );
+        assert!(!path.join(DIR).exists());
+        assert!(!path.join("archive").exists());
+    }
+}
+
+#[test]
+fn checkpoint_below_floor_archives_history_intact_under_existing_locks() {
+    let mut completed = false;
+    for interruption in 0..64 {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let History { root, .. } = forked_history(&path);
+        checkpoint_fixture(&root);
+        Connection::open(path.join(checkpoints::FILES[0]))
+            .unwrap()
+            .pragma_update(None, "user_version", 0)
+            .unwrap();
+        let originals: Vec<_> = [DATABASE_FILE, checkpoints::FILES[0]]
+            .into_iter()
+            .map(|name| (name, std::fs::read(path.join(name)).unwrap()))
+            .collect();
+        if interruption == 0 {
+            let lease = root.lock_history(false).unwrap();
+            assert!(matches!(
+                root.archive_incompatible_history(),
+                Err(StoreError::HistoryBusy)
+            ));
+            drop(lease);
+            let lock = checkpoints::lock(&root).unwrap();
+            assert!(matches!(
+                root.archive_incompatible_history(),
+                Err(StoreError::CheckpointUnavailable)
+            ));
+            drop(lock);
+        }
+        fail_after(Some(interruption));
+        let result = root.archive_incompatible_history();
+        fail_after(None);
+        let archived = match result {
+            Ok(archived) => {
+                completed = true;
+                archived.unwrap()
+            }
+            Err(StoreError::Io(_)) => root.archive_incompatible_history().unwrap().unwrap(),
+            Err(error) => panic!("step {interruption}: {error}"),
+        };
+        for (name, original) in originals {
+            assert_eq!(std::fs::read(archived.path().join(name)).unwrap(), original);
+        }
+        assert!(!path.join(checkpoints::FILES[0]).exists());
+        assert!(!path.join(DIR).exists());
+        assert_eq!(
+            root.archive_incompatible_history().unwrap().unwrap().path(),
+            archived.path()
+        );
+        archived.acknowledge().unwrap();
+        assert!(root.archive_incompatible_history().unwrap().is_none());
+        assert!(stored_rows(&open_connection(&root, false).unwrap()).is_empty());
+        if completed {
+            assert!(interruption >= 9);
+            break;
+        }
+    }
+    assert!(
+        completed,
+        "archive must complete within the failpoint bound"
+    );
+}
+
+fn hot_checkpoint_journal(
+    temp: &std::path::Path,
+    database: &std::path::Path,
+    journal: &std::path::Path,
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let scratch = temp.join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let writer = Connection::open(database).unwrap();
+    writer.execute_batch("PRAGMA cache_size=1; BEGIN;").unwrap();
+    writer.execute_batch("CREATE TABLE junk(x BLOB);").unwrap();
+    for _ in 0..300 {
+        writer
+            .execute("INSERT INTO junk VALUES (randomblob(4000))", [])
+            .unwrap();
+    }
+    std::fs::copy(database, scratch.join("db")).unwrap();
+    std::fs::copy(journal, scratch.join("journal")).unwrap();
+    drop(writer);
+    (scratch.join("db"), scratch.join("journal"))
+}
+
+fn install_hot_journal(
+    (db, hot): &(std::path::PathBuf, std::path::PathBuf),
+    database: &std::path::Path,
+    journal: &std::path::Path,
+) {
+    std::fs::copy(db, database).unwrap();
+    std::fs::copy(hot, journal).unwrap();
+}
+
+#[test]
+fn checkpoint_hot_journal_recovers_before_eligibility() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let database = path.join(checkpoints::FILES[0]);
+    let journal_path = path.join(checkpoints::FILES[1]);
+    let original = std::fs::read(&database).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    let hot = hot_checkpoint_journal(temp.path(), &database, &journal_path);
+    install_hot_journal(&hot, &database, &journal_path);
+    assert_ne!(std::fs::read(&database).unwrap(), original);
+    assert!(!checkpoint_below_floor(&root).unwrap());
+    assert!(!journal_path.exists());
+    assert_eq!(std::fs::read(&database).unwrap(), original);
+    assert!(root.archive_incompatible_history().unwrap().is_none());
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists());
+    replays(&root, &sessions);
+}
+
+#[test]
+fn checkpoint_regular_journal_that_survives_recovery_refuses_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let database = path.join(checkpoints::FILES[0]);
+    let journal_path = path.join(checkpoints::FILES[1]);
+    create_private(&root.dir, checkpoints::FILES[1]).unwrap();
+    let database_bytes = std::fs::read(&database).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    assert!(matches!(
+        checkpoint_below_floor(&root),
+        Err(StoreError::InvalidStateDirectory)
+    ));
+    assert!(matches!(
+        root.archive_incompatible_history(),
+        Err(StoreError::InvalidStateDirectory)
+    ));
+    assert!(journal_path.symlink_metadata().unwrap().is_file());
+    assert_eq!(std::fs::metadata(&journal_path).unwrap().len(), 0);
+    assert_eq!(std::fs::read(&database).unwrap(), database_bytes);
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+    replays(&root, &sessions);
+}
+
+#[test]
+fn checkpoint_journal_that_survives_recovery_refuses_untouched() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = forked_history(&path);
+    checkpoint_fixture(&root);
+    let target = path.join("elsewhere");
+    std::fs::write(&target, vec![0xA5; 512]).unwrap();
+    std::os::unix::fs::symlink(&target, path.join(checkpoints::FILES[1])).unwrap();
+    let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+    let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    assert!(checkpoint_below_floor(&root).is_err());
+    assert!(root.archive_incompatible_history().is_err());
+    assert!(
+        path.join(checkpoints::FILES[1])
+            .symlink_metadata()
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), vec![0xA5; 512]);
+    assert_eq!(
+        std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
+        original
+    );
+    assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+    assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+    replays(&root, &sessions);
+}
+
+#[test]
+fn orphan_checkpoint_journal_refuses_untouched() {
+    for empty_database in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let History { root, sessions } = forked_history(&path);
+        let database = path.join(checkpoints::FILES[0]);
+        if empty_database {
+            create_private(&root.dir, checkpoints::FILES[0]).unwrap();
+        }
+        create_private(&root.dir, checkpoints::FILES[1]).unwrap();
+        std::fs::write(path.join(checkpoints::FILES[1]), b"orphan").unwrap();
+        let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+        assert!(matches!(
+            root.archive_incompatible_history(),
+            Err(StoreError::InvalidStateDirectory)
+        ));
+        assert_eq!(
+            std::fs::read(path.join(checkpoints::FILES[1])).unwrap(),
+            b"orphan"
+        );
+        assert_eq!(database.exists(), empty_database);
+        assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+        assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+        replays(&root, &sessions);
+    }
+}
+
+#[test]
+fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
+    for case in ["newer", "malformed", "extra_trigger", "busy", "unsafe"] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let History { root, sessions } = forked_history(&path);
+        checkpoint_fixture(&root);
+        let connection = Connection::open(path.join(checkpoints::FILES[0])).unwrap();
+        match case {
+            "newer" => connection.pragma_update(None, "user_version", 2).unwrap(),
+            "extra_trigger" => connection
+                .execute_batch(
+                    "CREATE TRIGGER forged AFTER INSERT ON refs BEGIN DELETE FROM blobs; END;",
+                )
+                .unwrap(),
+            "busy" => connection.execute_batch("BEGIN EXCLUSIVE;").unwrap(),
+            _ => {}
+        }
+        if case == "malformed" {
+            std::fs::write(path.join(checkpoints::FILES[0]), b"malformed").unwrap();
+        }
+        if case == "unsafe" {
+            std::os::unix::fs::symlink(
+                path.join(checkpoints::FILES[0]),
+                path.join(checkpoints::FILES[1]),
+            )
+            .unwrap();
+        }
+        let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+        let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+        let result = root.archive_incompatible_history();
+        match case {
+            "busy" => assert!(
+                matches!(result, Err(StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _)))
+                if code.code == rusqlite::ErrorCode::DatabaseBusy)
+            ),
+            "unsafe" => assert!(result.is_err()),
+            _ => assert!(result.unwrap().is_none()),
+        }
+        if matches!(case, "newer" | "extra_trigger") {
+            assert!(
+                matches!(
+                    checkpoints::load(&root, [0; 32], &mut None),
+                    Err(StoreError::CheckpointUnavailable)
+                ),
+                "{case}"
+            );
+        }
+        assert_eq!(
+            std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
+            original,
+            "{case}"
+        );
+        assert_eq!(
+            std::fs::read(path.join(DATABASE_FILE)).unwrap(),
+            journal,
+            "{case}"
+        );
+        assert!(!path.join(DIR).exists(), "{case}");
+        assert!(!path.join("archive").exists(), "{case}");
+        replays(&root, &sessions);
+    }
 }

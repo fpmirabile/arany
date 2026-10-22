@@ -190,10 +190,12 @@ pub(super) fn programs() -> Result<[BpfProgram; 2], ToolError> {
 
 pub(super) fn profile_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = Vec::new();
-    for program in programs()?
-        .into_iter()
-        .chain(std::iter::once(non_spawning_program()?))
-    {
+    for program in programs()?.into_iter().chain([
+        non_spawning_program()?,
+        metadata_program()?,
+        ioctl_program()?,
+        unknown_syscalls_program()?,
+    ]) {
         bytes.extend_from_slice(&(program.len() as u32).to_le_bytes());
         for instruction in program {
             bytes.extend_from_slice(&instruction.code.to_le_bytes());
@@ -229,6 +231,103 @@ fn non_spawning_program() -> Result<BpfProgram, ToolError> {
         rules.insert(call, Vec::new());
     }
     compile(rules, SeccompAction::Errno(libc::EPERM as u32))
+}
+
+// Landlock does not mediate these metadata changes, and a Git write's child needs none of them.
+fn metadata_program() -> Result<BpfProgram, ToolError> {
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    {
+        // Generic syscall numbers, equal on both architectures, that libc does not name everywhere.
+        const FCHMODAT2: i64 = 452;
+        const SETXATTRAT: i64 = 463;
+        const REMOVEXATTRAT: i64 = 466;
+        const FILE_SETATTR: i64 = 469;
+        let mut rules = BTreeMap::new();
+        for call in [
+            libc::SYS_fchmod,
+            libc::SYS_fchmodat,
+            FCHMODAT2,
+            libc::SYS_fchown,
+            libc::SYS_fchownat,
+            libc::SYS_utimensat,
+            libc::SYS_setxattr,
+            libc::SYS_lsetxattr,
+            libc::SYS_fsetxattr,
+            libc::SYS_removexattr,
+            libc::SYS_lremovexattr,
+            libc::SYS_fremovexattr,
+            SETXATTRAT,
+            REMOVEXATTRAT,
+            FILE_SETATTR,
+        ] {
+            rules.insert(call, Vec::new());
+        }
+        #[cfg(target_arch = "x86_64")]
+        for call in [
+            libc::SYS_chmod,
+            libc::SYS_chown,
+            libc::SYS_lchown,
+            libc::SYS_utime,
+            libc::SYS_utimes,
+            libc::SYS_futimesat,
+        ] {
+            rules.insert(call, Vec::new());
+        }
+        compile(rules, SeccompAction::Errno(libc::EPERM as u32))
+    }
+    #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+    {
+        Err(ToolError::ProtectionUnavailable)
+    }
+}
+
+// Any later syscall may be a new metadata setter: ENOSYS fails closed and reads as an old kernel.
+const LAST_KNOWN_SYSCALL: u32 = 469;
+
+// A range check too wide for per-number rules; architecture refusals stay with the Guard filters.
+fn unknown_syscalls_program() -> Result<BpfProgram, ToolError> {
+    above_program(LAST_KNOWN_SYSCALL)
+}
+
+fn above_program(last: u32) -> Result<BpfProgram, ToolError> {
+    use seccompiler::sock_filter;
+    const LOAD_NR: u16 = 0x20;
+    const JUMP_ABOVE: u16 = 0x25;
+    const RETURN: u16 = 0x06;
+    const RET_ERRNO: u32 = 0x0005_0000;
+    const RET_ALLOW: u32 = 0x7fff_0000;
+    let instruction = |code, jt, jf, k| sock_filter { code, jt, jf, k };
+    Ok(vec![
+        instruction(LOAD_NR, 0, 0, 0),
+        instruction(JUMP_ABOVE, 0, 1, last),
+        instruction(RETURN, 0, 0, RET_ERRNO | libc::ENOSYS as u32),
+        instruction(RETURN, 0, 0, RET_ALLOW),
+    ])
+}
+
+// Inode-flag, fsxattr and version ioctls bypass read-only descriptors; ENOTTY keeps isatty honest.
+fn ioctl_program() -> Result<BpfProgram, ToolError> {
+    compile(
+        [(libc::SYS_ioctl, Vec::new())].into(),
+        SeccompAction::Errno(libc::ENOTTY as u32),
+    )
+}
+
+// Calling thread only: the Git child inherits them while the Guard thread keeps its access.
+pub(super) fn install_metadata_filter() -> Result<(), ToolError> {
+    for program in [
+        metadata_program()?,
+        ioctl_program()?,
+        unknown_syscalls_program()?,
+    ] {
+        seccompiler::apply_filter(&program).map_err(|_| ToolError::ProtectionUnavailable)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(super) fn install_above(last: u32) -> Result<(), ToolError> {
+    seccompiler::apply_filter(&above_program(last)?).map_err(|_| ToolError::ProtectionUnavailable)
 }
 
 pub(super) fn install_non_spawning() -> Result<(), ToolError> {

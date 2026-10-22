@@ -1999,6 +1999,7 @@ done
             });
         }
         ToolRuntime {
+            git_writes_available: false,
             worker: None,
             handover: None,
             definitions: Default::default(),
@@ -2037,6 +2038,7 @@ done
                 }],
                 runtime_grants: runtime_grants.clone(),
                 git: None,
+                git_identity: None,
             },
             workspace: workspace.to_path_buf(),
             reads: None,

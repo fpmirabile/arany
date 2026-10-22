@@ -136,6 +136,35 @@ fn failure_heavy_history_keeps_the_run_and_byte_budgets() {
     .ok()
     .expect("instructions fit");
     assert_eq!(context.context_usage.used_bytes, 4 + 89);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let global = temp.path().join("state/AGENTS.md");
+        std::fs::write(&global, "<instructions>").unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+        let user = inputs
+            .user_instructions
+            .as_ref()
+            .unwrap()
+            .model_instructions();
+        let context = CompiledContext::compile(
+            None,
+            "next",
+            &[],
+            &inputs,
+            CollaborationPolicy::Single,
+            0,
+            0,
+            None,
+        )
+        .ok()
+        .expect("both scopes fit");
+        assert_eq!(
+            context.context_usage.used_bytes as usize,
+            4 + 89 + user.len()
+        );
+    }
 }
 
 #[cfg(unix)]
@@ -306,4 +335,65 @@ fn nested_instructions_load_root_to_launch_directory_within_shared_bounds() {
     std::fs::remove_file(workspace.join("crates/cli/AGENTS.md")).unwrap();
     std::fs::create_dir(workspace.join("crates/cli/AGENTS.md")).unwrap();
     assert!(matches!(load(Some(&deep)), Err(InputError::NotRegular)));
+}
+
+#[cfg(unix)]
+#[test]
+fn user_instructions_have_an_independent_budget_and_fixed_label() {
+    use input::{InputError, WorkspaceInputs};
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let global = temp.path().join("state/AGENTS.md");
+    let write = |bytes: &[u8], mode: u32| {
+        std::fs::write(&global, bytes).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(mode)).unwrap();
+    };
+    let load = || WorkspaceInputs::load(&workspace, &state, None, &[]);
+
+    assert!(load().unwrap().user_instructions.is_none());
+    write(b"", 0o600);
+    let empty = load().unwrap().user_instructions.unwrap();
+    assert_eq!(
+        (empty.path.as_str(), empty.content.as_str()),
+        ("user AGENTS.md", "")
+    );
+    assert_eq!(empty.digest, <[u8; 32]>::from(Sha256::digest(b"")));
+
+    std::fs::write(workspace.join("AGENTS.md"), vec![b'p'; 64 * 1024]).unwrap();
+    std::fs::write(temp.path().join("AGENTS.md"), "parent canary").unwrap();
+    write(&vec![b'g'; 64 * 1024], 0o600);
+    let inputs = load().unwrap();
+    let user = inputs.user_instructions.as_ref().unwrap();
+    assert_eq!(user.content.len(), 64 * 1024);
+    assert_eq!(user.digest, <[u8; 32]>::from(Sha256::digest(&user.content)));
+    assert_eq!(inputs.instructions.len(), 1);
+    assert_eq!(inputs.instructions[0].path, "AGENTS.md");
+    assert!(
+        user.model_instructions()
+            .starts_with("# AGENTS.md instructions for user AGENTS.md\n\n")
+    );
+    assert!(
+        !user
+            .model_instructions()
+            .contains(temp.path().to_str().unwrap())
+    );
+
+    write(&vec![b'g'; 64 * 1024 + 1], 0o600);
+    assert!(matches!(load(), Err(InputError::State(_))));
+    write(b"rule", 0o644);
+    assert!(matches!(load(), Err(InputError::State(_))));
+    write(&[0xff, 0xfe], 0o600);
+    assert!(matches!(load(), Err(InputError::InvalidUtf8)));
+    std::fs::remove_file(&global).unwrap();
+    std::os::unix::fs::symlink(temp.path().join("AGENTS.md"), &global).unwrap();
+    assert!(matches!(load(), Err(InputError::State(_))));
+    std::fs::remove_file(&global).unwrap();
+    assert!(
+        load().unwrap().user_instructions.is_none(),
+        "no fallback to a parent file"
+    );
 }

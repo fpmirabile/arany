@@ -347,7 +347,7 @@ pub(crate) fn model_id_preview(id: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::presentation::{AgentInspectorModel, run_feedback};
+    use crate::presentation::{AgentInspectorModel, AgentQuery, run_feedback};
     use arany::{
         AgentRunId, AgentView, ContextUsage, ProviderCallDisposition, ProviderCallRecord,
         RunConfig, RunId, RunView, SessionDefaults, SessionId,
@@ -441,6 +441,7 @@ mod tests {
                 provider_concurrency: 1,
                 workspace_device: 1,
                 workspace_inode: 1,
+                user_instruction_digest: None,
                 instruction_sources: Vec::new(),
                 launch_directory: String::new(),
                 include_digests: Vec::new(),
@@ -467,6 +468,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: AgentStatus::Active,
@@ -482,6 +484,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: if ordinal == 1 {
@@ -941,7 +944,8 @@ mod tests {
             );
             assert_eq!(feedback, expected, "{disposition:?}");
             assert!(!feedback.contains("PRIVATE_RESPONSE_ID"));
-            let inspector = AgentInspectorModel::from_session(&view, 0, 120, false);
+            let inspector =
+                AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, false);
             assert_eq!(
                 inspector
                     .lines
@@ -1114,7 +1118,8 @@ mod tests {
                 )
             );
             for color in [true, false] {
-                let inspector = AgentInspectorModel::from_session(&view, 0, 120, color);
+                let inspector =
+                    AgentInspectorModel::from_session(&view, &AgentQuery::default(), 120, color);
                 assert!(
                     inspector
                         .lines

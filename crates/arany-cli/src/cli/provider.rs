@@ -264,9 +264,10 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             }
             let root = StateRoot::open_existing(&state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let report = check_custom_profile(root, &profile)
-                .await
-                .map_err(|error| error.to_string())?;
+            let report =
+                check_custom_profile(root, profile.strip_prefix("custom:").unwrap_or(&profile))
+                    .await
+                    .map_err(|error| error.to_string())?;
             Ok(CommandOutput {
                 stdout: format!(
                     "Provider: {}\nStatus: custom verified\n",

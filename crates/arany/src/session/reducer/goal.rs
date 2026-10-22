@@ -7,7 +7,10 @@ use crate::session::events::{
     AgentRole, AgentRunId, CompactionStatus, Event, GoalBudget, GoalId, GoalPhase,
     GoalPlanContract, GoalReport, GoalStatus, ProviderCallDisposition, ReplayError, RunId,
 };
-use crate::session::{MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES, WorkspaceIdentity};
+use crate::session::{
+    MAX_CHILD_STEERING_LABEL_BYTES, MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES,
+    WorkspaceIdentity,
+};
 
 impl SessionView {
     // The event's fields plus the replay prior; a struct would only forward them.
@@ -297,11 +300,7 @@ impl SessionView {
             .filter(|agent| agent.status == AgentStatus::Active)
             .map(|agent| agent.id)
             .ok_or(ReplayError::InvalidTransition)?;
-        let stored_bytes: usize = run
-            .steering_notes
-            .iter()
-            .map(|note| note.len() + MAX_STEERING_LABEL_BYTES)
-            .sum();
+        let stored_bytes = run.steering_bytes();
         // A pending Tool observation means this reservation is a Tool review, not a planning or synthesis call.
         let tool_pending = run
             .tools
@@ -320,6 +319,49 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         active_run(self, *run_id)?
+            .steering_notes
+            .push(text.to_owned());
+        Ok(())
+    }
+
+    pub(super) fn record_agent_steering_note(
+        &mut self,
+        goal_id: &GoalId,
+        run_id: &RunId,
+        agent_run_id: &AgentRunId,
+        text: &str,
+    ) -> Result<(), ReplayError> {
+        let run = active_run(self, *run_id)?;
+        let agent = run
+            .agents
+            .iter()
+            .find(|agent| agent.id == *agent_run_id)
+            .ok_or(ReplayError::InvalidTransition)?;
+        if agent.role != AgentRole::Child
+            || agent.status != AgentStatus::Active
+            || run.workers.stop.is_some()
+            || run.hook_stop_reason().is_some()
+            || agent
+                .tools
+                .last()
+                .is_some_and(|tool| tool.observation.is_none())
+            || run.steering_bytes() + text.len() + MAX_CHILD_STEERING_LABEL_BYTES
+                > MAX_STEERING_NOTE_BYTES
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        let goal = current_goal_mut(self, *goal_id)?;
+        if goal.status != GoalStatus::Running
+            || goal.active_run != Some(*run_id)
+            || !goal.unobserved_provider_calls.contains(agent_run_id)
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        active_run(self, *run_id)?
+            .agents
+            .iter_mut()
+            .find(|agent| agent.id == *agent_run_id)
+            .ok_or(ReplayError::InvalidTransition)?
             .steering_notes
             .push(text.to_owned());
         Ok(())
@@ -798,6 +840,14 @@ pub(super) fn apply(
             exhausted,
         } => {
             current.finish_goal(goal_id, status, active_ms, report, *exhausted, prior)?;
+        }
+        Event::AgentSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            agent_run_id,
+            text,
+        } => {
+            current.record_agent_steering_note(goal_id, run_id, agent_run_id, text)?;
         }
         Event::GoalSteeringNoteRecorded {
             goal_id,

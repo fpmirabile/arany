@@ -131,6 +131,16 @@ pub fn tool_results(wire: &Value) -> Vec<Value> {
         .collect()
 }
 
+pub fn compaction_probe_reply(wire: &Value, fallback: Value) -> Value {
+    let nonce = wire
+        .pointer("/text/format/schema/properties/summary/enum/0")
+        .or_else(|| wire.pointer("/output_config/format/schema/properties/summary/enum/0"))
+        .and_then(Value::as_str);
+    nonce.map_or(fallback, |nonce| {
+        json!(json!({"summary":nonce}).to_string())
+    })
+}
+
 pub fn responses_output(value: &Value) -> Value {
     if value["outcome"]["type"] == "delegate" {
         let mut arguments = value["outcome"].clone();
@@ -152,6 +162,51 @@ pub fn messages_content(value: &Value) -> Value {
     } else {
         json!([{"type":"text", "text":value.as_str().expect("an answer is plain text or a delegate outcome")}])
     }
+}
+
+pub fn messages_stream(response: &Value) -> String {
+    let mut start = response.clone();
+    start["content"] = json!([]);
+    start["stop_reason"] = Value::Null;
+    start["usage"]["output_tokens"] = json!(0);
+    let mut events = vec![json!({"type":"message_start", "message":start})];
+    for (index, block) in response["content"]
+        .as_array()
+        .expect("content blocks")
+        .iter()
+        .enumerate()
+    {
+        let mut initial = block.clone();
+        let delta = match block["type"].as_str().expect("content type") {
+            "text" => {
+                initial["text"] = json!("");
+                json!({"type":"text_delta", "text":block["text"]})
+            }
+            "tool_use" => {
+                initial["input"] = json!({});
+                json!({"type":"input_json_delta", "partial_json":block["input"].to_string()})
+            }
+            _ => panic!("synthetic stream supports text and tool_use"),
+        };
+        events.extend([
+            json!({"type":"content_block_start", "index":index, "content_block":initial}),
+            json!({"type":"content_block_delta", "index":index, "delta":delta}),
+            json!({"type":"content_block_stop", "index":index}),
+        ]);
+    }
+    events.extend([
+        json!({"type":"message_delta", "delta":{"stop_reason":response["stop_reason"]}, "usage":response["usage"]}),
+        json!({"type":"message_stop"}),
+    ]);
+    events
+        .iter()
+        .map(|event| {
+            format!(
+                ": keep-alive\nevent: {}\ndata: {event}\n\n",
+                event["type"].as_str().expect("event type")
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]

@@ -244,10 +244,12 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let patterns: [&[u8]; 7] = [
+        let patterns: [&[u8]; 8] = [
             b"Agent: primary; state: active",
             b"Agent choice: n next",
             b"Agent 2/2: primary; finished",
+            // The reprint rearms, so the next choice waits for its prompt.
+            b"Agent choice: n next",
             b"Notice: Run is active; Ctrl+C cancels",
             b"Agent choice: n next",
             b"z",
@@ -296,16 +298,17 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
     stage(1);
     input.write_all(b"n\n").expect("select recent AgentRun");
     stage(2);
-    input.write_all(b"q\n").expect("close active inspector");
     stage(3);
+    input.write_all(b"q\n").expect("close active inspector");
+    stage(4);
     input
         .write_all(b"/agents\n")
         .expect("reopen active inspector");
-    stage(4);
-    input.write_all(b"z").expect("partial inspector choice");
     stage(5);
-    release_run.send(()).expect("release active response");
+    input.write_all(b"z").expect("partial inspector choice");
     stage(6);
+    release_run.send(()).expect("release active response");
+    stage(7);
     input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let result = wait_product(attached.take());
@@ -683,8 +686,15 @@ fn agent_chat_journey(
             let screen =
                 frame_end.map(|end| screen_rows(&transcript[..end], size.0, size.1).join("\n"));
             if let Some(screen) = screen.as_ref().filter(|screen| {
-                needles.iter().all(|needle| screen.contains(needle))
-                    && !absent.iter().any(|text| screen.contains(text))
+                needles.iter().all(|needle| {
+                    crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
+                        .next()
+                        .is_some()
+                }) && !absent.iter().any(|text| {
+                    crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes())
+                        .next()
+                        .is_some()
+                })
             }) {
                 break screen.clone();
             }
@@ -742,6 +752,59 @@ fn agent_chat_journey(
         &[primary]
     };
     step(b"\x1b", returned, &[child]);
+    // `/agents` searches locally; no match activates nothing, and Enter opens the focused child.
+    let picker = "Enter open · Esc close";
+    step(
+        b"/agents\r",
+        &[picker, "Type to search 3 agents", "› 1. Run 1: primary"],
+        &[child],
+    );
+    step(
+        b"zz",
+        &[
+            picker,
+            "Search: zz · no matching agents",
+            "No matching agents",
+        ],
+        &["› 1."],
+    );
+    step(
+        b"\r\x7f\x7f",
+        &[picker, "Type to search 3 agents"],
+        &[child],
+    );
+    step(
+        b"second",
+        &[
+            "Search: second · 1 of 3 agents",
+            "› 1. Run 1: child 2; finished · second child task",
+        ],
+        &[child],
+    );
+    step(
+        b"\r",
+        &[
+            "viewing child 2 (read-only)",
+            armed,
+            "result of second child task",
+        ],
+        &[picker, primary],
+    );
+    step(b"\x1b", returned, &[child]);
+    step(b"/agents\r", &[picker, "› 1. Run 1: primary"], &[child]);
+    let screen = step(
+        b"\rqueued-submit\rqueued-draft",
+        &[primary, "Alt+Left/Right agents"],
+        &[picker, child, "queued-submit", "queued-draft"],
+    );
+    let composer = screen.lines().find(|row| row.starts_with("> "));
+    assert_eq!(
+        composer.map(str::trim_end),
+        Some("> Ask a question, or type / for commands"),
+        "{screen}"
+    );
+    step(b"x", &["> x"], &["queued-submit", "queued-draft"]);
+    step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
     let from = checkpoint_screen(
         &mut transcript,
         &mut answered,
@@ -830,7 +893,8 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
         let mut declined = false;
         let mut bytes = Vec::new();
         let prompt: &[u8] = b"Agent chat: number opens";
-        let stages: [&[u8]; 12] = [
+        let picker: &[u8] = b"Agent choice: n next";
+        let stages: [&[u8]; 24] = [
             b"Input:",
             b"second child task\r\nAgent chat: number opens",
             b"Viewing child 2 (read-only)",
@@ -843,6 +907,18 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
             prompt,
             b"Back to primary",
             // The primary prompt follows the return barrier, so later input reaches the composer.
+            b"Input:",
+            b"Type to search 3 agents",
+            picker,
+            b"Search: zz \xc2\xb7 no matching agents",
+            picker,
+            b"Notice: No agent focused; choose a number first",
+            picker,
+            b"1. Run 1: child 2; finished \xc2\xb7 second child task (focused)",
+            picker,
+            b"Viewing child 2 (read-only)",
+            prompt,
+            b"Back to primary",
             b"Input:",
         ];
         let mut next = 0;
@@ -896,6 +972,20 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
     input.write_all(b"q\n").expect("return to primary");
     stage(10);
     stage(11);
+    // Every picker choice waits for the prompt that follows its rearmed reprint.
+    for (keys, stages) in [
+        (b"/agents\n".as_slice(), [12, 13]),
+        (b"/zz\n".as_slice(), [14, 15]),
+        (b"o\n".as_slice(), [16, 17]),
+        (b"/second\n".as_slice(), [18, 19]),
+        (b"o\n".as_slice(), [20, 21]),
+    ] {
+        input.write_all(keys).expect("agent picker choice");
+        stages.into_iter().for_each(stage);
+    }
+    input.write_all(b"q\n").expect("return to primary again");
+    stage(22);
+    stage(23);
     input.write_all(b"/exit\n").expect("exit linear chat");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -935,6 +1025,7 @@ fn linear_agent_chats(workspace: &std::path::Path, state: &std::path::Path, id: 
 fn gated_team_server(
     listener: TcpListener,
     journeys: usize,
+    messaging: bool,
     requested: mpsc::Sender<&'static str>,
     release: mpsc::Receiver<()>,
 ) -> thread::JoinHandle<()> {
@@ -955,6 +1046,22 @@ fn gated_team_server(
             let wire: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).expect("Responses request");
             let input = crate::semantic::input(&wire);
+            let text = {
+                let mut current = input.clone();
+                current["history"] = serde_json::Value::Null;
+                current.to_string()
+            };
+            let targeted = messaging
+                && input["phase"] == "child_work"
+                && input["objective"] == "second child task";
+            assert_eq!(
+                text.contains("/literal guidance"),
+                targeted,
+                "only the selected child's request receives its note"
+            );
+            let whole = input.to_string();
+            assert!(!whole.contains("late note") && !whole.contains("queued note"));
+
             let gate = |name| {
                 requested.send(name).expect("request observer");
                 release
@@ -1003,7 +1110,7 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     );
     let (requests, requested) = mpsc::channel();
     let (release, released) = mpsc::channel();
-    let server = gated_team_server(listener, 3, requests, released);
+    let server = gated_team_server(listener, 5, false, requests, released);
     check_profile(&workspace, &state);
     let mut prior = Command::new(env!("CARGO_BIN_EXE_arany"));
     prior
@@ -1029,17 +1136,221 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
     for classic in [false, true] {
         live_agent_chat_journey(&workspace, &state, session_id, classic, &gates);
     }
-    live_linear_agent_chat(&workspace, &state, session_id, &gates);
+    for classic in [false, true] {
+        live_agent_picker_journey(&workspace, &state, session_id, classic, &gates);
+    }
+    live_linear_agent_chat(&workspace, &state, session_id, &gates, false);
     server.join().expect("synthetic server completed");
 
     // Following a child only read committed facts: each team Run closed normally, with no note.
     let (_, view) = replayed(&state, session_id);
-    assert_eq!(view.runs.len(), 4);
+    assert_eq!(view.runs.len(), 6);
     for run in &view.runs[1..] {
         assert_eq!(run.status, RunStatus::Finished);
         assert_eq!(run.assistant_message.as_deref(), Some("team answer"));
         assert_eq!(run.agents.len(), 3);
         assert!(run.steering_notes.is_empty());
+    }
+}
+
+#[test]
+fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let (requests, requested) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = gated_team_server(listener, 1, false, requests, released);
+    check_profile(&workspace, &state);
+    let prior = wait_product(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace)
+            .args(["exec", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .args(["--provider", "custom:local", "--model", "model-1", "prior"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the prior Run"),
+    );
+    assert!(prior.status.success());
+    let id = String::from_utf8(prior.stderr)
+        .expect("prior stderr is UTF-8")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Session: ")
+                .and_then(|id| id.parse::<SessionId>().ok())
+        })
+        .expect("prior Run reports its Session");
+    let gates = Gates { requested, release };
+    let (mut attached, mut pty) = live_pty(&workspace, &state, id, false);
+    pty.await_request(&gates, "first");
+    pty.frame(0, &["Alt+Left/Right agents"], &[]);
+    gates.release.send(()).expect("release the first child");
+    pty.await_request(&gates, "second");
+    gates.release.send(()).expect("release the second child");
+    pty.await_request(&gates, "synthesis");
+    // The synthesis is held, so the Run is active: `/exit` is refused until it is released.
+    let release = gates.release.clone();
+    exit_live_after_refusal(&mut attached, &mut pty, move || {
+        release.send(()).expect("release the synthesis");
+    });
+    server.join().expect("server thread finishes");
+}
+
+#[test]
+fn selected_child_messaging_journey() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let (requests, requested) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = gated_team_server(listener, 3, true, requests, released);
+    check_profile(&workspace, &state);
+    let prior = wait_product(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace)
+            .args(["exec", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .args(["--provider", "custom:local", "--model", "model-1", "prior"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the prior Run"),
+    );
+    assert!(prior.status.success());
+    let id = String::from_utf8(prior.stderr)
+        .expect("prior stderr is UTF-8")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Session: ")
+                .and_then(|id| id.parse::<SessionId>().ok())
+        })
+        .expect("prior Run reports its Session");
+    let gates = Gates { requested, release };
+    for classic in [false, true] {
+        let (mut attached, mut pty) = live_pty(&workspace, &state, id, classic);
+        let total = if classic { 7 } else { 4 };
+        pty.await_request(&gates, "first");
+        pty.frame(0, &["Alt+Left/Right agents", "child 2"], &[]);
+        pty.step(
+            b"/agents\r",
+            &[&format!("Type to search {total} agents"), "Enter open"],
+            &[],
+        );
+        pty.step(
+            b"second",
+            &["Search: second", &format!("of {total} agents"), "child 2"],
+            &[],
+        );
+        pty.step(
+            b"\rqueued note\r",
+            &["viewing child 2 (message)", "agents · Esc primary"],
+            &["queued note"],
+        );
+        pty.step(b"/literal guidance", &["> /literal guidance"], &[]);
+        pty.step(b"\r", &["Note waiting for child 2's next step"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"\x1b[1;3C",
+            &["viewing child 1 (message)", "agents · Esc primary"],
+            &[],
+        );
+        pty.step(b"late note", &["> late note"], &[]);
+        pty.step(b"\r", &["Note waiting for child 1's next step"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"/transcript agents 3\r",
+            &[
+                "viewing child 2 (message)",
+                "/literal guidance",
+                "Note waiting for child 2's next step",
+            ],
+            &[],
+        );
+        let from = pty.capture_from;
+        gates.release.send(()).expect("server accepts the release");
+        pty.await_request(&gates, "second");
+        pty.frame(
+            from,
+            &[
+                "Steering note recorded for child 2",
+                "viewing child 2 (message)",
+            ],
+            &[],
+        );
+        pty.step(b"draft", &["> draft"], &[]);
+        pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
+        pty.step(
+            b"/transcript agents 2\r",
+            &[
+                "viewing child 1 (read-only)",
+                "> late note",
+                "Note not delivered; child draft retained",
+            ],
+            &[],
+        );
+        pty.step(b"\r", &["This child is read-only; draft retained"], &[]);
+        pty.step(b"\x7f", &["Read-only"], &["> late note"]);
+        pty.step(
+            b"\x1b[1;3C",
+            &[
+                "viewing child 2 (message)",
+                "> draft",
+                "agents · Esc primary",
+            ],
+            &[],
+        );
+        gates.release.send(()).expect("server accepts the release");
+        pty.await_request(&gates, "synthesis");
+        pty.frame(
+            pty.capture_from,
+            &["viewing child 2 (read-only)", "> draft"],
+            &[],
+        );
+        gates.release.send(()).expect("server accepts the release");
+        pty.step(b"\x1b", &["team answer", "Ask Arany"], &["viewing child"]);
+        exit_live(&mut attached, &mut pty);
+    }
+    live_linear_agent_chat(&workspace, &state, id, &gates, true);
+    server.join().expect("server thread finishes");
+    let (events, view) = replayed(&state, id);
+    assert_eq!(view.runs.len(), 4);
+    assert_eq!(view.goals.len(), 4);
+    let notes: Vec<_> = events
+        .iter()
+        .filter(|event| matches!(event.event, arany::Event::AgentSteeringNoteRecorded { .. }))
+        .collect();
+    assert_eq!(notes.len(), 3);
+    for run in &view.runs[1..] {
+        assert_eq!(run.status, RunStatus::Finished);
+        assert_eq!(run.agents.len(), 3);
+        assert!(run.steering_notes.is_empty());
+        assert!(run.agents[1].steering_notes.is_empty());
+        assert_eq!(run.agents[2].steering_notes, ["/literal guidance"]);
+        assert_eq!(run.agents[2].grant, Some(arany::ChildGrant::NoTools));
+        assert!(!events.iter().any(|event| event.run_id == Some(run.id)
+            && matches!(event.event, arany::Event::ToolPermissionDecided { .. })));
     }
 }
 
@@ -1050,8 +1361,7 @@ struct Gates {
 
 const LIVE_SIZE: (usize, usize) = (80, 24);
 
-// One xterm PTY whose captured bytes are checked only at complete frames: Ratatui ends each
-// frame with a cursor hide or show, so a partial frame never satisfies or fails a step.
+// Decode at cursor markers; Classic resizing also emits them before the replacement frame.
 struct LivePty {
     input: std::process::ChildStdin,
     output: std::process::ChildStdout,
@@ -1085,7 +1395,7 @@ impl LivePty {
         screen_rows(&self.transcript[..end], LIVE_SIZE.0, LIVE_SIZE.1).join("\n")
     }
 
-    // Waits for a complete frame after `from` showing every needle and none of `absent`.
+    // After a view switch, name the armed hint row, or keys sent next can be dropped.
     fn frame(&mut self, from: usize, needles: &[&str], absent: &[&str]) -> usize {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1093,9 +1403,15 @@ impl LivePty {
             let end = self.frame_ends(from).last().copied();
             if let Some(end) = end {
                 let screen = self.screen(end);
-                if needles.iter().all(|needle| screen.contains(needle))
-                    && !absent.iter().any(|text| screen.contains(text))
-                {
+                if needles.iter().all(|needle| {
+                    crate::process::pty_text_matches(screen.as_bytes(), needle.as_bytes())
+                        .next()
+                        .is_some()
+                }) && !absent.iter().any(|text| {
+                    crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes())
+                        .next()
+                        .is_some()
+                }) {
                     return end;
                 }
             }
@@ -1164,13 +1480,13 @@ impl LivePty {
     }
 }
 
-fn live_agent_chat_journey(
+// A Classic or Fullscreen attached process that resumes the Session and starts a team Run.
+fn live_pty(
     workspace: &std::path::Path,
     state: &std::path::Path,
     id: SessionId,
     classic: bool,
-    gates: &Gates,
-) {
+) -> (ChildGuard, LivePty) {
     let mode = if classic { "--classic " } else { "" };
     let command = format!(
         "stty rows 24 cols 80; before=$(stty -g); printf 'TTY_BEFORE:%s\\n' \"$before\"; \"$ARANY_TEST_EXE\" {mode}--state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\" --provider custom:local --model model-1 'team task'; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\\n' \"$after\"; exit \"$exit_code\""
@@ -1196,7 +1512,7 @@ fn live_agent_chat_journey(
     let output = attached.child().stdout.take().expect("PTY output");
     let flags = fcntl_getfl(&output).expect("stdout flags");
     fcntl_setfl(&output, flags | OFlags::NONBLOCK).expect("nonblocking PTY output");
-    let mut pty = LivePty {
+    let pty = LivePty {
         input,
         output,
         transcript: Vec::new(),
@@ -1205,6 +1521,92 @@ fn live_agent_chat_journey(
         capture_from: 0,
         context: if classic { "Classic" } else { "Fullscreen" },
     };
+    (attached, pty)
+}
+
+// Exits through `/exit` and checks that the terminal settings were restored.
+fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
+    exit_live_after_refusal(attached, pty, || {});
+}
+
+// `on_refused` runs once a refusal of `/exit` is on screen, before the retry.
+fn exit_live_after_refusal(
+    attached: &mut ChildGuard,
+    pty: &mut LivePty,
+    mut on_refused: impl FnMut(),
+) {
+    let refused = "unavailable while a Run is active";
+    let count = |screen: &str, text: &str| {
+        crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes()).count()
+    };
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut from = pty.capture_from;
+    // The `/exit` refusal notice persists, so resend after a newer refusal reaches idle.
+    'exit: loop {
+        from = checkpoint_screen(
+            &mut pty.transcript,
+            &mut pty.answered,
+            &mut pty.history,
+            LIVE_SIZE,
+            from,
+        );
+        pty.capture_from = from;
+        let earlier = count(&pty.screen(pty.transcript.len()), refused);
+        pty.input.write_all(b"/exit\r").expect("exit attached mode");
+        let mut was_refused = false;
+        let mut inspected = 0;
+        loop {
+            pty.pump();
+            if attached.child().try_wait().expect("chat status").is_some() {
+                break 'exit;
+            }
+            for end in pty.frame_ends(from).into_iter().skip(inspected) {
+                inspected += 1;
+                let screen = pty.screen(end);
+                if count(&screen, refused) > earlier && !was_refused {
+                    was_refused = true;
+                    on_refused();
+                }
+                if was_refused && count(&screen, "ready ·") > 0 {
+                    continue 'exit;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} live chat did not exit: {}",
+                pty.context,
+                tail(&pty.transcript[from..])
+            );
+            thread::yield_now();
+        }
+    }
+    let result = wait_product(attached.take());
+    pty.pump();
+    assert!(
+        result.status.success(),
+        "{} chat exited cleanly",
+        pty.context
+    );
+    pty.history.extend_from_slice(&pty.transcript[from..]);
+    let text = String::from_utf8_lossy(&pty.history);
+    let setting = |marker: &str| {
+        text.split_once(marker)
+            .and_then(|(_, rest)| rest.lines().next())
+            .map(|line| line.trim_end_matches('\r').to_owned())
+            .unwrap_or_else(|| panic!("{} {marker} missing", pty.context))
+    };
+    assert_eq!(setting("TTY_BEFORE:"), setting("TTY_AFTER:"));
+    assert!(!text.contains("test-key"));
+}
+
+fn live_agent_chat_journey(
+    workspace: &std::path::Path,
+    state: &std::path::Path,
+    id: SessionId,
+    classic: bool,
+    gates: &Gates,
+) {
+    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
     let armed = "agents · Esc primary";
     pty.await_request(gates, "first");
     // The shelf lists both children once their spawns are committed and reduced.
@@ -1213,7 +1615,7 @@ fn live_agent_chat_journey(
     pty.step(
         b"\x1b[1;3C",
         &[
-            "viewing child 1 (read-only)",
+            "viewing child 1 (message)",
             armed,
             "first child task",
             "child 1 is working",
@@ -1221,7 +1623,7 @@ fn live_agent_chat_journey(
         &[],
     );
     let second: &[&str] = &[
-        "viewing child 2 (read-only)",
+        "viewing child 2 (message)",
         armed,
         "second child task",
         "child 2 is working",
@@ -1231,7 +1633,7 @@ fn live_agent_chat_journey(
     gates.release.send(()).expect("release the first child");
     pty.await_request(gates, "second");
     for screen in pty.frames_since(shown) {
-        assert!(screen.contains("viewing child 2 (read-only)"), "{screen}");
+        assert!(screen.contains("viewing child 2 (message)"), "{screen}");
         assert!(!screen.contains("result of first child task"), "{screen}");
     }
     // The sibling's committed result is there once its own chat is opened.
@@ -1268,61 +1670,109 @@ fn live_agent_chat_journey(
     assert!(
         frames
             .iter()
-            .all(|screen| screen.contains("viewing child 2 (read-only)")),
+            .all(|screen| screen.contains("viewing child 2 (")),
         "{frames:?}"
     );
     gates.release.send(()).expect("release the synthesis");
     // Escape returns to the primary without cancelling; its answer follows the Run's end.
-    pty.step(b"\x1b", &["team answer"], &["viewing child"]);
-    let from = checkpoint_screen(
-        &mut pty.transcript,
-        &mut pty.answered,
-        &mut pty.history,
-        LIVE_SIZE,
-        pty.capture_from,
+    pty.step(
+        b"\x1b",
+        &[
+            "team answer",
+            "Ask Arany",
+            "> Ask a question, or type / for commands",
+        ],
+        &["viewing child", "agents · Esc primary"],
     );
-    pty.input.write_all(b"/exit\r").expect("exit attached mode");
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        pty.pump();
-        if attached.child().try_wait().expect("chat status").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{} live chat did not exit: {}",
-            pty.context,
-            tail(&pty.transcript[from..])
-        );
-        thread::yield_now();
-    }
-    let result = wait_product(attached.take());
-    pty.pump();
-    assert!(
-        result.status.success(),
-        "{} chat exited cleanly",
-        pty.context
-    );
-    pty.history.extend_from_slice(&pty.transcript[from..]);
-    let text = String::from_utf8_lossy(&pty.history);
-    let setting = |marker: &str| {
-        text.split_once(marker)
-            .and_then(|(_, rest)| rest.lines().next())
-            .map(|line| line.trim_end_matches('\r').to_owned())
-            .unwrap_or_else(|| panic!("{} {marker} missing", pty.context))
-    };
-    assert_eq!(setting("TTY_BEFORE:"), setting("TTY_AFTER:"));
-    assert!(!text.contains("test-key"));
+    exit_live(&mut attached, &mut pty);
     if classic {
         // Live records were appended once each, below the chat's read-only boundary.
         let (scrollback, screen) = crate::terminal_grid(&pty.history, LIVE_SIZE.0, LIVE_SIZE.1);
         let rows = scrollback.iter().chain(&screen).collect::<Vec<_>>();
         let count = |needle: &str| rows.iter().filter(|row| row.contains(needle)).count();
         assert_eq!(count("result of second child task"), 1, "{rows:?}");
-        assert_eq!(count("Viewing child 2 (read-only)"), 2, "{rows:?}");
+        assert_eq!(count("Viewing child 2 (message)"), 2, "{rows:?}");
         // The Fullscreen journey's Run, then this one after the return, each once.
         assert_eq!(count("team answer"), 2, "{rows:?}");
     }
+}
+
+// `/agents` during a team Run: committed changes while the user searches never retarget the focus.
+fn live_agent_picker_journey(
+    workspace: &std::path::Path,
+    state: &std::path::Path,
+    id: SessionId,
+    classic: bool,
+    gates: &Gates,
+) {
+    let (mut attached, mut pty) = live_pty(workspace, state, id, classic);
+    let picker = "Enter open · Esc close";
+    let focused = |pty: &LivePty, end: usize| {
+        pty.screen(end)
+            .lines()
+            .find(|row| row.starts_with("› ") && row.contains(". Run "))
+            .map(str::to_owned)
+            .unwrap_or_default()
+    };
+    pty.await_request(gates, "first");
+    let from = pty.capture_from;
+    pty.frame(from, &["child 2 ·", "Alt+Left/Right agents"], &[]);
+    pty.step(b"/agents\r", &[picker, "Current Run: 3 agents"], &[]);
+    let end = pty.step(
+        b"\rqueued-steer\rqueued-draft",
+        &["Ask Arany", "Alt+Left/Right agents"],
+        &[picker, "queued-steer", "queued-draft"],
+    );
+    let screen = pty.screen(end);
+    let composer = screen.lines().find(|row| row.starts_with("> "));
+    assert_eq!(
+        composer.map(str::trim_end),
+        Some("> Ask a question, or type / for commands"),
+        "{screen}"
+    );
+    pty.step(b"x", &["> x"], &["queued-steer", "queued-draft"]);
+    pty.step(b"\x7f", &["Alt+Left/Right agents"], &["> x"]);
+    pty.step(b"/agents\r", &[picker, "Current Run: 3 agents"], &[]);
+    pty.step(b"active", &["Search: active · 3 of"], &[]);
+    let end = pty.step(b"\x1b[B\x1b[B", &["› 3. Run "], &[]);
+    assert!(
+        focused(&pty, end).contains("child 2; active"),
+        "{}",
+        pty.screen(end)
+    );
+    // The first child finishes and leaves the matches; the focus stays on child 2, now second.
+    let from = pty.capture_from;
+    gates.release.send(()).expect("release the first child");
+    pty.await_request(gates, "second");
+    let end = pty.frame(from, &["Search: active · 2 of", "› 2. Run "], &[]);
+    assert!(
+        focused(&pty, end).contains("child 2; active"),
+        "{}",
+        pty.screen(end)
+    );
+    pty.step(
+        b"\r",
+        &[
+            "viewing child 2 (message)",
+            "agents · Esc primary",
+            "second child task",
+            "child 2 is working",
+        ],
+        &[picker],
+    );
+    gates.release.send(()).expect("release the second child");
+    pty.await_request(gates, "synthesis");
+    gates.release.send(()).expect("release the synthesis");
+    pty.step(
+        b"\x1b",
+        &[
+            "team answer",
+            "Ask Arany",
+            "> Ask a question, or type / for commands",
+        ],
+        &["viewing child", "agents · Esc primary"],
+    );
+    exit_live(&mut attached, &mut pty);
 }
 
 fn live_linear_agent_chat(
@@ -1330,6 +1780,7 @@ fn live_linear_agent_chat(
     state: &std::path::Path,
     id: SessionId,
     gates: &Gates,
+    messaging: bool,
 ) {
     let mut command =
         crate::isolation::account_isolated_script(state.parent().expect("fixture root"));
@@ -1359,15 +1810,15 @@ fn live_linear_agent_chat(
     let mut consent_input =
         std::fs::File::from(rustix::io::dup(&input).expect("owned fixture input"));
     let prompt: &[u8] = b"Agent chat: number opens";
-    let stages: [&[u8]; 14] = [
+    let mut stages: Vec<&[u8]> = vec![
         b"Agent: child 2;",
-        b"Viewing child 2 (read-only)",
+        b"Viewing child 2 (message)",
         b"child 2 is working; its committed activity appears here",
         prompt,
         b"Viewing child 1 (read-only)",
         b"result of first child task",
         prompt,
-        b"Viewing child 2 (read-only)",
+        b"Viewing child 2 (message)",
         prompt,
         b"New activity from child 2:\r\nAgent result:\r\n  result of second child task\r\nchild 2 finished",
         prompt,
@@ -1375,6 +1826,13 @@ fn live_linear_agent_chat(
         b"team answer",
         b"Input:",
     ];
+    if messaging {
+        stages[9] = b"New activity from child 2:";
+        stages.insert(4, b"Notice: Note waiting for child 2's next step");
+        stages.insert(5, prompt);
+        stages.insert(6, b"Steering note recorded for child 2");
+        stages.insert(7, prompt);
+    }
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
@@ -1390,13 +1848,12 @@ fn live_linear_agent_chat(
             bytes.extend_from_slice(&chunk[..count]);
             crate::process::decline_workspace_consent(&mut consent_input, &bytes, &mut declined);
             while let Some(stage) = stages.get(offsets.len()) {
-                let Some(offset) = bytes[search_from..]
-                    .windows(stage.len())
-                    .position(|part| part == *stage)
+                let Some(matched) =
+                    crate::process::pty_text_matches(&bytes[search_from..], stage).next()
                 else {
                     break;
                 };
-                search_from += offset + stage.len();
+                search_from += matched.end;
                 offsets.push(search_from);
                 sender.send(offsets.len() - 1).expect("stage receiver");
             }
@@ -1426,18 +1883,28 @@ fn live_linear_agent_chat(
         .write_all(b"/transcript agents 3\n")
         .expect("open the second child");
     (1..=3).for_each(stage);
+    if messaging {
+        input
+            .write_all(b"/message /literal guidance\n")
+            .expect("offer child note");
+        (4..=5).for_each(stage);
+    }
     gates.release.send(()).expect("release the first child");
     request("second");
+    if messaging {
+        (6..=7).for_each(stage);
+    }
+    let shift = usize::from(messaging) * 4;
     input.write_all(b"p\n").expect("previous agent");
-    (4..=6).for_each(stage);
+    (4 + shift..=6 + shift).for_each(stage);
     input.write_all(b"n\n").expect("next agent");
-    (7..=8).for_each(stage);
+    (7 + shift..=8 + shift).for_each(stage);
     gates.release.send(()).expect("release the second child");
-    (9..=10).for_each(stage);
+    (9 + shift..=10 + shift).for_each(stage);
     request("synthesis");
     gates.release.send(()).expect("release the synthesis");
     input.write_all(b"q\n").expect("return to primary");
-    (11..=13).for_each(stage);
+    (11 + shift..=13 + shift).for_each(stage);
     input.write_all(b"/exit\n").expect("exit linear chat");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1455,7 +1922,8 @@ fn live_linear_agent_chat(
     let (bytes, offsets) = reader.join().expect("linear output reader");
     let text = String::from_utf8_lossy(&bytes);
     // While child 2 was shown, its sibling's committed result printed nothing.
-    let second_shown = String::from_utf8_lossy(&bytes[offsets[1]..offsets[4]]);
+    let second_shown =
+        String::from_utf8_lossy(&bytes[offsets[1]..offsets[4 + usize::from(messaging) * 4]]);
     assert!(!second_shown.contains("result of first"), "{second_shown}");
     assert_eq!(
         text.matches("result of second child task").count(),

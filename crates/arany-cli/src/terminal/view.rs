@@ -1059,7 +1059,9 @@ pub(super) fn draw_history_rows(
                     palette.accent()
                 }
                 MessageKind::Supervisor => Style::default().add_modifier(Modifier::DIM),
-                MessageKind::Notice => palette.accent().add_modifier(Modifier::BOLD),
+                MessageKind::Notice | MessageKind::SteeringNote => {
+                    palette.accent().add_modifier(Modifier::BOLD)
+                }
                 MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
             }
         } else {
@@ -2157,12 +2159,16 @@ pub(super) fn agent_detail_lines(model: &AgentInspectorModel, width: u16) -> Vec
         .collect()
 }
 
+pub(super) const AGENT_PICKER_ROWS: u16 = 23;
+
+// The Session line, the search line, a window of rows, the focused row's details and the key hint.
 pub(super) fn draw_agent_inspector_frame(
     frame: &mut Frame,
     area: Rect,
     model: &AgentInspectorModel,
     scroll: usize,
     armed: bool,
+    notice: Option<&str>,
     palette: Palette,
 ) {
     if area.width == 0 || area.height == 0 {
@@ -2173,22 +2179,28 @@ pub(super) fn draw_agent_inspector_frame(
         Paragraph::new(model.lines[0].as_str()).style(palette.selection()),
         Rect::new(area.x, area.y, area.width, 1),
     );
+    if area.height > 1 {
+        frame.render_widget(
+            Paragraph::new(model.search.as_str()),
+            Rect::new(area.x, area.y + 1, area.width, 1),
+        );
+    }
     let choices = agent_choice_rows(area.height, model.choices.len());
-    let start = model.selected.saturating_sub(choices.saturating_sub(1));
+    let start = super::agents::window_start(model.selected, choices);
     for (index, choice) in model.choices.iter().enumerate().skip(start).take(choices) {
         frame.render_widget(
             Paragraph::new(numbered_line(
                 index,
                 choice,
-                armed.then_some(model.selected),
+                model.selected.filter(|_| armed),
                 area.width,
             )),
-            Rect::new(area.x, area.y + 1 + (index - start) as u16, area.width, 1),
+            Rect::new(area.x, area.y + 2 + (index - start) as u16, area.width, 1),
         );
     }
     let detail_y = area
         .y
-        .saturating_add(1 + u16::try_from(choices).unwrap_or(u16::MAX));
+        .saturating_add(2 + u16::try_from(choices).unwrap_or(u16::MAX));
     let detail_rows = agent_detail_rows(area.height, model.choices.len());
     for (index, line) in agent_detail_lines(model, area.width)
         .into_iter()
@@ -2201,14 +2213,18 @@ pub(super) fn draw_agent_inspector_frame(
             Rect::new(area.x, detail_y + index as u16, area.width, 1),
         );
     }
-    if armed && area.height > 1 {
-        let hint = if area.width < 20 {
-            "Esc Up/Dn Pg"
-        } else {
-            "Esc close · Up/Down agent · PgUp/PgDn"
+    if armed && area.height > 2 {
+        let hint = match area.width {
+            70.. => "Enter open · Esc close · Up/Down agent · type to search · PgUp/PgDn",
+            40.. => "Enter open · Esc close · type to search",
+            20.. => "Type Enter Esc Up/Dn",
+            _ => "Esc Up/Dn Pg",
         };
         frame.render_widget(
-            Paragraph::new(safe_truncate(hint, usize::from(area.width))),
+            Paragraph::new(safe_truncate(
+                notice.unwrap_or(hint),
+                usize::from(area.width),
+            )),
             Rect::new(area.x, area.bottom() - 1, area.width, 1),
         );
     }
@@ -2216,11 +2232,27 @@ pub(super) fn draw_agent_inspector_frame(
 
 pub(super) const AGENT_CHAT_ROWS: u16 = 3;
 
-// The read-only label, the disabled composer and, once armed, the key hint.
+pub(super) struct AgentChatFrame<'a> {
+    pub label: &'a str,
+    pub draft: Option<&'a Composer>,
+    pub editable: bool,
+}
+
+impl<'a> From<&'a str> for AgentChatFrame<'a> {
+    fn from(label: &'a str) -> Self {
+        Self {
+            label,
+            draft: None,
+            editable: false,
+        }
+    }
+}
+
+// The actor label, its composer and, once armed, the key hint.
 pub(super) fn draw_agent_chat_frame(
     frame: &mut Frame,
     area: Rect,
-    label: &str,
+    state: AgentChatFrame<'_>,
     armed: bool,
     notice: Option<&str>,
     fullscreen: bool,
@@ -2231,19 +2263,29 @@ pub(super) fn draw_agent_chat_frame(
     }
     frame.render_widget(Clear, area);
     let width = usize::from(area.width);
-    let full = format!("viewing {label} (read-only)");
-    let short = format!("{label} (read-only)");
+    let label = state.label;
+    let mode = if state.editable {
+        "message"
+    } else {
+        "read-only"
+    };
+    let full = format!("viewing {label} ({mode})");
+    let short = format!("{label} ({mode})");
     let title = [full.as_str(), short.as_str()]
         .into_iter()
         .find(|title| UnicodeWidthStr::width(*title) <= width)
         .map_or_else(
-            || safe_truncate(&format!("{label} read-only"), width),
+            || safe_truncate(&format!("{label} {mode}"), width),
             str::to_owned,
         );
-    let composer = match width {
-        40.. => "> Read-only · Esc returns to primary",
-        20.. => "> Read-only · Esc",
-        _ => "> Read-only",
+    let composer = if state.editable {
+        "> Message · Enter offers guidance"
+    } else {
+        match width {
+            40.. => "> Read-only · Esc returns to primary",
+            20.. => "> Read-only · Esc",
+            _ => "> Read-only",
+        }
     };
     let hint = match (width, fullscreen) {
         (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
@@ -2251,9 +2293,19 @@ pub(super) fn draw_agent_chat_frame(
         (24.., _) => "Alt+←/→ agents · Esc",
         _ => "Esc primary",
     };
+    let draft_rows = state
+        .draft
+        .map(|draft| wrapped_composer(draft, width.saturating_sub(2)));
+    let draft_line = draft_rows
+        .as_ref()
+        .filter(|_| state.draft.is_some_and(|draft| !draft.is_empty()))
+        .map(|rows| format!("> {}", rows.lines[rows.cursor_row]));
     let rows = [
         Some((title, palette.selection())),
-        Some((safe_truncate(composer, width), palette.subtle())),
+        Some((
+            safe_truncate(draft_line.as_deref().unwrap_or(composer), width),
+            palette.subtle(),
+        )),
         armed.then(|| {
             (
                 safe_truncate(notice.unwrap_or(hint), width),
@@ -2269,37 +2321,50 @@ pub(super) fn draw_agent_chat_frame(
             );
         }
     }
+    if state.editable
+        && armed
+        && area.height >= 2
+        && area.width >= 3
+        && let Some(rows) = draft_rows
+    {
+        frame.set_cursor_position(Position {
+            x: area.x
+                + 2
+                + u16::try_from(rows.cursor_cells)
+                    .unwrap_or(u16::MAX)
+                    .min(area.width - 3),
+            y: area.y + 1,
+        });
+    }
 }
 
 pub(super) fn agent_choice_rows(height: u16, count: usize) -> usize {
-    usize::from(height / 3).min(4).min(count)
+    usize::from(height.saturating_sub(3))
+        .min(crate::presentation::MAX_AGENT_ROWS)
+        .min(count)
 }
 
 pub(super) fn agent_detail_rows(height: u16, count: usize) -> usize {
-    usize::from(height.saturating_sub(2)).saturating_sub(agent_choice_rows(height, count))
+    usize::from(height.saturating_sub(3)).saturating_sub(agent_choice_rows(height, count))
 }
 
 pub(super) fn agent_picker_index(
     area: Rect,
     column: u16,
     row: u16,
-    selected: usize,
+    selected: Option<usize>,
     count: usize,
 ) -> Option<usize> {
     let visible = agent_choice_rows(area.height, count);
-    if visible == 0
-        || column < area.left()
+    let first = area.top().saturating_add(2);
+    if column < area.left()
         || column >= area.right()
-        || row <= area.top()
-        || row
-            > area
-                .top()
-                .saturating_add(u16::try_from(visible).unwrap_or(u16::MAX))
+        || row < first
+        || usize::from(row - first) >= visible
     {
         return None;
     }
-    let start = selected.saturating_sub(visible.saturating_sub(1));
-    let index = start.saturating_add(usize::from(row - area.top() - 1));
+    let index = super::agents::window_start(selected, visible) + usize::from(row - first);
     (index < count).then_some(index)
 }
 

@@ -368,6 +368,172 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
 
 #[test]
 #[cfg(target_os = "linux")]
+fn state_instructions_precede_project_rules_and_replay_only_digests() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    const OMITTED: &[u8] = b"PARENT_INSTRUCTION_CANARY";
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("AGENTS.md"), "ROOT_RULE").expect("root guidance");
+    std::fs::write(temp.path().join("AGENTS.md"), OMITTED).expect("parent guidance");
+    let other_state = temp.path().join("other-state");
+    std::fs::create_dir(&other_state).expect("alternate State");
+    std::fs::write(other_state.join("AGENTS.md"), "OTHER_STATE_CANARY").expect("alternate file");
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
+    loopback::write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let global = state.join("AGENTS.md");
+    let write_global = |text: &str| {
+        std::fs::write(&global, text).expect("user guidance");
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))
+            .expect("user guidance mode");
+    };
+    write_global("USER_RULE");
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).expect("bounded accept");
+        for (index, user_rule) in ["", "", "", "USER_RULE", "NEWER_USER_RULE"]
+            .into_iter()
+            .enumerate()
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "request {index} missing");
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            };
+            let request = loopback::read_request(&mut stream);
+            for canary in [OMITTED, b"OTHER_STATE_CANARY"] {
+                assert!(
+                    !request.windows(canary.len()).any(|part| part == canary),
+                    "omitted input disclosed in request {index}"
+                );
+            }
+            if index < 3 {
+                let text = match index {
+                    0 => serde_json::json!("ok"),
+                    1 => {
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
+                    }
+                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                };
+                loopback::send_response(&mut stream, index, text);
+                continue;
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request).expect("bounded request JSON");
+            assert_eq!(body["input"][0]["role"], "user");
+            assert_eq!(
+                body["input"][0]["content"],
+                serde_json::json!([
+                    {"type": "input_text", "text": format!("# AGENTS.md instructions for user AGENTS.md\n\n<INSTRUCTIONS>\n{user_rule}\n</INSTRUCTIONS>")},
+                    {"type": "input_text", "text": "# AGENTS.md instructions for AGENTS.md\n\n<INSTRUCTIONS>\nROOT_RULE\n</INSTRUCTIONS>"},
+                ]),
+                "user block first, then the project block"
+            );
+            let rule = body["instructions"].as_str().expect("system prompt");
+            assert!(rule.contains("repository files win over the user file"));
+            loopback::send_response(&mut stream, index, serde_json::json!("ok"));
+        }
+    });
+
+    loopback::check_profile(&workspace, &state);
+    let run = |select: &dyn Fn(&mut Command)| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace);
+        command.arg("exec");
+        select(&mut command);
+        command
+            .arg("--workspace")
+            .arg(&workspace)
+            .args([
+                "--provider",
+                "custom:local",
+                "--model",
+                "model-1",
+                "--collaboration",
+                "single",
+                "answer",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = loopback::wait_product(command.spawn().expect("product exec process"));
+        assert!(
+            output.status.success(),
+            "instruction exit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"Answer:\n  ok\n");
+        SessionId::from_str(
+            std::str::from_utf8(&output.stderr)
+                .expect("receipt UTF-8")
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("Session: "))
+                .expect("Session line"),
+        )
+        .expect("Session ID")
+    };
+    let first = run(&|command| {
+        command.arg("--state-dir").arg(&state);
+    });
+    // Replay reads only the pin; a later Run snapshots the changed file again.
+    write_global("NEWER_USER_RULE");
+    let second = run(&|command| {
+        command.env("ARANY_STATE_DIR", &state);
+    });
+    server.join().expect("loopback server completed");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime");
+    let store = Store::open_read_only(StateRoot::open_existing(&state).expect("existing State"))
+        .expect("read-only State");
+    for (session_id, text) in [(first, "USER_RULE"), (second, "NEWER_USER_RULE")] {
+        let events = runtime
+            .block_on(store.load_session(session_id))
+            .expect("canonical Events");
+        let view = SessionView::replay(session_id, &events)
+            .expect("strict replay")
+            .expect("Session");
+        let config = view.runs[0].config.as_ref().expect("pinned config");
+        assert_eq!(
+            config.user_instruction_digest,
+            Some(Sha256::digest(text.as_bytes()).into())
+        );
+        assert_eq!(config.instruction_sources.len(), 1);
+    }
+    runtime
+        .block_on(store.close())
+        .expect("close read-only State");
+    let database = std::fs::read(state.join("events.sqlite3")).expect("database bytes");
+    for canary in [
+        &b"USER_RULE"[..],
+        b"ROOT_RULE",
+        OMITTED,
+        b"OTHER_STATE_CANARY",
+    ] {
+        assert!(
+            !database.windows(canary.len()).any(|part| part == canary),
+            "instruction text stays out of the journal"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 #[ignore = "native Linux PTY workspace consent and restoration gate"]
 fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -658,6 +824,18 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 &mut transcript,
                 &mut answered,
                 from,
+                b"Choose what to manage",
+            );
+            let from = transcript.len();
+            input
+                .write_all(if linear { b"Folder trust\r" } else { b"\r" })
+                .unwrap();
+            wait(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
                 b"Do you trust this folder?",
             );
             if trust {
@@ -718,6 +896,18 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                     &mut transcript,
                     &mut answered,
                     from,
+                    b"Choose what to manage",
+                );
+                let from = transcript.len();
+                input
+                    .write_all(if linear { b"Folder trust\r" } else { b"\r" })
+                    .unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
                     b"Do you trust this folder?",
                 );
                 let record = temp
@@ -763,6 +953,18 @@ fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_tru
                 );
                 let from = transcript.len();
                 input.write_all(b"/permissions\r").unwrap();
+                wait(
+                    &mut output,
+                    &mut input,
+                    &mut transcript,
+                    &mut answered,
+                    from,
+                    b"Choose what to manage",
+                );
+                let from = transcript.len();
+                input
+                    .write_all(if linear { b"Folder trust\r" } else { b"\r" })
+                    .unwrap();
                 wait(
                     &mut output,
                     &mut input,
@@ -959,6 +1161,14 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut transcript,
         &mut answered,
         "/permissions",
+    );
+    input.write_all(b"\r").unwrap();
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Choose what to manage",
     );
     input.write_all(b"\r").unwrap();
     wait(
@@ -1490,4 +1700,252 @@ fn folder_consent_precedes_setup_and_remembers_only_the_exact_trusted_directory(
     assert_ne!(std::fs::metadata(&workspace).unwrap().ino(), identity.ino());
     probe(&["--setup"], true, None);
     assert_eq!(std::fs::read(&record).unwrap(), remembered);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+#[cfg_attr(
+    not(arany_ci),
+    ignore = "native Linux PTY typed Git rule editing through /permissions"
+)]
+fn typed_prefix_permissions_edit_remove_and_restart() {
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::{io::Write, os::unix::fs::PermissionsExt};
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("project");
+    std::fs::create_dir(&workspace).unwrap();
+    let account_home = temp.path().join("account-home");
+    std::fs::create_dir(&account_home).unwrap();
+    std::fs::set_permissions(&account_home, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = account_home.join(".local/state/arany");
+    super::isolation::remember_workspace_trust(&account, &workspace, &workspace);
+    let state = temp.path().join("state");
+    let shell = "stty rows 24 cols 80; /arany --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4";
+    let mut command = super::isolation::isolated_script(temp.path());
+    command
+        .env_clear()
+        .env("ARANY_TEST_STATE", &state)
+        .env("ARANY_TEST_WORKSPACE", &workspace)
+        .env("OPENAI_API_KEY", "synthetic-never-sent-key")
+        .env("SHELL", "/bin/sh")
+        .env("TERM", "xterm-256color")
+        .current_dir(&workspace)
+        .args(["-q", "-e", "-c", shell, "/dev/null"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = super::loopback::ChildGuard::new(command.spawn().unwrap());
+    let mut input = child.child().stdin.take().unwrap();
+    let mut output = child.child().stdout.take().unwrap();
+    let flags = fcntl_getfl(&output).unwrap();
+    fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+    let mut transcript = Vec::new();
+    let mut answered = crate::session_picker::PtyResponses::manual_consent();
+    let file = state.join("permissions.json");
+    fn until(
+        output: &mut std::process::ChildStdout,
+        input: &mut std::process::ChildStdin,
+        transcript: &mut Vec<u8>,
+        answered: &mut crate::session_picker::PtyResponses,
+        what: &str,
+        ready: &dyn Fn(&[u8]) -> bool,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready(transcript) {
+            super::session_picker::pump(output, input, transcript, answered);
+            assert!(
+                Instant::now() < deadline,
+                "{what}: {}",
+                super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
+            );
+            thread::yield_now();
+        }
+    }
+    let shows = |needle: &'static str| {
+        move |transcript: &[u8]| super::session_picker::screen_contains(transcript, 80, 24, needle)
+    };
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "composer",
+        &shows("Ask a question, or type / for commands"),
+    );
+    input.write_all(b"/permissions\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "area menu",
+        &shows("Choose what to manage"),
+    );
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "rules list with the settings creation note",
+        &shows("creates permissions.json"),
+    );
+    input.write_all(b"\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "verb menu",
+        &shows("gh pr create (unavailable; human approval required)"),
+    );
+    assert!(super::session_picker::screen_contains(
+        &transcript,
+        80,
+        24,
+        "unavailable; human approval required"
+    ));
+    input.write_all(b"\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "decision menu",
+        &shows("Rule decision"),
+    );
+    input.write_all(b"\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "scope menu",
+        &shows("Rule scope"),
+    );
+    input.write_all(b"\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "saved rule",
+        &|_| file.exists(),
+    );
+    let value: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(value["permissions"]["defaultMode"], "default");
+    assert_eq!(
+        value["permissions"]["typedPrefixes"][0]["prefix"],
+        serde_json::json!(["git", "commit"])
+    );
+    assert_eq!(
+        value["permissions"]["typedPrefixes"][0]["decision"],
+        "allow"
+    );
+    assert_eq!(
+        value["permissions"]["typedPrefixes"][0]["workspace"]["path"],
+        workspace.to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "listed rule",
+        &shows("allow git commit"),
+    );
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "rule menu",
+        &shows("Remove rule"),
+    );
+    // Change the decision to ask before removing the rule.
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "changed rule",
+        &|_| {
+            std::fs::read_to_string(&file)
+                .unwrap()
+                .contains(r#""decision":"ask""#)
+        },
+    );
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "listed changed rule",
+        &shows("ask git commit"),
+    );
+    input.write_all(b"\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "second rule menu",
+        &shows("Remove rule"),
+    );
+    input.write_all(b"\x1b[B\x1b[B\x1b[B\r").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "removed rule",
+        &|_| {
+            !std::fs::read_to_string(&file)
+                .unwrap()
+                .contains("typedPrefixes")
+        },
+    );
+    input.write_all(b"\x1b").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "saved notice",
+        &shows("Typed Git rules saved"),
+    );
+    input.write_all(b"\x03").unwrap();
+    until(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "exit hint",
+        &shows("Ctrl+C again exits"),
+    );
+    input.write_all(b"\x03").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let status = loop {
+        super::session_picker::pump(&mut output, &mut input, &mut transcript, &mut answered);
+        if let Some(status) = child.child().try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "chat did not exit");
+        thread::yield_now();
+    };
+    assert!(status.success());
+    let reopened = arany::StateRoot::open_existing(&state).unwrap();
+    assert!(
+        arany::permissions::PermissionSettings::load(&reopened, &workspace)
+            .unwrap()
+            .typed_prefixes()
+            .is_empty()
+    );
 }
