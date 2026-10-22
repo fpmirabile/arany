@@ -931,6 +931,7 @@ pub(super) enum ActiveSubmission {
     Notice(String),
     OpenAgents,
     OpenHelp,
+    OpenUsage { status: bool },
     OpenTranscript,
     OpenAgentChats(Option<usize>),
     ReadClipboard,
@@ -942,6 +943,15 @@ pub(super) fn handle_active_submission(
     starting_sequence: u64,
 ) -> ActiveSubmission {
     let notice = match composer.submission() {
+        Ok(Submission::Command {
+            command: command @ (InteractiveCommand::Usage | InteractiveCommand::Status),
+            argument: None,
+        }) => {
+            composer.take();
+            return ActiveSubmission::OpenUsage {
+                status: command == InteractiveCommand::Status,
+            };
+        }
         Ok(Submission::Command {
             command: InteractiveCommand::Transcript,
             argument: None,
@@ -1260,10 +1270,9 @@ pub(super) async fn handle_command(
             },
             None => format!("Next-Run collaboration: {}", view.defaults.policy),
         },
-        InteractiveCommand::Status if view.created_sequence == 0 => {
-            "New conversation · not saved · 0 Runs".into()
+        InteractiveCommand::Usage | InteractiveCommand::Status => {
+            return Err("Usage requires the terminal report".into());
         }
-        InteractiveCommand::Status => format!("Session {session_id} · {} Runs", view.runs.len()),
         InteractiveCommand::Help => {
             return Err("Help requires the terminal command registry".into());
         }
@@ -1333,28 +1342,6 @@ pub(super) fn active_command_notice(
         .last()
         .filter(|run| run.accepted_sequence > starting_sequence);
     match command {
-        InteractiveCommand::Status => match run {
-            Some(run) => {
-                let agents = format!(
-                    "{} agent{}",
-                    run.agents.len(),
-                    if run.agents.len() == 1 { "" } else { "s" }
-                );
-                match run
-                    .config
-                    .as_ref()
-                    .and_then(|config| config.context_usage.as_ref())
-                    .filter(|_| run.status == arany::RunStatus::Active)
-                {
-                    Some(usage) => format!(
-                        "Working · request {}% of local limit · {agents}. Includes chat, instructions, files and images; not model tokens. Details: /agents",
-                        usage.utilization_percent(),
-                    ),
-                    None => format!("Task: {} · {agents} · details: /agents", run.status),
-                }
-            }
-            None => "Preparing message · Ctrl+C cancels".into(),
-        },
         InteractiveCommand::Goal => crate::presentation::goal_status(view),
         InteractiveCommand::Agents => {
             "/agents changes are unavailable while a Run is active; /agents opens details; Ctrl+C cancels".into()
@@ -1438,6 +1425,7 @@ mod tests {
     #[test]
     fn active_submissions_keep_objectives_local_and_lock_mutations() {
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "Current".into(),
@@ -1454,6 +1442,16 @@ mod tests {
             compactions: Vec::new(),
         };
         let starting_sequence = view.last_sequence;
+        for command in ["/usage", "/status"] {
+            let mut draft = Composer::default();
+            for character in command.chars() {
+                draft.apply(TerminalInput::Character(character));
+            }
+            assert!(
+                matches!(handle_active_submission(&mut draft, &view, starting_sequence), ActiveSubmission::OpenUsage { status } if status == (command == "/status"))
+            );
+        }
+
         let mut composer = Composer::default();
         for character in "//literal".chars() {
             composer.apply(TerminalInput::Character(character));
@@ -1660,9 +1658,10 @@ mod tests {
             provider_fallbacks: Vec::new(),
             provider_retries: Vec::new(),
         });
-        assert_eq!(
-            active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-            "Task: working · 1 agent · details: /agents"
+        assert!(
+            crate::presentation::usage_pages(&view, true, Some(starting_sequence))
+                .concat()
+                .contains("Task: working · 1 agent · details: /agents")
         );
         view.runs.last_mut().expect("active Run").config = Some(RunConfig {
             supervisor: None,
@@ -1699,18 +1698,17 @@ mod tests {
             compaction_content_digest: None,
             tool_policy: None,
         });
-        let notice = active_command_notice(&view, InteractiveCommand::Status, starting_sequence);
-        assert!(notice.starts_with("Working · request 49% of local limit · 1 agent."));
+        let notice =
+            crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();
+        assert!(notice.contains("Request: 49% of local request budget; not model tokens"));
         assert!(notice.contains("not model tokens"));
         assert!(!notice.contains(&run_id.to_string()));
-        assert!("Working · request 49% of local limit".chars().count() <= 40);
         for status in [RunStatus::Finished, RunStatus::Failed, RunStatus::Cancelled] {
             view.runs.last_mut().expect("latest Run").status = status;
-            assert_eq!(
-                active_command_notice(&view, InteractiveCommand::Status, starting_sequence),
-                format!("Task: {status} · 1 agent · details: /agents"),
-                "current terminal facts remain visible without active context usage"
-            );
+            let report =
+                crate::presentation::usage_pages(&view, true, Some(starting_sequence)).concat();
+            assert!(report.contains(&format!("Task: {status} · 1 agent · details: /agents")));
+            assert!(!report.contains("Request:"));
             assert_eq!(
                 active_command_notice(&view, InteractiveCommand::Model, starting_sequence),
                 "Model: gpt-5.4 · default; /model changes are unavailable while a Run is active; Ctrl+C cancels"
@@ -1744,7 +1742,6 @@ mod tests {
                 "/model",
                 "Model: claude-sonnet-5 · low; /model changes are unavailable while a Run is active; Ctrl+C cancels".to_owned(),
             ),
-            ("/status", "Preparing message · Ctrl+C cancels".to_owned()),
         ] {
             for character in command.chars() {
                 composer.apply(TerminalInput::Character(character));
@@ -1755,6 +1752,25 @@ mod tests {
                 panic!("admission inspection must remain local")
             };
             assert_eq!(notice, expected, "{command} before current Run progress");
+            assert!(composer.is_empty());
+            assert_eq!(view.defaults, defaults);
+        }
+        for (command, expected_status) in [("/status", true), ("/usage", false)] {
+            composer.insert_paste(command).unwrap();
+            let ActiveSubmission::OpenUsage { status } =
+                handle_active_submission(&mut composer, &view, starting_sequence)
+            else {
+                panic!("admission inspection must open the local usage report")
+            };
+            assert_eq!(status, expected_status);
+            let report =
+                crate::presentation::usage_pages(&view, status, Some(starting_sequence)).concat();
+            assert_eq!(
+                report.contains("Preparing message · Ctrl+C cancels"),
+                expected_status
+            );
+            assert!(!report.contains("Task:"));
+            assert!(!report.contains("Request:"));
             assert!(composer.is_empty());
             assert_eq!(view.defaults, defaults);
         }
@@ -2036,6 +2052,7 @@ mod tests {
     #[test]
     fn idle_validation_rejects_local_arguments_before_any_effect() {
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "Current".into(),

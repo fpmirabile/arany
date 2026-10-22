@@ -487,6 +487,7 @@ impl AgentTranscript {
         Some(Self {
             label,
             view: SessionView {
+                usage: Default::default(),
                 rewinds: Default::default(),
                 id: view.id,
                 title: String::new(),
@@ -684,6 +685,7 @@ pub(crate) mod tests {
 
     fn view() -> SessionView {
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "Session".into(),

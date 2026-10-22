@@ -53,6 +53,7 @@ mod goal_recovery_tests {
             finished_sequence: disposition.map(|_| 2),
         };
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Interrupted Goal".into(),
@@ -536,6 +537,12 @@ mod goal_replay_tests {
                 agent,
                 config(CollaborationPolicy::Single, false),
             ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: agent,
+                active_ceiling_ms: 0,
+            });
             events.push(Event::AgentFinished {
                 worker: None,
                 run_id: run,
@@ -557,7 +564,10 @@ mod goal_replay_tests {
             let result = SessionView::replay(session, &session_with(session, events));
             assert_eq!(result.is_ok(), accepted, "{disposition:?} {failure:?}");
             if accepted {
-                assert_eq!(result.unwrap().unwrap().runs[0].failure, failure);
+                let view = result.unwrap().unwrap();
+                assert_eq!(view.runs[0].failure, failure);
+                assert_eq!(view.usage.pending, [(session, run, Some(agent))]);
+                assert!(view.usage.groups.is_empty());
             }
         }
     }
@@ -1110,6 +1120,8 @@ mod goal_replay_tests {
         assert_eq!(view.goals[0].provider_calls, 4);
         assert!(view.goals[0].token_usage_unknown);
         assert_eq!(view.runs[0].provider_retries.len(), 3);
+        assert_eq!(view.usage.groups[0].input.unreported, 4);
+        assert!(view.usage.pending.is_empty());
         for (end, _) in valid
             .iter()
             .enumerate()
@@ -1120,6 +1132,7 @@ mod goal_replay_tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+            assert_eq!(open.usage.pending, [(session, run, Some(actor))]);
             assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
         }
         let position = |events: &[Event], attempt: u8| {
@@ -2479,6 +2492,7 @@ mod goal_replay_tests {
         assert_eq!(goal.status, GoalStatus::Running);
         assert_eq!(goal.compaction_call_reserved, None);
         assert_eq!(goal.uncertain_compaction_calls, 1);
+        assert!(view.usage.pending.contains(&(session_id, run_id, None)));
         assert!(goal.token_usage_unknown);
     }
 
@@ -3423,6 +3437,7 @@ mod goal_replay_tests {
             },
         };
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -4553,6 +4568,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -4725,6 +4741,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -7173,6 +7190,27 @@ mod goal_replay_tests {
         let mut replayed = view.clone();
         apply(&mut replayed, whole).expect("the whole step is covered");
         assert_eq!(replayed.goals[0].compaction_call_reserved, None);
+        assert_eq!(
+            replayed
+                .usage
+                .groups
+                .iter()
+                .map(|group| group.input.unreported)
+                .sum::<u64>(),
+            view.usage
+                .groups
+                .iter()
+                .map(|group| group.input.unreported)
+                .sum::<u64>()
+                + 1
+        );
+        assert!(
+            !replayed
+                .usage
+                .pending
+                .iter()
+                .any(|(_, id, actor)| *id == run && actor.is_none())
+        );
     }
 
     #[test]

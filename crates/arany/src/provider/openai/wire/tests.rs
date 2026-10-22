@@ -645,6 +645,59 @@ fn openai_usage_maps_cached_tokens() {
         assert!(decode(&request, &malformed).is_err());
         assert!(decode_streamed(&request, &malformed).is_err());
     }
+    for (details, read, written, valid) in [
+        (json!({"cache_write_tokens": 7}), None, Some(7), true),
+        (
+            json!({"cached_tokens": 0, "cache_write_tokens": 0}),
+            Some(0),
+            Some(0),
+            true,
+        ),
+        (
+            json!({"cached_tokens": 5, "cache_write_tokens": 7}),
+            Some(5),
+            Some(7),
+            true,
+        ),
+        (
+            json!({"cached_tokens": 5, "cache_write_tokens": 8}),
+            Some(5),
+            Some(8),
+            false,
+        ),
+        (
+            json!({"cached_tokens": u32::MAX, "cache_write_tokens": 1}),
+            Some(u32::MAX),
+            Some(1),
+            false,
+        ),
+        (json!({}), None, None, true),
+    ] {
+        finish["usage"]["input_tokens_details"] = details;
+        let usage = decode(&request, &finish).unwrap().usage;
+        assert_eq!(usage.cache_read_input_tokens, read);
+        assert_eq!(usage.cache_creation_input_tokens, written);
+        assert_eq!(super::super::valid_usage(usage, 64), valid);
+        assert_eq!(decode_streamed(&request, &finish).unwrap().usage, usage);
+        let mut compact = finish.clone();
+        compact["output"] = json!([message("summary")]);
+        assert_eq!(
+            decode_compaction(&serde_json::to_vec(&compact).unwrap(), MODEL)
+                .unwrap()
+                .usage,
+            usage
+        );
+    }
+    for invalid in [
+        json!(-1),
+        json!(1.5),
+        json!("5"),
+        json!(u64::from(u32::MAX) + 1),
+    ] {
+        finish["usage"]["input_tokens_details"] = json!({"cache_write_tokens": invalid});
+        assert!(decode(&request, &finish).is_err());
+        assert!(decode_streamed(&request, &finish).is_err());
+    }
     finish["usage"] = json!({"input_tokens": 12, "output_tokens": 8});
     let uncached = decode(&request, &finish).expect("usage without cache details");
     assert_eq!(uncached.usage.cache_read_input_tokens, None);

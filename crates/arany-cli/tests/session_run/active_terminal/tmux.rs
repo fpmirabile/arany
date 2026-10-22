@@ -448,7 +448,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
             let deadline = Instant::now() + Duration::from_secs(10);
             loop {
                 if let Some(screen) = capture_pane(&server)
-                    && String::from_utf8_lossy(&screen).contains("1-4 Enter Esc")
+                    && String::from_utf8_lossy(&screen).contains("1-5 Enter Esc")
                 {
                     break;
                 }
@@ -476,7 +476,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/21")
+                        if screen.contains("Commands 1/23")
                             && screen.contains("1. /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -492,8 +492,8 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 21/21")
-                            && screen.contains("21. /exit")
+                        if screen.contains("Commands 23/23")
+                            && screen.contains("23. /exit")
                             && screen.contains("Exit Session")
                         {
                             break;
