@@ -17,7 +17,7 @@ Arany aims to do the hard thinking about teams for you: on a big task it plans t
 
 ## Status
 
-Development beta; Linux and macOS have native Tool enforcement, but platform verification and release checks remain incomplete. Teams today are read-only researcher children: a primary agent can delegate bounded read-only work. Editing teams are in progress; see [next steps](./NEXT_STEPS.md) for the order and for remaining gaps. The [beta plan](./planning/agentic-teams/README.md) describes the team design.
+Development beta; Linux and macOS have native Tool enforcement, but platform verification and release checks remain incomplete. Teams today are read-only researcher children: a primary agent can delegate bounded read-only work. Editing teams are in progress; see [next steps](./NEXT_STEPS.md) for the order and for remaining gaps. The [planning index](./planning/README.md#active-plans) locates proposed team features.
 
 ## Get started
 
