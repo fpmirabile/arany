@@ -1060,6 +1060,13 @@ impl ToolRuntime {
         }
     }
 
+    pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
+        self.cache_state.as_ref().is_some_and(|state| {
+            Self::load_permissions(state)
+                .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
+        })
+    }
+
     pub(crate) async fn host_interpreter_admitted(&self, intent: &EffectIntent) -> bool {
         let ToolCall::CommandUnguarded { program, .. } = &intent.call else {
             return false;
@@ -1206,11 +1213,7 @@ impl ToolRuntime {
         if !self.host_interpreter_admitted(&intent).await {
             return unstarted_observation(intent, ToolError::Configuration);
         }
-        let settings_match = self.cache_state.as_ref().is_some_and(|state| {
-            Self::load_permissions(state)
-                .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
-        });
-        if !self.host_settings_admitted || !settings_match {
+        if !self.host_settings_admitted || !self.host_settings_current(pin) {
             return unstarted_observation(intent, ToolError::ChangedInput);
         }
         let checked_pin = pin.clone();

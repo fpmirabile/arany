@@ -411,6 +411,12 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .run_replying(
             vec![
                 tool_outcome(commit("third")),
+                tool_outcome(ToolCall::CommandUnguarded {
+                    program: "find".into(),
+                    args: vec![".".into()],
+                    cwd: String::new(),
+                    justification: "Inspect after saving the approved typed rule".into(),
+                }),
                 tool_outcome(commit("again")),
                 answer(),
             ],
@@ -427,6 +433,14 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .await;
     let first = outcome.unwrap();
     assert_eq!(asked, 2, "the saved rule applies only from the next Run");
+    let refused = first.run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(refused.disposition, ToolDisposition::Denied);
+    assert!(
+        refused
+            .output
+            .contains("permission settings changed outside admission")
+    );
+    assert!(refused.attestation.is_none());
     assert_eq!(
         offered,
         [Some(TypedGitPrefix::Commit), Some(TypedGitPrefix::Commit)]
@@ -486,6 +500,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         assert_eq!(next.run.unguarded_tools(), 0);
     }
     let (_, view) = repo.reopen(engine, first.session_id).await;
+    assert_eq!(view.runs[0].tools[1].observation.as_ref(), Some(refused));
     let verdict = verdict_of(&view, 0);
     assert_eq!(
         (verdict.source, verdict.basis, verdict.approved),

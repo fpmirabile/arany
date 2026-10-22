@@ -2775,6 +2775,9 @@ async fn unguarded_gate(
         .host
         .as_ref()
         .ok_or(UnguardedRefusal::UnavailableProgram)?;
+    if !runtime.host_settings_current(pin) {
+        return Err(UnguardedRefusal::SettingsChanged);
+    }
     if !runtime.host_interpreter_admitted(intent).await {
         return Err(UnguardedRefusal::InterpreterNotAdmitted);
     }

@@ -800,6 +800,67 @@ async fn changed_permission_settings_require_explicit_readmission() {
 }
 
 #[tokio::test]
+async fn live_settings_drift_refuses_before_prompt_and_rechecks_after_approval() {
+    for before_prompt in [true, false] {
+        let host = Host::new(None);
+        let path = host.state.join("permissions.json");
+        let edited = path.clone();
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![tool_outcome(unguarded(SCRIPT)), finish("done")])
+                .with_before_call(0, move || {
+                    if before_prompt {
+                        private_file(&edited, b"{}");
+                    }
+                }),
+        );
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let mut input = request(&host.workspace, "Inspect a command under changed settings");
+        input.include_paths.clear();
+        input.goal.budget = Some(budget());
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompts = 0;
+        let outcome = {
+            let running = run_with(&host.engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        assert!(approval.unguarded.is_some());
+                        prompts += 1;
+                        private_file(&path, b"{}");
+                        approval.decide(ApprovalReply::AllowOnce);
+                    }
+                }
+            }
+        };
+        assert_eq!(prompts, usize::from(!before_prompt));
+        assert_eq!(outcome.run.unguarded_tools(), 0);
+        assert!(!host.workspace.join("ran.txt").exists());
+        let (_, view) = host.reopen(outcome.session_id).await;
+        let tool = view.runs[0].tools.last().unwrap();
+        let observation = tool.observation.as_ref().unwrap();
+        assert!(observation.attestation.is_none());
+        if before_prompt {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Denied);
+            assert!(
+                observation
+                    .output
+                    .contains("permission settings changed outside admission")
+            );
+            assert!(!tool.permission_verdict.as_ref().unwrap().approved);
+        } else {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Failed);
+            assert!(tool.permission_verdict.as_ref().unwrap().approved);
+        }
+    }
+}
+
+#[tokio::test]
 async fn every_privilege_tool_is_handed_off_without_approval_or_dispatch() {
     for program in [
         "sudo",
