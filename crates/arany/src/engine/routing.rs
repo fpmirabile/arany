@@ -254,6 +254,33 @@ impl CallRouter<'_> {
                 deadline,
                 cancellation.clone(),
                 preview.clone(),
+                #[cfg(feature = "test-support")]
+                if role == ProviderRole::Primary {
+                    self.journal.tool_latency.get().map(|recorder| {
+                        let index = self
+                            .ledger
+                            .view(|view| {
+                                view.runs
+                                    .last()
+                                    .and_then(|run| {
+                                        run.agents
+                                            .iter()
+                                            .find(|agent| agent.id == scope.agent_run_id)
+                                    })
+                                    .map_or(0, |agent| agent.provider_calls.len())
+                            })
+                            .expect("live measurement scope");
+                        crate::test_support::latency::Receipt {
+                            recorder,
+                            session_id: scope.session_id,
+                            run_id: scope.run_id,
+                            agent_run_id: scope.agent_run_id,
+                            call_index: index,
+                        }
+                    })
+                } else {
+                    None
+                },
             )
             .await;
             let facts = self.attempt_facts(
@@ -705,10 +732,18 @@ pub(super) async fn invoke_attempt(
     deadline: Instant,
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
+    #[cfg(feature = "test-support")] receipt: Option<crate::test_support::latency::Receipt<'_>>,
 ) -> AttemptResult {
-    let (result, transient) =
-        invoke_bounded_with_preview(provider, request, deadline, cancellation, preview.clone())
-            .await;
+    let (result, transient) = invoke_bounded_with_preview(
+        provider,
+        request,
+        deadline,
+        cancellation,
+        preview.clone(),
+        #[cfg(feature = "test-support")]
+        receipt,
+    )
+    .await;
     AttemptResult {
         result,
         transient,
