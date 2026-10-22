@@ -114,6 +114,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         run_id: run,
         agent_run_id: primary,
         record: ProviderCallRecord {
+            rate_limits: None,
             delegation: None,
             phase: AgentPhase::RootPlan,
             disposition,

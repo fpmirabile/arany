@@ -2842,6 +2842,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     run_id: interrupted_run,
                     agent_run_id: primary,
                     record: arany::ProviderCallRecord {
+                        rate_limits: None,
                         delegation: None,
                         phase: arany::AgentPhase::RootPlan,
                         disposition: arany::ProviderCallDisposition::Finished,

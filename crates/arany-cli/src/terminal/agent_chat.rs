@@ -582,7 +582,7 @@ impl AttachedTerminal {
         } else if self.mode == TerminalMode::Classic && chat.shown {
             // Settled native rows stay; the boundary marks where the primary resumes.
             self.prepare_frame()?;
-            self.insert_native(MessageKind::Notice, BACK_TO_PRIMARY)?;
+            self.insert_native(MessageKind::Notice, BACK_TO_PRIMARY, None)?;
         }
         Ok(())
     }
@@ -1085,7 +1085,7 @@ impl AttachedTerminal {
                     })
             {
                 let (kind, body) = notice_kind(text);
-                self.insert_native(kind, body)?;
+                self.insert_native(kind, body, None)?;
                 self.native.last_notice = Some((view.last_sequence, text.to_owned()));
             }
         } else if let Some(text) = history_notice {
@@ -1176,7 +1176,7 @@ impl AttachedTerminal {
             }
         }));
         for (kind, text) in records {
-            self.insert_native(kind, &text)?;
+            self.insert_native(kind, &text, None)?;
         }
         Ok(())
     }

@@ -2146,6 +2146,7 @@ impl RunLoop<'_> {
             return Err(error);
         }
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
+        let limits = crate::provider::RateLimitSlot::default();
         let result = self
             .routing
             .invoke(
@@ -2153,6 +2154,7 @@ impl RunLoop<'_> {
                 review_deadline,
                 self.controls.cancellation.clone(),
                 None,
+                limits.clone(),
             )
             .await?;
         self.settle_result(&result)?;
@@ -2167,7 +2169,14 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid, None, None),
+            record: call_record(
+                AgentPhase::ToolReview,
+                &result,
+                valid,
+                None,
+                None,
+                limits.take(),
+            ),
         })
         .await?;
         if let Some(active_segment) = active_segment {
