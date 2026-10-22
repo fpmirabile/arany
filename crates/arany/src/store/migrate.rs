@@ -1,5 +1,6 @@
 use super::journal::{SCHEMA_SQL, SCHEMA_VERSION, open_database};
 use super::replay::{ROWS_AFTER_SQL, RawRow, raw_row, resolve_view, validate_history};
+use super::state::checkpoints;
 use super::state::{
     HISTORY_FILES, Identity, archive_name, check_private_record_file, identity_of, nonblocking,
     private_subdirectory, publish, rename, step, sync, valid_archive_name,
@@ -46,34 +47,62 @@ pub(super) struct EventStep {
     pub(super) canonical: fn(&str) -> Option<String>,
 }
 
+pub(super) struct SchemaFormat {
+    pub(super) floor: i64,
+    pub(super) current: i64,
+    pub(super) schema: &'static str,
+    pub(super) steps: &'static [SchemaStep],
+}
+
+pub(super) const CHECKPOINT_SCHEMA: SchemaFormat = SchemaFormat {
+    floor: 1,
+    current: checkpoints::SCHEMA_VERSION,
+    schema: checkpoints::SCHEMA_SQL,
+    steps: &[],
+};
+
 pub(super) struct Registry<'a> {
-    pub(super) schema_floor: i64,
-    pub(super) schema_steps: &'a [SchemaStep],
+    pub(super) schema: SchemaFormat,
     pub(super) event_floor: &'a [(&'a str, i64)],
     pub(super) event_steps: &'a [EventStep],
 }
 
-// The glob Tool only added a call variant and a worker Tool label, so older payloads keep
-// their bytes; one that names glob is forged and refuses.
-macro_rules! glob_step {
-    ($kind:literal, $from:literal) => {
+// The glob Tool and the typed Git writes only added call variants (glob also a worker Tool
+// label), so older payloads keep their bytes; one naming a variant its version lacked is forged
+// and refuses.
+macro_rules! variant_step {
+    ($kind:literal, $from:literal, $before:path) => {
         EventStep {
             kind: $kind,
             from: $from,
             transform: |value| {
-                crate::session::pre_glob_payload($kind, &value.to_string())
-                    .and_then(|text| serde_json::from_str(&text).ok())
+                $before($kind, &value.to_string()).and_then(|text| serde_json::from_str(&text).ok())
             },
-            canonical: |payload| crate::session::pre_glob_payload($kind, payload),
+            canonical: |payload| $before($kind, payload),
         }
     };
 }
 
+macro_rules! glob_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_glob_payload)
+    };
+}
+
+macro_rules! git_write_step {
+    ($kind:literal, $from:literal) => {
+        variant_step!($kind, $from, crate::session::pre_git_write_payload)
+    };
+}
+
 pub(super) const REGISTRY: Registry<'static> = Registry {
-    schema_floor: 4,
-    schema_steps: &[SchemaStep {
-        from: 4,
-        source: "CREATE TABLE events (
+    schema: SchemaFormat {
+        floor: 4,
+        current: SCHEMA_VERSION,
+        schema: SCHEMA_SQL,
+        steps: &[SchemaStep {
+            from: 4,
+            source: "CREATE TABLE events (
                 sequence INTEGER PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 run_id TEXT,
@@ -97,7 +126,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 checked_at_ms INTEGER NOT NULL,
                 expires_at_ms INTEGER NOT NULL
             ) STRICT;",
-        sql: "CREATE TABLE migrations (
+            sql: "CREATE TABLE migrations (
                 id TEXT PRIMARY KEY CHECK (length(id) = 36),
                 from_schema INTEGER NOT NULL,
                 to_schema INTEGER NOT NULL,
@@ -105,7 +134,8 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 backup TEXT NOT NULL,
                 recorded_at_ms INTEGER NOT NULL
             ) STRICT;",
-    }],
+        }],
+    },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
         glob_step!("ToolStarted", 13),
@@ -121,12 +151,33 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             transform: crate::session::run_started_v18_to_v19,
             canonical: crate::session::run_started_v18_payload,
         },
+        EventStep {
+            kind: "RunStarted",
+            from: 19,
+            transform: crate::session::run_started_v19_to_v20,
+            canonical: crate::session::run_started_v19_payload,
+        },
         glob_step!("ProviderCallRecorded", 13),
+        git_write_step!("ToolStarted", 14),
+        git_write_step!("ToolFinished", 20),
+        git_write_step!("HookStarted", 4),
+        git_write_step!("HookFinished", 9),
+        git_write_step!("GoalPlanContractRecorded", 7),
+        git_write_step!("ProviderCallRecorded", 14),
+        EventStep {
+            kind: "ToolPermissionDecided",
+            from: 4,
+            transform: |value| {
+                crate::session::pre_typed_prefix_payload(&value.to_string())
+                    .and_then(|text| serde_json::from_str(&text).ok())
+            },
+            canonical: crate::session::pre_typed_prefix_payload,
+        },
     ],
 };
 
 // Payload versions when migrations landed; older history is archived, never upgraded.
-const EVENT_FLOOR: [(&str, i64); 41] = [
+const EVENT_FLOOR: [(&str, i64); 42] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
@@ -136,6 +187,7 @@ const EVENT_FLOOR: [(&str, i64); 41] = [
     ("GoalPlanContractRecorded", 6),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
+    ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
@@ -170,6 +222,20 @@ const EVENT_FLOOR: [(&str, i64); 41] = [
     ("ContextCompacted", 7),
 ];
 
+impl SchemaFormat {
+    fn step(&self, from: i64) -> Option<&SchemaStep> {
+        self.steps.iter().find(|step| step.from == from)
+    }
+
+    fn expected_schema(&self, version: i64) -> Option<&'static str> {
+        if version == self.current {
+            Some(self.schema)
+        } else {
+            self.step(version).map(|step| step.source)
+        }
+    }
+}
+
 impl Registry<'_> {
     fn event_floor(&self, kind: &str) -> Option<i64> {
         self.event_floor
@@ -182,18 +248,6 @@ impl Registry<'_> {
         self.event_steps
             .iter()
             .find(|step| step.kind == kind && step.from == from)
-    }
-
-    fn schema_step(&self, from: i64) -> Option<&SchemaStep> {
-        self.schema_steps.iter().find(|step| step.from == from)
-    }
-
-    fn expected_schema(&self, version: i64) -> Option<&'static str> {
-        if version == SCHEMA_VERSION {
-            Some(SCHEMA_SQL)
-        } else {
-            self.schema_step(version).map(|step| step.source)
-        }
     }
 
     // `None` for a current payload; prefix digests of older versions hash this canonical text.
@@ -432,7 +486,7 @@ pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool,
         id,
         source,
         from_schema,
-        to_schema: SCHEMA_VERSION,
+        to_schema: registry.schema.current,
         phase: Phase::Preparing,
     };
     if identity_of(&dir, &marker.backup)?.is_some() {
@@ -513,13 +567,14 @@ fn stage(
             [],
             |_| Ok(()),
         )?;
-        if !exact_schema(&staged, registry, marker.from_schema)? {
+        if !exact_schema(&staged, &registry.schema, marker.from_schema)? {
             return Err(StoreError::InvalidHistory);
         }
         let transaction = staged.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for from in marker.from_schema..SCHEMA_VERSION {
+        for from in marker.from_schema..registry.schema.current {
             let schema_step = registry
-                .schema_step(from)
+                .schema
+                .step(from)
                 .ok_or(StoreError::InvalidHistory)?;
             transaction.execute_batch(schema_step.sql)?;
         }
@@ -541,7 +596,7 @@ fn stage(
                 .unwrap_or(i64::MAX),
             ],
         )?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.pragma_update(None, "user_version", registry.schema.current)?;
         step()?;
         transaction.commit()?;
     }
@@ -705,6 +760,55 @@ pub(super) enum Inspection {
     Inconclusive,
 }
 
+pub(super) fn orphan_checkpoint_journal(root: &StateRoot) -> Result<bool, StoreError> {
+    let records = checkpoints::records(root)?;
+    let empty = records[0].as_ref().is_none_or(|file| file.len() == 0);
+    Ok(empty && checkpoint_journal_present(root)?)
+}
+
+pub(super) fn checkpoint_journal_present(root: &StateRoot) -> Result<bool, StoreError> {
+    Ok(identity_of(&root.dir, checkpoints::FILES[1])?.is_some())
+}
+
+// The caller holds the checkpoint lock; recovery also needs the exclusive history lock.
+pub(super) fn checkpoint_below_floor(root: &StateRoot) -> Result<bool, StoreError> {
+    let records = checkpoints::records(root)?;
+    if records[0].as_ref().is_none_or(|file| file.len() == 0) {
+        return Ok(false);
+    }
+    let path = root.path().join(checkpoints::FILES[0]);
+    let unreadable = |error: &StoreError| {
+        matches!(
+            error,
+            StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
+                if matches!(
+                    code.code,
+                    rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+                )
+        )
+    };
+    if checkpoint_journal_present(root)? {
+        match open_source(&path, false) {
+            Ok(connection) => drop(connection),
+            Err(error) if unreadable(&error) => {}
+            Err(error) => return Err(error),
+        }
+        if checkpoint_journal_present(root)? {
+            return Err(StoreError::InvalidStateDirectory);
+        }
+    }
+    let inspect = || -> Result<i64, StoreError> {
+        let connection = open_source(&path, true)?;
+        connection.busy_timeout(std::time::Duration::ZERO)?;
+        Ok(connection.query_row("PRAGMA user_version", [], |row| row.get(0))?)
+    };
+    match inspect() {
+        Ok(version) => Ok(version < CHECKPOINT_SCHEMA.floor),
+        Err(error) if unreadable(&error) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 // A read-only look leaves the database and WAL as found; only an inconclusive one needs a writable check.
 pub(super) fn inspect_history(root: &StateRoot) -> Inspection {
     let nonempty = identity_of(&root.dir, DATABASE_FILE)
@@ -733,13 +837,13 @@ fn migratable(connection: &Connection, registry: &Registry<'_>) -> Result<Option
         [],
         |row| row.get(0),
     )?;
-    if !(registry.schema_floor..=SCHEMA_VERSION).contains(&schema)
+    if !(registry.schema.floor..=registry.schema.current).contains(&schema)
         || has_events != 1
-        || !exact_schema(connection, registry, schema)?
+        || !exact_schema(connection, &registry.schema, schema)?
     {
         return Ok(None);
     }
-    let mut needed = schema != SCHEMA_VERSION;
+    let mut needed = schema != registry.schema.current;
     let mut statement = connection.prepare("SELECT DISTINCT kind, event_version FROM events")?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {
@@ -772,17 +876,26 @@ pub(super) fn schema_objects(connection: &Connection) -> Result<Vec<[String; 4]>
 }
 
 // Compared before any mutation, so no trigger or view can run during the rewrite.
-fn exact_schema(
+pub(super) fn exact_schema(
     connection: &Connection,
-    registry: &Registry<'_>,
+    format: &SchemaFormat,
     version: i64,
 ) -> Result<bool, StoreError> {
-    let Some(sql) = registry.expected_schema(version) else {
+    let Some(sql) = format.expected_schema(version) else {
         return Ok(false);
     };
     let expected = Connection::open_in_memory()?;
     expected.execute_batch(sql)?;
-    Ok(schema_objects(connection)? == schema_objects(&expected)?)
+    let expected = schema_objects(&expected)?;
+    let (count, oversized): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COUNT(CASE WHEN length(sql)>4096 THEN 1 END) FROM sqlite_schema",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if count != expected.len() as i64 || oversized != 0 {
+        return Ok(false);
+    }
+    Ok(schema_objects(connection)? == expected)
 }
 
 fn open_source(path: &std::path::Path, read_only: bool) -> Result<Connection, StoreError> {

@@ -30,7 +30,7 @@ impl ApprovalMode {
 
     pub(crate) fn asks(self, call: &ToolCall) -> bool {
         let facts = call.facts();
-        facts.asks_approval && (self != Self::AutoEdits || !facts.mutates)
+        facts.asks_approval && (self != Self::AutoEdits || !facts.typed_edit())
     }
 }
 
@@ -48,6 +48,7 @@ pub enum ApprovalReply {
     Deny,
     AllowOnce,
     AllowAlwaysInProject,
+    AllowPrefixInFolder,
 }
 
 impl From<bool> for ApprovalReply {
@@ -68,6 +69,7 @@ pub struct ToolApproval {
     pub intent: EffectIntent,
     pub unguarded: Option<UnguardedPrompt>,
     pub allow_auto_edits: bool,
+    pub remember_prefix: Option<super::permissions::TypedGitPrefix>,
     reply: oneshot::Sender<ApprovalReply>,
 }
 
@@ -119,15 +121,17 @@ impl ToolApprovals {
     }
 
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
-        self.ask_with_auto_edits(intent, false).await
+        self.ask_local(intent, false, None).await != ApprovalReply::Deny
     }
 
-    pub(crate) async fn ask_with_auto_edits(
+    pub(crate) async fn ask_local(
         &self,
         intent: &EffectIntent,
         allow_auto_edits: bool,
-    ) -> bool {
-        self.request(intent, None, allow_auto_edits).await != ApprovalReply::Deny
+        remember_prefix: Option<super::permissions::TypedGitPrefix>,
+    ) -> ApprovalReply {
+        self.request(intent, None, allow_auto_edits, remember_prefix)
+            .await
     }
 
     pub(crate) async fn ask_unguarded(
@@ -135,7 +139,7 @@ impl ToolApprovals {
         intent: &EffectIntent,
         prompt: UnguardedPrompt,
     ) -> ApprovalReply {
-        self.request(intent, Some(prompt), false).await
+        self.request(intent, Some(prompt), false, None).await
     }
 
     async fn request(
@@ -143,6 +147,7 @@ impl ToolApprovals {
         intent: &EffectIntent,
         unguarded: Option<UnguardedPrompt>,
         allow_auto_edits: bool,
+        remember_prefix: Option<super::permissions::TypedGitPrefix>,
     ) -> ApprovalReply {
         let (reply, response) = oneshot::channel();
         if self
@@ -151,6 +156,7 @@ impl ToolApprovals {
                 intent: intent.clone(),
                 unguarded,
                 allow_auto_edits,
+                remember_prefix,
                 reply,
             })
             .await
@@ -165,6 +171,113 @@ impl ToolApprovals {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn modes_only_preapprove_typed_file_edits_in_auto_edits() {
+        let cases = [
+            (ToolCall::Mkdir { path: "d".into() }, [true, false, true]),
+            (
+                ToolCall::Write {
+                    path: "a".into(),
+                    expected_digest: None,
+                    content: "x".into(),
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::Edit {
+                    path: "a".into(),
+                    expected_digest: "0".repeat(64),
+                    old: "x".into(),
+                    new: "y".into(),
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::ApplyChangeset {
+                    source: crate::session::worker::ChangesetSource::CommandReceipt {
+                        source_intent_digest: [1; 32],
+                        changeset: super::super::CommandChangeset::default(),
+                    },
+                },
+                [true, false, true],
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "m".into(),
+                    paths: vec!["src".into()],
+                    staged: false,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "m".into(),
+                    paths: Vec::new(),
+                    staged: true,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitBranch {
+                    name: Some("topic".into()),
+                    start_point: None,
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::Command {
+                    program: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::CommandUnguarded {
+                    program: "git".into(),
+                    args: vec!["status".into()],
+                    cwd: ".".into(),
+                    justification: "sandbox failure".into(),
+                },
+                [true; 3],
+            ),
+            (
+                ToolCall::Read {
+                    path: "a".into(),
+                    offset: None,
+                    limit: Some(1),
+                },
+                [false; 3],
+            ),
+            (ToolCall::GitStatus { path: ".".into() }, [false; 3]),
+            (
+                ToolCall::GitBranch {
+                    name: None,
+                    start_point: None,
+                },
+                [false; 3],
+            ),
+        ];
+        for (call, expected) in cases {
+            for (mode, asks) in [
+                ApprovalMode::Request,
+                ApprovalMode::AutoEdits,
+                ApprovalMode::Auto,
+            ]
+            .into_iter()
+            .zip(expected)
+            {
+                assert_eq!(mode.asks(&call), asks, "{mode:?}: {call:?}");
+            }
+        }
+    }
 
     #[test]
     fn mode_changes_never_restore_human_only_asks() {

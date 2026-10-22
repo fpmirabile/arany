@@ -131,22 +131,23 @@ impl FromStr for GoalId {
     }
 }
 
-pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
+pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("SessionStarted", 6),
     ("SessionDefaultChanged", 6),
     ("SessionForked", 6),
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 7),
+    ("GoalPlanContractRecorded", 8),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
+    ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
     ("AgentSpawned", 12),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 14),
+    ("ProviderCallRecorded", 15),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -163,15 +164,15 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 4),
-    ("HookStarted", 4),
-    ("HookFinished", 9),
-    ("ToolFinished", 20),
-    ("RunStarted", 19),
+    ("ToolPermissionDecided", 5),
+    ("HookStarted", 5),
+    ("HookFinished", 10),
+    ("ToolFinished", 21),
+    ("RunStarted", 20),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 14),
+    ("ToolStarted", 15),
     ("ContextCompacted", 7),
 ];
 
@@ -347,6 +348,12 @@ pub enum Event {
     GoalSteeringNoteRecorded {
         goal_id: GoalId,
         run_id: RunId,
+        text: String,
+    },
+    AgentSteeringNoteRecorded {
+        goal_id: GoalId,
+        run_id: RunId,
+        agent_run_id: AgentRunId,
         text: String,
     },
     AssistantDisplayRecorded {
@@ -680,6 +687,7 @@ impl Event {
             Self::GoalContextCompacted { .. } => "GoalContextCompacted",
             Self::ToolResultsCleared { .. } => "ToolResultsCleared",
             Self::GoalSteeringNoteRecorded { .. } => "GoalSteeringNoteRecorded",
+            Self::AgentSteeringNoteRecorded { .. } => "AgentSteeringNoteRecorded",
             Self::AssistantDisplayRecorded { .. } => "AssistantDisplayRecorded",
             Self::ToolStarted { .. } => "ToolStarted",
             Self::SupervisorVerdictRecorded { .. } => "SupervisorVerdictRecorded",
@@ -723,7 +731,12 @@ impl Event {
             | Self::RunStarted { run_id, .. }
             | Self::MessageCommitted { run_id, .. }
             | Self::RunFinished { run_id, .. } => (Some(*run_id), None),
-            Self::WorkerDataChunk {
+            Self::AgentSteeringNoteRecorded {
+                run_id,
+                agent_run_id,
+                ..
+            }
+            | Self::WorkerDataChunk {
                 run_id,
                 agent_run_id,
                 ..
@@ -989,7 +1002,8 @@ impl Event {
                 covered_tool_count: *covered_tool_count,
                 record: record.clone(),
             }),
-            Self::GoalSteeringNoteRecorded { goal_id, text, .. } => {
+            Self::GoalSteeringNoteRecorded { goal_id, text, .. }
+            | Self::AgentSteeringNoteRecorded { goal_id, text, .. } => {
                 serialize(&GoalSteeringNotePayload {
                     goal_id: *goal_id,
                     text: text.clone(),
@@ -1317,6 +1331,15 @@ impl Event {
                     text: data.text,
                 }
             }
+            "AgentSteeringNoteRecorded" if run_id.is_some() && agent_run_id.is_some() => {
+                let data: GoalSteeringNotePayload = parse(payload)?;
+                Self::AgentSteeringNoteRecorded {
+                    goal_id: data.goal_id,
+                    run_id: run_id.ok_or(ReplayError::InvalidPayload)?,
+                    agent_run_id: agent_run_id.ok_or(ReplayError::InvalidPayload)?,
+                    text: data.text,
+                }
+            }
             "ToolStarted" if run_id.is_some() && agent_run_id.is_some() => {
                 let data: ToolStartedPayload = parse(payload)?;
                 Self::ToolStarted {
@@ -1395,6 +1418,7 @@ impl Event {
             | "GoalContextCompacted"
             | "ToolResultsCleared"
             | "GoalSteeringNoteRecorded"
+            | "AgentSteeringNoteRecorded"
             | "AssistantDisplayRecorded"
             | "ToolStarted"
             | "ToolFinished"
@@ -1415,6 +1439,35 @@ impl Event {
 // The typed text a payload had before its kind only gained the glob variants, or `None`
 // when it names them (they did not exist) or does not parse.
 pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
+    before_operations(kind, payload, &["glob"], Some("glob"))
+}
+
+// The same for the typed Git write variants, which a later payload version added.
+pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String> {
+    before_operations(
+        kind,
+        payload,
+        &["git_commit", "git_branch", "git_switch"],
+        None,
+    )
+}
+
+// The typed text a verdict had before the typed prefix rule source existed, or `None` when it
+// names that source (it did not exist) or does not parse.
+pub(crate) fn pre_typed_prefix_payload(payload: &str) -> Option<String> {
+    let verdict: crate::tools::permissions::PermissionVerdict = parse(payload).ok()?;
+    let forged = |source| source == crate::tools::permissions::PermissionSource::TypedPrefixRule;
+    (!forged(verdict.basis) && !forged(verdict.source))
+        .then(|| serialize(&verdict).ok())
+        .flatten()
+}
+
+fn before_operations(
+    kind: &str,
+    payload: &str,
+    operations: &[&str],
+    worker_label: Option<&str>,
+) -> Option<String> {
     fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
         serialize(&parse::<T>(payload).ok()?).ok()
     }
@@ -1429,7 +1482,7 @@ pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
         _ => None,
     }?;
-    (!mentions_glob(&serde_json::from_str(&text).ok()?)).then_some(text)
+    (!mentions(&serde_json::from_str(&text).ok()?, operations, worker_label)).then_some(text)
 }
 
 // Checked before the Goal and Message facts that precede RunStarted commit.
@@ -1461,15 +1514,39 @@ pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_j
     Some(serde_json::Value::Object(payload))
 }
 
-// Version 18's hashed text: the current text with the sources written back as one digest.
+// Version 19 had no user-instruction field, so no global file was loaded.
+pub(crate) fn run_started_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(mut payload) = value else {
+        return None;
+    };
+    let serde_json::Value::Object(config) = payload.get_mut("config")? else {
+        return None;
+    };
+    if config.contains_key("user_instruction_digest") {
+        return None;
+    }
+    config.insert("user_instruction_digest".into(), serde_json::Value::Null);
+    Some(serde_json::Value::Object(payload))
+}
+
+const USER_DIGEST_FIELD: &str = r#""user_instruction_digest":null,"#;
+
+// Version 19's hashed text: the current text without the null user digest.
+pub(crate) fn run_started_v19_payload(payload: &str) -> Option<String> {
+    let value = run_started_v19_to_v20(serde_json::from_str(payload).ok()?)?;
+    let text = serialize(&parse::<RunStartedPayload>(&value.to_string()).ok()?).ok()?;
+    (text.matches(USER_DIGEST_FIELD).count() == 1).then(|| text.replacen(USER_DIGEST_FIELD, "", 1))
+}
+
+// Version 18's hashed text: version 19's with the sources written back as one digest.
 pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
     let value = run_started_v18_to_v19(serde_json::from_str(payload).ok()?)?;
-    let typed = parse::<RunStartedPayload>(&value.to_string()).ok()?;
-    let text = serialize(&typed).ok()?;
-    let sources = &typed.config.instruction_sources;
+    let sources: Vec<InstructionSource> =
+        serde_json::from_value(value["config"]["instruction_sources"].clone()).ok()?;
+    let text = run_started_v19_payload(&value.to_string())?;
     let current = format!(
         r#""instruction_sources":{},"launch_directory":"""#,
-        serialize(sources).ok()?
+        serialize(&sources).ok()?
     );
     let legacy = format!(
         r#""instruction_digest":{}"#,
@@ -1478,17 +1555,28 @@ pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
     (text.matches(&current).count() == 1).then(|| text.replacen(&current, &legacy, 1))
 }
 
-fn mentions_glob(value: &serde_json::Value) -> bool {
+fn mentions(value: &serde_json::Value, operations: &[&str], worker_label: Option<&str>) -> bool {
+    let named = |field: &serde_json::Value| {
+        field.as_str().is_some_and(|name| {
+            operations.iter().any(|operation| {
+                name == *operation || name.strip_prefix("arany_") == Some(operation)
+            })
+        })
+    };
     match value {
         serde_json::Value::Object(fields) => fields.iter().any(|(key, field)| {
-            (key == "operation" && (field == "glob" || field == "arany_glob"))
+            (key == "operation" && named(field))
                 || (key == "tools"
-                    && field
-                        .as_array()
-                        .is_some_and(|tools| tools.iter().any(|tool| tool == "glob")))
-                || mentions_glob(field)
+                    && worker_label.is_some_and(|label| {
+                        field
+                            .as_array()
+                            .is_some_and(|tools| tools.iter().any(|tool| tool == label))
+                    }))
+                || mentions(field, operations, worker_label)
         }),
-        serde_json::Value::Array(items) => items.iter().any(mentions_glob),
+        serde_json::Value::Array(items) => items
+            .iter()
+            .any(|item| mentions(item, operations, worker_label)),
         _ => false,
     }
 }

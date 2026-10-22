@@ -1,6 +1,9 @@
 use super::setup::SetupError;
 use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInput};
-use arany::{ApprovalMode, WorkspacePermissions, native_protection_supported};
+use arany::permissions::{
+    Decision, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
+};
+use arany::{ApprovalMode, StateRoot, WorkspacePermissions, native_protection_supported};
 use std::path::Path;
 
 pub(super) enum PermissionChoice {
@@ -87,6 +90,246 @@ pub(super) async fn admit(
         )
         .await
     }
+}
+
+const BACK: u8 = 0;
+const ADD: u8 = 1;
+const ENTRY_BASE: u8 = 2;
+const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
+const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
+const HOST_NOTE: &str = "unavailable; human approval required";
+
+pub(super) enum PermissionArea {
+    FolderTrust,
+    TypedGitRules,
+}
+
+pub(super) async fn choose_area(
+    terminal: &mut AttachedTerminal,
+) -> Result<Option<PermissionArea>, SetupError> {
+    Ok(
+        match super::setup::choose_focused(
+            terminal,
+            1,
+            "Permissions",
+            "Choose what to manage",
+            &[
+                (b'1', "Folder trust"),
+                (b'2', "Typed Git rules"),
+                (b'0', "Cancel"),
+            ],
+            None,
+        )
+        .await?
+        {
+            Some(b'1') => Some(PermissionArea::FolderTrust),
+            Some(b'2') => Some(PermissionArea::TypedGitRules),
+            _ => None,
+        },
+    )
+}
+
+fn decision_label(decision: Decision) -> &'static str {
+    match decision {
+        Decision::Allow => "allow",
+        Decision::Ask => "ask",
+        Decision::Deny => "deny",
+    }
+}
+
+fn verb_label(prefix: TypedGitPrefix) -> String {
+    if prefix.available() {
+        prefix.label().to_owned()
+    } else {
+        format!("{} ({HOST_NOTE})", prefix.label())
+    }
+}
+
+fn scope_label(folder: Option<&str>, workspace: &Path) -> String {
+    match folder {
+        None => "user-wide".into(),
+        Some(path) if std::ffi::OsStr::new(path) == workspace.as_os_str() => "this folder".into(),
+        Some(path) => format!("folder {}", crate::presentation::escape_terminal(path)),
+    }
+}
+
+async fn pick<T: Copy>(
+    terminal: &mut AttachedTerminal,
+    title: &str,
+    instruction: &str,
+    options: &[(T, String)],
+) -> Result<Option<T>, SetupError> {
+    let mut rows = options
+        .iter()
+        .enumerate()
+        .map(|(index, (_, label))| {
+            let index = u8::try_from(index).expect("pick lists are a few fixed options");
+            (ENTRY_BASE + index, label.as_str())
+        })
+        .collect::<Vec<_>>();
+    rows.push((BACK, "Back"));
+    Ok(
+        super::setup::choose_focused(terminal, 2, title, instruction, &rows, None)
+            .await?
+            .and_then(|value| value.checked_sub(ENTRY_BASE))
+            .and_then(|index| options.get(usize::from(index)))
+            .map(|(value, _)| *value),
+    )
+}
+
+pub(super) async fn manage_rules(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    workspace: &Path,
+) -> Result<String, SetupError> {
+    let mut notice = None::<String>;
+    let mut saved = false;
+    let mut uncertain = false;
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(
+                "Error: state directory unavailable or unsafe; permissions unchanged".into(),
+            );
+        };
+        let settings = match PermissionSettings::load(&state, workspace) {
+            Ok(settings) => settings,
+            Err(error) => return Ok(format!("Error: {error}; permissions unchanged")),
+        };
+        let entries = settings.typed_prefixes();
+        let mut rows = vec![(ADD, "Add a rule".to_owned())];
+        rows.extend(entries.iter().enumerate().map(|(index, entry)| {
+            let index = u8::try_from(index).expect("typed rules are capped at 128");
+            (
+                ENTRY_BASE + index,
+                format!(
+                    "{} {} · {}",
+                    decision_label(entry.decision),
+                    verb_label(entry.prefix),
+                    scope_label(entry.folder.as_deref(), workspace)
+                ),
+            )
+        }));
+        rows.push((BACK, "Back".to_owned()));
+        let instruction = [
+            notice.take().unwrap_or_else(|| "Typed Git rules.".into()),
+            if settings.exists() {
+                String::new()
+            } else {
+                SETTINGS_NOTE.into()
+            },
+            "Rules apply from the next Run.".into(),
+        ]
+        .join(" ");
+        let labels = rows
+            .iter()
+            .map(|(value, label)| (*value, label.as_str()))
+            .collect::<Vec<_>>();
+        let choice = super::setup::choose_focused(
+            terminal,
+            2,
+            "Typed Git rules",
+            &instruction,
+            &labels,
+            None,
+        )
+        .await?;
+        let edit = match choice {
+            Some(ADD) => add_edit(terminal).await?,
+            Some(value) if value >= ENTRY_BASE => {
+                entry_edit(terminal, usize::from(value - ENTRY_BASE)).await?
+            }
+            _ => {
+                return Ok(if uncertain {
+                    "Typed Git rules may have changed; reopen /permissions to verify".into()
+                } else if saved {
+                    SAVED.into()
+                } else {
+                    "Typed Git rules unchanged".into()
+                });
+            }
+        };
+        let Some(edit) = edit else { continue };
+        match settings.save_edit(&state, workspace, edit) {
+            Ok(_) => {
+                saved = true;
+                notice = Some("Saved.".into());
+            }
+            Err(error) => {
+                uncertain |= match error {
+                    SettingsError::NotConfirmed => true,
+                    SettingsError::Invalid
+                    | SettingsError::Conflict
+                    | SettingsError::Busy
+                    | SettingsError::Missing
+                    | SettingsError::Folder => false,
+                };
+                notice = Some(format!("Error: {error}."));
+            }
+        }
+    }
+}
+
+async fn add_edit(terminal: &mut AttachedTerminal) -> Result<Option<TypedPrefixEdit>, SetupError> {
+    let verbs = TypedGitPrefix::ALL
+        .map(|prefix| (prefix, verb_label(prefix)))
+        .to_vec();
+    let Some(prefix) = pick(terminal, "Rule verb", "Choose the operation", &verbs).await? else {
+        return Ok(None);
+    };
+    let Some(decision) = pick(
+        terminal,
+        "Rule decision",
+        "Choose the decision",
+        &decisions(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let scopes = [
+        (true, "Current folder".to_owned()),
+        (false, "User-wide".to_owned()),
+    ];
+    let Some(folder) = pick(
+        terminal,
+        "Rule scope",
+        "Choose where the rule applies",
+        &scopes,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(TypedPrefixEdit::Insert {
+        prefix,
+        decision,
+        folder,
+    }))
+}
+
+fn decisions() -> Vec<(Decision, String)> {
+    [Decision::Allow, Decision::Ask, Decision::Deny]
+        .map(|decision| (decision, decision_label(decision).to_owned()))
+        .to_vec()
+}
+
+async fn entry_edit(
+    terminal: &mut AttachedTerminal,
+    index: usize,
+) -> Result<Option<TypedPrefixEdit>, SetupError> {
+    let mut options = decisions()
+        .into_iter()
+        .map(|(decision, label)| (Some(decision), format!("Change to {label}")))
+        .collect::<Vec<_>>();
+    options.push((None, "Remove rule".into()));
+    Ok(
+        pick(terminal, "Rule", "Change or remove this rule", &options)
+            .await?
+            .map(|decision| match decision {
+                Some(decision) => TypedPrefixEdit::Replace { index, decision },
+                None => TypedPrefixEdit::Remove { index },
+            }),
+    )
 }
 
 pub(super) enum TrustAdmission {

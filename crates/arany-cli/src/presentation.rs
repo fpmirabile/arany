@@ -13,7 +13,8 @@ pub mod rewind;
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
     AgentFocus, AgentInspectorModel, AgentQuery, AgentRow, AgentTarget, AgentTranscript, Appended,
-    MAX_AGENT_ROWS, MAX_AGENT_SEARCH, TranscriptPart, agent_targets, run_targets,
+    MAX_AGENT_ROWS, MAX_AGENT_SEARCH, MAX_RECENT_RUNS, STEERING_NOTE_HEADING, TranscriptPart,
+    agent_targets, run_targets,
 };
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
@@ -161,6 +162,21 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitStatus { path } => format!("Git status({path})"),
         ToolCall::GitDiff { path, .. } => format!("Git diff({path})"),
         ToolCall::GitLog { path, .. } => format!("Git log({path})"),
+        ToolCall::GitCommit {
+            paths,
+            staged: true,
+            ..
+        } if paths.is_empty() => "Git commit(staged)".into(),
+        ToolCall::GitCommit { paths, .. } => format!("Git commit({})", paths.join(", ")),
+        ToolCall::GitBranch { name: None, .. } => "Git branches()".into(),
+        ToolCall::GitBranch {
+            name: Some(name),
+            start_point,
+        } => match start_point {
+            Some(start) => format!("Git branch({name} from {start})"),
+            None => format!("Git branch({name})"),
+        },
+        ToolCall::GitSwitch { branch } => format!("Git switch({branch})"),
     };
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
@@ -175,6 +191,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                     command_result_summary(observation)
                         .unwrap_or_else(|| read_result_summary(std::slice::from_ref(tool)))
                 }
+                ToolCall::GitCommit { .. }
+                | ToolCall::GitBranch { name: Some(_), .. }
+                | ToolCall::GitSwitch { .. } => git_write_summary(observation),
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -192,7 +211,16 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 if observation.output.is_empty() {
                     state.into()
                 } else {
-                    format!("{state}: {}", safe_truncate(&observation.output, 160))
+                    match (disposition, &tool.intent.call) {
+                        // An uncertain Git write may lead with locks the owner must remove by hand.
+                        (
+                            ToolDisposition::Uncertain,
+                            ToolCall::GitCommit { .. }
+                            | ToolCall::GitBranch { .. }
+                            | ToolCall::GitSwitch { .. },
+                        ) => format!("{state}: {}", wrapped_rows(&observation.output)),
+                        _ => format!("{state}: {}", safe_truncate(&observation.output, 160)),
+                    }
                 }
             }
         },
@@ -233,6 +261,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     {
         summary.push_str(match verdict.source {
             arany::permissions::PermissionSource::Rule => " · permission deny rule",
+            arany::permissions::PermissionSource::TypedPrefixRule => " · typed Git deny rule",
             arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
             arany::permissions::PermissionSource::Hook => " · hook denial",
             _ => " · permission mode denial",
@@ -287,6 +316,30 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
         LimitCause::ReadCapacity => "too many reads at once; nothing was read".into(),
         LimitCause::RequestedTime => "asked for more time than the pinned maximum".into(),
         LimitCause::Resource => "resource limit reached".into(),
+    }
+}
+
+// The committed receipt, not a later read, is the evidence of what was published.
+fn git_write_summary(observation: &arany::ToolObservation) -> String {
+    let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap_or_default();
+    let text = |key: &str| safe_truncate(result[key].as_str().unwrap_or("?"), 160);
+    let short = |key: &str| text(key).chars().take(12).collect::<String>();
+    match &observation.intent.call {
+        arany::ToolCall::GitCommit { .. } => {
+            format!("committed {} on {}", short("commit"), text("branch"))
+        }
+        arany::ToolCall::GitSwitch { .. } if result["switched"] == false => {
+            format!("already on {}", text("branch"))
+        }
+        arany::ToolCall::GitSwitch { .. } => {
+            let files = result["files"].as_u64().unwrap_or_default();
+            format!(
+                "switched to {} · {files} {}",
+                text("branch"),
+                if files == 1 { "file" } else { "files" }
+            )
+        }
+        _ => format!("created {} at {}", text("branch"), short("oid")),
     }
 }
 
@@ -386,6 +439,7 @@ fn read_operation(tool: &arany::ToolView) -> bool {
             | ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }
             | ToolCall::GitLog { .. }
+            | ToolCall::GitBranch { name: None, .. }
             | ToolCall::Skill { .. }
             | ToolCall::McpList { .. }
     )
@@ -437,7 +491,10 @@ fn group_label(tools: &[arany::ToolView]) -> String {
             |c| {
                 matches!(
                     c,
-                    ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+                    ToolCall::GitStatus { .. }
+                        | ToolCall::GitDiff { .. }
+                        | ToolCall::GitLog { .. }
+                        | ToolCall::GitBranch { name: None, .. }
                 )
             },
             "inspected",
@@ -659,6 +716,7 @@ pub enum ToolApprovalChoice {
     Yes,
     AutoEdits,
     ExactCommand,
+    GitPrefix(arany::permissions::TypedGitPrefix),
     No,
 }
 
@@ -670,6 +728,19 @@ impl ToolApprovalChoice {
             Self::ExactCommand => {
                 "Yes, and don't ask again for: this exact command in this project (unguarded)"
             }
+            Self::GitPrefix(prefix) => match prefix {
+                arany::permissions::TypedGitPrefix::Commit => {
+                    "Yes, and allow git commit in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Branch => {
+                    "Yes, and allow git branch in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Switch => {
+                    "Yes, and allow git switch in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Push
+                | arany::permissions::TypedGitPrefix::PrCreate => "No remembered rule offered",
+            },
             Self::No => "No",
         }
     }
@@ -678,6 +749,7 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
             Self::ExactCommand => arany::ApprovalReply::AllowAlwaysInProject,
+            Self::GitPrefix(_) => arany::ApprovalReply::AllowPrefixInFolder,
             Self::No => arany::ApprovalReply::Deny,
         }
     }
@@ -691,8 +763,13 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         .is_some_and(|prompt| prompt.remember)
     {
         choices.push(ToolApprovalChoice::ExactCommand);
-    } else if approval.unguarded.is_none() && approval.allow_auto_edits {
-        choices.push(ToolApprovalChoice::AutoEdits);
+    } else if approval.unguarded.is_none() {
+        if approval.allow_auto_edits {
+            choices.push(ToolApprovalChoice::AutoEdits);
+        }
+        if let Some(prefix) = approval.remember_prefix.filter(|prefix| prefix.available()) {
+            choices.push(ToolApprovalChoice::GitPrefix(prefix));
+        }
     }
     choices.push(ToolApprovalChoice::No);
     choices
@@ -855,6 +932,44 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
                 escape_terminal(tool)
             ));
             lines.push(format!("Arguments: {}", escape_terminal(arguments)));
+        }
+        ToolCall::GitCommit {
+            message,
+            paths,
+            staged,
+        } => {
+            lines.push(if *staged {
+                "Commit the staged changes to the current branch".into()
+            } else {
+                "Commit the working-tree contents of these paths to the current branch:".into()
+            });
+            lines.extend(
+                paths
+                    .iter()
+                    .map(|path| format!("  {}", escape_terminal(path))),
+            );
+            lines.push("Message:".into());
+            lines.extend(
+                message
+                    .split('\n')
+                    .map(|line| format!("  {}", escape_terminal(line))),
+            );
+            lines.push("Repository hooks and configuration do not run".into());
+        }
+        ToolCall::GitBranch {
+            name: Some(name),
+            start_point,
+        } => lines.push(format!(
+            "Create branch {} at {} without switching",
+            escape_terminal(name),
+            escape_terminal(start_point.as_deref().unwrap_or("HEAD"))
+        )),
+        ToolCall::GitSwitch { branch } => {
+            lines.push(format!("Switch to branch {}", escape_terminal(branch)));
+            lines.push(
+                "Changed Workspace files are replaced; local changes they would overwrite refuse"
+                    .into(),
+            );
         }
         _ => lines.push(escape_terminal(
             &serde_json::to_string(&intent.call).expect("typed action"),
@@ -1687,11 +1802,40 @@ fn escape_json_controls(value: &str) -> String {
     safe
 }
 
+const WRAPPED_ROW_CHARS: usize = 120;
+const MAX_WRAPPED_ROWS: usize = 8;
+
+// The escaped text across at most eight continuation rows, then an explicit remainder count.
+fn wrapped_rows(value: &str) -> String {
+    let escaped: Vec<char> = escape_terminal(value).chars().collect();
+    let mut rows: Vec<String> = escaped
+        .chunks(WRAPPED_ROW_CHARS)
+        .take(MAX_WRAPPED_ROWS)
+        .map(|row| row.iter().collect())
+        .collect();
+    let hidden = escaped
+        .len()
+        .saturating_sub(WRAPPED_ROW_CHARS * MAX_WRAPPED_ROWS);
+    if hidden > 0 {
+        rows.push(format!("… {hidden} more characters"));
+    }
+    rows.join("\n    ")
+}
+
 fn unsafe_display_character(character: char) -> bool {
     character.is_control()
         || matches!(
             character as u32,
-            0x202a..=0x202e | 0x2066..=0x2069 | 0x061c | 0x200e | 0x200f | 0x2028 | 0x2029
+            0x00ad
+                | 0x061c
+                | 0x180e
+                // Zero-width joiners stay: emoji and many scripts need them.
+                | 0x200b
+                | 0x200e
+                | 0x200f
+                | 0x2028..=0x202e
+                | 0x2060..=0x2069
+                | 0xfeff
         )
 }
 
@@ -2126,6 +2270,141 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn git_write_rows_show_their_receipt_and_approvals_the_exact_action() {
+        let oid = "a".repeat(40);
+        for (call, output, expected) in [
+            (
+                ToolCall::GitCommit {
+                    message: "Fix\nbody".into(),
+                    paths: vec!["src/a.rs".into(), "README.md".into()],
+                    staged: false,
+                },
+                serde_json::json!({"commit": oid, "branch": "main"}),
+                "⏺ Git commit(src/a.rs, README.md)\n  ⎿ committed aaaaaaaaaaaa on main",
+            ),
+            (
+                ToolCall::GitCommit {
+                    message: "Fix".into(),
+                    paths: Vec::new(),
+                    staged: true,
+                },
+                serde_json::json!({"commit": oid, "branch": "main"}),
+                "⏺ Git commit(staged)\n  ⎿ committed aaaaaaaaaaaa on main",
+            ),
+            (
+                ToolCall::GitBranch {
+                    name: Some("topic".into()),
+                    start_point: Some("HEAD~1".into()),
+                },
+                serde_json::json!({"branch": "topic", "oid": oid}),
+                "⏺ Git branch(topic from HEAD~1)\n  ⎿ created topic at aaaaaaaaaaaa",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                serde_json::json!({"branch": "topic", "switched": true, "files": 1}),
+                "⏺ Git switch(topic)\n  ⎿ switched to topic · 1 file",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                serde_json::json!({"branch": "topic", "switched": false}),
+                "⏺ Git switch(topic)\n  ⎿ already on topic",
+            ),
+        ] {
+            assert_eq!(
+                tool_summary(&tool_fixture(call, &output.to_string())),
+                expected
+            );
+        }
+        // Receipt names are repository data: escaped, and bounded to their row.
+        let hostile = format!("\u{202e}evil\u{1b}[2J{}", "b".repeat(400));
+        let created = tool_summary(&tool_fixture(
+            ToolCall::GitBranch {
+                name: Some("topic".into()),
+                start_point: None,
+            },
+            &serde_json::json!({"branch": hostile, "oid": oid}).to_string(),
+        ));
+        assert!(
+            created.contains("created \\u{202e}evil\\u{001b}[2J"),
+            "{created}"
+        );
+        assert!(!created.contains('\u{202e}') && !created.contains('\u{1b}'));
+        assert!(
+            created.lines().nth(1).unwrap().chars().count() < 200,
+            "{created}"
+        );
+        let long = format!(".git/refs/heads/{}.lock", "deeply/nested/branch".repeat(6));
+        let locks = format!(
+            "Git locks left by an interrupted write: .git/index.lock, {long}, .git/packed-refs.lock; remove them after checking that no git process is running. Guard execution unconfirmed; effects may have occurred. Do not retry automatically."
+        );
+        let uncertain = |output: &str| {
+            let mut tool = tool_fixture(
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                output,
+            );
+            tool.observation.as_mut().unwrap().disposition = ToolDisposition::Uncertain;
+            tool_summary(&tool)
+        };
+        let summary = uncertain(&locks);
+        let rows: Vec<&str> = summary.lines().collect();
+        assert!(
+            rows.len() > 3,
+            "the report wraps instead of being cut: {summary}"
+        );
+        let joined: String = rows[1..]
+            .iter()
+            .map(|row| {
+                row.trim_start_matches("  ⎿ uncertain: ")
+                    .trim_start_matches("    ")
+            })
+            .collect();
+        assert_eq!(joined, locks, "every path and the instruction stay visible");
+        let flood = "x".repeat(2_000);
+        let summary = uncertain(&flood);
+        assert_eq!(summary.lines().count(), 1 + 8 + 1);
+        assert!(summary.ends_with("… 1040 more characters"), "{summary}");
+        assert!(uncertain("\u{202e}gol.kcol").contains("\\u{202e}"));
+        let mut failed = tool_fixture(
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
+            },
+            r#"{"failed":"Switching would overwrite local changes"}"#,
+        );
+        failed.observation.as_mut().unwrap().disposition = ToolDisposition::Failed;
+        assert_eq!(
+            tool_summary(&failed),
+            "⏺ Git switch(topic)\n  ⎿ Error: {\"failed\":\"Switching would overwrite local changes\"}"
+        );
+        let approval = tool_fixture(
+            ToolCall::GitCommit {
+                message: "Fix\n\u{1b}[2J".into(),
+                paths: vec!["src/a.rs".into()],
+                staged: false,
+            },
+            "",
+        );
+        let lines = tool_approval_lines(&approval.intent);
+        assert_eq!(
+            lines[..6],
+            [
+                "Proposed action",
+                "Commit the working-tree contents of these paths to the current branch:",
+                "  src/a.rs",
+                "Message:",
+                "  Fix",
+                &format!("  {}", escape_terminal("\u{1b}[2J")),
+            ]
+        );
+        assert!(lines.contains(&"Repository hooks and configuration do not run".to_owned()));
+    }
+
+    #[test]
     fn timeout_rows_use_operation_caps_and_only_offer_settings_for_commands() {
         for (call, operation, cap, guidance) in [
             (
@@ -2152,6 +2431,14 @@ mod peer_row_tests {
                     max_count: 10,
                 },
                 "Git log(.)",
+                20_000,
+                "",
+            ),
+            (
+                ToolCall::GitSwitch {
+                    branch: "topic".into(),
+                },
+                "Git switch(topic)",
                 20_000,
                 "",
             ),

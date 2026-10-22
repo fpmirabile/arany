@@ -391,7 +391,7 @@ mod run_steering_tests {
             steering.offer_note("y".into()),
             Err(SteeringRefused::RunFull)
         );
-        steering.begin_run();
+        steering.begin_run(SessionId::new(), RunId::new());
         steering
             .offer_note("x".repeat(MAX_STEERING_NOTE_BYTES - MAX_STEERING_LABEL_BYTES))
             .expect("a new Run has its own byte quota");
@@ -427,6 +427,100 @@ mod run_steering_tests {
     }
 
     #[test]
+    fn child_steering_is_targeted_and_shares_the_run_quota() {
+        let steering = RunSteering::new();
+        let (session_id, run_id) = (SessionId::new(), RunId::new());
+        let a = ChildSteeringTarget {
+            session_id,
+            run_id,
+            agent_run_id: AgentRunId::new(),
+        };
+        let b = ChildSteeringTarget {
+            agent_run_id: AgentRunId::new(),
+            ..a
+        };
+        assert_eq!(
+            steering.offer_child_note(a, "x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        steering.begin_run(session_id, run_id);
+        for target in [a, b] {
+            steering.register_child(target);
+        }
+        steering.offer_child_note(a, "one".into()).unwrap();
+        steering.offer_child_note(a, "two".into()).unwrap();
+        steering.offer_child_note(b, "sibling".into()).unwrap();
+        steering.offer_note("primary".into()).unwrap();
+        assert_eq!(steering.take_child_note(a).as_deref(), Some("one\n\ntwo"));
+        assert_eq!(steering.delivered_notes(), 0);
+        let spent = "one\n\ntwo".len() + MAX_CHILD_STEERING_LABEL_BYTES;
+        let pending = "sibling".len()
+            + MAX_CHILD_STEERING_LABEL_BYTES
+            + "primary".len()
+            + MAX_STEERING_LABEL_BYTES;
+        let remaining = MAX_STEERING_NOTE_BYTES - spent - pending;
+        steering
+            .offer_child_note(a, "x".repeat(remaining - MAX_CHILD_STEERING_LABEL_BYTES))
+            .unwrap();
+        assert_eq!(
+            steering.offer_note("y".into()),
+            Err(SteeringRefused::RunFull)
+        );
+        assert!(steering.take_child_note(a).is_some());
+        assert_eq!(steering.take_note().as_deref(), Some("primary"));
+        steering.close_child(b);
+        assert!(steering.take_child_note(b).is_none());
+        assert_eq!(steering.withdraw_child_note(b).as_deref(), Some("sibling"));
+        steering.begin_run(session_id, RunId::new());
+        assert_eq!(
+            steering.offer_child_note(a, "stale".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(steering.take_child_note(a).is_none());
+        let targets: Vec<_> = (0..8)
+            .map(|_| ChildSteeringTarget {
+                run_id: steering.lock().unwrap().run.unwrap().1,
+                agent_run_id: AgentRunId::new(),
+                ..a
+            })
+            .collect();
+        for target in &targets {
+            steering.register_child(*target);
+            steering
+                .offer_child_note(*target, "pending".into())
+                .unwrap();
+        }
+        for target in &targets {
+            steering.close_child(*target);
+        }
+        let ninth = ChildSteeringTarget {
+            agent_run_id: AgentRunId::new(),
+            ..targets[0]
+        };
+        steering.register_child(ninth);
+        assert_eq!(
+            steering.offer_child_note(ninth, "new".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert_eq!(
+            steering.withdraw_child_note(targets[0]).as_deref(),
+            Some("pending")
+        );
+        steering.offer_child_note(ninth, "new".into()).unwrap();
+        let poisoned = steering.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poisoned.state.lock().unwrap();
+            panic!("poison");
+        })
+        .join();
+        assert_eq!(
+            steering.offer_child_note(a, "x".into()),
+            Err(SteeringRefused::Unavailable)
+        );
+        assert!(steering.withdraw_child_note(a).is_none());
+    }
+
+    #[test]
     fn run_steering_take_reserves_quota_and_poisoned_lock_fails_closed() {
         let steering = RunSteering::new();
         steering
@@ -452,4 +546,94 @@ mod run_steering_tests {
         assert!(poisoned.take_note().is_none());
         assert_eq!(poisoned.delivered_notes(), 0);
     }
+}
+
+#[test]
+fn a_ninth_active_child_gets_its_own_refusal() {
+    let steering = RunSteering::new();
+    let (session_id, run_id) = (SessionId::new(), RunId::new());
+    steering.begin_run(session_id, run_id);
+    let target = |_| ChildSteeringTarget {
+        session_id,
+        run_id,
+        agent_run_id: crate::session::AgentRunId::new(),
+    };
+    let children: Vec<_> = (0..9).map(target).collect();
+    for child in &children {
+        steering.register_child(*child);
+    }
+    assert_eq!(steering.offer_child_note(children[7], "ok".into()), Ok(()));
+    assert_eq!(
+        steering.offer_child_note(children[8], "no".into()),
+        Err(SteeringRefused::ChildLimit)
+    );
+}
+
+mod stale_git_lock_scope_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_the_resumed_goals_unsettled_git_writes_are_considered() {
+        let fixture = crate::session::worker_protocol_fixture();
+        let mut view = crate::SessionView::replay(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap();
+        let goal = view.goals[0].clone();
+        let mut write = view
+            .runs
+            .iter()
+            .flat_map(|run| &run.tools)
+            .next()
+            .expect("a fixture Tool")
+            .clone();
+        write.intent.call = crate::tools::ToolCall::GitSwitch {
+            branch: "topic".into(),
+        };
+        write.observation = None;
+        let mut other = view.runs[0].clone();
+        other.id = crate::session::RunId::new();
+        other.tools = vec![write.clone()];
+        view.runs.push(other);
+        let workspace = tempfile::tempdir().unwrap();
+        // Without Tools an in-scope unsettled write refuses; another Goal's write must not.
+        assert!(
+            report_stale_git_locks(&view, goal.id, false, workspace.path())
+                .await
+                .is_ok()
+        );
+        let own = view
+            .runs
+            .iter()
+            .position(|run| goal.run_ids.contains(&run.id))
+            .unwrap();
+        view.runs[own].tools.push(write);
+        assert!(matches!(
+            report_stale_git_locks(&view, goal.id, false, workspace.path()).await,
+            Err(EngineError::GoalUnavailable)
+        ));
+    }
+}
+
+#[test]
+fn stale_run_notes_do_not_count_against_the_active_run() {
+    let steering = RunSteering::new();
+    let session_id = SessionId::new();
+    let first = RunId::new();
+    steering.begin_run(session_id, first);
+    let target = |run_id| ChildSteeringTarget {
+        session_id,
+        run_id,
+        agent_run_id: crate::session::AgentRunId::new(),
+    };
+    let stale: Vec<_> = (0..8).map(|_| target(first)).collect();
+    for child in &stale {
+        steering.register_child(*child);
+        steering.offer_child_note(*child, "x".repeat(900)).unwrap();
+    }
+    let second = RunId::new();
+    steering.begin_run(session_id, second);
+    let fresh = target(second);
+    steering.register_child(fresh);
+    assert_eq!(steering.offer_child_note(fresh, "x".repeat(4096)), Ok(()));
+    assert!(steering.withdraw_child_note(stale[0]).is_some());
 }

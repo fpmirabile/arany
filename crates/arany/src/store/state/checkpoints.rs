@@ -10,8 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 use tokio::time::Instant;
 
+pub(in crate::store) const SCHEMA_VERSION: i64 = 1;
 const FILE: &str = "checkpoints.sqlite";
-pub(super) const FILES: [&str; 4] = [
+pub(in crate::store) const FILES: [&str; 4] = [
     FILE,
     "checkpoints.sqlite-journal",
     "checkpoints.sqlite-wal",
@@ -27,29 +28,12 @@ const HEADROOM: u64 = 4 * 1024 * 1024;
 pub(crate) type Pruned = BTreeMap<SessionId, RunId>;
 pub(crate) type Checked = Option<i64>;
 
-const SCHEMA: &[(&str, &str)] = &[
-    (
-        "blobs",
-        "CREATE TABLE blobs(digest BLOB PRIMARY KEY CHECK(length(digest)=32), bytes BLOB NOT NULL, len INTEGER NOT NULL CHECK(len BETWEEN 0 AND 1048576 AND length(bytes)=len)) STRICT",
-    ),
-    (
-        "refs",
-        "CREATE TABLE refs(session_id TEXT NOT NULL, goal_id TEXT NOT NULL, run_id TEXT, rewind_id TEXT, tool_sequence INTEGER NOT NULL CHECK(tool_sequence>0), path TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), len INTEGER NOT NULL CHECK(len BETWEEN 0 AND 1048576), captured_at_ms INTEGER NOT NULL, CHECK((run_id IS NULL) != (rewind_id IS NULL)), PRIMARY KEY(session_id,tool_sequence,path)) STRICT",
-    ),
-    (
-        "refs_path",
-        "CREATE INDEX refs_path ON refs(session_id,path,captured_at_ms,tool_sequence)",
-    ),
-    (
-        "refs_goal",
-        "CREATE INDEX refs_goal ON refs(goal_id,captured_at_ms,tool_sequence)",
-    ),
-    (
-        "refs_session",
-        "CREATE INDEX refs_session ON refs(session_id,captured_at_ms,tool_sequence)",
-    ),
-    ("refs_digest", "CREATE INDEX refs_digest ON refs(digest)"),
-];
+pub(in crate::store) const SCHEMA_SQL: &str = "CREATE TABLE blobs(digest BLOB PRIMARY KEY CHECK(length(digest)=32), bytes BLOB NOT NULL, len INTEGER NOT NULL CHECK(len BETWEEN 0 AND 1048576 AND length(bytes)=len)) STRICT;
+CREATE TABLE refs(session_id TEXT NOT NULL, goal_id TEXT NOT NULL, run_id TEXT, rewind_id TEXT, tool_sequence INTEGER NOT NULL CHECK(tool_sequence>0), path TEXT NOT NULL, digest BLOB NOT NULL CHECK(length(digest)=32), len INTEGER NOT NULL CHECK(len BETWEEN 0 AND 1048576), captured_at_ms INTEGER NOT NULL, CHECK((run_id IS NULL) != (rewind_id IS NULL)), PRIMARY KEY(session_id,tool_sequence,path)) STRICT;
+CREATE INDEX refs_path ON refs(session_id,path,captured_at_ms,tool_sequence);
+CREATE INDEX refs_goal ON refs(goal_id,captured_at_ms,tool_sequence);
+CREATE INDEX refs_session ON refs(session_id,captured_at_ms,tool_sequence);
+CREATE INDEX refs_digest ON refs(digest);";
 
 #[derive(Clone, Copy)]
 struct Limits {
@@ -89,7 +73,7 @@ pub(crate) struct Capture {
     pub(crate) files: Vec<(String, Vec<u8>)>,
 }
 
-pub(super) struct Lock {
+pub(in crate::store) struct Lock {
     file: File,
     deadline: Instant,
 }
@@ -159,7 +143,7 @@ fn private_file(
     Ok(Some(file))
 }
 
-pub(super) fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
+pub(in crate::store) fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
     root.readmit()?;
     let file = private_file(root, "checkpoints.lock", true, 0)?
         .ok_or(StoreError::InvalidStateDirectory)?;
@@ -185,7 +169,7 @@ pub(super) fn lock(root: &StateRoot) -> Result<Lock, StoreError> {
     Ok(guard)
 }
 
-pub(super) fn records(root: &StateRoot) -> Result<Vec<Option<Metadata>>, StoreError> {
+pub(in crate::store) fn records(root: &StateRoot) -> Result<Vec<Option<Metadata>>, StoreError> {
     FILES
         .iter()
         .map(|name| {
@@ -260,7 +244,7 @@ fn open_before(
     connection.busy_timeout(deadline.saturating_duration_since(Instant::now()))?;
     let version: i64 = scalar(&connection, "PRAGMA user_version", [])?;
     let fresh = version == 0 && held.metadata()?.len() == 0 && create;
-    if version != 1 && !fresh {
+    if version != SCHEMA_VERSION && !fresh {
         return Err(StoreError::CheckpointUnavailable);
     }
     let schema = scalar(&connection, "PRAGMA schema_version", [])?;
@@ -273,10 +257,9 @@ fn open_before(
         )?;
         if fresh {
             connection.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; BEGIN IMMEDIATE;")?;
-            for (_, sql) in SCHEMA {
-                connection.execute_batch(sql)?;
-            }
-            connection.execute_batch("PRAGMA user_version=1; COMMIT;")?;
+            connection.execute_batch(SCHEMA_SQL)?;
+            connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            connection.execute_batch("COMMIT;")?;
         }
         let pages = limits.bytes / 4096;
         if scalar(&connection, &format!("PRAGMA max_page_count={pages}"), [])? != pages
@@ -303,22 +286,11 @@ fn scalar(
 }
 
 fn validate(connection: &Connection, limits: Limits) -> Result<(), StoreError> {
-    for (name, sql) in SCHEMA {
-        let stored: String = connection.query_row(
-            "SELECT sql FROM sqlite_schema WHERE name=?1 AND length(sql)<=4096",
-            [name],
-            |row| row.get(0),
-        )?;
-        if &stored != sql {
-            return Err(StoreError::CheckpointUnavailable);
-        }
-    }
-    if scalar(
+    if !crate::store::migrate::exact_schema(
         connection,
-        "SELECT COUNT(*) FROM sqlite_schema WHERE sql IS NOT NULL",
-        [],
-    )? != SCHEMA.len() as i64
-    {
+        &crate::store::migrate::CHECKPOINT_SCHEMA,
+        SCHEMA_VERSION,
+    )? {
         return Err(StoreError::CheckpointUnavailable);
     }
     let integrity: String = connection.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;

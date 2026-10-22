@@ -3,7 +3,7 @@
 - Question: which peer interaction patterns let a user inspect a child's conversation without changing Arany's execution or authority guarantees?
 - Source-check date: 2026-10-21. Arany source was checked at `e8cc700ab3bcc611096ce473336288fa9689a747`; Codex source is pinned below. Claude Code documentation is dated evidence, without a documentation revision pin.
 - Conclusion: reuse Codex's empty-composer Alt+Left/Alt+Right navigation and stable spawn order, and Claude Code's selectable agent panel and idle-row grouping. Arany can expose committed child history read-only first, then live updates; selecting a transcript must not imply permission to message its actor.
-- Scope: source investigation and proposed direction for one feature, switching between agent chats. No implementation, terminal execution, native-platform support or performance claim. The [plan](../../planning/agent-chat-switching/README.md) owns proposed work; the [terminal](../specs/terminal.md), [execution](../specs/execution.md) and [Goal](../specs/goals.md#steering-notes-and-pause) contracts remain authoritative.
+- Scope: source investigation and proposed direction for one feature, switching between agent chats. No implementation, terminal execution, native-platform support or performance claim. Accepted behavior now belongs to the owning contracts; the [terminal](../specs/terminal.md), [execution](../specs/execution.md) and [Goal](../specs/goals.md#steering-notes-and-pause) contracts remain authoritative.
 
 ## Observed Arany source
 
@@ -74,8 +74,7 @@ messaging semantics or timer-based hiding.
 
 ## Proposed direction and unresolved questions
 
-**Proposal, not current behavior:** the [plan](../../planning/agent-chat-switching/README.md)
-separates a read-only snapshot switch, committed live updates and a scalable
+**Original proposal at source-check time:** the plan separated a read-only snapshot switch, committed live updates and a scalable
 `/agents` picker into independently usable slices. Adopt the verified Codex key
 gates and wrap order; adapt Claude Code's idle grouping under Arany's redraw and
 resource constraints. Keep the composer read-only or disabled with an explicit
@@ -83,7 +82,7 @@ viewing label. Escape returns to the primary rather than interrupting a child.
 Every entry, return and selection path needs armed-frame admission, and Classic,
 Fullscreen and linear/screen-reader equivalents need equal behavior.
 
-**Owner question, outside this feature:** child messaging or steering would
+**Owner question at source-check time:** child messaging or steering would
 change a guarantee. [Goals](../specs/goals.md#steering-notes-and-pause) admits
 Run-scoped notes only to primary planning/synthesis calls and explicitly
 excludes child calls and Tool review. Viewing cannot reinterpret a note as

@@ -331,7 +331,7 @@ impl<'a> MessageStream<'a> {
     }
 }
 
-pub(super) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
+pub(in crate::provider) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> {
     let body = serde_json::to_vec(request).map_err(|_| ProviderError::Rejected)?;
     if body.len() > MAX_REQUEST_BYTES {
         return Err(ProviderError::Rejected);
@@ -339,12 +339,12 @@ pub(super) fn encode_request(request: &Value) -> Result<Vec<u8>, ProviderError> 
     Ok(body)
 }
 
-pub(super) struct RunScope<'a> {
-    pub(super) model: &'a str,
-    pub(super) output_cap: u32,
-    pub(super) secret: &'a str,
-    pub(super) offered: &'a [ToolSpec],
-    pub(super) review: bool,
+pub(in crate::provider) struct RunScope<'a> {
+    pub(in crate::provider) model: &'a str,
+    pub(in crate::provider) output_cap: u32,
+    pub(in crate::provider) secret: &'a str,
+    pub(in crate::provider) offered: &'a [ToolSpec],
+    pub(in crate::provider) review: bool,
 }
 
 fn tool_argument_limit(block: &Value) -> usize {
@@ -356,7 +356,7 @@ fn tool_argument_limit(block: &Value) -> usize {
     )
 }
 
-pub(super) fn decode_run(
+pub(in crate::provider) fn decode_run(
     bytes: &[u8],
     scope: &RunScope,
 ) -> Result<ProviderResponse, ProviderError> {
@@ -395,7 +395,7 @@ pub(super) fn decode_run(
     })
 }
 
-pub(super) fn decode_compaction(
+pub(in crate::provider) fn decode_compaction(
     bytes: &[u8],
     model: &str,
     output_cap: u32,
@@ -422,6 +422,14 @@ pub(crate) fn run_body(
     conversation: &Conversation,
     effort: Effort,
 ) -> Result<Value, ProviderError> {
+    run_body_with_optional_effort(request, conversation, Some(effort))
+}
+
+pub(in crate::provider) fn run_body_with_optional_effort(
+    request: &ProviderRequest,
+    conversation: &Conversation,
+    effort: Option<Effort>,
+) -> Result<Value, ProviderError> {
     let system: Vec<Value> = conversation
         .system
         .iter()
@@ -432,7 +440,7 @@ pub(crate) fn run_body(
         "max_tokens": request.max_output_tokens,
         "system": system,
         "messages": messages(conversation)?,
-        "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.as_str()},
+        "output_config": {"format": {"type": "json_schema", "schema": conversation.outcome}, "effort": effort.map(Effort::as_str)},
         "stream": false,
     });
     if request.input.role != crate::provider::PromptRole::ToolReview {
@@ -440,6 +448,20 @@ pub(crate) fn run_body(
             .as_object_mut()
             .expect("output config")
             .remove("format");
+    }
+    if effort.is_none() {
+        body["output_config"]
+            .as_object_mut()
+            .expect("output config")
+            .remove("effort");
+        if body["output_config"]
+            .as_object()
+            .is_some_and(|config| config.is_empty())
+        {
+            body.as_object_mut()
+                .expect("request object")
+                .remove("output_config");
+        }
     }
     // Plan-contract unions exceed strict Tool-schema limits; the Engine validates calls instead.
     let exhausted = request
@@ -548,15 +570,28 @@ fn user_blocks(block: &Block) -> Result<Vec<Value>, ProviderError> {
     })
 }
 
-pub(super) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Value {
+pub(in crate::provider) fn compaction_body(request: &CompactionRequest, effort: Effort) -> Value {
+    compaction_body_with_optional_effort(request, Some(effort))
+}
+
+pub(in crate::provider) fn compaction_body_with_optional_effort(
+    request: &CompactionRequest,
+    effort: Option<Effort>,
+) -> Value {
     let mut body = json!({
         "model": request.model,
         "max_tokens": request.max_output_tokens,
         "system": [{"type": "text", "text": COMPACTION_INSTRUCTIONS}],
         "messages": [{"role": "user", "content": [{"type": "text", "text": compaction_input(request).to_string()}]}],
-        "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.as_str()},
+        "output_config": {"format": {"type": "json_schema", "schema": summary_schema()}, "effort": effort.map(Effort::as_str)},
         "stream": false,
     });
+    if effort.is_none() {
+        body["output_config"]
+            .as_object_mut()
+            .expect("output config")
+            .remove("effort");
+    }
     cache_breakpoints(&mut body, false);
     body
 }
@@ -594,8 +629,16 @@ struct WireContent {
 struct WireUsage {
     input_tokens: u32,
     cache_creation_input_tokens: Option<u32>,
+    cache_creation: Option<WireCacheCreation>,
     cache_read_input_tokens: Option<u32>,
     output_tokens: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCacheCreation {
+    ephemeral_5m_input_tokens: u32,
+    ephemeral_1h_input_tokens: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -662,11 +705,31 @@ impl WireContent {
 
 impl WireResponse {
     fn admit(self, model: &str, output_cap: u32) -> Result<Admitted, ProviderError> {
+        let nested_creation = self
+            .usage
+            .cache_creation
+            .map(|creation| {
+                creation
+                    .ephemeral_5m_input_tokens
+                    .checked_add(creation.ephemeral_1h_input_tokens)
+                    .ok_or(ProviderError::InvalidOutcome)
+            })
+            .transpose()?;
+        if self
+            .usage
+            .cache_creation_input_tokens
+            .zip(nested_creation)
+            .is_some_and(|(flat, nested)| flat != nested)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let cache_creation_input_tokens =
+            self.usage.cache_creation_input_tokens.or(nested_creation);
         // Messages reports cache counts beside `input_tokens`; the record total keeps the billed sum.
         let total_input_tokens = self
             .usage
             .input_tokens
-            .checked_add(self.usage.cache_creation_input_tokens.unwrap_or(0))
+            .checked_add(cache_creation_input_tokens.unwrap_or(0))
             .and_then(|total| total.checked_add(self.usage.cache_read_input_tokens.unwrap_or(0)))
             .ok_or(ProviderError::InvalidOutcome)?;
         let stop = match self.stop_reason.as_str() {
@@ -695,7 +758,7 @@ impl WireResponse {
                 input_tokens: Some(total_input_tokens),
                 output_tokens: Some(self.usage.output_tokens),
                 cache_read_input_tokens: self.usage.cache_read_input_tokens,
-                cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
+                cache_creation_input_tokens,
             },
             stop,
             content: self.content,

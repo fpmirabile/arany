@@ -583,7 +583,18 @@ impl ProviderRequest {
             || self.phase == AgentPhase::ChildWork
                 && (self.collaboration != CollaborationPolicy::Single
                     || input.goal_context_facts.is_some())
-            || !input.steering_notes.is_empty() && !root
+            || self.phase == AgentPhase::ToolReview
+                && (!input.steering_notes.is_empty()
+                    || input.tools.as_ref().is_some_and(|tools| {
+                        tools
+                            .steps
+                            .iter()
+                            .any(|step| !step.steering_notes.is_empty())
+                    })
+                    || input
+                        .stop_hook_feedback
+                        .iter()
+                        .any(|feedback| !feedback.steering_notes.is_empty()))
             || !root && !input.assignment_profiles.is_empty()
             || input.assignment_profiles.len() > MAX_ASSIGNMENT_PROFILES
             || input
@@ -1695,7 +1706,7 @@ stop_bytes: 0,
         assert!(researcher.validate_scope().is_err());
         researcher.input.assignment_profiles.clear();
         researcher.input.steering_notes = vec!["note".into()];
-        assert!(researcher.validate_scope().is_err());
+        assert!(researcher.validate_scope().is_ok());
 
         for (role, phase, tools, fits) in [
             (
@@ -1750,14 +1761,14 @@ stop_bytes: 0,
     }
 
     #[test]
-    fn steering_notes_are_primary_only_and_never_child_or_review_scope() {
+    fn steering_notes_are_allowed_in_work_roles_and_excluded_from_review() {
         let mut request = request(PromptRole::ReadOnly, AgentPhase::RootPlan, None);
         request.input.steering_notes = vec!["note".into()];
         assert!(request.validate_scope().is_ok());
         request.phase = AgentPhase::RootSynthesis;
         assert!(request.validate_scope().is_ok());
         request.phase = AgentPhase::ChildWork;
-        assert!(request.validate_scope().is_err());
+        assert!(request.validate_scope().is_ok());
         request.phase = AgentPhase::ToolReview;
         request.input.role = PromptRole::ToolReview;
         assert!(request.validate_scope().is_err());

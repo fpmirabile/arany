@@ -3504,7 +3504,7 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
 
 #[test]
 fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices() {
-    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
     for width in [120, 80, 50, 16] {
         for (name, body, choices, focus) in [
             (
@@ -3520,6 +3520,16 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                     .collect(),
                 vec![Yes, AutoEdits, No],
                 0,
+            ),
+            (
+                "git-prefix",
+                vec!["Commit 1 path".to_owned()],
+                vec![
+                    Yes,
+                    GitPrefix(arany::permissions::TypedGitPrefix::Commit),
+                    No,
+                ],
+                1,
             ),
             (
                 "unguarded",
@@ -3598,6 +3608,12 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
             }
             if name == "unguarded" {
                 assert!(squashed.contains("this exact command"));
+            }
+            if name == "git-prefix" {
+                assert!(
+                    squashed.contains("allow git commit in this folder from the next Run"),
+                    "{width}: {squashed}"
+                );
             }
             let focused_rows = (0..50)
                 .map(|row| buffer_row(terminal.backend().buffer(), row))
@@ -4020,7 +4036,7 @@ fn agent_chat_frames_label_a_read_only_child_and_hint_keys_only_once_armed() {
                         draw_agent_chat_frame(
                             frame,
                             area,
-                            &transcript.label,
+                            transcript.label.as_str().into(),
                             armed,
                             None,
                             fullscreen,
@@ -4123,6 +4139,48 @@ fn empty_composer_names_agent_keys_only_when_the_run_has_children() {
         match expected {
             Some(hint) => assert!(rows.contains(hint), "{context}"),
             None => assert!(!rows.contains("agents"), "{context}"),
+        }
+    }
+}
+
+#[test]
+fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
+    let mut composer = Composer::text_only();
+    composer.restore_prompt("/literal child note").unwrap();
+    for (width, height) in [(80, 24), (16, 8), (8, 2)] {
+        for editable in [false, true] {
+            let backend = TestBackend::new(width, height);
+            let mut terminal = ratatui::Terminal::new(backend).unwrap();
+            terminal
+                .draw(|frame| {
+                    draw_agent_chat_frame(
+                        frame,
+                        bottom_area(frame.area(), AGENT_CHAT_ROWS),
+                        AgentChatFrame {
+                            label: "child 2",
+                            draft: Some(&composer),
+                            editable,
+                        },
+                        true,
+                        Some("draft retained"),
+                        true,
+                        Palette { color: false },
+                    )
+                })
+                .unwrap();
+            let screen = (0..height)
+                .map(|y| buffer_row(terminal.backend().buffer(), y))
+                .collect::<Vec<_>>()
+                .join("\n");
+            if width == 80 {
+                assert!(screen.contains(if editable {
+                    "viewing child 2 (message)"
+                } else {
+                    "viewing child 2 (read-only)"
+                }));
+                assert!(screen.contains("> /literal child note"));
+            }
+            assert!(!composer.has_open_menu());
         }
     }
 }

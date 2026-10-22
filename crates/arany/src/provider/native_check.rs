@@ -11,7 +11,7 @@ use aws_lc_rs::hmac;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v31";
+const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-v32";
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
@@ -462,6 +462,48 @@ mod tests {
         let credentials = || {
             NativeApiCredentials::new("anthropic", key.into(), Some("wrkspc_One".into())).unwrap()
         };
+        let mut legacy = Vec::new();
+        for field in [
+            "native-goal-contract-outcome-conformance-v31",
+            env!("CARGO_PKG_VERSION"),
+            "https://api.anthropic.com/v1/messages;output_config.format",
+            "anthropic",
+            "example-model",
+            "high",
+            "three-probes-1024-output-tokens",
+            "sequential-concurrency-one",
+            "env",
+            "wrkspc_One",
+        ] {
+            legacy.extend_from_slice(&u64::try_from(field.len()).unwrap().to_be_bytes());
+            legacy.extend_from_slice(field.as_bytes());
+        }
+        let signing_key = hmac::Key::new(hmac::HMAC_SHA256, key.as_bytes());
+        let legacy: [u8; 32] = hmac::sign(&signing_key, &legacy)
+            .as_ref()
+            .try_into()
+            .unwrap();
+        let store = Store::open(open()).expect("reopen Store");
+        store
+            .record_native_evidence(NativeEvidenceRecord {
+                fingerprint: legacy,
+                checked_at_ms,
+                expires_at_ms: checked_at_ms + 60_000,
+            })
+            .await
+            .unwrap();
+        store.close().await.unwrap();
+        assert!(matches!(
+            AnthropicProvider::from_checked_credentials_with_effort(
+                open(),
+                "example-model".into(),
+                Effort::High,
+                credentials(),
+                None,
+            )
+            .await,
+            Err(ProviderError::Rejected)
+        ));
         let store = Store::open(open()).expect("reopen Store");
         store
             .record_native_evidence(NativeEvidenceRecord {

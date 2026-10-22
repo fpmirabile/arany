@@ -441,6 +441,7 @@ mod tests {
                 provider_concurrency: 1,
                 workspace_device: 1,
                 workspace_inode: 1,
+                user_instruction_digest: None,
                 instruction_sources: Vec::new(),
                 launch_directory: String::new(),
                 include_digests: Vec::new(),
@@ -467,6 +468,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: AgentStatus::Active,
@@ -482,6 +484,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: if ordinal == 1 {

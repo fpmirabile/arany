@@ -45,6 +45,7 @@ impl CompletionLayout {
 #[derive(Default)]
 pub struct Composer {
     text: String,
+    text_only: bool,
     images: Vec<ImageAttachment>,
     cursor: usize,
     vertical_grapheme_column: Option<usize>,
@@ -61,8 +62,15 @@ pub struct Composer {
 }
 
 impl Composer {
+    pub(super) fn text_only() -> Self {
+        Self {
+            text_only: true,
+            ..Self::default()
+        }
+    }
+
     pub fn restore_prompt(&mut self, text: &str) -> Result<ComposerEdit, &'static str> {
-        let literal = text.starts_with('/').then(|| format!("/{text}"));
+        let literal = (!self.text_only && text.starts_with('/')).then(|| format!("/{text}"));
         self.insert_paste(literal.as_deref().unwrap_or(text))
     }
     pub fn remember_and_clear(&mut self) {
@@ -135,6 +143,9 @@ impl Composer {
     }
 
     pub fn file_query(&self) -> Option<String> {
+        if self.text_only {
+            return None;
+        }
         if self.cursor < self.text.len()
             && !self.text[self.cursor..].chars().next()?.is_whitespace()
         {
@@ -222,6 +233,9 @@ impl Composer {
     }
 
     pub fn attach_image(&mut self, image: ImageAttachment) -> Result<(), &'static str> {
+        if self.text_only {
+            return Err("Child messages are text only; draft retained");
+        }
         if self.images.len() == MAX_MESSAGE_IMAGES {
             return Err("draft already has four images; submit or clear it first");
         }
@@ -248,6 +262,13 @@ impl Composer {
     }
 
     pub fn parse_submission<'a>(&self, text: &'a str) -> Result<Submission<'a>, CommandParseError> {
+        if self.text_only {
+            return if text.trim().is_empty() {
+                Err(CommandParseError::Empty)
+            } else {
+                Ok(Submission::Objective(text))
+            };
+        }
         match parse_submission(text) {
             Err(CommandParseError::Empty) if !self.images.is_empty() => {
                 Ok(Submission::Objective(text))
@@ -333,6 +354,9 @@ impl Composer {
     }
 
     pub(super) fn command_preview(&self) -> Option<CommandPreview> {
+        if self.text_only {
+            return None;
+        }
         if let Some((items, selected)) = self.file_menu() {
             return Some(CommandPreview {
                 ghost: String::new(),
@@ -390,6 +414,9 @@ impl Composer {
     }
 
     pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
+        if self.text_only {
+            return None;
+        }
         if self.completion_hidden || self.cursor != self.text.len() {
             return None;
         }
@@ -561,7 +588,7 @@ impl Composer {
             self.vertical_grapheme_column = None;
         }
         match input {
-            TerminalInput::Tab if self.cursor == self.text.len() => {
+            TerminalInput::Tab if !self.text_only && self.cursor == self.text.len() => {
                 let Some(suffix) = completion_suffix(&self.text, &self.choices) else {
                     return ComposerEdit::Unchanged;
                 };
@@ -911,6 +938,11 @@ mod tests {
         composer.apply(TerminalInput::Left);
         let caret = composer.cursor_byte_offset();
         let image = arany::test_support::test_image();
+        let mut child = Composer::text_only();
+        child.restore_prompt("/literal").unwrap();
+        assert!(child.attach_image(image.clone()).is_err());
+        assert_eq!(child.text(), "/literal");
+        assert!(child.images().is_empty());
         for _ in 0..MAX_MESSAGE_IMAGES {
             composer.attach_image(image.clone()).unwrap();
         }

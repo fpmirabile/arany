@@ -8,8 +8,9 @@ use crate::session::input::{InputError, WorkspaceInputs};
 use crate::session::{
     AgentRole, AgentRunId, CollaborationPolicy, CompiledContext, Event, GoalBudget, GoalId,
     GoalPhase, GoalPlanContract, GoalStatus, GoalUsage, InstructionSource,
-    MAX_STEERING_CONTEXT_BYTES, MAX_STEERING_LABEL_BYTES, MAX_STEERING_NOTE_BYTES,
-    MAX_USER_MESSAGE_BYTES, RunConfig, RunId, RunView, SessionId, WorkspaceIdentity,
+    MAX_CHILD_STEERING_LABEL_BYTES, MAX_STEERING_CONTEXT_BYTES, MAX_STEERING_LABEL_BYTES,
+    MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId, RunView, SessionId,
+    WorkspaceIdentity,
 };
 use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::Telemetry;
@@ -124,7 +125,7 @@ pub enum EngineError {
     InputNotRegular,
     #[error("Workspace input exceeds its byte limit")]
     InputTooLarge,
-    #[error("Workspace input is not UTF-8")]
+    #[error("input is not UTF-8")]
     InputNotUtf8,
     #[error("explicit include does not exist")]
     MissingInclude,
@@ -170,6 +171,7 @@ impl From<InputError> for EngineError {
             InputError::InvalidUtf8 => Self::InputNotUtf8,
             InputError::MissingInclude => Self::MissingInclude,
             InputError::TooManyIncludes => Self::TooManyIncludes,
+            InputError::State(error) => Self::Store(error),
             InputError::StateOverlap => Self::StateOverlap,
             InputError::Io(_) => Self::WorkspaceUnavailable,
         }
@@ -449,8 +451,13 @@ impl RunTurn {
     }
 }
 
-/// The attached caller's handle on one submission's steering: at most one note waits for the
-/// next primary call, and a pause request stops the Run at its next boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChildSteeringTarget {
+    pub session_id: SessionId,
+    pub run_id: RunId,
+    pub agent_run_id: AgentRunId,
+}
+
 #[derive(Clone, Default)]
 pub struct RunSteering {
     state: Arc<Mutex<SteeringState>>,
@@ -461,11 +468,33 @@ pub struct RunSteering {
 #[derive(Default)]
 struct SteeringState {
     waiting: Option<String>,
+    run: Option<(SessionId, RunId)>,
+    children: Vec<ChildSteeringTarget>,
+    child_waiting: Vec<(ChildSteeringTarget, String)>,
     run_bytes: usize,
     recorded: u64,
 }
 
 const NOTE_SEPARATOR: &str = "\n\n";
+const MAX_STEERING_CHILDREN: usize = 8;
+
+impl SteeringState {
+    fn pending_bytes(&self) -> usize {
+        self.waiting
+            .as_ref()
+            .map_or(0, |text| text.len() + MAX_STEERING_LABEL_BYTES)
+            + self
+                .child_waiting
+                .iter()
+                .filter(|(target, _)| self.run == Some((target.session_id, target.run_id)))
+                .map(|(_, text)| text.len() + MAX_CHILD_STEERING_LABEL_BYTES)
+                .sum::<usize>()
+    }
+
+    fn child_available(&self, target: ChildSteeringTarget) -> bool {
+        self.run == Some((target.session_id, target.run_id)) && self.children.contains(&target)
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SteeringRefused {
@@ -473,6 +502,7 @@ pub enum SteeringRefused {
     Empty,
     TooLarge,
     Unavailable,
+    ChildLimit,
 }
 
 impl RunSteering {
@@ -501,7 +531,15 @@ impl RunSteering {
             .as_ref()
             .map_or(0, |waiting| waiting.len() + NOTE_SEPARATOR.len())
             + text.len();
-        if state.run_bytes + merged_len + MAX_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES {
+        if state.run_bytes + state.pending_bytes()
+            - state
+                .waiting
+                .as_ref()
+                .map_or(0, |text| text.len() + MAX_STEERING_LABEL_BYTES)
+            + merged_len
+            + MAX_STEERING_LABEL_BYTES
+            > MAX_STEERING_NOTE_BYTES
+        {
             return Err(SteeringRefused::RunFull);
         }
         match state.waiting.as_mut() {
@@ -512,6 +550,107 @@ impl RunSteering {
             None => state.waiting = Some(text),
         }
         Ok(())
+    }
+
+    pub fn offer_child_note(
+        &self,
+        target: ChildSteeringTarget,
+        text: String,
+    ) -> Result<(), SteeringRefused> {
+        let mut state = self.lock().ok_or(SteeringRefused::Unavailable)?;
+        if self.pause_requested() {
+            return Err(SteeringRefused::Unavailable);
+        }
+        if !state.child_available(target) {
+            return Err(
+                if state.run == Some((target.session_id, target.run_id))
+                    && state.children.len() >= MAX_STEERING_CHILDREN
+                {
+                    SteeringRefused::ChildLimit
+                } else {
+                    SteeringRefused::Unavailable
+                },
+            );
+        }
+        if text.trim().is_empty() {
+            return Err(SteeringRefused::Empty);
+        }
+        if text.len() + MAX_CHILD_STEERING_LABEL_BYTES > MAX_STEERING_NOTE_BYTES {
+            return Err(SteeringRefused::TooLarge);
+        }
+        let index = state.child_waiting.iter().position(|(id, _)| *id == target);
+        let active = state
+            .child_waiting
+            .iter()
+            .filter(|(id, _)| state.run == Some((id.session_id, id.run_id)))
+            .count();
+        if index.is_none() && active >= MAX_STEERING_CHILDREN {
+            return Err(SteeringRefused::Unavailable);
+        }
+        let cost = text.len()
+            + if index.is_some() {
+                NOTE_SEPARATOR.len()
+            } else {
+                MAX_CHILD_STEERING_LABEL_BYTES
+            };
+        if state.run_bytes + state.pending_bytes() + cost > MAX_STEERING_NOTE_BYTES {
+            return Err(SteeringRefused::RunFull);
+        }
+        if let Some(index) = index {
+            state.child_waiting[index].1.push_str(NOTE_SEPARATOR);
+            state.child_waiting[index].1.push_str(&text);
+        } else {
+            state.child_waiting.push((target, text));
+        }
+        Ok(())
+    }
+
+    pub fn withdraw_child_note(&self, target: ChildSteeringTarget) -> Option<String> {
+        let mut state = self.lock()?;
+        let index = state
+            .child_waiting
+            .iter()
+            .position(|(id, _)| *id == target)?;
+        Some(state.child_waiting.remove(index).1)
+    }
+
+    pub(crate) fn take_child_note(&self, target: ChildSteeringTarget) -> Option<String> {
+        let mut state = self.lock()?;
+        if self.pause_requested() || !state.child_available(target) {
+            return None;
+        }
+        let index = state
+            .child_waiting
+            .iter()
+            .position(|(id, _)| *id == target)?;
+        let text = state.child_waiting.remove(index).1;
+        state.run_bytes += text.len() + MAX_CHILD_STEERING_LABEL_BYTES;
+        Some(text)
+    }
+
+    fn register_child(&self, target: ChildSteeringTarget) {
+        if let Some(mut state) = self.lock()
+            && state.run == Some((target.session_id, target.run_id))
+            && state.children.len() < MAX_STEERING_CHILDREN
+            && !state.children.contains(&target)
+        {
+            state.children.push(target);
+        }
+    }
+
+    fn close_child(&self, target: ChildSteeringTarget) {
+        if let Some(mut state) = self.lock() {
+            state.children.retain(|id| *id != target);
+        }
+    }
+
+    fn end_run(&self, session: SessionId, run: RunId) {
+        if let Some(mut state) = self.lock()
+            && state.run == Some((session, run))
+        {
+            state.run = None;
+            state.children.clear();
+        }
     }
 
     /// Removes the waiting note before the Engine took it and returns its full merged text.
@@ -546,9 +685,11 @@ impl RunSteering {
         }
     }
 
-    pub(crate) fn begin_run(&self) {
+    pub(crate) fn begin_run(&self, session: SessionId, run: RunId) {
         if let Some(mut state) = self.lock() {
             state.run_bytes = 0;
+            state.run = Some((session, run));
+            state.children.clear();
         }
     }
 
@@ -608,6 +749,41 @@ fn goal_context_metadata_reservation(
         })
         .and_then(|bytes| bytes.checked_add(64))
         .ok_or(EngineError::ContextTooLarge)
+}
+
+// Locks a dead Guard's Git write left are reported, with their paths, before admission refuses
+// to resume past its unsettled effect; nothing is moved or retried.
+async fn report_stale_git_locks(
+    view: &crate::SessionView,
+    goal: crate::session::GoalId,
+    tools: bool,
+    workspace: &std::path::Path,
+) -> Result<(), EngineError> {
+    let Some(goal) = view.goal(goal) else {
+        return Ok(());
+    };
+    let git_writes: Vec<_> = view
+        .runs
+        .iter()
+        .filter(|r| goal.run_ids.contains(&r.id))
+        .flat_map(|r| &r.tools)
+        .filter(|t| t.intent.call.is_git() && t.intent.call.mutates() && !t.settled_without_stop())
+        .map(|t| t.intent.id)
+        .collect();
+    if git_writes.is_empty() {
+        return Ok(());
+    }
+    if !tools {
+        return Err(EngineError::GoalUnavailable);
+    }
+    crate::tools::worker::recover_private(&git_writes).await?;
+    for id in git_writes {
+        let workspace = workspace.to_owned();
+        tokio::task::spawn_blocking(move || crate::tools::report_git_locks(&workspace, id))
+            .await
+            .map_err(|_| crate::tools::ToolError::Operation)??;
+    }
+    Ok(())
 }
 
 fn resolve_goal_admission(
@@ -1292,7 +1468,7 @@ impl Engine {
                     },
                 );
                 if let Some(steering) = &submission.steering {
-                    steering.begin_run();
+                    steering.begin_run(session_id, run_id);
                 }
                 self.drive_turn(
                     submission,
@@ -1528,6 +1704,13 @@ impl Engine {
         };
         if let Some(view) = &history {
             ensure_session_workspace(view, workspace_identity)?;
+        }
+        if entry == GoalEntry::Resume
+            && let Some(view) = &history
+            && let Some(goal) = request.goal.id
+        {
+            report_stale_git_locks(view, goal, submission.tools.is_some(), &request.workspace)
+                .await?;
         }
         let goal = resolve_goal_admission(request, history.as_ref(), entry)?;
         if goal.entry == GoalEntry::Resume {
@@ -1795,6 +1978,10 @@ impl Engine {
             provider_concurrency,
             workspace_device: root_identity.device,
             workspace_inode: root_identity.inode,
+            user_instruction_digest: inputs
+                .user_instructions
+                .as_ref()
+                .map(|snapshot| snapshot.digest),
             instruction_sources: inputs
                 .instructions
                 .iter()
@@ -1815,7 +2002,7 @@ impl Engine {
             context_usage: Some(context.context_usage),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
-            tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
+            tool_policy: tools.as_ref().map(|tools| Box::new(tools.receipt())),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
         if !crate::session::run_started_fits(&config) {
@@ -2048,8 +2235,12 @@ fn root_request(
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
             pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
-            workspace_guidance: std::mem::take(&mut input.inputs.instructions)
+            workspace_guidance: input
+                .inputs
+                .user_instructions
+                .take()
                 .into_iter()
+                .chain(std::mem::take(&mut input.inputs.instructions))
                 .map(|snapshot| WorkspaceGuidance {
                     path: snapshot.path,
                     text: snapshot.content,

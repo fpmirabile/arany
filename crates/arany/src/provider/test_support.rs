@@ -9,7 +9,7 @@ pub(crate) fn catalog() -> Value {
         "commands": [{"name": "bash"}],
         "skills": [{"name": "example"}],
         "mcp_servers": [{"name": "example", "tools": ["echo"]}],
-        "git": {"operations": ["git_status", "git_diff", "git_log"]},
+        "git": {"write": true, "operations": ["git_status", "git_diff", "git_log", "git_commit", "git_branch", "git_switch"]},
         "tool_calls_remaining": 4,
     })
 }

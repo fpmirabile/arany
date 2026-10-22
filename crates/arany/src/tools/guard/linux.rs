@@ -145,6 +145,9 @@ pub(super) fn harden() -> Result<(), ToolError> {
         },
     )
     .map_err(|_| ToolError::ProtectionUnavailable)?;
+    let own = thread_status(Path::new("/proc/thread-self/status"))?
+        .ok_or(ToolError::ProtectionUnavailable)?;
+    verify_hardened_status(&own)?;
     let mut threads = 0usize;
     for entry in
         std::fs::read_dir("/proc/self/task").map_err(|_| ToolError::ProtectionUnavailable)?
@@ -157,22 +160,28 @@ pub(super) fn harden() -> Result<(), ToolError> {
             .map_err(|_| ToolError::ProtectionUnavailable)?
             .path()
             .join("status");
-        let mut status = String::new();
-        std::fs::File::open(path)
-            .and_then(|file| {
-                file.take(STATUS_BYTES_CAP as u64 + 1)
-                    .read_to_string(&mut status)
-            })
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if status.len() > STATUS_BYTES_CAP {
-            return Err(ToolError::ProtectionUnavailable);
+        if let Some(status) = thread_status(&path)? {
+            verify_hardened_status(&status)?;
         }
-        verify_hardened_status(&status)?;
-    }
-    if threads == 0 {
-        return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
+}
+
+// A listed thread whose status is gone is safe because TSYNC filtered it or its creator and clones inherit the filter.
+fn thread_status(path: &Path) -> Result<Option<String>, ToolError> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ToolError::ProtectionUnavailable),
+    };
+    let mut status = String::new();
+    file.take(STATUS_BYTES_CAP as u64 + 1)
+        .read_to_string(&mut status)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if status.len() > STATUS_BYTES_CAP {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(Some(status))
 }
 
 fn verify_hardened_status(status: &str) -> Result<(), ToolError> {
@@ -661,7 +670,7 @@ fn unit_command(
             | ToolCall::Edit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }
-    ) || intent.call.is_git_read();
+    ) || intent.call.is_git();
     let folders = ["programs", "inputs", "skills"]
         .into_iter()
         .filter(|folder| seed_dir.symlink_metadata(folder).is_ok())
@@ -1447,6 +1456,22 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_that_exited_after_listing_has_no_status_to_verify() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("gone/status");
+        assert!(matches!(thread_status(&missing), Ok(None)));
+        let status = directory.path().join("status");
+        std::fs::write(&status, "Seccomp:\t2\n").unwrap();
+        assert_eq!(
+            thread_status(&status).unwrap().as_deref(),
+            Some("Seccomp:\t2\n")
+        );
+        std::fs::write(&status, vec![b'x'; STATUS_BYTES_CAP + 1]).unwrap();
+        assert!(thread_status(&status).is_err());
+        assert!(thread_status(directory.path()).is_err());
+    }
+
+    #[test]
     fn mountinfo_escapes_decode_only_separator_bytes() {
         assert_eq!(decode_mount_field(br"a\040b").unwrap(), b"a b");
         assert_eq!(decode_mount_field(br"\134").unwrap(), b"\\");
@@ -1633,7 +1658,16 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
+        std::thread::Builder::new()
+            .spawn(|| ())
+            .unwrap()
+            .join()
+            .unwrap();
         harden().expect("production Guard hardening");
+        let own = thread_status(Path::new("/proc/thread-self/status"))
+            .unwrap()
+            .expect("the caller's own status");
+        verify_hardened_status(&own).unwrap();
         for path in ["/workspace/a.txt", "/workspace/.git/write-probe"] {
             assert_eq!(std::fs::read(path).unwrap(), b"allowed\n");
             assert_eq!(

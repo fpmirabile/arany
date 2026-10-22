@@ -789,8 +789,18 @@ mod tests {
 
     #[test]
     fn tool_approval_linear_corpus_numbers_only_supported_choices() {
-        use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+        use crate::presentation::ToolApprovalChoice::{
+            AutoEdits, ExactCommand, GitPrefix, No, Yes,
+        };
         for (choices, expected) in [
+            (
+                vec![
+                    Yes,
+                    GitPrefix(arany::permissions::TypedGitPrefix::Commit),
+                    No,
+                ],
+                "1. Yes\n2. Yes, and allow git commit in this folder from the next Run\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+            ),
             (
                 vec![Yes, No],
                 "1. Yes\n2. No\nSelect 1-2, yes or no; empty Enter denies:\n",
@@ -1213,6 +1223,7 @@ mod tests {
                 summary: None,
                 result: None,
                 provider_calls: Vec::new(),
+                steering_notes: Vec::new(),
                 grant: None,
                 tools: Vec::new(),
                 status: AgentStatus::Active,

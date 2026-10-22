@@ -36,8 +36,10 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
+        git_identity: None,
     };
     let runtime = ToolRuntime {
+        git_writes_available: false,
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -245,6 +247,7 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         mcp: Vec::new(),
         runtime_grants: Vec::new(),
         git: None,
+        git_identity: None,
     };
     for (case, drift) in [("fresh", false), ("changed-input", true)] {
         let target = temp.path().join(case);
@@ -1951,7 +1954,7 @@ fn git_read_calls_validate_paths_combinations_and_counts() {
     ];
     for call in &valid {
         assert!(call.valid(), "{call:?}");
-        assert!(call.is_goal_plan_prelude() && call.is_git_read() && !call.mutates());
+        assert!(call.is_goal_plan_prelude() && call.is_git() && !call.mutates());
         assert!(!call.is_process() && !call.is_child_research());
     }
     assert_eq!(valid[0].label(), "git_status");
@@ -2153,7 +2156,8 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use super::ToolRuntime;
     use std::path::PathBuf;
 
-    let runtime = |config: Config| ToolRuntime {
+    let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
+        git_writes_available,
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -2183,18 +2187,55 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     let mut value = config_value();
     value["workspace_paths"] = json!(["."]);
     let mut config: Config = serde_json::from_value(value).unwrap();
-    let catalog = |config: Config| {
-        let context = runtime(config).context().unwrap();
+    let catalog = |config: Config, git_writes_available: bool| {
+        let context = runtime(config, git_writes_available).context().unwrap();
         parse_json(context.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap()
     };
-    assert_eq!(catalog(config.clone())["git"], "unavailable");
+    assert_eq!(catalog(config.clone(), true)["git"], "unavailable");
     config.git = Some(
         serde_json::from_value(json!({"name":"git","executable":"/usr/bin/git","sha256":"0".repeat(64),"interpreter":false,"inputs":[]})).unwrap(),
     );
     assert_eq!(
-        catalog(config)["git"]["operations"],
-        json!(["git_status", "git_diff", "git_log"])
+        catalog(config.clone(), true)["git"]["operations"],
+        json!(["git_status", "git_diff", "git_log", "git_branch"])
     );
+    config.write = true;
+    assert_eq!(
+        config.allows(&ToolCall::GitBranch {
+            name: Some("topic".into()),
+            start_point: None,
+        }),
+        super::guard::git_writes_available()
+    );
+    for git_writes in [false, true] {
+        let operations = if git_writes {
+            vec![
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_commit",
+                "git_branch",
+                "git_switch",
+            ]
+        } else {
+            vec!["git_status", "git_diff", "git_log", "git_branch"]
+        };
+        let catalog = catalog(config.clone(), git_writes);
+        assert_eq!(catalog["git"]["write"], git_writes);
+        assert_eq!(catalog["git"]["operations"], json!(operations));
+        let branch = catalog_call_schemas(&catalog)
+            .into_iter()
+            .find(|call| call["properties"]["operation"]["enum"][0] == "git_branch")
+            .unwrap();
+        let expected = if git_writes {
+            json!(["string", "null"])
+        } else {
+            json!("null")
+        };
+        for field in ["name", "start_point"] {
+            assert_eq!(branch["properties"][field]["type"], expected);
+        }
+    }
 }
 
 #[test]
@@ -2273,6 +2314,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "git": program,
     });
     let runtime = ToolRuntime {
+        git_writes_available: true,
         worker: None,
         handover: None,
         definitions: Default::default(),
@@ -2336,6 +2378,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
 pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
+        git_writes_available: false,
         worker: None,
         handover: None,
         definitions: Default::default(),

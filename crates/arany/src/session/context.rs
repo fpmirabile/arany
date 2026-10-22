@@ -52,8 +52,9 @@ impl CompiledContext {
                 .map(ImageAttachment::context_bytes)
                 .sum::<usize>()
             + inputs
-                .instructions
+                .user_instructions
                 .iter()
+                .chain(inputs.instructions.iter())
                 .map(|value| value.model_instructions().len())
                 .sum::<usize>()
             + inputs

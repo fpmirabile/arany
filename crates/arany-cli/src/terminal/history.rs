@@ -35,9 +35,10 @@ pub(super) struct ClassicProjection {
 pub(super) enum MessageKind {
     User,
     Assistant,
-    // A child's assignment and result in a read-only agent transcript.
+    // A child's assignment and result in its agent transcript.
     Assignment,
     AgentResult,
+    SteeringNote,
     Notice,
     Error,
     Preview,
@@ -54,6 +55,7 @@ enum MessageSource {
     Assistant(usize),
     Notice(u64),
     Tool(usize, usize),
+    Steering(usize, usize),
     Commentary(usize, u32, u8),
     Supervisor(usize, usize),
 }
@@ -200,6 +202,7 @@ impl History {
                     MessageSource::User(run)
                     | MessageSource::Assistant(run)
                     | MessageSource::Supervisor(run, _)
+                    | MessageSource::Steering(run, _)
                     | MessageSource::Tool(run, _)
                     | MessageSource::Commentary(run, _, _) => run >= first,
                     MessageSource::Notice(_) => false,
@@ -261,6 +264,17 @@ impl History {
                             Some(MessageSource::Tool(index, tool_index)),
                             width,
                         );
+                    }
+                }
+                if self.agent {
+                    for (note, text) in run.steering_notes.iter().enumerate() {
+                        self.push_owned(
+                            MessageSource::Steering(index, note),
+                            MessageKind::SteeringNote,
+                            text.clone(),
+                            width,
+                        );
+                        self.push_notices_after(Some(MessageSource::Steering(index, note)), width);
                     }
                 }
                 for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
@@ -1308,6 +1322,7 @@ fn message_text<'a>(
         return Cow::Borrowed(text);
     }
     match message.source {
+        MessageSource::Steering(run, note) => Cow::Borrowed(&view.runs[run].steering_notes[note]),
         MessageSource::Supervisor(run, verdict) => Cow::Owned(
             crate::presentation::supervisor_line(&view.runs[run].supervisor.verdicts()[verdict].1),
         ),
@@ -1606,6 +1621,7 @@ fn message_heading(kind: MessageKind) -> &'static str {
         MessageKind::Assistant => "Arany:",
         MessageKind::Assignment => "Assignment:",
         MessageKind::AgentResult => "Agent result:",
+        MessageKind::SteeringNote => crate::presentation::STEERING_NOTE_HEADING,
         MessageKind::Notice => "Arany · notice:",
         MessageKind::Error => "Arany · error:",
         MessageKind::Preview => "Arany · provisional:",
@@ -1713,6 +1729,40 @@ fn message_row_count(text: &str, width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_after_a_steering_note_survives_a_rebuild() {
+        let mut view = crate::presentation::team_view();
+        let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
+        view.runs[0].agents[2].steering_notes = vec!["guidance".into()];
+        view.runs[0].agents[2].result = None;
+        view.runs[0].agents[2].summary = None;
+        let transcript =
+            crate::presentation::AgentTranscript::from_session(&view, run, child).unwrap();
+        let mut history = History::agent();
+        history.sync(&transcript.view, 80, 4096);
+        history.record_notice(super::super::TerminalNotice::History("After the note"));
+        history.dirty = true;
+        history.sync(&transcript.view, 80, 4096);
+        let kinds: Vec<_> = history
+            .messages
+            .iter()
+            .map(|message| message.kind)
+            .collect();
+        let note = kinds
+            .iter()
+            .position(|kind| *kind == MessageKind::SteeringNote)
+            .expect("steering note row");
+        assert!(matches!(
+            history.messages[note].source,
+            MessageSource::Steering(_, 0)
+        ));
+        assert!(matches!(
+            history.notices.back().and_then(|notice| notice.after),
+            Some(MessageSource::Steering(_, 0))
+        ));
+        assert_eq!(kinds.get(note + 1), Some(&MessageKind::Notice));
+    }
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
         RunDisposition, RunStatus, RunView, SessionDefaults, WorkspaceIdentity,
@@ -3016,6 +3066,7 @@ mod tests {
                             provider_concurrency: 1,
                             workspace_device: 1,
                             workspace_inode: 1,
+                            user_instruction_digest: None,
                             instruction_sources: Vec::new(),
                             launch_directory: String::new(),
                             include_digests: Vec::new(),

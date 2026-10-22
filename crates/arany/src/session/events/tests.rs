@@ -85,6 +85,32 @@ mod goal_success_tests {
     }
 
     #[test]
+    fn a_later_git_switch_invalidates_a_satisfied_command_criterion() {
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "true".into()],
+            cwd: String::new(),
+        };
+        let contract = criterion(GoalSuccessCriterion::ToolCallSucceeded {
+            call: Box::new(call.clone()),
+        });
+        let passed = observation(
+            call,
+            ToolDisposition::Succeeded,
+            serde_json::json!({"exit_code":0,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+        );
+        assert!(matches_success(&contract, std::slice::from_ref(&passed)));
+        let switch = observation(
+            ToolCall::GitSwitch {
+                branch: "topic".into(),
+            },
+            ToolDisposition::Succeeded,
+            "{}".into(),
+        );
+        assert!(!matches_success(&contract, &[passed, switch]));
+    }
+
+    #[test]
     fn skill_only_plan_requires_an_exact_binding_and_successful_receipt() {
         let call = ToolCall::Skill {
             name: "review".into(),
@@ -311,6 +337,54 @@ mod goal_success_tests {
             ),
         ];
         assert!(!matches_success(&contract, &observations));
+    }
+
+    #[test]
+    fn child_steering_event_round_trips_with_exact_scope() {
+        let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let event = Event::AgentSteeringNoteRecorded {
+            goal_id,
+            run_id,
+            agent_run_id,
+            text: "literal /grant all".into(),
+        };
+        assert_eq!(event.version(), 1);
+        assert_eq!(event.scope(), (Some(run_id), Some(agent_run_id)));
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
+            serde_json::json!({"goal_id":goal_id,"text":"literal /grant all"})
+        );
+        assert_eq!(
+            Event::decode(event.kind(), 1, &payload, Some(run_id), Some(agent_run_id)).unwrap(),
+            event
+        );
+        for (run, actor) in [
+            (None, None),
+            (Some(run_id), None),
+            (None, Some(agent_run_id)),
+        ] {
+            assert!(Event::decode(event.kind(), 1, &payload, run, actor).is_err());
+        }
+        for payload in [
+            serde_json::json!({"goal_id":goal_id,"text":null}),
+            serde_json::json!({"goal_id":goal_id,"text":" "}),
+            serde_json::json!({"goal_id":null,"text":"x"}),
+            serde_json::json!({"goal_id":uuid::Uuid::nil(),"text":"x"}),
+            serde_json::json!({"goal_id":goal_id,"text":"x","agent_run_id":agent_run_id}),
+            serde_json::json!({"goal_id":goal_id,"text":"x".repeat(crate::session::MAX_STEERING_NOTE_BYTES+1)}),
+        ] {
+            assert!(
+                Event::decode(
+                    event.kind(),
+                    1,
+                    &payload.to_string(),
+                    Some(run_id),
+                    Some(agent_run_id)
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -670,6 +744,7 @@ mod account_default_tests {
             provider_concurrency: 1,
             workspace_device: 1,
             workspace_inode: 1,
+            user_instruction_digest: None,
             instruction_sources: Vec::new(),
             launch_directory: String::new(),
             include_digests: Vec::new(),
@@ -690,7 +765,7 @@ mod account_default_tests {
         };
         assert_eq!(
             event.payload().unwrap(),
-            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
+            r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#
         );
         let Event::RunStarted {
             config: ordinary, ..
@@ -769,6 +844,18 @@ mod account_default_tests {
             .unwrap()
             .remove("supervisor");
         assert!(serde_json::from_value::<RunConfig>(missing_supervisor).is_err());
+        let mut missing_user = serde_json::to_value(ordinary).unwrap();
+        missing_user
+            .as_object_mut()
+            .unwrap()
+            .remove("user_instruction_digest");
+        assert!(serde_json::from_value::<RunConfig>(missing_user).is_err());
+        let mut pinned_user = ordinary.clone();
+        pinned_user.user_instruction_digest = Some([7; 32]);
+        assert!(pinned_user.validate().is_ok());
+        let mut short_user = serde_json::to_value(&pinned_user).unwrap();
+        short_user["user_instruction_digest"] = serde_json::json!(vec![7; 31]);
+        assert!(serde_json::from_value::<RunConfig>(short_user).is_err());
         let mut missing_roster = serde_json::to_value(ordinary).unwrap();
         missing_roster.as_object_mut().unwrap().remove("roster");
         assert!(serde_json::from_value::<RunConfig>(missing_roster).is_err());
@@ -778,8 +865,8 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(19));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(14));
+        assert_eq!(payload_version("RunStarted"), Some(20));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -1652,9 +1739,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(20));
+        assert_eq!(payload_version("ToolFinished"), Some(21));
         assert_eq!(
-            Event::decode("ToolFinished", 20, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1662,7 +1749,7 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                20,
+                21,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1674,14 +1761,14 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 20, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 21, &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
         assert!(
             Event::decode(
                 "ToolFinished",
-                20,
+                21,
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1694,14 +1781,14 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                20,
+                21,
                 &unknown.to_string(),
                 Some(run),
                 Some(agent)
             )
             .is_err()
         );
-        for previous in [19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1754,8 +1841,8 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(14));
-        assert_eq!(payload_version("ToolPermissionDecided"), Some(4));
+        assert_eq!(payload_version("ToolStarted"), Some(15));
+        assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
     #[test]
@@ -1854,6 +1941,7 @@ mod payload_version_tests {
             provider_concurrency: 1,
             workspace_device: 1,
             workspace_inode: 2,
+            user_instruction_digest: None,
             instruction_sources: Vec::new(),
             launch_directory: String::new(),
             include_digests: Vec::new(),
@@ -1898,8 +1986,8 @@ mod payload_version_tests {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
             let version = match event {
-                Event::RunStarted { .. } => 19,
-                Event::ToolStarted { .. } => 14,
+                Event::RunStarted { .. } => 20,
+                Event::ToolStarted { .. } => 15,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
             };
@@ -2219,7 +2307,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(19));
+    assert_eq!(payload_version("RunStarted"), Some(20));
 }
 
 #[test]
@@ -2227,7 +2315,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(14));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,
@@ -2256,8 +2344,8 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
-    assert!(decode_call(&valid, 14).is_ok());
-    assert!(decode_call(&valid, 13).is_err());
+    assert!(decode_call(&valid, 15).is_ok());
+    assert!(decode_call(&valid, 14).is_err());
     for (field, value) in [
         ("refusal", serde_json::Value::Null),
         ("failure_reason", serde_json::Value::Null),
@@ -2278,17 +2366,17 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     ] {
         let mut invalid = valid.clone();
         invalid[field] = value;
-        assert!(decode_call(&invalid, 14).is_err(), "field {field}");
+        assert!(decode_call(&invalid, 15).is_err(), "field {field}");
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
-    assert!(decode_call(&worker_phase, 14).is_err());
+    assert!(decode_call(&worker_phase, 15).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
-    assert!(decode_call(&synthesis, 14).is_ok());
+    assert!(decode_call(&synthesis, 15).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
-    assert!(decode_call(&missing, 14).is_err());
+    assert!(decode_call(&missing, 15).is_err());
     for (disposition, failure, accepted) in [
         ("failed", serde_json::json!("proposal_refused"), true),
         ("failed", serde_json::Value::Null, false),
@@ -2348,8 +2436,8 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
             Some(AgentRunId::new()),
         )
     };
-    assert!(decode(&value, 14).is_ok());
-    assert!(decode(&value, 13).is_err());
+    assert!(decode(&value, 15).is_ok());
+    assert!(decode(&value, 14).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
         ("phase", serde_json::json!("tool_review")),
@@ -2362,7 +2450,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, 14).is_err(), "{key}");
+        assert!(decode(&malformed, 15).is_err(), "{key}");
     }
 }
 
