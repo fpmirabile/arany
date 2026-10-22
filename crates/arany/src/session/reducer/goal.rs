@@ -91,6 +91,8 @@ impl SessionView {
             known_cached_tokens: 0,
             continues,
             budget_closed: false,
+            budget_refusal: None,
+            run_start_usage: Default::default(),
         });
         Ok(())
     }
@@ -115,6 +117,13 @@ impl SessionView {
         if goal.phase != *phase {
             return Err(ReplayError::InvalidTransition);
         }
+        goal.run_start_usage = crate::session::GoalUsage {
+            runs: goal.run_ids.len(),
+            provider_calls: goal.provider_calls,
+            active_ms: goal.active_ms,
+            known_tokens: goal.known_tokens,
+            token_usage_unknown: goal.token_usage_unknown,
+        };
         goal.active_run = Some(*run_id);
         goal.run_ids.push(*run_id);
         Ok(())
@@ -440,6 +449,7 @@ impl SessionView {
         Ok(())
     }
 
+    #[expect(clippy::too_many_arguments, reason = "one Goal terminal transition")]
     pub(super) fn finish_goal(
         &mut self,
         goal_id: &GoalId,
@@ -447,8 +457,12 @@ impl SessionView {
         active_ms: &u64,
         report: &GoalReport,
         exhausted: bool,
+        budget_refusal: Option<crate::session::BudgetRefusal>,
         prior: u64,
     ) -> Result<(), ReplayError> {
+        if let Some(refusal) = &budget_refusal {
+            self.validate_budget_refusal(*goal_id, refusal, *active_ms)?;
+        }
         // The report's cache-read total must be exactly what the Goal accumulated from its Provider calls.
         if self
             .goal(*goal_id)
@@ -495,6 +509,7 @@ impl SessionView {
             }
             self.close_exhausted_goal(goal_id, *status, run_status, *active_ms, report, prior)?;
             current_goal_mut(self, *goal_id)?.budget_closed = true;
+            current_goal_mut(self, *goal_id)?.budget_refusal = budget_refusal;
             return Ok(());
         }
         let goal = current_goal_mut(self, *goal_id)?;
@@ -505,9 +520,102 @@ impl SessionView {
             return Err(ReplayError::InvalidTransition);
         }
         goal.budget_closed = exhausted;
+        goal.budget_refusal = budget_refusal;
         goal.status = *status;
         goal.report = Some(report.clone());
         goal.finished_sequence = Some(prior);
+        Ok(())
+    }
+
+    fn validate_budget_refusal(
+        &self,
+        goal_id: GoalId,
+        refusal: &crate::session::BudgetRefusal,
+        final_active_ms: u64,
+    ) -> Result<(), ReplayError> {
+        use crate::session::{BudgetAction, BudgetChargeBasis, GoalLimit};
+        refusal.validate()?;
+        let goal = self.goal(goal_id).ok_or(ReplayError::InvalidTransition)?;
+        let budget = goal.effective_budget();
+        let usage = goal.resume_usage(self);
+        let conservative_active =
+            goal.uncertain_active_ms > 0 || goal.unsettled_active_charge_ms() > 0;
+        if matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume) {
+            let expected = budget
+                .refusal(usage, refusal.action)
+                .ok_or(ReplayError::InvalidTransition)?;
+            if refusal.dimension != expected.dimension
+                || refusal.cause != expected.cause
+                || refusal.requested != expected.requested
+                || refusal.required_minimum != expected.required_minimum
+                || refusal.token_usage_unknown != expected.token_usage_unknown
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+        }
+        if budget.max_tokens.is_some()
+            && refusal.token_usage_unknown
+            && refusal.dimension != GoalLimit::Tokens
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
+        let (limit, final_used, floor) = match refusal.dimension {
+            GoalLimit::Calls => (
+                budget.max_provider_calls.map(u64::from),
+                u64::from(usage.provider_calls),
+                u64::from(goal.run_start_usage.provider_calls),
+            ),
+            GoalLimit::Tokens => (
+                budget.max_tokens,
+                usage.known_tokens,
+                goal.run_start_usage.known_tokens,
+            ),
+            GoalLimit::ActiveTime => (
+                budget.max_active_ms,
+                final_active_ms,
+                goal.run_start_usage.active_ms,
+            ),
+            GoalLimit::Runs => (
+                Some(u64::from(budget.max_runs)),
+                usage.runs as u64,
+                goal.run_start_usage.runs as u64,
+            ),
+        };
+        let run = refusal.run_id.and_then(|id| {
+            self.runs
+                .iter()
+                .rev()
+                .find(|run| goal.run_ids.contains(&run.id))
+                .filter(|run| run.id == id)
+        });
+        let valid_ids = match refusal.action {
+            BudgetAction::Run | BudgetAction::Resume => {
+                refusal.run_id.is_none() && refusal.agent_run_id.is_none()
+            }
+            BudgetAction::Provider
+            | BudgetAction::Tool
+            | BudgetAction::Delegation
+            | BudgetAction::Compaction => run.is_some_and(|run| {
+                refusal
+                    .agent_run_id
+                    .is_some_and(|id| run.agents.iter().any(|agent| agent.id == id))
+            }),
+        };
+        if limit != Some(refusal.limit)
+            || refusal.used > final_used
+            || refusal.used < floor
+            || matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume)
+                && refusal.used != final_used
+            || !valid_ids
+            || refusal.token_usage_unknown && !usage.token_usage_unknown
+            || goal.run_start_usage.token_usage_unknown && !refusal.token_usage_unknown
+            || conservative_active && refusal.charge_basis != BudgetChargeBasis::Conservative
+            || refusal.charge_basis == BudgetChargeBasis::Conservative
+                && !conservative_active
+                && !usage.token_usage_unknown
+        {
+            return Err(ReplayError::InvalidTransition);
+        }
         Ok(())
     }
 
@@ -837,8 +945,17 @@ pub(super) fn apply(
             active_ms,
             report,
             exhausted,
+            budget_refusal,
         } => {
-            current.finish_goal(goal_id, status, active_ms, report, *exhausted, prior)?;
+            current.finish_goal(
+                goal_id,
+                status,
+                active_ms,
+                report,
+                *exhausted,
+                *budget_refusal,
+                prior,
+            )?;
         }
         Event::AgentSteeringNoteRecorded {
             goal_id,

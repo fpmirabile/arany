@@ -51,10 +51,9 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Approvals wait for the human](./approvals-wait/README.md) | `Ready`: A1 non-host primary approvals now; A2 transition-driven child wait accounting; A3 host expiry after #279 |
 | [Rewind confirmation](./rewind-confirmation/README.md) | `Ready`: R1 live preview confirmation without wall-clock expiry, after approvals A1 |
-| [Budget feedback](./budget-feedback/README.md) | `Ready`: G1 reproduce/classify budget refusal, persist its reservation detail and render deterministic explanations; independent of approvals |
 | [Tool failure continuation](./failure-feedback/README.md) | `Ready`: C1 primary failure/decline results and sanitized continuation after approvals A1; C2 delegated feedback |
 | [Arany-owned storage report](./arany-storage/README.md) | `In progress`: S2 recorded native Guard storage remains; S1 local StateRoot/cache report uses the metadata-only lead default, with no automatic model disclosure |
-| [Provider check journal](./provider-check-journal/README.md) | `Ready`: C1 standalone custom/native check streams and SQLite migration; C2 ChatGPT checks and account-index migration; prerequisite for setup UI |
+| [Provider check journal](./provider-check-journal/README.md) | `In progress`: C1 implemented; C2 selected ChatGPT checks and account-index migration remain; prerequisite for setup UI |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [Large draft attachments](./large-draft-attachments/README.md) | In progress: pasted-text slice implemented; typed/restored drafts and clipboard/path image chips remain |
 | [Composer newline keys](./composer-newline-keys/README.md) | In progress: remaining slice negotiates modifier keys with capability-aware guidance and terminal restoration |

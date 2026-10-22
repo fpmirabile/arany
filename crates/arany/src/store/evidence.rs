@@ -2,7 +2,7 @@ use super::StoreError;
 use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::{
     net::SocketAddr,
     str::FromStr,
@@ -16,7 +16,7 @@ const MAX_EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub(super) fn apply(
     connection: &mut Connection,
-    read_only: bool,
+    _read_only: bool,
     op: EvidenceOp,
 ) -> Result<Option<EvidenceRecord>, StoreError> {
     match op {
@@ -26,17 +26,16 @@ pub(super) fn apply(
         EvidenceOp::LoadNative(fingerprint) => {
             Ok(load_native(connection, &fingerprint)?.map(EvidenceRecord::Native))
         }
-        _ if read_only => Err(StoreError::ReadOnly),
-        EvidenceOp::ClearProvider(name) => clear(connection, &name).map(|()| None),
-        EvidenceOp::RecordProvider(record) => record_provider(connection, &record).map(|()| None),
+        #[cfg(test)]
+        _ if _read_only => Err(StoreError::ReadOnly),
+        #[cfg(test)]
         EvidenceOp::ClearNative(fingerprint) => {
             clear_native(connection, &fingerprint).map(|()| None)
         }
-        EvidenceOp::RecordNative(record) => record_native(connection, &record).map(|()| None),
     }
 }
 
-fn clear(connection: &mut Connection, name: &str) -> Result<(), StoreError> {
+pub(super) fn clear(connection: &Connection, name: &str) -> Result<(), StoreError> {
     if !valid_name(name) {
         return Err(StoreError::InvalidHistory);
     }
@@ -47,12 +46,12 @@ fn clear(connection: &mut Connection, name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn record_provider(
-    connection: &mut Connection,
+pub(super) fn record_provider(
+    transaction: &Connection,
+    check_id: crate::CheckId,
     record: &ProviderEvidenceRecord,
 ) -> Result<(), StoreError> {
     validate(record)?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "DELETE FROM provider_evidence WHERE expires_at_ms <= ?1",
         [record.checked_at_ms],
@@ -74,22 +73,23 @@ fn record_provider(
     )
     .map_err(|_| StoreError::InvalidHistory)?;
     transaction.execute(
-        "INSERT INTO provider_evidence (profile_name, profile_digest, addresses, checked_at_ms, expires_at_ms)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO provider_evidence (profile_name, profile_digest, addresses, checked_at_ms, expires_at_ms, check_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT(profile_name) DO UPDATE SET
              profile_digest = excluded.profile_digest,
              addresses = excluded.addresses,
              checked_at_ms = excluded.checked_at_ms,
-             expires_at_ms = excluded.expires_at_ms",
+             expires_at_ms = excluded.expires_at_ms,
+             check_id = excluded.check_id",
         params![
             record.name,
             record.digest.as_slice(),
             addresses,
             record.checked_at_ms,
-            record.expires_at_ms
+            record.expires_at_ms,
+            check_id.to_string()
         ],
     )?;
-    transaction.commit()?;
     Ok(())
 }
 
@@ -97,15 +97,23 @@ fn load(connection: &Connection, name: &str) -> Result<Option<ProviderEvidenceRe
     if !valid_name(name) {
         return Err(StoreError::InvalidHistory);
     }
-    let raw: Option<(Vec<u8>, String, i64, i64)> = connection
+    let raw: Option<(Vec<u8>, String, i64, i64, String)> = connection
         .query_row(
-            "SELECT profile_digest, addresses, checked_at_ms, expires_at_ms
+            "SELECT profile_digest, addresses, checked_at_ms, expires_at_ms, check_id
              FROM provider_evidence WHERE profile_name = ?1",
             [name],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .optional()?;
-    let Some((digest, addresses, checked_at_ms, expires_at_ms)) = raw else {
+    let Some((digest, addresses, checked_at_ms, expires_at_ms, check_id)) = raw else {
         return Ok(None);
     };
     let digest: [u8; 32] = digest.try_into().map_err(|_| StoreError::InvalidHistory)?;
@@ -130,10 +138,22 @@ fn load(connection: &Connection, name: &str) -> Result<Option<ProviderEvidenceRe
     if record.checked_at_ms > now_ms || record.expires_at_ms <= now_ms {
         return Ok(None);
     }
+    if !super::check::evidence_valid(
+        connection,
+        &check_id,
+        record.digest,
+        super::check::provider_digest(&record)?,
+    )? {
+        return Ok(None);
+    }
     Ok(Some(record))
 }
 
-fn clear_native(connection: &mut Connection, fingerprint: &[u8; 32]) -> Result<(), StoreError> {
+#[cfg(test)]
+pub(super) fn clear_native(
+    connection: &Connection,
+    fingerprint: &[u8; 32],
+) -> Result<(), StoreError> {
     connection.execute(
         "DELETE FROM native_provider_evidence WHERE fingerprint = ?1",
         [fingerprint.as_slice()],
@@ -141,8 +161,9 @@ fn clear_native(connection: &mut Connection, fingerprint: &[u8; 32]) -> Result<(
     Ok(())
 }
 
-fn record_native(
-    connection: &mut Connection,
+pub(super) fn record_native(
+    transaction: &Connection,
+    check_id: crate::CheckId,
     record: &NativeEvidenceRecord,
 ) -> Result<(), StoreError> {
     validate_native(record)?;
@@ -150,7 +171,6 @@ fn record_native(
     if record.checked_at_ms > now || record.expires_at_ms <= now {
         return Err(StoreError::InvalidHistory);
     }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
     transaction.execute(
         "DELETE FROM native_provider_evidence WHERE expires_at_ms <= ?1",
         [now],
@@ -164,18 +184,19 @@ fn record_native(
         return Err(StoreError::StorageFull);
     }
     transaction.execute(
-        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms)
-         VALUES (?1, ?2, ?3)
+        "INSERT INTO native_provider_evidence (fingerprint, checked_at_ms, expires_at_ms, check_id)
+         VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(fingerprint) DO UPDATE SET
              checked_at_ms = excluded.checked_at_ms,
-             expires_at_ms = excluded.expires_at_ms",
+             expires_at_ms = excluded.expires_at_ms,
+             check_id = excluded.check_id",
         params![
             record.fingerprint.as_slice(),
             record.checked_at_ms,
-            record.expires_at_ms
+            record.expires_at_ms,
+            check_id.to_string()
         ],
     )?;
-    transaction.commit()?;
     Ok(())
 }
 
@@ -183,15 +204,15 @@ fn load_native(
     connection: &Connection,
     fingerprint: &[u8; 32],
 ) -> Result<Option<NativeEvidenceRecord>, StoreError> {
-    let raw: Option<(i64, i64)> = connection
+    let raw: Option<(i64, i64, String)> = connection
         .query_row(
-            "SELECT checked_at_ms, expires_at_ms
+            "SELECT checked_at_ms, expires_at_ms, check_id
              FROM native_provider_evidence WHERE fingerprint = ?1",
             [fingerprint.as_slice()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    let Some((checked_at_ms, expires_at_ms)) = raw else {
+    let Some((checked_at_ms, expires_at_ms, check_id)) = raw else {
         return Ok(None);
     };
     let record = NativeEvidenceRecord {
@@ -202,6 +223,14 @@ fn load_native(
     validate_native(&record)?;
     let now = now_ms()?;
     if record.checked_at_ms > now || record.expires_at_ms <= now {
+        return Ok(None);
+    }
+    if !super::check::evidence_valid(
+        connection,
+        &check_id,
+        record.fingerprint,
+        super::check::native_digest(&record)?,
+    )? {
         return Ok(None);
     }
     Ok(Some(record))

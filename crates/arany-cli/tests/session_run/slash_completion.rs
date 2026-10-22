@@ -3956,6 +3956,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                         cached_input_tokens: 0,
                     },
                     exhausted: true,
+                    budget_refusal: None,
                 },
             ] {
                 store.append(id, event).await.unwrap();

@@ -2037,70 +2037,98 @@ async fn thread_resume_lists_turns_and_tool_items_with_journaled_dispositions_in
 
 #[tokio::test]
 async fn failed_accepted_turns_complete_with_error_guidance_instead_of_rpc_errors() {
-    let _deadline = deadline();
-    let root = tempfile::tempdir().unwrap();
-    let workspace = root.path().join("workspace");
-    std::fs::create_dir(&workspace).unwrap();
-    let state = root.path().join("state");
-    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
-    provider
-        .responses
-        .lock()
-        .unwrap()
-        .push_back(Err(arany::ProviderError::Unavailable));
-    let threads = threads::Threads {
-        provider: Some(provider),
-        ..Default::default()
-    };
-    let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
-    let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
-    let client = async {
-        input.send(initialize()).await.unwrap();
-        next(&mut output).await;
-        input.send(thread_start(&workspace)).await.unwrap();
-        let thread = next(&mut output).await["result"]["thread"]["id"].clone();
-        next(&mut output).await;
-        input
-            .send(request(
-                3,
-                "turn/start",
-                json!({"threadId":thread,"input":[{"type":"text","text":"Try"}]}),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(
-            next(&mut output).await["result"]["turn"]["status"],
-            "inProgress"
+    for budget_stop in [false, true] {
+        let _deadline = deadline();
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let state = root.path().join("state");
+        StateRoot::admit(&state).unwrap().record(arany::RecordKind::UiPreferences).replace(&serde_json::to_vec(&json!({"version":4,"preferences":{
+        "completion":"tabs", "view":"fullscreen", "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
+        "resources":arany::ToolResourceSettings::default(), "mouse":"wheel_and_clicks", "copy_on_select":true
+    }})).unwrap()).unwrap();
+        let provider = Arc::new(
+            ScriptedProvider::new(if budget_stop {
+                vec![
+                    arany::ProviderOutcome::Answer(arany::Answer { text: " ".into() }),
+                    arany::ProviderOutcome::Answer(arany::Answer {
+                        text: "Forbidden extra call".into(),
+                    }),
+                ]
+            } else {
+                Vec::new()
+            })
+            .with_profile("openai", "gpt-5.4"),
         );
-        let completed = loop {
-            let message = next(&mut output).await;
-            assert!(message.get("error").is_none());
-            if message["method"] == "turn/completed" {
-                break message;
-            }
-        };
-        assert_eq!(completed["params"]["turn"]["status"], "failed");
-        input.send(ClientMessage::Eof).await.unwrap();
-        (serde_json::from_value(thread).unwrap(), completed)
-    };
-    let (result, (id, completed)) = tokio::join!(
-        server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
-        client
-    );
-    result.unwrap();
-    let (events, view) = closed_view(&state, id).await;
-    assert_eq!(
-        completed["params"]["turn"]["error"]["message"],
-        crate::presentation::run_feedback(&view.runs[0]).unwrap()
-    );
-    assert!(events.iter().any(|e| matches!(
-        e.event,
-        Event::RunFinished {
-            disposition: arany::RunDisposition::Failed,
-            ..
+        if !budget_stop {
+            provider
+                .responses
+                .lock()
+                .unwrap()
+                .push_back(Err(arany::ProviderError::Unavailable));
         }
-    )));
-    assert!(view.runs[0].assistant_message.is_none());
+        let requests = provider.requests.clone();
+        let threads = threads::Threads {
+            provider: Some(provider),
+            ..Default::default()
+        };
+        let (input, inbound) = mpsc::channel(INBOUND_CAPACITY);
+        let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
+        let client = async {
+            input.send(initialize()).await.unwrap();
+            next(&mut output).await;
+            input.send(thread_start(&workspace)).await.unwrap();
+            let thread = next(&mut output).await["result"]["thread"]["id"].clone();
+            next(&mut output).await;
+            input
+                .send(request(
+                    3,
+                    "turn/start",
+                    json!({"threadId":thread,"input":[{"type":"text","text":"Try"}]}),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                next(&mut output).await["result"]["turn"]["status"],
+                "inProgress"
+            );
+            let completed = loop {
+                let message = next(&mut output).await;
+                assert!(message.get("error").is_none());
+                if message["method"] == "turn/completed" {
+                    break message;
+                }
+            };
+            assert_eq!(completed["params"]["turn"]["status"], "failed");
+            input.send(ClientMessage::Eof).await.unwrap();
+            (serde_json::from_value(thread).unwrap(), completed)
+        };
+        let (result, (id, completed)) = tokio::join!(
+            server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
+            client
+        );
+        result.unwrap();
+        let (events, view) = closed_view(&state, id).await;
+        assert_eq!(
+            completed["params"]["turn"]["error"]["message"],
+            crate::presentation::session_run_feedback(&view, &view.runs[0]).unwrap()
+        );
+        assert_eq!(requests.lock().unwrap().len(), 1);
+        assert_eq!(view.goals[0].budget_closed, budget_stop);
+        assert_eq!(view.goals[0].budget_refusal.is_some(), budget_stop);
+        assert_eq!(
+            completed["params"]["turn"]["goal"]["budgetRefusal"],
+            json!(view.goals[0].budget_refusal)
+        );
+        assert!(events.iter().any(|e| matches!(
+            e.event,
+            Event::RunFinished {
+                disposition: arany::RunDisposition::Failed,
+                ..
+            }
+        )));
+        assert!(view.runs[0].assistant_message.is_none());
+    }
 }
 
 #[test]

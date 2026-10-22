@@ -131,6 +131,8 @@ mod goal_recovery_tests {
                 active_ceiling_ms: 0,
                 continues: None,
                 budget_closed: false,
+                budget_refusal: None,
+                run_start_usage: Default::default(),
             }],
         }
     }
@@ -402,6 +404,7 @@ mod goal_replay_tests {
                     cached_input_tokens: 0,
                 },
                 exhausted: false,
+                budget_refusal: None,
             },
         ]
     }
@@ -2373,6 +2376,16 @@ mod goal_replay_tests {
                 cached_input_tokens: 0,
             },
             exhausted: true,
+            budget_refusal: budget.refusal(
+                crate::session::GoalUsage {
+                    runs: 1,
+                    provider_calls: 0,
+                    active_ms: 0,
+                    known_tokens: 0,
+                    token_usage_unknown: false,
+                },
+                crate::BudgetAction::Resume,
+            ),
         };
         let mut events = vec![goal_started(goal, budget)];
         events.extend(start_run(
@@ -2385,6 +2398,24 @@ mod goal_replay_tests {
         let session = SessionId::new();
         let mut closing = events.clone();
         closing.push(close.clone());
+        for mutate in [
+            |r: &mut crate::BudgetRefusal| r.limit = 2,
+            |r: &mut crate::BudgetRefusal| r.used = 0,
+            |r: &mut crate::BudgetRefusal| r.run_id = Some(RunId::new()),
+            |r: &mut crate::BudgetRefusal| {
+                r.charge_basis = crate::BudgetChargeBasis::Conservative;
+            },
+        ] {
+            let mut forged = closing.clone();
+            if let Event::GoalFinished {
+                budget_refusal: Some(refusal),
+                ..
+            } = forged.last_mut().unwrap()
+            {
+                mutate(refusal);
+            }
+            assert!(SessionView::replay_open(session, &session_with(session, forged)).is_err());
+        }
         let view = SessionView::replay_open(session, &session_with(session, closing))
             .expect("an exhausted paused Goal closes as Failed")
             .expect("Session exists");
@@ -2423,6 +2454,7 @@ mod goal_replay_tests {
             active_ms: 0,
             report,
             exhausted: true,
+            budget_refusal: None,
         };
         let budget = GoalBudget {
             max_provider_calls: Some(1),
@@ -2539,6 +2571,7 @@ mod goal_replay_tests {
                 cached_input_tokens: 0,
             },
             exhausted: true,
+            budget_refusal: None,
         });
 
         let session = SessionId::new();
@@ -2640,6 +2673,7 @@ mod goal_replay_tests {
                     cached_input_tokens: 0,
                 },
                 exhausted: true,
+                budget_refusal: None,
             },
         ]);
         let session = SessionId::new();
@@ -2908,6 +2942,7 @@ mod goal_replay_tests {
                 cached_input_tokens: 0,
             },
             exhausted: true,
+            budget_refusal: None,
         });
 
         let session = SessionId::new();
@@ -3133,11 +3168,26 @@ mod goal_replay_tests {
                 cached_input_tokens: 0,
             };
             let mut unflagged = view.clone();
-            let receipt =
-                view.finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, true, 0);
+            let receipt = view.finish_goal(
+                &goal_id,
+                &GoalStatus::Failed,
+                &settled,
+                &report,
+                true,
+                None,
+                0,
+            );
             assert!(
                 unflagged
-                    .finish_goal(&goal_id, &GoalStatus::Failed, &settled, &report, false, 0)
+                    .finish_goal(
+                        &goal_id,
+                        &GoalStatus::Failed,
+                        &settled,
+                        &report,
+                        false,
+                        None,
+                        0
+                    )
                     .is_err(),
                 "a budget close of a Finished Run must carry exhausted"
             );
@@ -3211,6 +3261,7 @@ mod goal_replay_tests {
                 cached_input_tokens: 0,
             },
             exhausted: false,
+            budget_refusal: None,
         });
         let mut forged = events.clone();
         if let Some(Event::GoalFinished { exhausted, .. }) = forged.last_mut() {
@@ -3573,6 +3624,8 @@ mod goal_replay_tests {
                 active_ceiling_ms: 0,
                 continues: None,
                 budget_closed: false,
+                budget_refusal: None,
+                run_start_usage: Default::default(),
             }],
         }
     }
@@ -3686,6 +3739,53 @@ mod goal_replay_tests {
             event,
             created_at_ms: 0,
         })
+    }
+
+    fn assert_exhausted_crash_receipt(view: &SessionView) {
+        let mut view = view.clone();
+        view.goals[0].budget.max_active_ms = Some(1000);
+        if let Some(contract) = &mut view.goals[0].plan_contract {
+            contract.budget.max_active_ms = Some(1000);
+        }
+        let goal = &view.goals[0];
+        assert_eq!(goal.effective_budget().max_active_ms, Some(1000));
+        let usage = goal.resume_usage(&view);
+        assert!(!usage.token_usage_unknown);
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
+        assert_eq!(usage.active_ms, 1000);
+        let mut refusal = goal
+            .effective_budget()
+            .refusal(usage, crate::BudgetAction::Resume)
+            .expect("finite active budget refuses the recovered ceiling");
+        let mut close = Event::GoalFinished {
+            goal_id: goal.id,
+            status: GoalStatus::Failed,
+            active_ms: usage.active_ms,
+            report: GoalReport {
+                summary: "Out of budget.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: goal.known_cached_tokens,
+            },
+            exhausted: true,
+            budget_refusal: Some(refusal),
+        };
+        assert!(
+            rejected(&view, close.clone()),
+            "pending time is not observed"
+        );
+        refusal.charge_basis = crate::BudgetChargeBasis::Conservative;
+        if let Event::GoalFinished { budget_refusal, .. } = &mut close {
+            *budget_refusal = Some(refusal);
+        }
+        apply(&mut view, close.clone()).expect("crash ceiling closes conservatively");
+        let goal = &view.goals[0];
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (1000, 1000));
+        assert_eq!(goal.active_ceiling_ms, 0);
+        assert_eq!(goal.budget_refusal, Some(refusal));
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(rejected(&view, close), "a closed Goal cannot charge twice");
     }
 
     fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
@@ -4039,6 +4139,7 @@ mod goal_replay_tests {
                             unresolved: Vec::new(),
                             cached_input_tokens: 0,
                         },
+                        budget_refusal: None,
                     },
                 );
             }
@@ -4716,6 +4817,8 @@ mod goal_replay_tests {
                 active_ceiling_ms: 0,
                 continues: None,
                 budget_closed: false,
+                budget_refusal: None,
+                run_start_usage: Default::default(),
             }],
         };
         for path in ["unrelated", "src/main.rs"] {
@@ -4912,6 +5015,8 @@ mod goal_replay_tests {
                 active_ceiling_ms: 0,
                 continues: None,
                 budget_closed: false,
+                budget_refusal: None,
+                run_start_usage: Default::default(),
             }],
         };
         view.apply_committed(&EventEnvelope {
@@ -7047,7 +7152,17 @@ mod goal_replay_tests {
             "no request is declared before the step"
         );
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
-        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: agent,
+                intent: first.clone(),
+                active_ceiling_ms: 1000,
+            },
+        )
+        .expect("first request starts");
+        assert_exhausted_crash_receipt(&view);
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
@@ -7367,6 +7482,7 @@ mod goal_replay_tests {
                         cached_input_tokens,
                     },
                     exhausted: false,
+                    budget_refusal: None,
                 },
             ]);
             SessionView::replay(session_id, &session_with(session_id, events))
@@ -8016,6 +8132,7 @@ mod goal_replay_tests {
         .unwrap();
         assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
         assert!(!view.runs[0].hooks_settled());
+        assert_exhausted_crash_receipt(&view);
         let mut observation = observation_for(intent, b"");
         observation.disposition = ToolDisposition::Denied;
         observation.attestation = None;

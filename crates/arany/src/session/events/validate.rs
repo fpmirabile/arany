@@ -117,9 +117,21 @@ impl Event {
                 }
                 Ok(())
             }
-            Self::GoalFinished { status, report, .. } => {
+            Self::GoalFinished {
+                status,
+                report,
+                exhausted,
+                budget_refusal,
+                ..
+            } => {
                 if !matches!(status, GoalStatus::Completed | GoalStatus::Failed) {
                     return Err(ReplayError::InvalidPayload);
+                }
+                if let Some(refusal) = budget_refusal {
+                    if !exhausted {
+                        return Err(ReplayError::InvalidPayload);
+                    }
+                    refusal.validate()?;
                 }
                 report.validate()
             }

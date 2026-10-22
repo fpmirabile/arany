@@ -613,6 +613,96 @@
     "GoalSummary": {
       "additionalProperties": false,
       "properties": {
+        "budgetRefusal": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "provider",
+                "tool",
+                "delegation",
+                "compaction",
+                "run",
+                "resume"
+              ]
+            },
+            "agent_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cause": {
+              "enum": [
+                "exhausted",
+                "unknown_usage",
+                "insufficient_headroom"
+              ]
+            },
+            "charge_basis": {
+              "enum": [
+                "observed",
+                "conservative"
+              ]
+            },
+            "dimension": {
+              "enum": [
+                "tokens",
+                "calls",
+                "active_time",
+                "runs"
+              ]
+            },
+            "limit": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "requested": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "required_minimum": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "token_usage_unknown": {
+              "type": "boolean"
+            },
+            "used": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "dimension",
+            "cause",
+            "action",
+            "run_id",
+            "agent_run_id",
+            "used",
+            "limit",
+            "requested",
+            "required_minimum",
+            "token_usage_unknown",
+            "charge_basis"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "status": {
           "$ref": "#/$defs/GoalStatus"
         },
@@ -1213,6 +1303,96 @@
       "properties": {
         "budget": {
           "$ref": "#/$defs/ReceiptBudget"
+        },
+        "budgetRefusal": {
+          "additionalProperties": false,
+          "properties": {
+            "action": {
+              "enum": [
+                "provider",
+                "tool",
+                "delegation",
+                "compaction",
+                "run",
+                "resume"
+              ]
+            },
+            "agent_run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "cause": {
+              "enum": [
+                "exhausted",
+                "unknown_usage",
+                "insufficient_headroom"
+              ]
+            },
+            "charge_basis": {
+              "enum": [
+                "observed",
+                "conservative"
+              ]
+            },
+            "dimension": {
+              "enum": [
+                "tokens",
+                "calls",
+                "active_time",
+                "runs"
+              ]
+            },
+            "limit": {
+              "minimum": 1,
+              "type": "integer"
+            },
+            "requested": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "required_minimum": {
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "run_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "token_usage_unknown": {
+              "type": "boolean"
+            },
+            "used": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "dimension",
+            "cause",
+            "action",
+            "run_id",
+            "agent_run_id",
+            "used",
+            "limit",
+            "requested",
+            "required_minimum",
+            "token_usage_unknown",
+            "charge_basis"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "id": {
           "type": "string"

@@ -1861,7 +1861,7 @@ async fn finish_submission(
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-    let run_feedback = crate::presentation::run_feedback(&outcome.run);
+    let run_feedback = crate::presentation::session_run_feedback(view, &outcome.run);
     let run_feedback = match stop {
         Some(reason) => Some(match run_feedback {
             Some(feedback) => format!("Error: Goal stopped after this Run: {reason}. {feedback}"),
@@ -1880,16 +1880,21 @@ async fn finish_submission(
         run_feedback,
         crate::presentation::render_provider_attempts(&outcome.run),
     );
-    if let Some(feedback) = feedback {
+    if let Some(feedback) = feedback.as_deref() {
         if composer.is_empty() {
-            notice = Some(Feedback::History(feedback));
+            notice = Some(Feedback::History(feedback.to_owned()));
         } else {
             terminal
-                .draw(view, composer, Some(&feedback))
+                .draw(view, composer, Some(feedback))
                 .map_err(|error| error.to_string())?;
         }
     }
     if let Some(config) = automatic {
+        let submission_feedback = if composer.is_empty() {
+            notice.take()
+        } else {
+            feedback.map(Feedback::History)
+        };
         let compaction_notice = match compact_current(
             engine,
             terminal,
@@ -1936,6 +1941,9 @@ async fn finish_submission(
             answer_hidden.then_some(hidden_answer),
         )
         .map(Feedback::History);
+        if let Some(feedback) = submission_feedback {
+            append_notice(&mut notice, &feedback);
+        }
     }
     if let Some(error) = reload_error {
         notice = Some(Feedback::History(match notice.as_deref() {

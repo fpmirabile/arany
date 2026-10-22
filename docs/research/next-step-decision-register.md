@@ -349,6 +349,29 @@ configuration authority. The [Tool contract](../specs/tools.md#branch-discovery)
 owns exact syntax, fidelity, disclosure and bounds; execution reuses its existing
 concrete Engine/Guard boundary with no new adapter or privilege.
 
+### D-26 — Standalone Provider check durability
+
+The 2026-10-22 owner review accepted a CheckId stream in the existing Store,
+separate from conversation Sessions. Reusing its checked opening, thread,
+transactions and migration owner avoids fabricated Runs or a second database.
+A pure reducer and evidence linkage make crash prefixes inspectable without
+retrying paid requests or treating an old cache row as proof. Custom/native
+behavior and bounds live in [Provider](../specs/provider.md#commands) and
+[Execution](../specs/execution.md#standalone-provider-checks).
+
+The plan's scoped primary-source review on 2026-10-22 found direct probes and
+protocol qualification: [Claude gateway verification](https://code.claude.com/docs/en/llm-gateway-connect#verify-the-connection)
+and [gateway rollout](https://code.claude.com/docs/en/llm-gateway-rollout#test-claude-code-against-the-gateway),
+[Codex gateway qualification](https://learn.chatgpt.com/docs/enterprise/gateway-compatibility#qualification-checklist),
+[OpenCode custom Providers](https://opencode.ai/docs/providers/#custom-provider)
+and [Pi's pinned integration guidance](https://github.com/earendil-works/pi/blob/a13d35a742c6ef8462812a28fbe1d8c8b7431c32/packages/coding-agent/docs/custom-provider.md#test-the-integration).
+Arany keeps the real configured protocol and meaningful failure probes.
+Those inspected sections do not specify a durable standalone intent/outcome
+stream or crash/replay contract; this is a documentation finding, not a claim
+about every peer implementation. The separate journal is Arany's divergence
+from the documented direct-probe/gateway-log workflows, required by journal-first
+durability, honest uncertainty and strict replay.
+
 ### Rejected layering
 
 Retained from the 2026-10-04 architecture review (its report is folded into this register):
