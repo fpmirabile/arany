@@ -886,10 +886,29 @@ impl crate::Provider for ForegroundWorkerProvider {
                 } else {
                     ("notes/b", b"original b".as_slice(), "edited b")
                 };
-                super::scenario::tool_outcome(ToolCall::Write {
-                    path: path.into(),
-                    expected_digest: Some(crate::tools::types::hex_digest(old)),
-                    content: new.into(),
+                super::scenario::tool_outcome(if self.case == "success" {
+                    ToolCall::MultiEdit {
+                        file_path: path.into(),
+                        expected_digest: crate::tools::types::hex_digest(old),
+                        edits: vec![
+                            crate::LiteralEdit {
+                                old_string: std::str::from_utf8(old).unwrap().into(),
+                                new_string: "intermediate".into(),
+                                replace_all: false,
+                            },
+                            crate::LiteralEdit {
+                                old_string: "intermediate".into(),
+                                new_string: new.into(),
+                                replace_all: false,
+                            },
+                        ],
+                    }
+                } else {
+                    ToolCall::Write {
+                        path: path.into(),
+                        expected_digest: Some(crate::tools::types::hex_digest(old)),
+                        content: new.into(),
+                    }
                 })
             }
             (AgentPhase::ChildWork, 2) => {
