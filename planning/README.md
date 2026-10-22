@@ -73,7 +73,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Ready: typed discovery/suggestions, then Git disclosure; depends on snapshot PR1 (selector and enforced preparation) |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
-| [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
+| [Linux Tool latency](./linux-tool-latency/README.md) | `In progress`: slice 2 extends the replay-audited Read report with guarded Edit and command rows; named-host evidence remains owner-run |
 | [Guarded Cargo tests](./guarded-cargo-test/README.md) | Ready: selected offline Rust environment, Guard-only IPC test ignores, bounded multicore Build profile and exact repository measurement; owner decisions accepted |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
