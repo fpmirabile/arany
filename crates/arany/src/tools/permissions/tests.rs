@@ -1453,6 +1453,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     let agent = crate::session::AgentRunId::new();
     let mut observation = crate::tools::ToolObservation {
         intent: crate::tools::EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run,

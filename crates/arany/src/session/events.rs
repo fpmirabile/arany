@@ -145,9 +145,9 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 12),
+    ("AgentSpawned", 13),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 15),
+    ("ProviderCallRecorded", 16),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -164,15 +164,15 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 5),
-    ("HookStarted", 5),
-    ("HookFinished", 10),
-    ("ToolFinished", 21),
-    ("RunStarted", 20),
+    ("ToolPermissionDecided", 6),
+    ("HookStarted", 6),
+    ("HookFinished", 11),
+    ("ToolFinished", 22),
+    ("RunStarted", 21),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 15),
+    ("ToolStarted", 16),
     ("ContextCompacted", 7),
 ];
 
@@ -1440,6 +1440,46 @@ impl Event {
 // when it names them (they did not exist) or does not parse.
 pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     before_operations(kind, payload, &["glob"], Some("glob"))
+}
+
+pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(payload: &str) -> Option<String> {
+        serialize(&parse::<T>(payload).ok()?).ok()
+    }
+    let value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    fn carries_host(value: &serde_json::Value) -> bool {
+        match value {
+            serde_json::Value::Object(fields) => fields.iter().any(|(key, value)| {
+                matches!(key.as_str(), "host" | "host_epoch")
+                    || key == "child_unguarded" && value == "human_only"
+                    || key == "unguarded" && value == "human_only" && fields.len() == 1
+                    || carries_host(value)
+            }),
+            serde_json::Value::Array(items) => items.iter().any(carries_host),
+            serde_json::Value::String(text) => matches!(
+                text.as_str(),
+                "command_unguarded"
+                    | "arany_command_unguarded"
+                    | "exact_command_rule"
+                    | "session_approval"
+            ),
+            _ => false,
+        }
+    }
+    if carries_host(&value) {
+        return None;
+    }
+    match kind {
+        "RunStarted" => again::<RunStartedPayload>(payload),
+        "ToolStarted" => again::<ToolStartedPayload>(payload),
+        "ToolFinished" => again::<ToolFinishedPayload>(payload),
+        "ToolPermissionDecided" => again::<crate::tools::permissions::PermissionVerdict>(payload),
+        "AgentSpawned" => again::<SpawnPayload>(payload),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload),
+        _ => None,
+    }
 }
 
 // The same for the typed Git write variants, which a later payload version added.

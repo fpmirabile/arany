@@ -1066,6 +1066,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             break;
                         }
                         if command == InteractiveCommand::Rewind {
+                            engine
+                                .revoke_host_approvals()
+                                .map_err(|error| error.to_string())?;
                             notice = Some(Feedback::History(
                                 rewind::open(
                                     &engine,
@@ -1118,6 +1121,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
+                            engine
+                                .revoke_host_approvals()
+                                .map_err(|error| error.to_string())?;
                             match permissions::choose_area(&mut terminal).await? {
                                 None => {
                                     terminal
@@ -1136,6 +1142,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                     .await?;
                                     terminal
                                         .restore_draft_input(composer.text().len())
+                                        .map_err(|error| error.to_string())?;
+                                    engine
+                                        .readmit_host_permissions()
                                         .map_err(|error| error.to_string())?;
                                     notice = Some(Feedback::History(summary));
                                     continue;
@@ -1202,6 +1211,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             } else {
                                 "Read only · /permissions can enable guarded Tools".into()
                             }));
+                            engine
+                                .readmit_host_permissions()
+                                .map_err(|error| error.to_string())?;
                             admission.workspace_permissions = Some(access);
                             admission.tools = false;
                             refresh_runtime_skills(
@@ -1300,6 +1312,17 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             .map(feedback_or_end)
                             .transpose()?;
                         } else {
+                            if matches!(
+                                command,
+                                InteractiveCommand::Resume
+                                    | InteractiveCommand::New
+                                    | InteractiveCommand::Fork
+                                    | InteractiveCommand::Permissions
+                            ) {
+                                engine
+                                    .revoke_host_approvals()
+                                    .map_err(|error| error.to_string())?;
+                            }
                             notice = Some(feedback_or_end(
                                 controls::handle_command(
                                     &admission,
@@ -2117,6 +2140,7 @@ fn new_conversation(defaults: SessionDefaults) -> SessionView {
         inherited_title: None,
         workspace_identity: None,
         defaults,
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 0,
         lineage: None,

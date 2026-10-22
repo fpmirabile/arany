@@ -990,6 +990,8 @@ impl Task {
             .and(worker_input.as_ref())
             .map(|bytes| Arc::from(bytes.as_slice()));
         let runtime = ToolRuntime {
+            host_settings_admitted: false,
+            guard_available: false,
             git_writes_available: false,
             handover,
             worker: self.worker.zip(worker_input).map(|(transfer, input)| {
@@ -1444,6 +1446,7 @@ mod tests {
             worker: None,
             handover: None,
             intent: EffectIntent {
+                host: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
                 run_id: crate::session::RunId::default(),
@@ -1653,6 +1656,7 @@ mod tests {
             worker: None,
             handover: None,
             intent: EffectIntent {
+                host: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
                 run_id: crate::session::RunId::default(),

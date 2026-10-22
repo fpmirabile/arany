@@ -638,6 +638,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     inherited_title: None,
                     workspace_identity: None,
                     defaults: SessionDefaults::default(),
+                    host_epoch_floor: 0,
                     created_sequence: 0,
                     last_sequence: 0,
                     lineage: None,

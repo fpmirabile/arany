@@ -68,6 +68,7 @@ struct Host {
     state: PathBuf,
     engine: Engine,
     restricted_approvals: bool,
+    session: Option<SessionId>,
     policy: CollaborationPolicy,
 }
 
@@ -117,6 +118,7 @@ impl Host {
             state,
             engine,
             restricted_approvals: false,
+            session: None,
             policy: CollaborationPolicy::Single,
         }
     }
@@ -147,6 +149,7 @@ impl Host {
             ..Default::default()
         };
         let mut input = request(workspace, "Run the failing command");
+        input.session_id = self.session;
         input.include_paths.clear();
         input.policy = self.policy;
         input.goal.budget = Some(budget());
@@ -257,20 +260,24 @@ fn denied(seen: &Seen, needle: &str) {
 }
 
 #[tokio::test]
-async fn unguarded_rerun_is_offered_only_after_an_attested_guard_failure_and_runs_once_after_human_allow()
- {
+async fn primary_host_request_needs_no_prior_failure_and_replays_after_human_allow() {
     let host = Host::new(None);
-    let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
+    let second = unguarded(SCRIPT);
     let seen = host
         .run(
             &host.workspace,
-            script(&first, &second, vec![]),
+            vec![
+                arany::test_support::scenario::plan_outcome(plan(&second)),
+                tool_outcome(second.clone()),
+                finish("answer"),
+            ],
             Some(ApprovalMode::Request),
             vec![ApprovalReply::AllowOnce],
         )
         .await;
     assert_eq!(seen.unconsumed, 0);
     assert_eq!(seen.prompts.len(), 1);
+    assert!(seen.intents[0].host.is_some());
     assert_eq!(
         seen.prompts[0].executable,
         std::fs::canonicalize("/bin/sh").unwrap().to_str().unwrap()
@@ -334,20 +341,8 @@ async fn unguarded_rerun_is_offered_only_after_an_attested_guard_failure_and_run
 }
 
 #[tokio::test]
-async fn model_escalation_without_a_qualifying_failure_is_denied_and_journaled() {
-    let cases: [(&str, ToolCall, ToolCall, &str); 4] = [
-        (
-            "no prior attempt",
-            guarded("echo prior; exit 0"),
-            unguarded(SCRIPT),
-            "No identical command failed",
-        ),
-        (
-            "one byte differs",
-            guarded("exit 7"),
-            unguarded("exit 8"),
-            "No identical command failed",
-        ),
+async fn guard_aliases_are_never_translated_into_host_paths() {
+    let cases: [(&str, ToolCall, ToolCall, &str); 2] = [
         (
             "guard path alias",
             guarded("ls /workspace >/dev/null; exit 7"),
@@ -457,42 +452,31 @@ fn write_rule(host: &Host, script: &str) {
 }
 
 #[tokio::test]
-async fn headless_exec_denies_unguarded_without_an_exact_rule_and_dispatches_with_one() {
-    let host = Host::new(None);
-    let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
-    let seen = host
-        .run(
-            &host.workspace,
-            script(&first, &second, vec![]),
-            None,
-            vec![],
-        )
-        .await;
-    denied(&seen, "needs interactive approval");
-    assert_eq!(
-        last_tool(&seen).permission_verdict.as_ref().unwrap().source,
-        PermissionSource::UnavailableApproval
-    );
-    assert!(!host.workspace.join("ran.txt").exists());
-
-    write_rule(&host, SCRIPT);
-    let seen = host
-        .run(
-            &host.workspace,
-            script(&first, &second, vec![]),
-            None,
-            vec![],
-        )
-        .await;
-    let tool = last_tool(&seen);
-    let verdict = tool.permission_verdict.as_ref().unwrap();
-    assert!(verdict.approved);
-    assert_eq!(verdict.source, PermissionSource::ExactCommandRule);
-    assert!(host.workspace.join("ran.txt").is_file());
-    assert_eq!(seen.outcome.run.unguarded_tools(), 1);
-    let session = seen.outcome.session_id;
-    let (_, view) = host.reopen(session).await;
-    assert_eq!(view.runs[0].unguarded_tools(), 1);
+async fn headless_host_commands_refuse_with_or_without_inactive_exact_rules() {
+    for previous in [false, true] {
+        let host = Host::new(None);
+        if previous {
+            write_rule(&host, SCRIPT);
+        }
+        let call = unguarded(SCRIPT);
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    arany::test_support::scenario::plan_outcome(plan(&call)),
+                    tool_outcome(call),
+                ],
+                None,
+                vec![],
+            )
+            .await;
+        denied(&seen, "needs fresh human approval");
+        assert!(seen.prompts.is_empty());
+        assert!(!host.workspace.join("ran.txt").exists());
+        assert_eq!(host.rules().is_some(), previous);
+        let (_, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(view.runs[0].unguarded_tools(), 0);
+    }
 }
 
 #[tokio::test]
@@ -547,158 +531,258 @@ async fn an_ask_rule_still_denies_headless_unguarded_runs_with_an_exact_rule() {
             vec![],
         )
         .await;
-    denied(&seen, "needs interactive approval");
+    denied(&seen, "needs fresh human approval");
     assert!(!host.workspace.join("ran.txt").exists());
 }
 
 #[tokio::test]
-async fn always_allow_records_the_exact_rule_for_this_project_only_and_applies_next_submission() {
+async fn live_session_approval_reuses_identical_intents_without_writing_old_rules() {
     let host = Host::new(None);
-    let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
-    // A repeat inside the same Run prompts again because the admitted snapshot is immutable.
+    let call = unguarded(SCRIPT);
     let seen = host
         .run(
             &host.workspace,
             vec![
-                arany::test_support::scenario::plan_outcome(plan(&second)),
-                tool_outcome(first.clone()),
-                tool_outcome(second.clone()),
-                tool_outcome(second.clone()),
+                arany::test_support::scenario::plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
+                tool_outcome(call.clone()),
                 finish("answer"),
             ],
             Some(ApprovalMode::Request),
-            vec![
-                ApprovalReply::AllowAlwaysInProject,
-                ApprovalReply::AllowOnce,
-            ],
+            vec![ApprovalReply::AllowForSession],
         )
         .await;
-    assert_eq!(seen.prompts.len(), 2);
-    let rules = host.rules().expect("a recorded rule");
-    let commands = rules["commands"].as_array().unwrap();
-    assert_eq!(commands.len(), 1);
-    let metadata = std::fs::metadata(&host.workspace).unwrap();
-    assert_eq!(
-        commands[0]["workspace"]["path"],
-        host.workspace.to_str().unwrap()
-    );
-    assert_eq!(commands[0]["workspace"]["device"], metadata.dev());
-    assert_eq!(commands[0]["workspace"]["inode"], metadata.ino());
-    assert_eq!(commands[0]["args"], json!(["-c", SCRIPT]));
+    assert_eq!(seen.prompts.len(), 1);
+    assert!(host.rules().is_none());
+    let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
+    assert_eq!(verdict.source, PermissionSource::SessionApproval);
+    assert!(verdict.host.as_ref().unwrap().source_intent.is_some());
+    assert_eq!(seen.outcome.run.unguarded_tools(), 2);
+    let (_, view) = host.reopen(seen.outcome.session_id).await;
+    assert_eq!(view.runs[0].unguarded_tools(), 2);
+}
 
-    let next = host
+#[tokio::test]
+async fn primary_inspects_an_absolute_host_target_without_guarded_programs_or_failure() {
+    let host = Host::new(None);
+    let outside = host._temp.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("visible.txt"), "fixture").unwrap();
+    let config_path = host.state.join("tools.json");
+    let mut config: Value = serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+    config["commands"] = json!([]);
+    private_file(&config_path, &serde_json::to_vec(&config).unwrap());
+    let call = ToolCall::CommandUnguarded {
+        program: "find".into(),
+        args: vec![outside.display().to_string(), "-type".into(), "f".into()],
+        cwd: String::new(),
+        justification: "Inspect the exact host directory the user requested".into(),
+    };
+    let seen = host
         .run(
             &host.workspace,
-            script(&first, &second, vec![]),
+            vec![
+                tool_outcome(call),
+                finish("Only the requested directory was inspected"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    assert_eq!(seen.prompts.len(), 1);
+    let observation = last_tool(&seen).observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+    assert!(observation.output.contains("visible.txt"));
+    assert!(matches!(
+        observation.attestation,
+        Some(arany::Attestation::Unguarded(_))
+    ));
+    let (events, _) = host.reopen(seen.outcome.session_id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.event, Event::ToolStarted { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn session_host_authority_survives_turns_but_revocation_requires_a_human() {
+    let mut host = Host::new(None);
+    let call = unguarded("printf inspected");
+    let outcomes = || vec![tool_outcome(call.clone()), finish("done")];
+    let first = host
+        .run(
+            &host.workspace,
+            outcomes(),
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowForSession],
+        )
+        .await;
+    host.session = Some(first.outcome.session_id);
+    let second = host
+        .run(
+            &host.workspace,
+            outcomes(),
             Some(ApprovalMode::Request),
             vec![],
         )
         .await;
-    assert!(next.prompts.is_empty(), "the exact rule approves it");
-    let verdict = last_tool(&next).permission_verdict.as_ref().unwrap();
-    assert_eq!(verdict.source, PermissionSource::ExactCommandRule);
-    assert!(verdict.approved);
-
-    let other = host._temp.path().join("other");
-    std::fs::create_dir_all(other.join("notes")).unwrap();
-    let other = other.canonicalize().unwrap();
-    let elsewhere = host
+    assert!(second.prompts.is_empty());
+    assert_eq!(
+        last_tool(&second)
+            .permission_verdict
+            .as_ref()
+            .unwrap()
+            .source,
+        PermissionSource::SessionApproval
+    );
+    host.engine.revoke_host_approvals().unwrap();
+    let third = host
         .run(
-            &other,
-            script(&first, &second, vec![]),
+            &host.workspace,
+            outcomes(),
             Some(ApprovalMode::Request),
-            vec![ApprovalReply::Deny],
+            vec![ApprovalReply::AllowOnce],
         )
         .await;
+    assert_eq!(third.prompts.len(), 1);
     assert_eq!(
-        elsewhere.prompts.len(),
-        1,
-        "another Workspace prompts again"
+        last_tool(&third)
+            .permission_verdict
+            .as_ref()
+            .unwrap()
+            .source,
+        PermissionSource::Human
     );
-    assert!(!other.join("ran.txt").exists());
+    let (_, replay) = host.reopen(third.outcome.session_id).await;
+    assert_eq!(replay.runs.len(), 3);
 }
 
 #[tokio::test]
-async fn an_unconfirmed_exact_rule_save_is_uncertain_stops_the_run_and_never_dispatches() {
+async fn changed_permission_settings_require_explicit_readmission() {
     let host = Host::new(None);
-    let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
-    arany::FaultPlan::fail_record_sync(host.state.clone(), "unguarded-commands.json");
-    let provider = Arc::new(ScriptedProvider::new(script(&first, &second, vec![])));
-    let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
-    let controls = RunControls {
-        tools: ToolGrant::Configured,
-        approvals: Some(approvals),
-        ..Default::default()
-    };
-    let mut input = request(&host.workspace, "Run the failing command");
-    input.include_paths.clear();
-    input.goal.budget = Some(budget());
-    let mut prompts = 0;
-    let outcome = {
-        let running = run_with(&host.engine, &provider, input, controls);
-        tokio::pin!(running);
-        loop {
-            tokio::select! {
-                biased;
-                result = &mut running => break result,
-                Some(approval) = inbox.next() => {
-                    if approval.unguarded.is_some() {
-                        prompts += 1;
-                        approval.decide(ApprovalReply::AllowAlwaysInProject);
-                    } else {
-                        approval.decide(ApprovalReply::AllowOnce);
-                    }
-                }
-            }
-        }
-    };
-    assert!(
-        matches!(
-            outcome,
-            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
-        ),
-        "{:?}",
-        outcome.map(|outcome| outcome.run.status)
-    );
-    assert_eq!(prompts, 1);
-    assert!(
-        provider.requests.lock().unwrap().len() < 4,
-        "the stop ends the continuation"
-    );
-    assert!(!host.workspace.join("ran.txt").exists());
-    let session = list_sessions(
-        StateRoot::open_existing(&host.state).unwrap(),
-        host.workspace.clone(),
+    let call = unguarded("printf inspected");
+    let outcomes = || vec![tool_outcome(call.clone()), finish("done")];
+    host.run(
+        &host.workspace,
+        outcomes(),
+        Some(ApprovalMode::Request),
+        vec![ApprovalReply::AllowOnce],
     )
-    .await
-    .unwrap()[0]
-        .id;
-    let before = std::fs::read(host.state.join("unguarded-commands.json")).unwrap();
-    host.engine.close().await.unwrap();
-    let store = Store::open_read_only(StateRoot::open_existing(&host.state).unwrap()).unwrap();
-    let events = store.load_session(session).await.unwrap();
-    let view = SessionView::replay(session, &events).unwrap().unwrap();
-    store.close().await.unwrap();
-    let state = host.state.clone();
-    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
-    let tool = view.runs[0].tools.last().unwrap();
-    let observation = tool.observation.as_ref().unwrap();
-    assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
-    assert!(observation.output.contains("rule save not confirmed"));
-    assert!(observation.attestation.is_none());
-    assert!(tool.permission_verdict.as_ref().unwrap().approved);
-    assert_eq!(
-        events
-            .iter()
-            .filter(|e| matches!(e.event, Event::ToolStarted { .. }))
-            .count(),
-        2
+    .await;
+    private_file(
+        &host.state.join("permissions.json"),
+        br#"{"permissions":{"allow":["Bash"]}}"#,
     );
+    let denied_run = host
+        .run(
+            &host.workspace,
+            outcomes(),
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert!(denied_run.prompts.is_empty());
+    denied(&denied_run, "use /permissions to re-admit");
+    host.engine.readmit_host_permissions().unwrap();
+    let admitted = host
+        .run(
+            &host.workspace,
+            outcomes(),
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    assert_eq!(admitted.prompts.len(), 1);
     assert_eq!(
-        std::fs::read(state.join("unguarded-commands.json")).unwrap(),
-        before,
-        "replay never saves again"
+        last_tool(&admitted)
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        arany::ToolDisposition::Succeeded
     );
+}
+
+#[tokio::test]
+async fn every_privilege_tool_is_handed_off_without_approval_or_dispatch() {
+    for program in [
+        "sudo",
+        "sudoedit",
+        "doas",
+        "su",
+        "pkexec",
+        "run0",
+        "runuser",
+        "chroot",
+        "systemd-run",
+        "machinectl",
+        "pfexec",
+        "ksu",
+        "dzdo",
+        "authopen",
+        "/usr/libexec/authopen",
+        "/usr/bin/sudo",
+    ] {
+        for mode in ["default", "auto", "acceptEdits", "dontAsk", "plan"] {
+            let host = Host::new(Some(
+                &json!({"permissions":{"defaultMode":mode,"allow":["Bash"]}}),
+            ));
+            let call = ToolCall::CommandUnguarded {
+                program: program.into(),
+                args: vec!["echo".into(), "canary".into()],
+                cwd: String::new(),
+                justification: "Inspect host".into(),
+            };
+            let seen = host
+                .run(
+                    &host.workspace,
+                    vec![
+                        tool_outcome(call),
+                        finish("Run the displayed command by hand"),
+                    ],
+                    Some(ApprovalMode::Request),
+                    vec![],
+                )
+                .await;
+            assert!(seen.prompts.is_empty(), "{program} {mode}");
+            denied(
+                &seen,
+                "Arany cannot run privilege-escalation commands. Please run this command by hand:",
+            );
+            assert!(
+                last_tool(&seen)
+                    .observation
+                    .as_ref()
+                    .unwrap()
+                    .output
+                    .contains(program)
+            );
+            let (_, view) = host.reopen(seen.outcome.session_id).await;
+            assert_eq!(view.runs[0].unguarded_tools(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn unsupported_host_prefix_reply_does_not_downgrade_to_once() {
+    let host = Host::new(None);
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![
+                tool_outcome(unguarded("printf should-not-run")),
+                finish("refused"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowPrefixInFolder],
+        )
+        .await;
+    assert_eq!(seen.prompts.len(), 1);
+    denied(&seen, "Approval was not granted");
+    assert_eq!(seen.outcome.run.unguarded_tools(), 0);
 }
 
 #[tokio::test]
@@ -720,231 +804,30 @@ async fn a_denied_prompt_dispatches_nothing() {
 }
 
 #[tokio::test]
-async fn hook_unguarded_rerun_requires_the_exact_command_and_a_fresh_human_ask_then_replays() {
-    const HOOK: &str =
-        "if [ -n \"$ARANY_UNGUARDED\" ]; then printf 'ran\\n' >> ran.txt; else mkdir .ssh; fi";
-    for event in ["PreToolUse", "PostToolUse"] {
-        for allow in [false, true] {
-            let settings = json!({"hooks": {event: [{"matcher": "Read", "hooks": [{"type": "command", "command": HOOK}]}]}});
-            let host = Host::new(Some(&settings));
-            let metadata = std::fs::metadata(&host.workspace).unwrap();
-            private_file(&host.state.join("unguarded-commands.json"), &serde_json::to_vec(&json!({
-                "version":1,"commands":[{"workspace":{"path":host.workspace,"device":metadata.dev(),"inode":metadata.ino()},
-                    "program":"sh","args":["-c",HOOK],"cwd":"","created_unix_ms":1}]
-            })).unwrap());
-            std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
-            let first = ToolCall::Read {
-                path: "notes/input".into(),
-                offset: None,
-                limit: Some(64),
-            };
-            let rules_before = host.rules();
-            let exact = unguarded(HOOK);
-            let wrong = unguarded("echo different");
-            let seen = host
-                .run(
-                    &host.workspace,
-                    vec![
-                        arany::test_support::scenario::plan_outcome(plan(&exact)),
-                        tool_outcome(first),
-                        tool_outcome(wrong),
-                        tool_outcome(exact.clone()),
-                        finish("answer"),
-                    ],
-                    Some(ApprovalMode::Auto),
-                    vec![if allow {
-                        ApprovalReply::AllowAlwaysInProject
-                    } else {
-                        ApprovalReply::Deny
-                    }],
-                )
-                .await;
-            assert_eq!(seen.prompts.len(), 1);
-            assert!(!seen.prompts[0].remember);
-            assert_eq!(host.rules(), rules_before);
-            assert_eq!(seen.intents[0].call, exact);
-            assert_eq!(
-                seen.prompts[0].attribution,
-                Some(arany::EnforcementCause::FilesystemDenied)
-            );
-            let hook = &seen.outcome.run.tools[0].hooks[0];
-            assert_eq!(
-                hook.outcome.as_ref().unwrap().result,
-                arany::permissions::HookResult::Ignored {
-                    why: arany::permissions::HookIgnoreReason::NotCompleted,
-                }
-            );
-            let next = seen.calls[2].input.tools.as_ref().unwrap();
-            let feedback = &next.steps[1].hook_feedback[&0];
-            assert!(
-                feedback
-                    .iter()
-                    .any(|line| line.contains("command_unguarded") && line.contains("mkdir .ssh"))
-            );
-            assert!(
-                !seen.outcome.run.tools[1]
-                    .permission_verdict
-                    .as_ref()
-                    .unwrap()
-                    .approved
-            );
-            let verdict = last_tool(&seen).permission_verdict.as_ref().unwrap();
-            assert_eq!(
-                (verdict.decision, verdict.source, verdict.approved),
-                (Decision::Ask, PermissionSource::Human, allow)
-            );
-            let ran = std::fs::read_to_string(host.workspace.join("ran.txt")).ok();
-            assert_eq!(ran.is_some(), allow);
-            let session = seen.outcome.session_id;
-            private_file(
-                &host.state.join("permissions.json"),
-                br#"{"permissions":{"deny":["command_unguarded"]}}"#,
-            );
-            let (events, view) = host.reopen(session).await;
-            assert_eq!(view.runs[0].unguarded_tools(), usize::from(allow));
-            if allow {
-                assert_eq!(ran.as_deref(), Some("ran\n"));
-                for remove in [true, false] {
-                    let mut forged = events.clone();
-                    if remove {
-                        forged.retain(|event| !matches!(event.event, Event::HookFinished { .. }));
-                    } else {
-                        for event in &mut forged {
-                            if let Event::HookFinished { outcome, .. } = &mut event.event {
-                                outcome.observation.enforcement_cause = None;
-                            }
-                        }
-                    }
-                    assert!(SessionView::replay(session, &forged).is_err());
-                }
-            }
-        }
-    }
+async fn ignored_stop_hook_does_not_offer_host_execution_or_force_continuation() {
+    let host = Host::new(Some(
+        &json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":"mkdir .ssh"}]}]}}),
+    ));
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![finish("done")],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert_eq!(seen.requests, 1);
+    assert!(seen.prompts.is_empty());
+    assert_eq!(seen.outcome.run.unguarded_tools(), 0);
+    let (_, view) = host.reopen(seen.outcome.session_id).await;
+    assert!(view.runs[0].lifecycle_hooks.iter().all(|hook| matches!(
+        hook.outcome.as_ref().unwrap().result,
+        arany::permissions::HookResult::Ignored { .. }
+    )));
 }
 
 #[tokio::test]
-async fn hook_stop_unguarded_rerun_uses_a_bounded_continuation_and_human_approval() {
-    const HOOK: &str =
-        "if [ -n \"$ARANY_UNGUARDED\" ]; then echo ran >> ran.txt; else mkdir .ssh; fi";
-    for allow in [false, true] {
-        let host = Host::new(Some(
-            &json!({"hooks":{"Stop":[{"hooks":[{"type":"command","command":HOOK}]}]}}),
-        ));
-        std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
-        let call = unguarded(HOOK);
-        let seen = host
-            .run(
-                &host.workspace,
-                vec![
-                    arany::test_support::scenario::plan_outcome(plan(&call)),
-                    tool_outcome(ToolCall::Read {
-                        path: "notes/input".into(),
-                        offset: None,
-                        limit: Some(64),
-                    }),
-                    finish("candidate"),
-                    tool_outcome(call.clone()),
-                    finish("answer"),
-                ],
-                Some(ApprovalMode::Auto),
-                vec![if allow {
-                    ApprovalReply::AllowOnce
-                } else {
-                    ApprovalReply::Deny
-                }],
-            )
-            .await;
-        assert_eq!(seen.prompts.len(), 1);
-        assert_eq!(seen.intents[0].call, call);
-        assert_eq!(seen.calls.len(), if allow { 5 } else { 4 });
-        assert!(
-            seen.calls[3].input.stop_hook_feedback[0]
-                .text
-                .contains("command_unguarded")
-        );
-        assert!(seen.outcome.run.lifecycle_hooks.iter().all(|hook| matches!(
-            hook.outcome.as_ref().unwrap().result,
-            arany::permissions::HookResult::Ignored { .. }
-        )));
-        assert_eq!(host.workspace.join("ran.txt").exists(), allow);
-        let session = seen.outcome.session_id;
-        let (_, view) = host.reopen(session).await;
-        assert_eq!(view.runs[0].unguarded_tools(), usize::from(allow));
-    }
-}
-
-#[tokio::test]
-async fn child_hook_unguarded_rerun_is_refused_without_explicit_inheritance() {
-    const HOOK: &str =
-        "if [ -n \"$ARANY_UNGUARDED\" ]; then echo ran >> ran.txt; else mkdir .ssh; fi";
-    for explicit in [false, true] {
-        let mut host = Host::new(Some(
-            &json!({"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[{"type":"command","command":HOOK}]}]}}),
-        ));
-        host.policy = CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
-        if explicit {
-            let path = host.state.join("tools.json");
-            let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            config["child_unguarded"] = json!("human_only");
-            private_file(&path, &serde_json::to_vec(&config).unwrap());
-        }
-        std::fs::write(host.workspace.join("notes/input"), "fact").unwrap();
-        let call = unguarded(HOOK);
-        let seen = host
-            .run(
-                &host.workspace,
-                vec![
-                    ProviderOutcome::Delegate(Delegate {
-                        agent: None,
-                        children: vec![arany::ChildAssignment {
-                            editor: None,
-                            objective: "Inspect fact".into(),
-                            profile: None,
-                        }],
-                    }),
-                    tool_outcome(ToolCall::Read {
-                        path: "notes/input".into(),
-                        offset: None,
-                        limit: Some(64),
-                    }),
-                    finish("fact"),
-                    arany::test_support::scenario::plan_outcome(plan(&call)),
-                    tool_outcome(call.clone()),
-                    finish("answer"),
-                ],
-                Some(ApprovalMode::Auto),
-                if explicit {
-                    vec![ApprovalReply::AllowOnce]
-                } else {
-                    vec![]
-                },
-            )
-            .await;
-        assert_eq!(seen.prompts.len(), usize::from(explicit));
-        assert_eq!(host.workspace.join("ran.txt").exists(), explicit);
-        assert_eq!(
-            seen.outcome.run.agents[1].grant,
-            Some(arany::ChildGrant::ReadOnly {
-                unguarded: if explicit {
-                    arany::UnguardedGrant::HumanOnly
-                } else {
-                    arany::UnguardedGrant::Denied
-                },
-            })
-        );
-        let primary_catalog: Value =
-            serde_json::from_str(seen.calls[4].input.tools.as_ref().unwrap().catalog()).unwrap();
-        assert_eq!(primary_catalog.get("hook_reruns").is_some(), explicit);
-        let session = seen.outcome.session_id;
-        let (_, view) = host.reopen(session).await;
-        assert_eq!(view.runs[0].unguarded_tools(), usize::from(explicit));
-    }
-}
-
-#[tokio::test]
-async fn pre_compact_with_a_rerun_offer_blocks_compaction() {
+async fn ignored_pre_compact_hook_does_not_block_for_a_host_offer() {
     const HOOK: &str = "mkdir .ssh";
     let host = Host::new(Some(
         &json!({"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": HOOK}]}]}}),
@@ -953,18 +836,23 @@ async fn pre_compact_with_a_rerun_offer_blocks_compaction() {
         .run(&host.workspace, vec![finish("done")], None, vec![])
         .await;
     let session = seen.outcome.session_id;
-    let providers = arany::AdmittedProviders::single(Arc::new(ScriptedProvider::new(vec![])));
-    assert!(matches!(
+    let providers = arany::AdmittedProviders::single(Arc::new(
+        ScriptedProvider::new(vec![]).with_compactions(vec![Ok(arany::CompactionResponse {
+            summary: "Completed host-hook scenario".into(),
+            response_id: None,
+            usage: arany::Usage::default(),
+            wire_provenance: None,
+        })]),
+    ));
+    assert!(!matches!(
         host.engine
             .compact_session(&providers, session, host.workspace.clone())
             .await,
         Err(arany::EngineError::CompactionBlockedByHook)
     ));
     let (events, _) = host.reopen(session).await;
-    assert!(!events.iter().any(|event| matches!(
-        event.event,
-        Event::ContextCompacted { .. } | Event::GoalCompactionCallReserved { .. }
-    )));
+    assert!(!events.iter().any(|event| matches!(&event.event,
+        Event::ToolStarted { intent, .. } if intent.call.is_unguarded())));
 }
 
 #[test]
@@ -1119,4 +1007,116 @@ fn runaway_command_output_stops_at_the_drain_ceiling_and_publishes_nothing() {
             let (_, replay) = host.reopen(session).await;
             assert_eq!(replay.runs[0], seen.outcome.run);
         });
+}
+
+#[tokio::test]
+async fn wrapped_privilege_tools_are_handed_off_before_any_approval() {
+    for (program, args) in [
+        ("env", vec!["sudo", "true"]),
+        ("env", vec!["-S", "sudo id"]),
+        ("env", vec!["--split-string=sudo id"]),
+        ("sh", vec!["-c", "sudo true"]),
+        ("sh", vec!["-c", "echo $(/usr/bin/sudo id)"]),
+        ("python3", vec!["-c", "system('sudo true')"]),
+        ("pwsh", vec!["-Command", "sudo true"]),
+        ("xargs", vec!["/usr/bin/sudo", "true"]),
+        ("find", vec![".", "-exec", "sudo", "true", ";"]),
+        ("timeout", vec!["5", "sudo", "true"]),
+        (
+            "osascript",
+            vec!["-e", "do shell script \"id\" with administrator privileges"],
+        ),
+    ] {
+        let host = Host::new(None);
+        let call = ToolCall::CommandUnguarded {
+            program: program.into(),
+            args: args.into_iter().map(str::to_owned).collect(),
+            cwd: String::new(),
+            justification: "Inspect host".into(),
+        };
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    tool_outcome(call),
+                    finish("Run the displayed command by hand"),
+                ],
+                Some(ApprovalMode::Request),
+                vec![],
+            )
+            .await;
+        assert!(seen.prompts.is_empty(), "{program}");
+        denied(&seen, "Please run this command by hand:");
+        assert!(
+            last_tool(&seen)
+                .observation
+                .as_ref()
+                .unwrap()
+                .attestation
+                .is_none()
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn host_child_has_a_new_session_and_no_controlling_terminal() {
+    let host = Host::new(None);
+    let call = unguarded(
+        "ps -o sess= -p $$ > session; if (exec 3<>/dev/tty) 2>/dev/null; then exit 1; fi",
+    );
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![tool_outcome(call), finish("Checked session")],
+            Some(ApprovalMode::Request),
+            vec![ApprovalReply::AllowOnce],
+        )
+        .await;
+    let observation = last_tool(&seen).observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Succeeded);
+    let arany::Attestation::Unguarded(receipt) = observation.attestation.as_ref().unwrap() else {
+        panic!("host receipt");
+    };
+    let session: u32 = std::fs::read_to_string(host.workspace.join("session"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert_eq!(session, receipt.pid);
+}
+
+#[tokio::test]
+async fn wrapped_privilege_symlink_is_handed_off_before_approval() {
+    let host = Host::new(None);
+    let privilege = host._temp.path().join("sudo");
+    std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &privilege).unwrap();
+    std::os::unix::fs::symlink(&privilege, host.workspace.join("alias")).unwrap();
+    let call = ToolCall::CommandUnguarded {
+        program: "env".into(),
+        args: vec!["./alias".into(), "true".into()],
+        cwd: String::new(),
+        justification: "Inspect host".into(),
+    };
+    let seen = host
+        .run(
+            &host.workspace,
+            vec![
+                tool_outcome(call),
+                finish("Run the displayed command by hand"),
+            ],
+            Some(ApprovalMode::Request),
+            vec![],
+        )
+        .await;
+    assert!(seen.prompts.is_empty());
+    denied(&seen, "Please run this command by hand:");
+    assert!(
+        last_tool(&seen)
+            .observation
+            .as_ref()
+            .unwrap()
+            .attestation
+            .is_none()
+    );
 }

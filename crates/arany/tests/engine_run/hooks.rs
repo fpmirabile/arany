@@ -53,6 +53,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let actor = result.run.agents[0].id;
         let config = result.run.config.as_ref().unwrap();
         let intent = arany::EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: result.run.id,
@@ -272,7 +273,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
 #[tokio::test]
 async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay() {
     use arany::UnguardedGrant::{Denied, HumanOnly};
-    for inherited in [Denied, HumanOnly] {
+    for inherited in [Denied] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "fact");
         let state = temp.path().join("state");
@@ -366,7 +367,7 @@ async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay(
             }
             assert_eq!(
                 SessionView::replay(outcome.session_id, &changed).is_ok(),
-                requested == Denied || inherited == HumanOnly
+                requested == Denied
             );
         }
         let mut forged = events;

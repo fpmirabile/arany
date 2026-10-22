@@ -344,6 +344,11 @@ impl<'a> IntoFuture for RunHandle<'a> {
     }
 }
 
+struct HostSettings {
+    digest: Option<[u8; 32]>,
+    changed: bool,
+}
+
 struct ToolAdmission {
     config: crate::tools::config::Config,
     permissions: Option<crate::tools::PermissionSnapshot>,
@@ -888,6 +893,8 @@ pub struct Engine {
     journal: Journal,
     config: EngineConfig,
     busy: AtomicBool,
+    host_epoch: Mutex<Option<(SessionId, uuid::Uuid)>>,
+    host_permissions: Mutex<Option<HostSettings>>,
 }
 
 type WorkspaceLeases = HashMap<WorkspaceIdentity, GoalWorkspaceLock>;
@@ -898,6 +905,45 @@ struct GoalWorkspaceLock {
 }
 
 impl Engine {
+    pub fn revoke_host_approvals(&self) -> Result<(), EngineError> {
+        let _slot = self.claim()?;
+        self.clear_host_epoch();
+        Ok(())
+    }
+
+    fn clear_host_epoch(&self) {
+        *self.host_epoch.lock().expect("host epoch lock") = None;
+    }
+
+    pub fn readmit_host_permissions(&self) -> Result<(), EngineError> {
+        let _slot = self.claim()?;
+        let snapshot = crate::tools::ToolRuntime::load_permissions(&self.state)?;
+        *self.host_permissions.lock().expect("host permissions lock") = Some(HostSettings {
+            digest: snapshot.map(|snapshot| snapshot.digest),
+            changed: false,
+        });
+        self.clear_host_epoch();
+        Ok(())
+    }
+
+    fn host_settings_match(&self, digest: Option<[u8; 32]>) -> bool {
+        let mut pinned = self.host_permissions.lock().expect("host permissions lock");
+        let settings = pinned.get_or_insert(HostSettings {
+            digest,
+            changed: false,
+        });
+        settings.changed |= settings.digest != digest;
+        !settings.changed
+    }
+
+    fn host_epoch(&self, session: SessionId) -> uuid::Uuid {
+        let mut binding = self.host_epoch.lock().expect("host epoch lock");
+        if binding.as_ref().is_none_or(|(bound, _)| *bound != session) {
+            *binding = Some((session, uuid::Uuid::now_v7()));
+        }
+        binding.as_ref().expect("bound epoch").1
+    }
+
     async fn lock_lineage(
         &self,
         view: &crate::session::SessionView,
@@ -1057,6 +1103,8 @@ impl Engine {
             journal,
             config,
             busy: AtomicBool::new(false),
+            host_epoch: Mutex::new(None),
+            host_permissions: Mutex::new(None),
         })
     }
 
@@ -1157,6 +1205,9 @@ impl Engine {
                 .clone()
                 .ok_or(EngineError::GuardUnavailable)
         };
+        if request.goal.id.is_some() {
+            self.clear_host_epoch();
+        }
         let tools = match &controls.tools {
             ToolGrant::None => None,
             ToolGrant::Configured => {
@@ -1860,6 +1911,14 @@ impl Engine {
                 )
             })
             .transpose()?;
+        if let Some(runtime) = &mut tools {
+            runtime.host_settings_admitted = self.host_settings_match(
+                submission
+                    .tools
+                    .as_ref()
+                    .and_then(|tools| tools.permissions.as_ref().map(|snapshot| snapshot.digest)),
+            );
+        }
         if let Some(runtime) = &tools
             && runtime.workspace_identity() != workspace_identity
         {
@@ -2002,7 +2061,11 @@ impl Engine {
             context_usage: Some(context.context_usage),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
-            tool_policy: tools.as_ref().map(|tools| Box::new(tools.receipt())),
+            tool_policy: tools.as_ref().map(|tools| {
+                let mut receipt = tools.receipt();
+                receipt.host_epoch = Some(self.host_epoch(admitted.session_id));
+                Box::new(receipt)
+            }),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
         if !crate::session::run_started_fits(&config) {

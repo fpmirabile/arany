@@ -11,7 +11,20 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 17] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 25] = [
+    ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
+    ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("ToolPermissionDecided", 5, VERDICT_V4, VERDICT_V4),
+    ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 10, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "ProviderCallRecorded",
+        15,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -1183,7 +1196,7 @@ fn typed_prefix_verdict_migration_preserves_legacy_facts() {
     );
     let verdict = Event::decode(
         "ToolPermissionDecided",
-        5,
+        crate::session::payload_version("ToolPermissionDecided").unwrap(),
         &upgraded,
         Some(RunId::new()),
         Some(AgentRunId::new()),
@@ -1514,5 +1527,25 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
         assert!(!path.join(DIR).exists(), "{case}");
         assert!(!path.join("archive").exists(), "{case}");
         replays(&root, &sessions);
+    }
+}
+
+#[test]
+fn pre_host_migrations_never_create_live_authority() {
+    let mut tool: serde_json::Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    tool["intent"]["call"]["operation"] = serde_json::json!("command_unguarded");
+    let mut run: serde_json::Value = serde_json::from_str(GLOBAL_RUNSTARTED).unwrap();
+    run["config"]["tool_policy"] = serde_json::json!({"child_unguarded":"human_only"});
+    let mut verdict: serde_json::Value = serde_json::from_str(VERDICT_V4).unwrap();
+    verdict["source"] = serde_json::json!("exact_command_rule");
+    for (kind, value) in [
+        ("ToolStarted", tool),
+        ("RunStarted", run),
+        ("ToolPermissionDecided", verdict),
+    ] {
+        assert!(
+            crate::session::pre_host_payload(kind, &value.to_string()).is_none(),
+            "{kind}"
+        );
     }
 }

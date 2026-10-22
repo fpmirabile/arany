@@ -1999,6 +1999,8 @@ done
             });
         }
         ToolRuntime {
+            host_settings_admitted: true,
+            guard_available: true,
             git_writes_available: false,
             worker: None,
             handover: None,
@@ -3488,6 +3490,7 @@ int main(int argc, char **argv) {
                     hook_stdin: None,
                     hidden: Default::default(),
                     intent: EffectIntent {
+                        host: None,
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),
                         run_id: crate::session::RunId::default(),

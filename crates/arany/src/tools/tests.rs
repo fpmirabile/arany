@@ -39,6 +39,8 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
         git_identity: None,
     };
     let runtime = ToolRuntime {
+        host_settings_admitted: true,
+        guard_available: true,
         git_writes_available: false,
         worker: None,
         handover: None,
@@ -1368,6 +1370,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         assert!(bytes > MAX_ORDINARY_TOOL_ARGUMENT_BYTES && bytes <= MAX_TOOL_ARGUMENT_BYTES);
     }
     let intent = EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1622,6 +1625,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
     );
 
     let intent = EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1649,6 +1653,7 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
 #[test]
 fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_build() {
     let intent = |call| EffectIntent {
+        host: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),
@@ -1702,6 +1707,7 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
 fn goal_success_criterion_offers_only_admitted_calls() {
     let calls = catalog_call_schemas(&json!({
         "write": false,
+        "host_commands": true,
         "commands": [{"name": "cargo"}],
         "skills": [],
         "mcp_servers": []
@@ -1716,11 +1722,13 @@ fn goal_success_criterion_offers_only_admitted_calls() {
         .filter_map(|call| call["properties"]["operation"]["enum"][0].as_str())
         .collect();
     assert_eq!(operations, ["command", "command_unguarded"]);
-    assert!(
-        success_calls
-            .iter()
-            .all(|call| call["properties"]["program"]["enum"] == json!(["cargo"]))
-    );
+    assert!(success_calls.iter().all(|call| {
+        if call["properties"]["operation"]["enum"][0] == "command" {
+            call["properties"]["program"]["enum"] == json!(["cargo"])
+        } else {
+            call["properties"]["program"] == json!({"type":"string"})
+        }
+    }));
 }
 
 #[test]
@@ -1762,6 +1770,7 @@ fn goal_success_criterion_without_admitted_calls_omits_the_call_alternative() {
 async fn cache_receipt_states_preserve_success_without_publication_uncertainty() {
     fn make_observation(call: ToolCall, cache_requested_bytes: u64) -> ToolObservation {
         let mut intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::new(),
@@ -2078,7 +2087,7 @@ fn git_pin_is_optional_closed_and_rooted_per_platform() {
 }
 
 #[test]
-fn unguarded_command_is_offered_only_beside_a_cataloged_command_and_never_to_researchers() {
+fn host_command_catalog_is_primary_only_and_needs_no_guarded_program() {
     let names = |catalog: Value| -> Vec<String> {
         catalog_call_schemas(&catalog)
             .iter()
@@ -2088,14 +2097,13 @@ fn unguarded_command_is_offered_only_beside_a_cataloged_command_and_never_to_res
     };
     let without = json!({"write": false, "commands": [], "skills": [], "mcp_servers": []});
     assert!(!names(without).contains(&"command_unguarded".to_owned()));
-    let with =
-        json!({"write": false, "commands": [{"name": "sh"}], "skills": [], "mcp_servers": []});
+    let with = json!({"write": false, "host_commands": true, "commands": [], "skills": [], "mcp_servers": []});
     let calls = catalog_call_schemas(&with);
     let unguarded = calls
         .iter()
         .find(|call| call["properties"]["operation"]["enum"][0] == "command_unguarded")
         .expect("offered beside a cataloged command");
-    assert_eq!(unguarded["properties"]["program"]["enum"], json!(["sh"]));
+    assert!(unguarded["properties"]["program"].get("enum").is_none());
     assert!(
         unguarded["required"]
             .as_array()
@@ -2157,6 +2165,8 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     use std::path::PathBuf;
 
     let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
+        host_settings_admitted: true,
+        guard_available: true,
         git_writes_available,
         worker: None,
         handover: None,
@@ -2314,6 +2324,8 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         "git": program,
     });
     let runtime = ToolRuntime {
+        host_settings_admitted: true,
+        guard_available: true,
         git_writes_available: true,
         worker: None,
         handover: None,
@@ -2378,6 +2390,8 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
 pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> super::ToolRuntime {
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
+        host_settings_admitted: true,
+        guard_available: true,
         git_writes_available: false,
         worker: None,
         handover: None,
@@ -2408,46 +2422,28 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
 }
 
 #[test]
-fn unguarded_rules_snapshot_does_not_see_a_rule_recorded_later() {
+fn old_host_rules_are_inactive_and_preserved() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = temp.path().join("workspace");
-    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::create_dir_all(&workspace).unwrap();
     let state = crate::store::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let bytes = b"malformed inactive legacy rules";
+    state
+        .record(crate::store::RecordKind::UnguardedCommands)
+        .replace(bytes)
+        .unwrap();
     let mut runtime = in_process_runtime(&workspace, config_value());
-    runtime.cache_state = Some(std::sync::Arc::new(state));
-    let call = |cwd: &str| ToolCall::CommandUnguarded {
-        program: "sh".into(),
-        args: vec!["-c".into(), "cargo test".into()],
-        cwd: cwd.into(),
-        justification: "Allow this exact command?".into(),
-    };
-    assert!(!runtime.matches_exact_command_rule(&call("")));
+    runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(&state).unwrap();
+    assert!(runtime.has_inactive_host_rules());
     assert_eq!(runtime.receipt().unguarded_rules_digest, None);
-    runtime.record_exact_command_rule(&call("")).unwrap();
-    let state = runtime.cache_state.as_deref().unwrap();
-    runtime.unguarded_rules = super::ToolRuntime::load_exact_command_rules(state).unwrap();
-    let admitted_digest = runtime.receipt().unguarded_rules_digest.unwrap();
-    assert!(runtime.matches_exact_command_rule(&call("")));
-    runtime.record_exact_command_rule(&call("src")).unwrap();
-    assert!(!runtime.matches_exact_command_rule(&call("src")));
     assert_eq!(
-        runtime.receipt().unguarded_rules_digest,
-        Some(admitted_digest)
+        state
+            .record(crate::store::RecordKind::UnguardedCommands)
+            .read()
+            .unwrap()
+            .unwrap(),
+        bytes
     );
-    let mut refreshed = runtime.clone();
-    refreshed.unguarded_rules =
-        super::ToolRuntime::load_exact_command_rules(runtime.cache_state.as_deref().unwrap())
-            .unwrap();
-    assert!(refreshed.matches_exact_command_rule(&call("src")));
-    assert_ne!(
-        refreshed.receipt().unguarded_rules_digest,
-        Some(admitted_digest)
-    );
-    refreshed.workspace_identity.inode = refreshed.workspace_identity.inode.wrapping_add(1);
-    assert!(!refreshed.matches_exact_command_rule(&call("")));
-    let mut another_path = runtime;
-    another_path.workspace = temp.path().join("another-workspace");
-    assert!(!another_path.matches_exact_command_rule(&call("")));
 }
 
 async fn run_in_process(runtime: &super::ToolRuntime, call: ToolCall) -> ToolObservation {
@@ -3672,4 +3668,30 @@ fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
         config.evaluate(&call)
     );
     assert!(runtime.context().unwrap().catalog().contains("root skill"));
+}
+
+#[tokio::test]
+async fn unavailable_guard_hides_guarded_commands_and_refuses_before_spawn() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut runtime = in_process_runtime(temp.path(), config_value());
+    runtime.guard_available = false;
+    let context: serde_json::Value =
+        serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
+    assert_eq!(context["commands"], serde_json::json!([]));
+    assert_eq!(context["mcp_servers"], serde_json::json!([]));
+    assert_eq!(context["host_commands"], true);
+    assert_eq!(context["write"], false);
+    assert!(runtime.worker_policy().is_none());
+    let result = run_in_process(
+        &runtime,
+        ToolCall::Command {
+            program: "sh".into(),
+            args: vec!["-c".into(), "touch canary".into()],
+            cwd: String::new(),
+        },
+    )
+    .await;
+    assert!(result.attestation.is_none());
+    assert_ne!(result.disposition, ToolDisposition::Succeeded);
+    assert!(!temp.path().join("canary").exists());
 }

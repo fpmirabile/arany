@@ -97,6 +97,7 @@ mod tests {
     fn catalog() -> Value {
         json!({
             "write": true,
+            "host_commands": true,
             "commands": [{"name": "cargo"}],
             "skills": [{"name": "guide"}],
             "mcp_servers": [{"name": "local", "tools": ["probe"]}],

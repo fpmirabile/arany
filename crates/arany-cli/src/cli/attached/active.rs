@@ -2183,10 +2183,7 @@ mod approval_reply_tests {
             }
         }
         assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
-        assert_eq!(
-            ExactCommand.reply(),
-            arany::ApprovalReply::AllowAlwaysInProject
-        );
+        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
         assert_eq!(No.reply(), arany::ApprovalReply::Deny);
         assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
     }

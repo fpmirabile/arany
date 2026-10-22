@@ -811,7 +811,7 @@ mod tests {
             ),
             (
                 vec![Yes, ExactCommand, No],
-                "1. Yes\n2. Yes, and don't ask again for: this exact command in this project (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
+                "1. Yes\n2. Yes, and don't ask again for: this identical command in this live session (unguarded)\n3. No\nSelect 1-3, yes or no; empty Enter denies:\n",
             ),
         ] {
             let mut state = LinearState::new("linear");
@@ -1150,6 +1150,7 @@ mod tests {
             inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,

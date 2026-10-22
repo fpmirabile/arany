@@ -20,7 +20,7 @@ mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
 pub(crate) mod types;
-mod unguarded;
+pub(crate) mod unguarded;
 pub(crate) mod unguarded_rules;
 pub(crate) mod worker;
 mod workspace;
@@ -148,11 +148,13 @@ pub enum ToolError {
 #[derive(Clone)]
 pub(crate) struct PermissionSnapshot {
     config: std::sync::Arc<permissions::PermissionConfig>,
-    digest: [u8; 32],
+    pub(crate) digest: [u8; 32],
 }
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
+    pub(crate) host_settings_admitted: bool,
+    guard_available: bool,
     config: Config,
     git_writes_available: bool,
     worker: Option<std::sync::Arc<worker::Action>>,
@@ -664,7 +666,7 @@ impl ToolRuntime {
     ) -> Result<Self, ToolError> {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
-        guard::check_available()?;
+        let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         state
@@ -708,11 +710,12 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(path), &account)?;
         }
         #[cfg(target_os = "macos")]
-        let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
-            None
-        } else {
-            Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
-        };
+        let system_programs =
+            if !guard_available || config.commands.is_empty() && config.mcp.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
+            };
         #[cfg(target_os = "macos")]
         let process_enforcement_digest = guard::macos_runtime_enforcement_digest(
             system_programs.as_deref(),
@@ -723,6 +726,8 @@ impl ToolRuntime {
         #[cfg(target_os = "macos")]
         capture.complete();
         Ok(Self {
+            host_settings_admitted: true,
+            guard_available,
             definitions: std::sync::Arc::new(definitions),
             config,
             git_writes_available: guard::git_writes_available(),
@@ -773,7 +778,7 @@ impl ToolRuntime {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
-        receipt.unguarded_rules_digest = self.exact_command_rules().map(|rules| rules.digest);
+        receipt.unguarded_rules_digest = None;
         receipt
     }
 
@@ -808,8 +813,8 @@ impl ToolRuntime {
             .map(|snapshot| snapshot.config.as_ref())
     }
 
-    fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
-        self.unguarded_rules.as_ref()
+    pub(crate) fn has_inactive_host_rules(&self) -> bool {
+        self.unguarded_rules.is_some()
     }
 
     pub(crate) fn command_executable(&self, name: &str) -> Option<&str> {
@@ -818,25 +823,6 @@ impl ToolRuntime {
             .iter()
             .find(|program| program.name == name)
             .map(|program| program.executable.as_str())
-    }
-
-    pub(crate) fn matches_exact_command_rule(&self, call: &ToolCall) -> bool {
-        self.exact_command_rules()
-            .is_some_and(|rules| rules.matches(call, self.workspace_identity, &self.workspace))
-    }
-
-    pub(crate) fn record_exact_command_rule(&self, call: &ToolCall) -> Result<(), ToolError> {
-        fs::validate_workspace(self)?;
-        let state = self
-            .cache_state
-            .as_deref()
-            .ok_or(ToolError::Configuration)?;
-        unguarded_rules::ExactCommandRules::record(
-            state,
-            &self.workspace,
-            self.workspace_identity,
-            call,
-        )
     }
 
     pub(crate) fn record_typed_prefix_rule(
@@ -882,6 +868,7 @@ impl ToolRuntime {
 
     fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
         self.config.commands.iter()
+            .filter(|_| self.guard_available)
             .filter(|p| names.is_none_or(|names| names.contains(&p.name)))
             .map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,
                 "inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()}))
@@ -892,13 +879,14 @@ impl ToolRuntime {
         let catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
-            "write": self.config.write,
+            "write": self.config.write && self.guard_available,
             "file_tools": catalog::FILE_TOOLS,
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
+            "host_commands": true,
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
-            "git": if self.config.git_available() {
+            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "git": if self.guard_available && self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
                 serde_json::json!({"write":write,"operations":catalog::git_operations(write),"scope":catalog::GIT_SCOPE})
             } else {
@@ -914,7 +902,7 @@ impl ToolRuntime {
 
     pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
         use crate::session::worker::*;
-        (self.config.write && self.definitions.pin().is_some())
+        (self.guard_available && self.config.write && self.definitions.pin().is_some())
             .then(|| WorkerPolicy {
                 parent_grant: WorkerGrant {
                     commands: {
@@ -942,7 +930,13 @@ impl ToolRuntime {
                         WorkerTool::Command,
                     ],
                     skills: self.config.skills.iter().map(|s| s.name.clone()).collect(),
-                    mcp_servers: self.config.mcp.iter().map(|s| s.name.clone()).collect(),
+                    mcp_servers: self
+                        .config
+                        .mcp
+                        .iter()
+                        .filter(|_| self.guard_available)
+                        .map(|s| s.name.clone())
+                        .collect(),
                     permission_mode: self.permissions().map(permissions::PermissionConfig::mode),
                 },
                 concurrency: 4,
@@ -1003,7 +997,7 @@ impl ToolRuntime {
             "file_tools": catalog::RESEARCH_FILE_TOOLS,
             "commands": [],
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
         });
         let context = ToolContext::new(catalog);
@@ -1025,6 +1019,38 @@ impl ToolRuntime {
             self.enforcement_digest
         };
         EffectIntent {
+            host: match &call {
+                ToolCall::CommandUnguarded { program, .. } => {
+                    let path = std::env::var("PATH").unwrap_or_default();
+                    let requested = self.command_executable(program).unwrap_or(program);
+                    unguarded::pin(requested, &self.workspace, &path)
+                        .ok()
+                        .map(|mut pin| {
+                            pin.state_roots = [
+                                self.cache_state
+                                    .as_ref()
+                                    .map(|state| state.path().to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                                StateRoot::account_path()
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            ];
+                            pin.permissions_digest =
+                                self.permissions.as_ref().map(|snapshot| snapshot.digest);
+                            pin
+                        })
+                        .filter(|pin| {
+                            !unguarded::interpreter(program)
+                                && !unguarded::interpreter(&pin.executable)
+                                || self.config.commands.iter().any(|command| {
+                                    command.interpreter
+                                        && command.executable == pin.executable
+                                        && command.sha256 == pin.sha256
+                                })
+                        })
+                }
+                _ => None,
+            },
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -1069,6 +1095,9 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
+        if intent.call.facts().site == Site::Guard && !self.guard_available {
+            return unstarted_observation(intent, ToolError::ProtectionUnavailable);
+        }
         if matches!(
             intent.target,
             crate::worker::EffectTarget::WorkerView { .. }
@@ -1137,12 +1166,40 @@ impl ToolRuntime {
         if let Err(error) = self.pinned_root(&intent) {
             return unstarted_observation(intent, error);
         }
-        let Some(pinned) = self.config.commands.iter().find(|row| &row.name == program) else {
+        if unguarded::prohibited_intent(&intent) {
+            let output = unguarded::manual_handoff(&intent.call);
+            return ToolObservation {
+                enforcement_cause: None,
+                limit_cause: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output,
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+            };
+        }
+        let Some(pin) = &intent.host else {
             return unstarted_observation(intent, ToolError::Configuration);
+        };
+        let settings_match = self.cache_state.as_ref().is_some_and(|state| {
+            Self::load_permissions(state)
+                .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
+        });
+        if !self.host_settings_admitted || !settings_match || pin.verify(&self.workspace).is_err() {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        }
+        let pinned = config::Program {
+            name: program.clone(),
+            executable: pin.executable.clone(),
+            sha256: pin.sha256.clone(),
+            interpreter: true,
+            inputs: Vec::new(),
         };
         let outcome = unguarded::run(
             unguarded::Request {
-                program: pinned,
+                launcher: &self.guard_executable,
+                program: &pinned,
+                host: Some(pin),
                 args,
                 cwd,
                 workspace: &self.workspace,
@@ -1417,6 +1474,8 @@ pub fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
+
+pub use unguarded::tool_host_main;
 
 pub fn tool_guard_main() -> std::process::ExitCode {
     guard::helper_main()

@@ -521,6 +521,8 @@ pub(crate) fn hex_digest(bytes: &[u8]) -> String {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyReceipt {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_epoch: Option<Uuid>,
     pub contract_version: u32,
     pub config_digest: [u8; 32],
     #[serde(deserialize_with = "Option::deserialize")]
@@ -564,7 +566,10 @@ impl ToolPolicyReceipt {
             && self.config_digest != [0; 32]
             && self.permissions_digest != Some([0; 32])
             && self.unguarded_rules_digest != Some([0; 32])
-            && self.child_unguarded.narrows(self.unguarded)
+            && self.child_unguarded == UnguardedGrant::Denied
+            && self
+                .host_epoch
+                .is_none_or(|epoch| epoch.get_version() == Some(uuid::Version::SortRand))
             && (MIN_TOOL_CONTEXT_BYTES as u32..=crate::session::MAX_WINDOW_CONTENT_BYTES as u32)
                 .contains(&self.max_context_bytes)
     }
@@ -572,7 +577,38 @@ impl ToolPolicyReceipt {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HostCommandPin {
+    pub state_roots: [String; 2],
+    pub permissions_digest: Option<[u8; 32]>,
+    pub workspace: String,
+    pub executable: String,
+    pub device: u64,
+    pub inode: u64,
+    pub sha256: String,
+    pub path: String,
+    pub environment_digest: [u8; 32],
+}
+
+#[cfg(test)]
+pub(crate) fn test_host_pin() -> HostCommandPin {
+    HostCommandPin {
+        state_roots: ["/state".into(), "/account".into()],
+        permissions_digest: None,
+        workspace: "/test-workspace".into(),
+        executable: "/usr/bin/sh".into(),
+        device: 1,
+        inode: 2,
+        sha256: "a".repeat(64),
+        path: "/usr/bin:/bin".into(),
+        environment_digest: [4; 32],
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectIntent {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostCommandPin>,
     pub target: EffectTarget,
     pub id: Uuid,
     pub run_id: RunId,
@@ -611,6 +647,10 @@ impl EffectIntent {
             && self.use_count == 1
             && self.call.valid()
             && self.limits.valid()
+            && self
+                .host
+                .as_ref()
+                .is_none_or(|host| self.call.is_unguarded() && host.valid())
     }
 }
 
@@ -916,6 +956,10 @@ impl Attestation {
             Self::Unguarded(receipt) => {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::Unguarded
+                    && intent
+                        .host
+                        .as_ref()
+                        .is_some_and(|pin| pin.sha256 == receipt.executable_sha256)
                     && receipt.valid_for(intent)
             }
         }
@@ -938,7 +982,10 @@ impl Attestation {
             Site::Unguarded => Self::Unguarded(UnguardedReceipt {
                 contract_version: 1,
                 intent_digest: intent.digest(),
-                executable_sha256: "0".repeat(64),
+                executable_sha256: intent
+                    .host
+                    .as_ref()
+                    .map_or_else(|| "0".repeat(64), |pin| pin.sha256.clone()),
                 pid: 1,
                 exit_code: Some(0),
                 descendants_confirmed_stopped: true,
@@ -1031,68 +1078,6 @@ pub(crate) fn uses_guard_alias(args: &[String]) -> bool {
                 !before.is_some_and(name_byte) && !after.is_some_and(name_byte)
             })
         })
-    })
-}
-
-pub(crate) fn qualifying_guard_failure<'a>(
-    call: &ToolCall,
-    observations: impl Iterator<Item = &'a ToolObservation>,
-) -> Option<&'a ToolObservation> {
-    let ToolCall::CommandUnguarded {
-        program, args, cwd, ..
-    } = call
-    else {
-        return None;
-    };
-    if uses_guard_alias(args) {
-        return None;
-    }
-    observations
-        .filter(|observation| {
-            matches!(&observation.intent.call,
-                ToolCall::Command { program: p, args: a, cwd: c } if p == program && a == args && c == cwd)
-        })
-        .last()
-        .filter(|observation| {
-            observation.intent.target == crate::worker::EffectTarget::Workspace
-                && observation.disposition == ToolDisposition::Failed
-                && observation.enforcement_cause != Some(EnforcementCause::FilesystemDenied)
-                && matches!(&observation.attestation,
-                    Some(attestation @ Attestation::Guard(_)) if attestation.valid_for(&observation.intent))
-        })
-}
-
-pub(crate) fn guarded_command_matches(call: &ToolCall, guarded: &ToolCall) -> bool {
-    matches!((call, guarded), (
-        ToolCall::CommandUnguarded { program, args, cwd, .. },
-        ToolCall::Command { program: p, args: a, cwd: c })
-        if program == p && args == a && cwd == c)
-}
-
-pub(crate) fn qualifying_hook_failure<'a>(
-    call: &ToolCall,
-    observations: impl Iterator<Item = &'a ToolObservation>,
-) -> Option<&'a ToolObservation> {
-    let ToolCall::CommandUnguarded {
-        program, args, cwd, ..
-    } = call
-    else {
-        return None;
-    };
-    if uses_guard_alias(args) {
-        return None;
-    }
-    observations.filter(|observation| {
-        matches!(&observation.intent.call, ToolCall::Command { program: p, args: a, cwd: c }
-            if p == program && a == args && c == cwd)
-    }).last().filter(|observation| {
-        observation.intent.target == crate::worker::EffectTarget::Workspace
-            && observation.valid() && !observation.stops_run() && match observation.enforcement_cause {
-            Some(EnforcementCause::GuardBootstrap) => true,
-            Some(_) => matches!(&observation.attestation,
-                Some(attestation @ Attestation::Guard(_)) if attestation.valid_for(&observation.intent)),
-            None => false,
-        }
     })
 }
 
@@ -1595,6 +1580,7 @@ mod model_call_tests {
             },
         ] {
             let intent = EffectIntent {
+                host: None,
                 target: EffectTarget::Workspace,
                 id: Uuid::now_v7(),
                 run_id: RunId::new(),
@@ -1633,6 +1619,7 @@ mod unguarded_vocabulary_tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: call.is_unguarded().then(test_host_pin),
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
@@ -1662,23 +1649,6 @@ mod unguarded_vocabulary_tests {
             args: args.iter().map(|arg| (*arg).into()).collect(),
             cwd: cwd.into(),
             justification: "Run the failed command once".into(),
-        }
-    }
-
-    fn guarded(
-        call: ToolCall,
-        disposition: ToolDisposition,
-        cause: Option<EnforcementCause>,
-    ) -> ToolObservation {
-        let intent = intent(call);
-        ToolObservation {
-            attestation: Some(Attestation::for_site(&intent)),
-            enforcement_cause: cause,
-            limit_cause: (disposition == ToolDisposition::Limit).then_some(LimitCause::Resource),
-            intent,
-            disposition,
-            output: String::new(),
-            cache_update: CacheUpdate::NotApplicable,
         }
     }
 
@@ -1797,133 +1767,6 @@ mod unguarded_vocabulary_tests {
     }
 
     #[test]
-    fn hook_unguarded_evidence_needs_a_typed_cause_and_never_trusts_program_output() {
-        let call = unguarded(&["-c", "exit 7"], "");
-        let mut observation = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Failed,
-            None,
-        );
-        observation.attestation = None;
-        observation.output = "Guard bootstrap failed before dispatch".into();
-        assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_none());
-        assert!(observation.stops_run());
-        observation.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
-        assert!(observation.valid());
-        assert!(!observation.stops_run());
-        assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_some());
-        for disposition in [
-            ToolDisposition::Uncertain,
-            ToolDisposition::Cancelled,
-            ToolDisposition::Limit,
-            ToolDisposition::Succeeded,
-        ] {
-            observation.disposition = disposition;
-            assert!(qualifying_hook_failure(&call, std::iter::once(&observation)).is_none());
-        }
-    }
-
-    #[test]
-    fn qualifying_guard_failure_requires_exact_argv_guard_receipt_failed_disposition_and_non_filesystem_cause()
-     {
-        let call = unguarded(&["-c", "exit 7"], "");
-        let failed = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Failed,
-            None,
-        );
-        let qualifies = |call: &ToolCall, observations: &[ToolObservation]| {
-            qualifying_guard_failure(call, observations.iter()).is_some()
-        };
-        assert!(qualifies(&call, std::slice::from_ref(&failed)));
-
-        let mut private = failed.clone();
-        private.intent.target = crate::worker::EffectTarget::WorkerView {
-            assignment_id: private.intent.agent_run_id,
-            base_digest: [1; 32],
-            revision: 0,
-            cache_generation: None,
-        };
-        private.attestation = Some(Attestation::WorkerCommand {
-            receipt: Attestation::for_site(&private.intent)
-                .guard()
-                .unwrap()
-                .clone(),
-        });
-        assert!(!qualifies(&call, std::slice::from_ref(&private)));
-        private.attestation = None;
-        private.enforcement_cause = Some(EnforcementCause::GuardBootstrap);
-        assert!(private.valid());
-        assert!(qualifying_hook_failure(&call, std::iter::once(&private)).is_none());
-
-        let one_byte_off = guarded(
-            command(&["-c", "exit 8"], ""),
-            ToolDisposition::Failed,
-            None,
-        );
-        assert!(!qualifies(&call, std::slice::from_ref(&one_byte_off)));
-        let other_cwd = guarded(
-            command(&["-c", "exit 7"], "sub"),
-            ToolDisposition::Failed,
-            None,
-        );
-        assert!(!qualifies(&call, std::slice::from_ref(&other_cwd)));
-        let limited = guarded(command(&["-c", "exit 7"], ""), ToolDisposition::Limit, None);
-        assert!(!qualifies(&call, std::slice::from_ref(&limited)));
-        let mut unattested = failed.clone();
-        unattested.attestation = None;
-        assert!(!qualifies(&call, std::slice::from_ref(&unattested)));
-        let mut unguarded_receipt_observation = failed.clone();
-        unguarded_receipt_observation.attestation = Some(Attestation::Unguarded(
-            unguarded_receipt(&unguarded_receipt_observation.intent),
-        ));
-        assert!(!qualifies(
-            &call,
-            std::slice::from_ref(&unguarded_receipt_observation)
-        ));
-        let denied_by_filesystem = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Denied,
-            Some(EnforcementCause::FilesystemDenied),
-        );
-        assert!(!qualifies(
-            &call,
-            std::slice::from_ref(&denied_by_filesystem)
-        ));
-        let failed_by_filesystem = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Failed,
-            Some(EnforcementCause::FilesystemDenied),
-        );
-        assert!(!qualifies(
-            &call,
-            std::slice::from_ref(&failed_by_filesystem)
-        ));
-
-        let later_success = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Succeeded,
-            None,
-        );
-        assert!(!qualifies(&call, &[failed.clone(), later_success.clone()]));
-        let later_failure = guarded(
-            command(&["-c", "exit 7"], ""),
-            ToolDisposition::Failed,
-            None,
-        );
-        assert!(qualifies(
-            &call,
-            &[later_success, failed.clone(), later_failure.clone()]
-        ));
-        assert_eq!(
-            qualifying_guard_failure(&call, [&failed, &later_failure].into_iter())
-                .map(|observation| observation.intent.id),
-            Some(later_failure.intent.id)
-        );
-        assert!(!qualifies(&command(&["-c", "exit 7"], ""), &[failed]));
-    }
-
-    #[test]
     fn guard_path_aliases_in_argv_never_qualify_for_a_host_rerun() {
         let owned = |args: &[&str]| args.iter().map(|arg| (*arg).to_owned()).collect::<Vec<_>>();
         for args in [
@@ -1936,9 +1779,6 @@ mod unguarded_vocabulary_tests {
             &["${ARANY_TOOL_SKILLS}/x"],
         ] {
             assert!(uses_guard_alias(&owned(args)), "{args:?}");
-            let call = unguarded(args, "");
-            let failed = guarded(command(args, ""), ToolDisposition::Failed, None);
-            assert!(qualifying_guard_failure(&call, [&failed].into_iter()).is_none());
         }
         for args in [
             &["/home/me/workspace/x"][..],
