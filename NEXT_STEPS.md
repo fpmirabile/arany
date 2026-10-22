@@ -125,7 +125,8 @@ Owner: use macOS Terminal.app and iTerm2 and a native Linux terminal, locally, o
 5. Round-trip `/copy` and selection copies through local `wl-copy`/`xclip`, macOS `pbcopy`/`pbpaste` with non-ASCII text, tmux 3.2+ and SSH OSC 52. Confirm Linux serving clients exit when another application takes the selection. Check ignored OSC 52 in Terminal.app/VTE and native-selection recovery, iTerm2's clipboard permission and Homebrew tmux's `set-clipboard on` fallback; a send cue alone is not delivery evidence.
 6. `ARANY_DISABLE_MOUSE=1`: native selection works and wheel input scrolls history with an empty composer; check Mouse `wheel only` and `off` too. Exit, suspend/resume, signals and view switches restore terminal modes.
 7. Ctrl+O/Ctrl+T pager: `/`, `n`/`N`, movement and close keys work; `[` releases capture and the alternate screen, dumps bounded text to native/tmux scrollback and waits for Enter. A Run keeps streaming without redraw, Enter returns, and the dump survives exit.
-8. An answer containing OSC 52 renders inert and leaves the clipboard unchanged before a copy gesture. Oversized or unavailable copies give the specified notice, keep selection and never retry automatically.
+8. Verify typed backslash-Enter, distinct Shift+Enter and saved Alt/Ctrl+Enter in Classic, Fullscreen and editable child drafts, locally and through tmux/SSH. Check fresh-session fallback hints, modifier loss warnings, canonical continuation and framed-paste draining; include VoiceOver/Orca. Keyboard negotiation remains [slice 2](./planning/composer-newline-keys/README.md#vertical-slices), with no native support claim from synthetic coverage.
+9. An answer containing OSC 52 renders inert and leaves the clipboard unchanged before a copy gesture. Oversized or unavailable copies give the specified notice, keep selection and never retry automatically.
 
 ### Tool protocol
 

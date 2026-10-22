@@ -526,6 +526,7 @@ pub(super) async fn submit_objective(
         tokio::select! {
             approval = inbox.next(), if pending.is_none() => {
                 pending = approval;
+                if pending.is_some() { composer.disarm_continuation(); }
                 approval_page = 0;
                 approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
                 approval_unarmed = pending.is_some();
@@ -668,11 +669,15 @@ pub(super) async fn submit_objective(
                     break "terminal rendering failed".to_owned();
                 }
             }
-            input = terminal.next_input(), if !exit_after_run => {
+            input = async {
+                if pending.is_some() { terminal.next_input().await } else { terminal.next_chat_input().await }
+            }, if !exit_after_run => {
                 let input = match input {
                     Ok(input) => input,
                     Err(_) => break "terminal input failed".to_owned(),
                 };
+                composer.observe_input(input);
+                if terminal.agent_chat_open() || pending.is_some() || terminal.help_open() { composer.disarm_continuation(); }
                 if pending.is_some() && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_)) {
                     let choices = crate::presentation::tool_approval_choices(pending.as_ref().expect("pending action"));
                     approval_choice = approval_choice.min(choices.len() - 1);
@@ -814,6 +819,7 @@ pub(super) async fn submit_objective(
                     }
                     continue;
                 }
+                let input = composer.chat_input(input);
                 let input = active_escape(input, composer.has_open_menu(), terminal.clipboard_loading(), stop);
                 let mut notice = match input {
                     TerminalInput::Escape if terminal.clipboard_loading() => {
@@ -879,6 +885,12 @@ pub(super) async fn submit_objective(
                     }
                     TerminalInput::QuickActions => {
                         Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
+                    }
+                    TerminalInput::Submit if !terminal.is_linear() && composer.continue_line() => {
+                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
+                            break "terminal rendering failed".to_owned();
+                        }
+                        None
                     }
                     TerminalInput::Submit if terminal.clipboard_loading() && !terminal.is_linear() => {
                         if terminal.restore_draft_input(composer.text().len()).is_err() {
@@ -1219,8 +1231,9 @@ pub(super) async fn compact_current(
                 ),
                 Err(error) => CompactionOutcome::Unavailable(error),
             }),
-            input = terminal.next_input() => {
+            input = terminal.next_chat_input() => {
                 let input = input.map_err(|error| error.to_string())?;
+                composer.observe_input(input);
                 // The pager and a scrollback dump own their keys before the hidden composer.
                 if terminal.handle_transcript_input(input, view).map_err(|error| error.to_string())?
                     || terminal.handle_history_input(input, view, composer, true).await
@@ -1229,7 +1242,12 @@ pub(super) async fn compact_current(
                         .map_err(|error| error.to_string())?;
                     continue;
                 }
+                let input = composer.chat_input(input);
                 let notice = match input {
+                    TerminalInput::Submit if !terminal.is_linear() && composer.continue_line() => {
+                        terminal.draw_busy(view, composer, None).map_err(|error| error.to_string())?;
+                        None
+                    },
                     TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
                         Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
                         Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
