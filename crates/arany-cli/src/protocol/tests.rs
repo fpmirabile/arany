@@ -238,6 +238,36 @@ fn goal_stop_failure_schema_lists_every_serialized_run_failure() {
             "{failure:?}"
         );
     }
+    let goal = GoalSummary {
+        status: GoalStatus::Failed,
+        stopped: Some(GoalStop::GoalExhausted {
+            limit: GoalLimit::Calls,
+        }),
+        budget_refusal: Some(arany::BudgetRefusal {
+            dimension: arany::GoalLimit::Calls,
+            cause: arany::BudgetRefusalCause::Exhausted,
+            action: arany::BudgetAction::Tool,
+            run_id: Some(arany::RunId::new()),
+            agent_run_id: Some(arany::AgentRunId::new()),
+            used: 3,
+            limit: 3,
+            requested: Some(1),
+            required_minimum: Some(1),
+            token_usage_unknown: false,
+            charge_basis: arany::BudgetChargeBasis::Observed,
+        }),
+    };
+    let value = serde_json::to_value(&goal).unwrap();
+    validate(&schema, &json!({"$ref":"#/$defs/GoalSummary"}), &value);
+    assert_eq!(
+        serde_json::from_value::<GoalSummary>(value.clone()).unwrap(),
+        goal
+    );
+    for field in ["dimension", "cause", "action", "charge_basis"] {
+        let mut unknown = value.clone();
+        unknown["budgetRefusal"][field] = json!("unknown");
+        assert!(serde_json::from_value::<GoalSummary>(unknown).is_err());
+    }
 }
 
 #[test]

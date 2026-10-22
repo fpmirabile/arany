@@ -589,6 +589,11 @@ pub(super) async fn submit_objective(
                         Ok(RunSubmission::Completed(outcome, user_recorded, Some(reason)))
                     }
                     Err(run::RunAttemptError::InterruptedBeforeRun) => Ok(RunSubmission::InterruptedBeforeRun),
+                    Err(run::RunAttemptError::Failed(run::RunFailure::Engine(arany::EngineError::GoalBudgetExhausted))) => {
+                        let reloaded = super::load_view(&admission.state_dir, view.id).await?;
+                        let feedback = reloaded.runs.last().filter(|run| reloaded.budget_stop_goal(run).is_some_and(|goal| goal.budget_refusal.is_some())).and_then(|run| crate::presentation::session_run_feedback(&reloaded, run));
+                        Err(feedback.unwrap_or_else(|| "Goal budget admission refused (uncommitted); no Goal receipt is available".into()))
+                    },
                     Err(run::RunAttemptError::Failed(error)) => Err(error.to_string()),
                 };
             },

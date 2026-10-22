@@ -586,6 +586,9 @@ pub struct GoalSummary {
     pub status: GoalStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stopped: Option<GoalStop>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "budget_refusal_schema")]
+    pub budget_refusal: Option<arany::BudgetRefusal>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq)]
@@ -884,6 +887,9 @@ pub struct ReceiptGoal {
     pub usage: ReceiptUsage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub report: Option<ReceiptReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "budget_refusal_schema")]
+    pub budget_refusal: Option<arany::BudgetRefusal>,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]
@@ -1056,6 +1062,24 @@ fn optional_disposition_schema(_: &mut SchemaGenerator) -> Schema {
 
 fn run_failure_schema(_: &mut SchemaGenerator) -> Schema {
     json_schema!({"enum": ["provider_call", "proposal_refused", "budget_exhausted", "tool_stopped", "definition_invalid", "plan_admission", "tool_context_full", "workers_unverified", "criterion_unmet", "refusal_limit"], "type": "string"})
+}
+
+fn budget_refusal_schema(_: &mut SchemaGenerator) -> Schema {
+    json_schema!({
+        "type": ["object", "null"], "additionalProperties": false,
+        "required": ["dimension", "cause", "action", "run_id", "agent_run_id", "used", "limit", "requested", "required_minimum", "token_usage_unknown", "charge_basis"],
+        "properties": {
+            "dimension": {"enum": ["tokens", "calls", "active_time", "runs"]},
+            "cause": {"enum": ["exhausted", "unknown_usage", "insufficient_headroom"]},
+            "action": {"enum": ["provider", "tool", "delegation", "compaction", "run", "resume"]},
+            "run_id": {"type": ["string", "null"]}, "agent_run_id": {"type": ["string", "null"]},
+            "used": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1},
+            "requested": {"type": ["integer", "null"], "minimum": 0},
+            "required_minimum": {"type": ["integer", "null"], "minimum": 0},
+            "token_usage_unknown": {"type": "boolean"},
+            "charge_basis": {"enum": ["observed", "conservative"]}
+        }
+    })
 }
 
 // Keep this exhaustive match and the serialized-variant schema test in sync.

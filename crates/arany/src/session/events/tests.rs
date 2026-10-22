@@ -2032,11 +2032,31 @@ mod payload_version_tests {
                 cached_input_tokens: 0,
             },
             exhausted: false,
+            budget_refusal: None,
         };
         let (run_id, agent_run_id) = finished.scope();
         let payload = finished.payload().expect("payload");
+        let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        missing.as_object_mut().unwrap().remove("budget_refusal");
+        assert!(
+            Event::decode(
+                "GoalFinished",
+                finished.version(),
+                &missing.to_string(),
+                None,
+                None
+            )
+            .is_err()
+        );
         assert_eq!(
-            Event::decode("GoalFinished", 7, &payload, run_id, agent_run_id).expect("bumped"),
+            Event::decode(
+                "GoalFinished",
+                finished.version(),
+                &payload,
+                run_id,
+                agent_run_id
+            )
+            .expect("bumped"),
             finished
         );
         let started = Event::GoalStarted {

@@ -1063,6 +1063,61 @@ pub fn render_goal_provider_attempts<'a>(
     (!notices.is_empty()).then(|| notices.join("\n"))
 }
 
+pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String> {
+    let Some(goal) = view.budget_stop_goal(run) else {
+        return run_feedback(run);
+    };
+    let mut text = String::from("Arany status: ");
+    if let Some(summary) = arany::budget_refusal_summary(goal) {
+        text.push_str(&summary);
+        if let Some(report) = &goal.report {
+            for (index, fact) in report.unresolved.iter().enumerate().skip(1) {
+                let fact = escape_terminal(fact);
+                if text.len() + fact.len() + 160 > arany::MAX_GOAL_REPORT_BYTES {
+                    text.push_str(&format!(
+                        "\n{} additional report fact(s) omitted.",
+                        report.unresolved.len() - index
+                    ));
+                    break;
+                }
+                text.push('\n');
+                text.push_str(&fact);
+            }
+        }
+    } else {
+        let budget = goal.effective_budget();
+        let (dimension, used, limit) = match view.budget_stop_limit(run)? {
+            arany::GoalLimit::Calls => (
+                "Provider calls",
+                u64::from(goal.provider_calls),
+                budget.max_provider_calls.map(u64::from),
+            ),
+            arany::GoalLimit::Tokens => ("tokens", goal.known_tokens, budget.max_tokens),
+            arany::GoalLimit::ActiveTime => {
+                ("active time (ms)", goal.active_ms, budget.max_active_ms)
+            }
+            arany::GoalLimit::Runs => (
+                "Runs",
+                goal.run_ids.len() as u64,
+                Some(u64::from(budget.max_runs)),
+            ),
+        };
+        text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}. Committed refused reservation detail is unavailable.", limit?));
+        if goal.token_usage_unknown {
+            text.push_str(" Token usage is unknown.");
+        }
+        if goal.uncertain_active_ms > 0 {
+            text.push_str(" Active time includes conservative crash charges.");
+        }
+    }
+    text.push_str(if run.assistant_message.is_some() {
+        "\nThe committed answer is preserved."
+    } else {
+        "\nNo answer was committed; completed actions remain in the Session."
+    });
+    Some(text)
+}
+
 pub fn run_feedback(run: &RunView) -> Option<String> {
     match run.status {
         RunStatus::Finished => render_cache_update_feedback(run).map(str::to_owned),
@@ -1429,6 +1484,14 @@ pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Outp
         }
     }
     if output == Output::Text {
+        for run in &view.runs {
+            if view.budget_stop_goal(run).is_some()
+                && let Some(feedback) = session_run_feedback(view, run)
+            {
+                rendered.push_str(&feedback);
+                rendered.push('\n');
+            }
+        }
         for worker in view.runs.iter().flat_map(RunView::worker_history) {
             rendered.push_str(&escape_terminal(&worker.description()));
             rendered.push('\n');
@@ -1534,6 +1597,7 @@ mod exec_jsonl_tests {
                 cached_input_tokens: 0,
             },
             exhausted: false,
+            budget_refusal: None,
         }
     }
 
@@ -1747,16 +1811,15 @@ fn append_jsonl(rendered: &mut String, envelope: &EventEnvelope) {
 }
 
 pub fn escape_terminal(value: &str) -> String {
-    let mut safe = String::with_capacity(value.len());
-    for character in value.chars() {
-        let code = character as u32;
-        if unsafe_display_character(character) {
-            safe.push_str(&format!("\\u{{{code:04x}}}"));
-        } else {
-            safe.push(character);
-        }
-    }
-    safe
+    arany::escape_status_text(value).into_owned()
+}
+
+fn unsafe_display_character(character: char) -> bool {
+    let mut bytes = [0; 4];
+    matches!(
+        arany::escape_status_text(character.encode_utf8(&mut bytes)),
+        std::borrow::Cow::Owned(_)
+    )
 }
 
 pub(crate) fn escaped_terminal_bytes(value: &str) -> usize {
@@ -1820,23 +1883,6 @@ fn wrapped_rows(value: &str) -> String {
         rows.push(format!("… {hidden} more characters"));
     }
     rows.join("\n    ")
-}
-
-fn unsafe_display_character(character: char) -> bool {
-    character.is_control()
-        || matches!(
-            character as u32,
-            0x00ad
-                | 0x061c
-                | 0x180e
-                // Zero-width joiners stay: emoji and many scripts need them.
-                | 0x200b
-                | 0x200e
-                | 0x200f
-                | 0x2028..=0x202e
-                | 0x2060..=0x2069
-                | 0xfeff
-        )
 }
 
 pub(crate) fn session_access_label(defaults: &arany::SessionDefaults) -> &str {
@@ -2162,6 +2208,52 @@ mod goal_status_tests {
         assert_eq!(
             goal_status(&view),
             "No Goal in this Session; send a message or use /goal <objective>"
+        );
+    }
+
+    #[test]
+    fn budget_feedback_uses_the_refusal_record_and_labels_missing_detail() {
+        let mut view = session_with_goal(true);
+        let mut run = crate::presentation::team_view().runs.remove(0);
+        run.status = RunStatus::Failed;
+        run.failure = Some(arany::RunFailure::BudgetExhausted);
+        run.assistant_message = None;
+        let goal = &mut view.goals[0];
+        goal.run_ids = vec![run.id];
+        goal.provider_calls = 64;
+        goal.status = GoalStatus::Failed;
+        goal.budget_closed = true;
+        view.runs = vec![run];
+        assert_eq!(
+            session_run_feedback(&view, &view.runs[0]).unwrap(),
+            "Arany status: Run stopped at a budget boundary: Provider calls; committed usage 64, pinned limit 64. Committed refused reservation detail is unavailable.\nNo answer was committed; completed actions remain in the Session."
+        );
+        let goal = &mut view.goals[0];
+        goal.budget_refusal = Some(arany::BudgetRefusal {
+            dimension: arany::GoalLimit::Calls,
+            cause: arany::BudgetRefusalCause::Exhausted,
+            action: arany::BudgetAction::Provider,
+            run_id: Some(view.runs[0].id),
+            agent_run_id: Some(view.runs[0].agents[0].id),
+            used: 64,
+            limit: 64,
+            requested: Some(1),
+            required_minimum: Some(1),
+            token_usage_unknown: false,
+            charge_basis: arany::BudgetChargeBasis::Observed,
+        });
+        goal.report = Some(arany::GoalReport {
+            summary: String::new(),
+            changes: Vec::new(),
+            evidence: Vec::new(),
+            unresolved: vec!["Misleading budget prose".into()],
+            cached_input_tokens: 0,
+        });
+        view.runs[0].status = RunStatus::Finished;
+        view.runs[0].assistant_message = Some("Committed answer".into());
+        assert_eq!(
+            session_run_feedback(&view, &view.runs[0]).unwrap(),
+            "Arany status: Goal budget refused Provider: Provider calls; exhausted; used at refusal 64, pinned limit 64; requested 1; required minimum 1; final settled usage 64.\nThe committed answer is preserved."
         );
     }
 }

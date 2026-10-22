@@ -568,7 +568,30 @@ fn goal_compaction_reservation(goal: &crate::session::GoalView) -> Result<u64, E
             action_ms.min(limit.saturating_sub(goal.active_ms))
         });
     if reserved_ms <= duration_ms(STORE_ACTION_OVERHEAD) {
-        return Err(EngineError::GoalBudgetExhausted);
+        let mut refusal = goal
+            .effective_budget()
+            .refusal(
+                crate::session::GoalUsage {
+                    runs: goal.run_ids.len(),
+                    provider_calls: goal.provider_calls,
+                    active_ms: goal.active_ms,
+                    known_tokens: goal.known_tokens,
+                    token_usage_unknown: goal.token_usage_unknown,
+                },
+                crate::session::BudgetAction::Compaction,
+            )
+            .ok_or(EngineError::InvalidHistory)?;
+        if refusal.dimension == crate::session::GoalLimit::ActiveTime {
+            refusal.requested = Some(action_ms);
+            refusal.required_minimum = Some(duration_ms(STORE_ACTION_OVERHEAD) + 1);
+        }
+        if goal.uncertain_active_ms > 0 {
+            refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
+        }
+        return Err(EngineError::GoalBudgetUncommitted {
+            refusal: Box::new(refusal),
+            source: Box::new(EngineError::GoalBudgetExhausted),
+        });
     }
     Ok(reserved_ms)
 }

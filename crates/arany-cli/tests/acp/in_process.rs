@@ -2008,7 +2008,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             "prompt":[{"type":"text","text":"Read facts"}]}),
         )
         .await;
-        loop {
+        let response = loop {
             let value = next(&mut reader).await;
             if value["id"] == 3 {
                 assert_eq!(
@@ -2021,9 +2021,9 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
                         "max_turn_requests"
                     }
                 );
-                break;
+                break value;
             }
-        }
+        };
         writer.shutdown().await.unwrap();
         task.await.unwrap().unwrap();
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
@@ -2032,6 +2032,16 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .unwrap();
         assert_eq!(view.goals[0].budget_closed, !finish);
+        if !finish {
+            assert_eq!(
+                response["result"]["_meta"]["arany.budgetRefusal"],
+                json!(view.goals[0].budget_refusal)
+            );
+            assert_eq!(
+                response["result"]["_meta"]["arany.status"],
+                crate::presentation::session_run_feedback(&view, &view.runs[0]).unwrap()
+            );
+        }
         assert_eq!(view.goals[0].provider_calls, 1);
         assert_eq!(view.runs.len(), 1);
         assert_eq!(provider.requests.lock().unwrap().len(), 1);

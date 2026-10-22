@@ -361,6 +361,32 @@ async fn run_on_engine(
         Err(EngineError::CancelledBeforeStart) if interrupted => {
             return Err("interrupted before a Run started; no Run was recorded".into());
         }
+        Err(EngineError::GoalBudgetExhausted) => {
+            if let (Some(session), Some(goal_id)) =
+                (admission.session_id, args.resume_goal.as_ref())
+            {
+                let root = StateRoot::open_existing(&admission.state_dir)
+                    .map_err(|_| "state directory unavailable or unsafe")?;
+                let store = Store::open_read_only(root).map_err(|_| "state store unavailable")?;
+                let view = store
+                    .load_view(session)
+                    .await
+                    .map_err(|_| "Session history unavailable or invalid")?;
+                store.close().await.map_err(|_| "store shutdown failed")?;
+                if let Some(view) = view
+                    && let Some(run) = view.runs.iter().rev().find(|run| {
+                        view.budget_stop_goal(run)
+                            .is_some_and(|goal| goal.id.to_string() == *goal_id)
+                    })
+                    && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
+                {
+                    return Err(feedback);
+                }
+            }
+            return Err(
+                "Goal budget admission refused (uncommitted); no Goal receipt is available".into(),
+            );
+        }
         Err(error) => return Err(error.to_string()),
     };
     let root = StateRoot::open_existing(&admission.state_dir)
@@ -401,6 +427,11 @@ async fn run_on_engine(
     )
     .map(|reason| format!("Goal stopped after a committed Run: {reason}"));
     if !run.status.is_outcome() {
+        if view.budget_stop_goal(run).is_some()
+            && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
+        {
+            return Err(feedback);
+        }
         return Err(stopped
             .map_or("Run did not reach a terminal state", stop_text)
             .into());
@@ -471,8 +502,18 @@ async fn run_on_engine(
                 receipt.push_str(&notice);
                 receipt.push('\n');
             }
+            if view.budget_stop_goal(run).is_some()
+                && let Some(feedback) = crate::presentation::session_run_feedback(&view, run)
+            {
+                receipt.push_str(&feedback);
+                receipt.push('\n');
+            }
             receipt
         }
+        OutputArg::Jsonl if view.budget_stop_goal(run).is_some() => format!(
+            "{}\n",
+            crate::presentation::session_run_feedback(&view, run).unwrap_or_default()
+        ),
         OutputArg::Jsonl if success => String::new(),
         OutputArg::Jsonl => match run.status {
             RunStatus::Cancelled => "error: Run cancelled\n".into(),
@@ -1157,7 +1198,7 @@ mod tests {
                 }
             );
             let receipt: Vec<_> = report.stderr.lines().collect();
-            assert_eq!(receipt.len(), 3);
+            assert_eq!(receipt.len(), if finite { 5 } else { 3 });
             let id = SessionId::from_str(
                 receipt[0]
                     .strip_prefix("Session: ")
@@ -1171,7 +1212,14 @@ mod tests {
                     "Session: {id}\nRun: {}\nStatus: {}\n",
                     view.runs[0].id,
                     if finite { "failed" } else { "finished" }
-                )
+                ) + &if finite {
+                    format!(
+                        "{}\n",
+                        crate::presentation::session_run_feedback(&view, &view.runs[0]).unwrap()
+                    )
+                } else {
+                    String::new()
+                }
             );
             if finite {
                 assert_eq!(view.goals[0].budget.max_provider_calls, Some(1));
@@ -1313,7 +1361,8 @@ mod tests {
         .await
         .err()
         .expect("an exhausted resume exits unsuccessfully with its reason");
-        assert_eq!(error, "Goal budget is exhausted");
+        assert!(error.starts_with("Arany status: Goal budget refused resume: Provider calls; exhausted; used at refusal 1, pinned limit 1; requested 1; required minimum 1"));
+        assert!(error.ends_with("The committed answer is preserved."));
         assert_eq!(observed.lock().expect("observations").len(), 1);
 
         let mut again = args(state_dir.clone(), workspace.clone(), "unused");

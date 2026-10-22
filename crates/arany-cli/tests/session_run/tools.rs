@@ -18,6 +18,106 @@ use std::time::Duration;
 #[path = "tools/native_exec.rs"]
 mod native_exec;
 
+#[tokio::test]
+async fn budget_incident_failed_reads_then_next_action_has_distinct_terminal_feedback() {
+    use arany::test_support::{goals::*, scenario::ScriptedProvider};
+    for exhausted in [true, false] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).unwrap();
+        private_file(&state_path.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        let provider = Arc::new(
+            ScriptedProvider::new(
+                (0..3)
+                    .map(|_| {
+                        crate::tool_outcome(ToolCall::Read {
+                            path: "notes/missing.txt".into(),
+                            offset: None,
+                            limit: None,
+                        })
+                    })
+                    .chain([finish_with("Recovered")])
+                    .collect(),
+            )
+            .with_known_input_tokens(),
+        );
+        let engine = arany::test_support::engine::open(state, EngineConfig::default()).unwrap();
+        let mut input = proposal_request(&workspace);
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::new(
+            arany::GoalBudget {
+                max_provider_calls: exhausted.then_some(3),
+                ..Default::default()
+            },
+            arany::GoalPhase::Implementation,
+        );
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, result.session_id).await;
+        assert_eq!(view.runs[0], result.run);
+        assert_eq!(view.goals[0].budget_closed, exhausted);
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            if exhausted { 3 } else { 4 }
+        );
+        let feedback = arany_cli::presentation::session_run_feedback(&view, &view.runs[0]);
+        if exhausted {
+            let feedback = feedback.unwrap();
+            assert!(feedback.starts_with("Arany status: Goal budget refused Tool: Provider calls; exhausted; used at refusal 3, pinned limit 3; requested 1; required minimum 1; final settled usage 3."));
+            assert_eq!(feedback.matches("primary: Read failed").count(), 2);
+            assert!(
+                feedback
+                    .ends_with("No answer was committed; completed actions remain in the Session.")
+            );
+            assert_eq!(
+                arany_cli::presentation::render_session(
+                    &view,
+                    &events,
+                    arany_cli::presentation::Output::Text
+                )
+                .matches(&feedback)
+                .count(),
+                1
+            );
+        } else {
+            assert_eq!(feedback, None);
+        }
+        assert!(
+            matches!(events.last().unwrap().event, arany::Event::GoalFinished { exhausted: closed, .. } if closed == exhausted)
+        );
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .current_dir(&workspace)
+            .args(["show", "--state-dir"])
+            .arg(&state_path)
+            .arg(result.session_id.to_string());
+        let output = super::process_output_before_deadline(command);
+        assert!(output.status.success());
+        assert!(output.stderr.is_empty());
+        assert_eq!(
+            output.stdout,
+            arany_cli::presentation::render_session(
+                &view,
+                &events,
+                arany_cli::presentation::Output::Text
+            )
+            .as_bytes()
+        );
+    }
+}
+
 fn assert_seed_retired(id: uuid::Uuid) {
     assert!(!Path::new("/tmp").join(format!("arany-tools-{id}")).exists());
     let guard = StateRoot::account_path().unwrap().join("guard");

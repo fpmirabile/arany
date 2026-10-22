@@ -601,10 +601,13 @@ impl CallRouter<'_> {
             Some(
                 match self
                     .ledger
-                    .reserve(Action::ProviderCall {
-                        previews: false,
-                        steering: false,
-                    })
+                    .reserve(
+                        Action::ProviderCall {
+                            previews: false,
+                            steering: false,
+                        },
+                        scope.agent_run_id,
+                    )
                     .await
                 {
                     Ok(reservation) => reservation,

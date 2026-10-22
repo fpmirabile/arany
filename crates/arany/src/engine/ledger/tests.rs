@@ -39,6 +39,8 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
         active_ceiling_ms: 0,
         continues: None,
         budget_closed: false,
+        budget_refusal: None,
+        run_start_usage: Default::default(),
     }
 }
 
@@ -150,9 +152,88 @@ fn active_plan_narrowing_uses_settled_action_usage() {
 fn unlimited_goal_admits_a_finite_build_action_above_the_default_usage_ceiling() {
     let ledger = ledger(unlimited_time());
     let (_, reserved_ms) = ledger
-        .reserve_active(1_845_000)
+        .reserve_active(1_845_000, BudgetAction::Provider, None)
         .expect("maximum macOS Build action plus Store tail");
     assert_eq!(reserved_ms, 1_850_000);
+}
+
+#[tokio::test(start_paused = true)]
+async fn active_admission_distinguishes_store_headroom_from_elapsed_exhaustion() {
+    for (used, carried, admitted, elapsed) in [
+        (4_999, 0, true, false),
+        (5_000, 0, false, false),
+        (5_000, 10, false, false),
+        (10_000, 0, false, true),
+    ] {
+        let ledger = ledger(GoalBudget {
+            max_active_ms: Some(10_000),
+            ..Default::default()
+        });
+        edit(&ledger, |goal, in_flight| {
+            goal.active_ms = used;
+            in_flight.origin = Some(Instant::now());
+        });
+        tokio::time::advance(Duration::from_millis(carried)).await;
+        assert_eq!(ledger.spent_active_time_exhausted(), elapsed);
+        assert_eq!(
+            ledger
+                .reserve_active(600_000, BudgetAction::Provider, None)
+                .is_ok(),
+            admitted
+        );
+        let refusal = ledger.budget_refusal().unwrap();
+        assert_eq!(refusal.is_none(), admitted);
+        if let Some(refusal) = refusal {
+            assert_eq!(refusal.used, used + carried);
+            assert_eq!(refusal.limit, 10_000);
+            assert_eq!(refusal.requested, Some(605_000 + carried));
+            assert_eq!(refusal.required_minimum, Some(5_001 + carried));
+            refusal.validate().expect("valid captured reservation");
+            assert_eq!(
+                refusal.cause,
+                if elapsed {
+                    crate::BudgetRefusalCause::Exhausted
+                } else {
+                    crate::BudgetRefusalCause::InsufficientHeadroom
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn refusal_snapshot_uses_pinned_dimensions_and_canonical_simultaneous_order() {
+    for (calls, tokens, unknown, active, runs, expected) in [
+        (0, 0, false, 0, 1, None),
+        (4, 0, false, 0, 1, Some(GoalLimit::Calls)),
+        (4, 100, false, 60_000, 2, Some(GoalLimit::Tokens)),
+        (4, 0, false, 60_000, 2, Some(GoalLimit::Calls)),
+        (0, 0, false, 55_000, 2, Some(GoalLimit::ActiveTime)),
+        (0, 0, false, 0, 2, Some(GoalLimit::Runs)),
+        (0, 0, true, 0, 1, Some(GoalLimit::Tokens)),
+    ] {
+        let ledger = ledger(GoalBudget {
+            max_provider_calls: Some(4),
+            max_tokens: Some(100),
+            max_active_ms: Some(60_000),
+            max_runs: 2,
+        });
+        edit(&ledger, |goal, _| {
+            goal.provider_calls = calls;
+            goal.known_tokens = tokens;
+            goal.token_usage_unknown = unknown;
+            goal.active_ms = active;
+            goal.run_ids.resize_with(runs, RunId::new);
+        });
+        ledger
+            .capture_budget_refusal(BudgetAction::Run, None)
+            .unwrap();
+        let refusal = ledger.budget_refusal().unwrap();
+        assert_eq!(refusal.map(|r| r.dimension), expected);
+        if let Some(refusal) = refusal {
+            refusal.validate().unwrap();
+        }
+    }
 }
 
 #[test]
@@ -162,12 +243,12 @@ fn carried_time_joins_the_next_reservation_and_the_runs_active_time() {
         in_flight.origin = Some(Instant::now() - Duration::from_secs(11));
     });
     let (_, reserved_ms) = ledger
-        .reserve_active(1_845_000)
+        .reserve_active(1_845_000, BudgetAction::Provider, None)
         .expect("Build action after carried time");
     assert!(reserved_ms >= 1_861_000, "{reserved_ms}");
     assert!(
         matches!(
-            ledger.reserve_active(1),
+            ledger.reserve_active(1, BudgetAction::Provider, None),
             Err(EngineError::CoordinatorFailed)
         ),
         "one open reservation at a time"
@@ -199,10 +280,13 @@ async fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap
     }));
     assert!(matches!(
         ledger
-            .reserve(Action::ProviderCall {
-                previews: false,
-                steering: false,
-            })
+            .reserve(
+                Action::ProviderCall {
+                    previews: false,
+                    steering: false,
+                },
+                AgentRunId::new()
+            )
             .await,
         Err(EngineError::GoalBudgetExhausted)
     ));
@@ -224,7 +308,9 @@ fn an_unrecorded_result_counts_toward_the_token_cap() {
 #[tokio::test(start_paused = true)]
 async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
     let ledger = ledger(unlimited_time());
-    let (started, _) = ledger.reserve_active(10_000).unwrap();
+    let (started, _) = ledger
+        .reserve_active(10_000, BudgetAction::Provider, None)
+        .unwrap();
     tokio::time::advance(Duration::from_millis(100)).await;
     ledger
         .exclude_idle_approval(Duration::from_millis(80))
@@ -233,7 +319,9 @@ async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
         .settle_active(duration_ms(started.elapsed()), None)
         .unwrap();
     assert_eq!(ledger.run_active_ms().unwrap(), 20);
-    let (started, _) = ledger.reserve_active(10_000).unwrap();
+    let (started, _) = ledger
+        .reserve_active(10_000, BudgetAction::Provider, None)
+        .unwrap();
     tokio::time::advance(Duration::from_millis(50)).await;
     ledger
         .settle_active(duration_ms(started.elapsed()), None)
@@ -263,7 +351,9 @@ fn open_delegation_reservation_does_not_exhaust_its_own_review() {
         max_active_ms: Some(600_000),
         ..GoalBudget::default()
     });
-    let (_started, reserved_ms) = ledger.reserve_active(600_000).unwrap();
+    let (_started, reserved_ms) = ledger
+        .reserve_active(600_000, BudgetAction::Provider, None)
+        .unwrap();
     assert!(reserved_ms > 0);
     assert!(ledger.active_time_exhausted());
     assert!(!ledger.spent_active_time_exhausted());

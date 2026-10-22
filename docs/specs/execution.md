@@ -167,7 +167,8 @@ Persist only SQLite schema 5, compaction compiler version 3 and one current payl
 | `RunFinished` | 9 |
 | `MessageAccepted` | 7; required nullable `skill` names the invoked Skill, null for an ordinary turn |
 | `GoalPlanContractRecorded` | 8 |
-| `GoalStarted`, `GoalFinished`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
+| `GoalFinished` | 8; required nullable `budget_refusal` follows the [Goal refusal contract](./goals.md#budget-refusal-feedback) |
+| `GoalStarted`, `GoalProviderCallReserved`, `GoalCompactionCallReserved`, `ContextCompacted` | 7 |
 | `ToolPermissionDecided` | 5; the closed `source` and `basis` add `typed_prefix_rule`; migrated from 4 unchanged, and a version-4 payload naming it is forged and refuses |
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
@@ -221,6 +222,8 @@ The [Supervisor adapter](./tools.md#supervisor-adapter) is a shadow-only canonic
 `AgentSteeringNoteRecorded` is an actor-scoped v1 fact with strict `{goal_id,text}` payload and Run/AgentRun IDs in its envelope. Its migration floor is 1; it has no predecessor payload or migration edge. Existing payload versions, SQLite schema 5 and compaction compiler 3 stay unchanged. The reducer enforces the [shared steering quota and ChildWork reservation](./goals.md#steering-notes-and-pause); replay rebuilds historical guidance without delivering it.
 
 ### Journal migration
+
+`GoalFinished` 7 → 8 adds `budget_refusal: null`; version 7 did not record refused quantities. A source payload already containing that field refuses. No runtime compatibility reader or invented historical reservation is introduced.
 
 `store::migrate` registers SQLite schema steps keyed by source version, each with its exact source schema, and JSON-level `Value -> Value` Event payload steps keyed by (kind, source version). Each payload step also declares its source version's canonical serialization. The floors are schema 4 and the payload versions schema 5 shipped with, which the table above exceeds for the kinds that gained the glob and [typed Git write](#admission-persistence-and-recovery) variants, by two more for `RunStarted` and for `ToolPermissionDecided` 4 → 5 as its [payload table](#admission-persistence-and-recovery) row records; history below a floor is archived. The glob steps keep each payload's bytes and refuse a source payload that already names `glob`; the Git write steps likewise refuse one naming a typed Git write. `RunStarted` 18 → 19 turns the single root `instruction_digest` into one root source (`directory` empty, `file` null because version 18 did not record which name supplied it) or none, with an empty `launch_directory`, because version 18 read only the root; a source payload that already names sources or a launch directory refuses. `RunStarted` 19 → 20 adds `user_instruction_digest: null`, because version 19 loaded no State `AGENTS.md`; a payload that already names the field refuses, and the step never reads the current file. Steps run only in this upgrade path, never in runtime decoders or the reducer. A step adds a field only with a value the old payload proves, otherwise it refuses; it never adds authority, grants or trust. A test fails when any schema or payload version above its floor lacks a registered step and canonical fixture for each adjacent edge, and a multi-step chain must decode at the current version.
 

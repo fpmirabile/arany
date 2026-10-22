@@ -343,6 +343,13 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::WorkspaceBusy => "WorkspaceBusy",
         EngineError::GoalUnavailable => "GoalUnavailable",
         EngineError::GoalAdmissionUncertain => "GoalAdmissionUncertain",
+        EngineError::GoalBudgetUncommitted { source, .. } => {
+            if matches!(source.as_ref(), EngineError::GoalBudgetExhausted) {
+                "GoalBudgetExhausted"
+            } else {
+                "GoalAdmissionUncertain"
+            }
+        }
         EngineError::GoalBudgetExhausted => "GoalBudgetExhausted",
         EngineError::GoalNotContinuable => "GoalNotContinuable",
         EngineError::Busy => "Busy",

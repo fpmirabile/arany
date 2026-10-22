@@ -27,6 +27,7 @@ mod hints;
 mod ledger;
 mod lifecycle;
 mod report;
+pub use report::budget_refusal_summary;
 mod rewind;
 pub use rewind::{
     ConversationRewind, ConversationRewindOutcome, RewindBothResult, RewindFile, RewindIssue,
@@ -105,6 +106,12 @@ pub enum EngineError {
     GoalAdmissionUncertain,
     #[error("Goal budget is exhausted")]
     GoalBudgetExhausted,
+    #[error("Goal budget refusal is uncommitted: {dimension:?} ({cause:?}); used {used}, pinned limit {limit}, requested {requested:?}, required minimum {minimum:?}, token usage unknown {unknown}, charge basis {basis:?}; inspect Session history before retrying", dimension = .refusal.dimension, cause = .refusal.cause, used = .refusal.used, limit = .refusal.limit, requested = .refusal.requested, minimum = .refusal.required_minimum, unknown = .refusal.token_usage_unknown, basis = .refusal.charge_basis)]
+    GoalBudgetUncommitted {
+        refusal: Box<crate::session::BudgetRefusal>,
+        #[source]
+        source: Box<EngineError>,
+    },
     #[error("no exhausted Goal is available to continue")]
     GoalNotContinuable,
     #[error("Engine has an active operation")]
@@ -1028,7 +1035,25 @@ impl Engine {
             .rev()
             .find_map(|run_id| view.runs.iter().find(|run| run.id == *run_id))
             .ok_or(EngineError::InvalidHistory)?;
-        let report = goal_report(view, run, goal_view);
+        let mut goal_view = goal_view.clone();
+        let unknown_recovery = goal.usage.token_usage_unknown && !goal_view.token_usage_unknown;
+        goal_view.uncertain_active_ms = goal_view
+            .uncertain_active_ms
+            .saturating_add(goal.usage.active_ms.saturating_sub(goal_view.active_ms));
+        goal_view.active_ms = goal.usage.active_ms;
+        goal_view.token_usage_unknown = goal.usage.token_usage_unknown;
+        goal_view
+            .run_ids
+            .retain(|id| view.runs.iter().any(|run| run.id == *id));
+        let mut refusal = goal_view
+            .effective_budget()
+            .refusal(goal.usage, crate::session::BudgetAction::Resume)
+            .ok_or(EngineError::InvalidHistory)?;
+        if goal_view.uncertain_active_ms > 0 || unknown_recovery {
+            refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
+        }
+        goal_view.budget_refusal = Some(refusal);
+        let report = goal_report(view, run, &goal_view);
         self.append_goal_lifecycle(
             session_id,
             None,
@@ -1038,9 +1063,14 @@ impl Engine {
                 active_ms: goal.usage.active_ms,
                 report,
                 exhausted: true,
+                budget_refusal: Some(refusal),
             },
         )
-        .await?;
+        .await
+        .map_err(|source| EngineError::GoalBudgetUncommitted {
+            refusal: Box::new(refusal),
+            source: Box::new(source),
+        })?;
         Ok(())
     }
 
@@ -2036,6 +2066,7 @@ impl Engine {
             workspace_identity,
         } = started;
         let budget_stopped = ledger.budget_stopped();
+        let captured_refusal = ledger.budget_refusal()?;
         let (run, active_ms, terminal) = ledger.view(|view| -> Result<_, EngineError> {
             let run = view
                 .runs
@@ -2065,11 +2096,37 @@ impl Engine {
                 )),
                 _ => None,
             }
-            .map(|(status, exhausted)| (status, goal_report(view, &run, goal_view), exhausted));
+            .map(|(status, exhausted)| {
+                let mut goal_view = goal_view.clone();
+                goal_view.budget_refusal = if exhausted {
+                    captured_refusal.or_else(|| {
+                        goal_view.effective_budget().refusal(
+                            goal_view.resume_usage(view),
+                            crate::session::BudgetAction::Run,
+                        )
+                    })
+                } else {
+                    None
+                };
+                if goal_view.uncertain_active_ms > 0
+                    && let Some(refusal) = &mut goal_view.budget_refusal
+                {
+                    refusal.charge_basis = crate::session::BudgetChargeBasis::Conservative;
+                }
+                (
+                    status,
+                    goal_report(view, &run, &goal_view),
+                    exhausted,
+                    goal_view.budget_refusal,
+                )
+            });
             Ok((run, goal_view.active_ms, terminal))
         })??;
         let mut goal_status = GoalStatus::Running;
-        if let Some((status, report, exhausted)) = terminal {
+        if let Some((status, report, exhausted, budget_refusal)) = terminal {
+            if exhausted && budget_refusal.is_none() {
+                return Err(EngineError::InvalidHistory);
+            }
             self.journal
                 .append(
                     session_id,
@@ -2079,9 +2136,17 @@ impl Engine {
                         active_ms,
                         report,
                         exhausted,
+                        budget_refusal,
                     },
                 )
-                .await?;
+                .await
+                .map_err(|error| match budget_refusal {
+                    Some(refusal) => EngineError::GoalBudgetUncommitted {
+                        refusal: Box::new(refusal),
+                        source: Box::new(EngineError::from(error)),
+                    },
+                    None => EngineError::from(error),
+                })?;
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }

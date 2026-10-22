@@ -321,6 +321,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         cached_input_tokens: 0,
                     },
                     exhausted: false,
+                    budget_refusal: None,
                 },
             )
             .await

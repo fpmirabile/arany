@@ -132,6 +132,7 @@ pub(super) fn goal_summary(goal: &GoalView) -> GoalSummary {
             arany::GoalStatus::Failed => GoalStatus::Failed,
         },
         stopped: None,
+        budget_refusal: goal.budget_refusal,
     }
 }
 
@@ -159,14 +160,17 @@ pub(super) fn turn_summary(
         } else {
             Vec::new()
         },
-        error: matches!(run.status, RunStatus::Failed | RunStatus::StoppedByHook).then(|| {
-            TurnError {
-                message: crate::presentation::run_feedback(run)
-                    .unwrap_or_else(|| "Run failed".into()),
-            }
+        error: (matches!(run.status, RunStatus::Failed | RunStatus::StoppedByHook)
+            || view.budget_stop_goal(run).is_some())
+        .then(|| TurnError {
+            message: crate::presentation::session_run_feedback(view, run)
+                .unwrap_or_else(|| "Run failed".into()),
         }),
         goal: Some(GoalSummary {
             stopped: stop.map(goal_stop),
+            budget_refusal: view
+                .budget_stop_goal(run)
+                .and_then(|goal| goal.budget_refusal),
             ..goal_summary(goal)
         }),
     }

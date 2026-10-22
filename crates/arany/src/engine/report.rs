@@ -22,6 +22,14 @@ pub(super) fn goal_report(
         cached_input_tokens: goal.known_cached_tokens,
     };
     let mut omitted_facts = false;
+    if let Some(fact) = budget_refusal_summary(goal) {
+        push_goal_report_item(
+            &mut report,
+            GoalReportSection::Unresolved,
+            &fact,
+            &mut omitted_facts,
+        );
+    }
     let uncertain_calls = goal.unobserved_provider_calls.len();
     if uncertain_calls > 0 {
         push_goal_report_item(
@@ -83,6 +91,9 @@ pub(super) fn goal_report(
         );
     }
     push_cache_facts(&mut report, view, goal, &mut omitted_facts);
+    if goal.budget_refusal.is_some() {
+        push_budget_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    }
     push_unguarded_facts(&mut report, view, goal, &mut omitted_facts);
     push_checkpoint_facts(&mut report, view, goal, &mut omitted_facts);
     if let Some(facts) = crate::session::rewind::history_facts(view, 0, view.last_sequence) {
@@ -126,33 +137,249 @@ pub(super) fn goal_report(
         );
     }
     push_settled_workers(&mut report, workers, &mut omitted_facts);
-    // The serialized-size loop below is the only truncation; it starts from the full summary.
-    let mut summary_bytes = raw_summary.len();
-    let mut summary_notice_added = false;
-    report.summary = raw_summary.to_owned();
-    while !goal_report_fits_with_omission(&mut report) {
-        summary_bytes = summary_bytes.saturating_sub(128);
-        if summary_bytes < raw_summary.len() && !summary_notice_added {
-            let summary = std::mem::take(&mut report.summary);
-            push_goal_report_item(
-                &mut report,
-                GoalReportSection::Unresolved,
-                "The primary summary was shortened to fit the durable Goal report.",
-                &mut omitted_facts,
-            );
-            report.summary = summary;
-            summary_notice_added = true;
-        }
-        report.summary = crate::tools::types::truncate_utf8(raw_summary, summary_bytes).to_owned();
-        assert!(summary_bytes > 0 || goal_report_fits_with_omission(&mut report));
-    }
+    fit_report_summary(&mut report, raw_summary, &mut omitted_facts);
     let protected_unresolved_count = report.unresolved.len();
-    push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    if goal.budget_refusal.is_none() {
+        push_unresolved_tool_facts(&mut report, view, goal, &mut omitted_facts);
+    }
     push_success_facts(&mut report, view, goal, &mut omitted_facts);
     if omitted_facts {
         append_goal_report_omission(&mut report, protected_unresolved_count);
     }
     report
+}
+
+fn fit_report_summary(report: &mut GoalReport, raw_summary: &str, omitted_facts: &mut bool) {
+    let mut summary_bytes = raw_summary.len();
+    let mut summary_notice_added = false;
+    report.summary = raw_summary.to_owned();
+    while !goal_report_fits_with_omission(report) {
+        summary_bytes = summary_bytes.saturating_sub(128);
+        if summary_bytes < raw_summary.len() && !summary_notice_added {
+            let summary = std::mem::take(&mut report.summary);
+            push_goal_report_item(
+                report,
+                GoalReportSection::Unresolved,
+                "The primary summary was shortened to fit the durable Goal report.",
+                omitted_facts,
+            );
+            report.summary = summary;
+            summary_notice_added = true;
+        }
+        report.summary = crate::tools::types::truncate_utf8(raw_summary, summary_bytes).to_owned();
+        assert!(summary_bytes > 0 || goal_report_fits_with_omission(report));
+    }
+}
+
+pub fn budget_refusal_summary(goal: &crate::session::GoalView) -> Option<String> {
+    use crate::session::{BudgetAction, BudgetChargeBasis, BudgetRefusalCause, GoalLimit};
+    let refusal = goal.budget_refusal.as_ref()?;
+    let (dimension, final_used) = match refusal.dimension {
+        GoalLimit::Calls => ("Provider calls", u64::from(goal.provider_calls)),
+        GoalLimit::Tokens => ("tokens", goal.known_tokens),
+        GoalLimit::ActiveTime => ("active time (ms)", goal.active_ms),
+        GoalLimit::Runs => ("Runs", goal.run_ids.len() as u64),
+    };
+    let action = match refusal.action {
+        BudgetAction::Provider => "Provider",
+        BudgetAction::Tool => "Tool",
+        BudgetAction::Delegation => "delegation",
+        BudgetAction::Compaction => "compaction",
+        BudgetAction::Run => "Run",
+        BudgetAction::Resume => "resume",
+    };
+    let cause = match refusal.cause {
+        BudgetRefusalCause::Exhausted => "exhausted",
+        BudgetRefusalCause::UnknownUsage => "unknown usage prevents admission",
+        BudgetRefusalCause::InsufficientHeadroom => "insufficient headroom",
+    };
+    let mut fact = format!(
+        "Goal budget refused {action}: {dimension}; {cause}; used at refusal {}, pinned limit {}",
+        refusal.used, refusal.limit
+    );
+    if let Some(requested) = refusal.requested {
+        fact.push_str(&format!("; requested {requested}"));
+    }
+    if let Some(minimum) = refusal.required_minimum {
+        fact.push_str(&format!("; required minimum {minimum}"));
+    }
+    if refusal.dimension == GoalLimit::ActiveTime {
+        fact.push_str("; reservation includes carried processing and Store margin 5000 ms");
+    }
+    if refusal.token_usage_unknown {
+        fact.push_str("; token usage unknown");
+    }
+    if refusal.charge_basis == BudgetChargeBasis::Conservative {
+        fact.push_str("; conservatively charged");
+    }
+    fact.push_str(&format!("; final settled usage {final_used}."));
+    Some(fact)
+}
+
+fn push_budget_tool_facts(
+    report: &mut GoalReport,
+    view: &crate::session::SessionView,
+    goal: &crate::session::GoalView,
+    omitted_facts: &mut bool,
+) {
+    use crate::tools::ToolDisposition;
+    let mut recent = Vec::new();
+    for run in view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+    {
+        for tool in run
+            .tools
+            .iter()
+            .chain(run.agents.iter().flat_map(|agent| &agent.tools))
+        {
+            let Some(observation) = tool.observation.as_ref() else {
+                continue;
+            };
+            let label = match observation.disposition {
+                ToolDisposition::Denied => "denied; action did not run",
+                ToolDisposition::Limit => "limited",
+                ToolDisposition::Conflict => "conflict",
+                ToolDisposition::Failed => "failed",
+                ToolDisposition::Succeeded
+                | ToolDisposition::Cancelled
+                | ToolDisposition::Uncertain => continue,
+            };
+            let Some(actor) = run
+                .agents
+                .iter()
+                .find(|actor| actor.id == tool.intent.agent_run_id)
+            else {
+                continue;
+            };
+            recent.push((
+                tool.finished_sequence.unwrap_or(0),
+                tool,
+                observation,
+                actor,
+                label,
+            ));
+        }
+    }
+    let count = recent.len();
+    recent.sort_by_key(|(sequence, ..)| std::cmp::Reverse(*sequence));
+    let facts: Vec<_> = recent
+        .into_iter()
+        .take(8)
+        .map(|(_, tool, observation, actor, label)| {
+            budget_tool_fact(tool, observation, actor, label)
+        })
+        .collect();
+    let mut included = facts.len();
+    loop {
+        let mut candidate = report.clone();
+        candidate
+            .unresolved
+            .extend(facts[..included].iter().cloned());
+        if count > included {
+            candidate.unresolved.push(format!(
+                "{} earlier Tool failure(s) omitted.",
+                count - included
+            ));
+        }
+        if goal_report_fits_with_omission(&mut candidate) {
+            *report = candidate;
+            return;
+        }
+        if included == 0 {
+            *omitted_facts = true;
+            return;
+        }
+        included -= 1;
+    }
+}
+
+fn budget_tool_fact(
+    tool: &crate::session::ToolView,
+    observation: &crate::tools::ToolObservation,
+    actor: &crate::session::AgentView,
+    label: &str,
+) -> String {
+    use crate::tools::ToolDisposition;
+    let actor = match actor.role {
+        crate::session::AgentRole::Primary => "primary".into(),
+        crate::session::AgentRole::Child => format!("child {}", actor.ordinal),
+    };
+    let mut fact = format!("{actor}: {} {label}", tool.intent.call.label());
+    if observation.disposition == ToolDisposition::Denied {
+        use crate::tools::permissions::{Decision, PermissionSource};
+        let source = tool.permission_verdict.as_ref().map(|verdict| {
+            if verdict.hook_restriction == Some(Decision::Deny) {
+                PermissionSource::Hook
+            } else {
+                verdict.source
+            }
+        });
+        let cause = match source {
+            Some(PermissionSource::Human) => "permission_denied; human approval not granted",
+            Some(PermissionSource::Hook) => "hook_denied",
+            Some(
+                PermissionSource::Rule
+                | PermissionSource::ExactCommandRule
+                | PermissionSource::TypedPrefixRule,
+            ) => "permission_rule_denied",
+            Some(PermissionSource::Mode) => "permission_mode_denied",
+            Some(PermissionSource::UnavailableApproval) => {
+                "permission_denied; approval unavailable"
+            }
+            Some(PermissionSource::AiReview | PermissionSource::PinnedGrant) | None => {
+                "permission_denied"
+            }
+        };
+        fact.push_str(&format!("; {cause}"));
+    }
+    if let Some(cause) = observation.limit_cause {
+        use crate::tools::LimitCause;
+        let cause = match cause {
+            LimitCause::Timeout => "timeout",
+            LimitCause::OutputCeiling => "output_ceiling",
+            LimitCause::ContextFull => "context_full",
+            LimitCause::ReadCapacity => "read_capacity",
+            LimitCause::RequestedTime => "requested_time",
+            LimitCause::Resource => "resource",
+        };
+        fact.push_str(&format!("; limit {cause}"));
+    }
+    if observation.disposition != ToolDisposition::Denied && observation.attested_for(&tool.intent)
+    {
+        let output = if matches!(
+            tool.intent.call,
+            crate::tools::ToolCall::Command { .. }
+                | crate::tools::ToolCall::CommandUnguarded { .. }
+        ) {
+            serde_json::from_str::<crate::tools::types::CommandResult>(&observation.output)
+                .ok()
+                .map(|result| {
+                    format!(
+                        "exit {}; {}",
+                        result
+                            .exit_code
+                            .map_or("unknown".into(), |code| code.to_string()),
+                        result.stderr
+                    )
+                })
+        } else {
+            Some(observation.output.clone())
+        };
+        if let Some(output) = output {
+            fact.push_str("; ");
+            let excerpt = crate::tools::types::truncate_utf8(&output, 256);
+            fact.push_str(&crate::session::escape_status_text(excerpt));
+            if excerpt.len() < output.len() {
+                fact.push('…');
+            }
+        }
+    }
+    if fact.len() > 512 {
+        fact = format!("{}…", crate::tools::types::truncate_utf8(&fact, 509));
+    }
+    fact
 }
 
 fn push_checkpoint_facts(

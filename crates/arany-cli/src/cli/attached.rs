@@ -1733,7 +1733,7 @@ async fn finish_submission(
         .map_err(|error| error.to_string())?;
     let mut notice = retained_draft_notice(composer);
     // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
-    let run_feedback = crate::presentation::run_feedback(&outcome.run);
+    let run_feedback = crate::presentation::session_run_feedback(view, &outcome.run);
     let run_feedback = match stop {
         Some(reason) => Some(match run_feedback {
             Some(feedback) => format!("Error: Goal stopped after this Run: {reason}. {feedback}"),

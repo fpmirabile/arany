@@ -3,6 +3,267 @@ use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn budget_incident_path_distinguishes_failed_reads_from_refused_next_actions() {
+    for (case, calls, tokens, unknown, expected) in [
+        ("calls", Some(3), None, false, Some(arany::GoalLimit::Calls)),
+        (
+            "tokens",
+            None,
+            Some(24),
+            false,
+            Some(arany::GoalLimit::Tokens),
+        ),
+        ("finite_remaining", Some(6), Some(100), false, None),
+        ("default_unlimited", None, None, true, None),
+        ("provider_failure", Some(3), None, false, None),
+        (
+            "unknown_tokens",
+            None,
+            Some(100),
+            true,
+            Some(arany::GoalLimit::Tokens),
+        ),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let missing = || {
+            crate::tool_outcome(arany::ToolCall::Read {
+                path: "notes/missing.txt".into(),
+                offset: None,
+                limit: None,
+            })
+        };
+        let mut provider = ScriptedProvider::new(vec![
+            missing(),
+            missing(),
+            missing(),
+            finish_with("Recovered"),
+        ]);
+        if !unknown {
+            provider = provider.with_known_input_tokens();
+        }
+        let failed_call = case == "provider_failure";
+        if failed_call {
+            provider.responses.lock().unwrap()[2] = Err(arany::ProviderError::Unavailable);
+        }
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut input = request(&workspace, "Inspect missing facts and report");
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::new(
+            arany::GoalBudget {
+                max_provider_calls: calls,
+                max_tokens: tokens,
+                ..Default::default()
+            },
+            arany::GoalPhase::Implementation,
+        );
+        let result = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("classified Run");
+        engine.close().await.expect("Engine shutdown");
+        let (events, view) = replayed(&state_path, result.session_id).await;
+        let run = &view.runs[0];
+        let goal = &view.goals[0];
+        assert_eq!(goal.budget_closed, expected.is_some(), "{case}");
+        assert_eq!(
+            goal.budget_refusal.map(|refusal| refusal.dimension),
+            expected,
+            "{case}"
+        );
+        if let Some(refusal) = goal.budget_refusal {
+            assert_eq!(
+                refusal.used,
+                if unknown {
+                    8
+                } else if tokens.is_some() {
+                    24
+                } else {
+                    3
+                },
+                "{case}"
+            );
+            assert_eq!(
+                refusal.limit,
+                if unknown {
+                    100
+                } else if tokens.is_some() {
+                    24
+                } else {
+                    3
+                },
+                "{case}"
+            );
+            assert_eq!(refusal.token_usage_unknown, unknown, "{case}");
+            assert_eq!(refusal.action, arany::BudgetAction::Tool, "{case}");
+        }
+        assert_eq!(
+            view.run_stop(run),
+            if failed_call {
+                Some(arany::RunStop::Failed(arany::RunFailure::ProviderCall))
+            } else {
+                expected.map(arany::RunStop::GoalExhausted)
+            },
+            "{case}"
+        );
+        let count = if failed_call {
+            3
+        } else if expected.is_none() {
+            4
+        } else if unknown {
+            1
+        } else {
+            3
+        };
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            count,
+            "{case}: no extra call"
+        );
+        assert_eq!(goal.provider_calls as usize, count, "{case}");
+        assert_eq!(
+            run.tools.len(),
+            if failed_call {
+                2
+            } else if expected.is_none() {
+                3
+            } else if unknown {
+                0
+            } else {
+                2
+            },
+            "{case}"
+        );
+        assert!(
+            run.tools.iter().all(|tool| tool
+                .observation
+                .as_ref()
+                .is_some_and(|o| o.disposition == arany::ToolDisposition::Failed)),
+            "{case}"
+        );
+        assert!(
+            matches!(events.last().expect("Goal receipt").event, Event::GoalFinished { exhausted, .. } if exhausted == expected.is_some()),
+            "{case}"
+        );
+        assert_eq!(
+            run.failure,
+            if failed_call {
+                Some(arany::RunFailure::ProviderCall)
+            } else {
+                expected.map(|_| arany::RunFailure::BudgetExhausted)
+            },
+            "{case}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn budget_refusal_store_failure_and_lost_ack_never_claim_a_live_receipt() {
+    for (before_goal, committed) in [(true, false), (false, false), (false, true)] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).unwrap(), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .unwrap();
+        let gate = if committed {
+            Some(arany::FaultPlan::gate_goal_append_acknowledgment(
+                session,
+                |event| matches!(event, Event::GoalFinished { .. }),
+            ))
+        } else if before_goal {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::GoalStarted { .. })
+            });
+            None
+        } else {
+            arany::FaultPlan::fail_goal_append(session, |event| {
+                matches!(event, Event::GoalFinished { .. })
+            });
+            None
+        };
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                crate::tool_outcome(facts_read()),
+                finish_with("Forbidden extra call"),
+            ])
+            .with_known_input_tokens(),
+        );
+        let mut input = request(&workspace, "Read facts");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::new(
+            arany::GoalBudget {
+                max_provider_calls: Some(1),
+                ..Default::default()
+            },
+            arany::GoalPhase::Implementation,
+        );
+        let error = {
+            let run = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(run);
+            if let Some((entered, release)) = gate {
+                tokio::select! { result = &mut run => panic!("Run ended before terminal acknowledgment: {:?}", result.map(|r| r.run.status)), entered = entered => entered.unwrap() }
+                drop(release);
+            }
+            run.await.expect_err("unacknowledged terminal fact")
+        };
+        if before_goal {
+            assert!(matches!(error, EngineError::Store(_)));
+        } else {
+            assert!(matches!(error, EngineError::GoalBudgetUncommitted { .. }));
+            assert!(error.to_string().contains("uncommitted"));
+        }
+        engine.close().await.unwrap();
+        let (events, view) = replayed(&state_path, session).await;
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            usize::from(!before_goal)
+        );
+        if before_goal {
+            assert!(view.goals.is_empty());
+            assert!(view.runs.is_empty());
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e.event, Event::GoalFinished { .. }))
+            );
+            continue;
+        }
+        assert_eq!(view.goals[0].budget_refusal.is_some(), committed);
+        assert_eq!(view.goals[0].budget_closed, committed);
+        assert!(view.runs[0].tools.is_empty());
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, Event::GoalFinished { .. }))
+                .count(),
+            usize::from(committed)
+        );
+    }
+}
+
+#[tokio::test]
 async fn default_goal_completes_past_64_calls_and_30_active_minutes() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "Fact");
@@ -860,6 +1121,14 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
     assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
     assert_eq!(view.goals[0].active_ms, 0);
     assert_eq!(view.goals[0].uncertain_active_ms, 0);
+    let refusal = view.goals[0].budget_refusal.expect("active refusal");
+    assert_eq!(refusal.dimension, arany::GoalLimit::ActiveTime);
+    assert_eq!(
+        refusal.cause,
+        arany::BudgetRefusalCause::InsufficientHeadroom
+    );
+    assert_eq!((refusal.used, refusal.limit), (0, 1));
+    assert_eq!(refusal.required_minimum, Some(5_001));
     assert!(view.goals[0].active_deadline.is_none());
     store.close().await.expect("Store shutdown");
 }
@@ -948,6 +1217,11 @@ async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
         .expect("Session");
     let goal = &view.goals[0];
     assert_eq!(goal.status, arany::GoalStatus::Failed);
+    let refusal = goal.budget_refusal.expect("exhausted resume receipt");
+    assert_eq!(refusal.action, arany::BudgetAction::Resume);
+    assert_eq!(refusal.dimension, arany::GoalLimit::Calls);
+    assert_eq!((refusal.used, refusal.limit), (1, 1));
+    assert_eq!((refusal.run_id, refusal.agent_run_id), (None, None));
     assert!(
         goal.report
             .as_ref()
@@ -2240,6 +2514,10 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
         "the historical turn projects the live stop"
     );
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(
+        goal.budget_refusal.map(|refusal| refusal.dimension),
+        Some(arany::GoalLimit::Runs)
+    );
     assert!(
         goal.budget_closed,
         "a budget close is journaled as exhausted"
@@ -2298,6 +2576,10 @@ async fn autonomous_goal_call_cap_at_its_boundary_fails_the_goal_with_a_report()
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(
+        goal.budget_refusal.map(|refusal| refusal.dimension),
+        Some(arany::GoalLimit::Calls)
+    );
     assert!(
         goal.budget_closed,
         "a budget close is journaled as exhausted"
@@ -2396,6 +2678,10 @@ async fn autonomous_goal_token_cap_at_its_boundary_fails_the_goal_with_a_report(
 
     let (_, view) = replayed(&state_path, outcome.session_id).await;
     let goal = view.goal(outcome.goal_id).expect("Goal");
+    assert_eq!(
+        goal.budget_refusal.map(|refusal| refusal.dimension),
+        Some(arany::GoalLimit::Tokens)
+    );
     assert!(
         goal.budget_closed,
         "a budget close is journaled as exhausted"

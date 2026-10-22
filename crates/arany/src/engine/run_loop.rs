@@ -258,8 +258,15 @@ impl<'a> RunLoop<'a> {
         Ok(())
     }
 
-    fn reserve_active_segment(&self, action_bound: Duration) -> Result<ActiveSegment, EngineError> {
-        let (started, reserved_ms) = self.ledger().reserve_active(duration_ms(action_bound))?;
+    fn reserve_active_segment(
+        &self,
+        action_bound: Duration,
+        action: crate::session::BudgetAction,
+        actor: AgentRunId,
+    ) -> Result<ActiveSegment, EngineError> {
+        let (started, reserved_ms) =
+            self.ledger()
+                .reserve_active(duration_ms(action_bound), action, Some(actor))?;
         Ok(ActiveSegment {
             started,
             reserved_ms,
@@ -282,7 +289,11 @@ impl<'a> RunLoop<'a> {
     }
 
     fn reserve_active_pause(&self) -> Result<ActivePause, EngineError> {
-        let segment = self.reserve_active_segment(Duration::ZERO)?;
+        let segment = self.reserve_active_segment(
+            Duration::ZERO,
+            crate::session::BudgetAction::Tool,
+            self.primary_id,
+        )?;
         Ok(ActivePause {
             segment,
             paused_at: Instant::now(),
@@ -308,7 +319,7 @@ impl<'a> RunLoop<'a> {
         action: Action,
         pending_ms: u64,
     ) -> Result<(), EngineError> {
-        let reservation = self.ledger().reserve(action).await?;
+        let reservation = self.ledger().reserve(action, agent_run_id).await?;
         // A review runs inside the Tool step's admission, which already counts its slots.
         if !matches!(action, Action::Review) {
             self.journal
@@ -471,6 +482,18 @@ impl<'a> RunLoop<'a> {
             .await?;
             // A cancellation or active-time expiry while the record commits still stops this call.
             let facts = RunFacts::observe(self)?;
+            let budget_action = match &first {
+                CallResult::Response(response) => match response.outcome {
+                    ProviderOutcome::Tools(_) => crate::session::BudgetAction::Tool,
+                    ProviderOutcome::Delegate(_) => crate::session::BudgetAction::Delegation,
+                    ProviderOutcome::Answer(_)
+                    | ProviderOutcome::Plan(_)
+                    | ProviderOutcome::Review(_) => crate::session::BudgetAction::Provider,
+                },
+                CallResult::Failed(_) | CallResult::Cancelled => {
+                    crate::session::BudgetAction::Provider
+                }
+            };
             match decide_primary_call(PrimarySite::Loop, first, validity, &facts) {
                 PrimaryDecision::Plan(plan, turn) => {
                     match self.record_plan_step(root_request, *plan, turn).await {
@@ -518,7 +541,13 @@ impl<'a> RunLoop<'a> {
                         break PrimaryEnd::Stopped(StopCause::Refused(cause));
                     }
                 }
-                PrimaryDecision::Stop(cause) => break PrimaryEnd::Stopped(cause),
+                PrimaryDecision::Stop(cause) => {
+                    if matches!(cause, StopCause::Budget | StopCause::ActiveTime) {
+                        self.ledger()
+                            .capture_budget_refusal(budget_action, Some(self.primary_id))?;
+                    }
+                    break PrimaryEnd::Stopped(cause);
+                }
                 PrimaryDecision::Fail(failure) => break PrimaryEnd::Failed(failure),
                 PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
             }
@@ -684,7 +713,11 @@ impl<'a> RunLoop<'a> {
             &mut root.model,
             &mut root.max_output_tokens,
         )?;
-        let active_segment = self.reserve_active_segment(provider.identity().limits.deadline)?;
+        let active_segment = self.reserve_active_segment(
+            provider.identity().limits.deadline,
+            crate::session::BudgetAction::Provider,
+            self.primary_id,
+        )?;
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)
@@ -1046,6 +1079,10 @@ impl<'a> RunLoop<'a> {
             ),
             Settlement::Fail { failure, exhausted } => {
                 if exhausted {
+                    self.ledger().capture_budget_refusal(
+                        crate::session::BudgetAction::Provider,
+                        Some(self.primary_id),
+                    )?;
                     self.ledger().mark_budget_stopped();
                 }
                 (

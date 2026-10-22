@@ -342,7 +342,11 @@ impl RunLoop<'_> {
         if self.hook_requested_stop()? {
             return Ok(());
         }
-        let reservation = match self.ledger().reserve(Action::Compaction).await {
+        let reservation = match self
+            .ledger()
+            .reserve(Action::Compaction, self.primary_id)
+            .await
+        {
             Ok(reservation) => reservation,
             Err(EngineError::GoalBudgetExhausted) => return Ok(()),
             Err(error) => return Err(error),
@@ -352,7 +356,11 @@ impl RunLoop<'_> {
         }
         let active_segment = match deadline {
             Some(_) => None,
-            None => Some(self.reserve_active_segment(COMPACTION_CALL_DEADLINE)?),
+            None => Some(self.reserve_active_segment(
+                COMPACTION_CALL_DEADLINE,
+                crate::session::BudgetAction::Compaction,
+                self.primary_id,
+            )?),
         };
         let deadline = deadline
             .or_else(|| active_segment.as_ref().map(super::ActiveSegment::deadline))
