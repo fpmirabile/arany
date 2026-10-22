@@ -46,9 +46,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Draft: owner decisions and one PR for attached defaults, saved-budget preservation and durable limit verification |
 | [Large draft text attachments](./large-draft-attachments/README.md) | Draft: owner decisions and two PRs for durable pasted text and large typed/startup/restored drafts |
-| [Anthropic-compatible custom routes](./anthropic-compatible-routes/README.md) | S3 review and CI; Kimi Code, GLM Standard and DeepSeek candidates remain unavailable pending strict-compaction evidence |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
-| [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
