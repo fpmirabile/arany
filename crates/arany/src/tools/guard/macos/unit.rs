@@ -1082,6 +1082,7 @@ pub(super) async fn execute(
                             return Err(ToolError::Operation);
                         }
                         selecting.store(false, Ordering::Release);
+                        payload_phase.store(true, Ordering::Release);
                     }
                 }
                 let capture_result = async {
@@ -1171,7 +1172,6 @@ pub(super) async fn execute(
                                 let limits = if selecting.load(Ordering::Acquire) {
                                     selection_limits(&intent.limits)
                                 } else {
-                                    watcher.capture_cpu = None;
                                     intent.limits.clone()
                                 };
                                 watcher.apply_limits(limits);
