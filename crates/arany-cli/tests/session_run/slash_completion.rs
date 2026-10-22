@@ -3650,7 +3650,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
     use std::net::TcpListener;
     use std::os::unix::net::UnixListener;
 
-    for linear in [false, true] {
+    for (linear, prefix) in [(false, ""), (true, ""), (false, "//literal ")] {
         let temp = tempfile::tempdir().expect("private attachment fixture");
         let root = temp.path();
         let workspace = root.join("workspace");
@@ -3660,7 +3660,11 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         write_profile(&state, listener.local_addr().unwrap().port());
         let payload = format!("@private.txt {}", "ordinary text ".repeat(700));
-        let expected = format!("{payload} typed suffix");
+        let expected = format!(
+            "{}{payload} typed suffix",
+            prefix.strip_prefix('/').unwrap_or(prefix)
+        );
+        let expected_request = expected.clone();
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             for index in 0..4 {
@@ -3683,7 +3687,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 if index == 3 {
                     let wire = serde_json::from_slice(&body).unwrap();
                     let input = crate::semantic::input(&wire);
-                    assert_eq!(input["objective"], expected);
+                    assert_eq!(input["objective"], expected_request);
                     assert_eq!(input["includes"], serde_json::json!([]));
                 }
                 let response = match index {
@@ -3932,7 +3936,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             input.write_all(b"/paste\r").unwrap();
         } else {
             input
-                .write_all(format!("\x1b[200~{payload}\x1b[201~").as_bytes())
+                .write_all(format!("{prefix}\x1b[200~{payload}\x1b[201~").as_bytes())
                 .unwrap();
         }
         let label = format!("[Pasted Content {} chars]", payload.chars().count());
@@ -3984,7 +3988,8 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
             let view = store.load_view(id).await.unwrap().unwrap();
             let goal = view.goals.last().unwrap();
-            assert_eq!(goal.objective, format!("{payload} typed suffix"));
+            assert_eq!(goal.objective, expected);
+            assert_eq!(view.runs.last().unwrap().objective, expected);
             assert_eq!(goal.include_paths, Some(Vec::new()));
             assert_eq!(goal.status, arany::GoalStatus::Completed);
             store.close().await.unwrap();

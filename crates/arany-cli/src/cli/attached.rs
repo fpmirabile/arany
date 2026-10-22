@@ -1027,7 +1027,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                 }
                 let line = composer.text().to_owned();
                 let submission = match if composer.has_text_pastes() {
-                    Ok(Submission::Objective(&line))
+                    Ok(Submission::Objective(
+                        &line[composer.objective_escape_len()..],
+                    ))
                 } else {
                     composer.parse_submission(&line)
                 } {

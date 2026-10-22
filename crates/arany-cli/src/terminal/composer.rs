@@ -627,9 +627,13 @@ impl Composer {
         std::mem::take(&mut self.images)
     }
 
+    pub fn objective_escape_len(&self) -> usize {
+        objective_escape_len(&self.text, &self.pastes)
+    }
+
     pub fn submission(&self) -> Result<Submission<'_>, CommandParseError> {
         if self.has_text_pastes() {
-            let escaped = objective_escape_len(&self.text, &self.pastes);
+            let escaped = self.objective_escape_len();
             if escaped > 0 {
                 return Ok(Submission::Objective(&self.text[escaped..]));
             }
