@@ -6,8 +6,8 @@ use crate::accounts::chatgpt;
 use crate::cli::provider::select::ProviderArg;
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
-    InteractiveCommand, MouseMode, PointerSettings, Submission, TerminalInput, TerminalMode,
-    transcript_agents,
+    InteractiveCommand, MouseMode, NewlineShortcut, PointerSettings, Submission, TerminalInput,
+    TerminalMode, transcript_agents,
 };
 use arany::{
     CollaborationPolicy, CustomProfile, Effort, SessionId, SessionView, StateRoot, fork_session,
@@ -19,17 +19,23 @@ use std::str::FromStr;
 
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
-const UI_PREFERENCES_VERSION: u8 = 4;
+const UI_PREFERENCES_VERSION: u8 = 5;
 
 pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
     kind: RecordKind::UiPreferences,
     field: "version",
     floor: 3,
     current: UI_PREFERENCES_VERSION as u64,
-    steps: &[RecordStep {
-        from: 3,
-        transform: with_pointer_defaults,
-    }],
+    steps: &[
+        RecordStep {
+            from: 3,
+            transform: with_pointer_defaults,
+        },
+        RecordStep {
+            from: 4,
+            transform: with_newline_default,
+        },
+    ],
     accepts: |bytes| decode_settings(bytes).is_ok(),
 };
 
@@ -48,6 +54,16 @@ fn with_pointer_defaults(record: Value) -> Option<Value> {
     preferences.insert("copy_on_select".into(), true.into());
     record.insert("version".into(), 4.into());
     Some(Value::Object(record))
+}
+
+fn with_newline_default(mut record: Value) -> Option<Value> {
+    let preferences = record.get_mut("preferences")?.as_object_mut()?;
+    if preferences.contains_key("newline") {
+        return None;
+    }
+    preferences.insert("newline".into(), "shift_enter".into());
+    record.as_object_mut()?.insert("version".into(), 5.into());
+    Some(record)
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
@@ -72,6 +88,7 @@ pub(super) struct Preferences {
     pub resources: arany::ToolResourceSettings,
     pub mouse: MouseMode,
     pub copy_on_select: bool,
+    pub newline: NewlineShortcut,
 }
 
 impl Default for Preferences {
@@ -84,6 +101,7 @@ impl Default for Preferences {
             resources: arany::ToolResourceSettings::default(),
             mouse: pointer.mouse,
             copy_on_select: pointer.copy_on_select,
+            newline: NewlineShortcut::default(),
         }
     }
 }
@@ -157,6 +175,10 @@ fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
             .into_iter()
             .find(|value| on_off(*value) == raw)
             .map(|value| preferences.copy_on_select = value),
+        Ok(14) => NewlineShortcut::ALL
+            .into_iter()
+            .find(|shortcut| shortcut.label().eq_ignore_ascii_case(raw))
+            .map(|shortcut| preferences.newline = shortcut),
         _ => None,
     };
     if parsed.is_none()
@@ -210,6 +232,7 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
         ),
         format!("Mouse: {}", preferences.mouse.label()),
         format!("Copy on select: {}", on_off(preferences.copy_on_select)),
+        format!("Newline shortcut: {}", preferences.newline.label()),
     ]
 }
 
@@ -222,6 +245,7 @@ fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
     }
     rows[11].push_str(" (wheel and clicks|wheel only|off)");
     rows[12].push_str(" (on|off)");
+    rows[13].push_str(" (shift+enter|alt+enter|ctrl+enter)");
     rows
 }
 
@@ -238,6 +262,7 @@ fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
         }]
     }
     match row {
+        13 => preferences.newline = step(preferences.newline, &NewlineShortcut::ALL, forward),
         0 => preferences.completion = preferences.completion.toggled(),
         1 => preferences.view = preferences.view.toggled(),
         2 => {
@@ -447,13 +472,24 @@ async fn choose_settings(
     let mut selected_row = 0usize;
     let mut answer = Composer::default();
     let mut invalid = false;
+    let mut linear_guidance = linear;
     terminal.begin_dialog();
     loop {
-        let notice = std::mem::take(&mut invalid).then_some(if linear {
-            "Type NUMBER VALUE from the list; q cancels"
+        let notice = if std::mem::take(&mut invalid) {
+            Some(if linear {
+                "Type NUMBER VALUE from the list; q cancels"
+            } else {
+                "The selected settings could not be saved"
+            })
+        } else if std::mem::take(&mut linear_guidance) {
+            Some(
+                "Modified newline shortcuts apply only to visual sessions; use backslash then Enter here",
+            )
+        } else if selected_row == 13 {
+            Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE)
         } else {
-            "The selected settings could not be saved"
-        });
+            None
+        };
         let rows = if linear {
             linear_setting_rows(chosen)
         } else {
@@ -524,6 +560,7 @@ pub(super) async fn settings(
     let linear = terminal.is_linear();
     let mut current = settings_or_defaults(admission).await?;
     current.completion = composer.completion_layout();
+    current.newline = composer.newline_shortcut();
     current.view = *saved_view;
     let notice = match choose_settings(terminal, current, view).await? {
         None => "Settings unchanged".to_owned(),
@@ -532,6 +569,8 @@ pub(super) async fn settings(
                 let view_changed = chosen.view != *saved_view;
                 *saved_view = chosen.view;
                 composer.set_completion_layout(chosen.completion);
+                composer.set_newline_shortcut(chosen.newline);
+                terminal.set_newline_shortcut(chosen.newline);
                 terminal
                     .set_pointer(chosen.pointer())
                     .map_err(|error| error.to_string())?;
@@ -1611,7 +1650,7 @@ mod tests {
             );
         }
         let rows = linear_setting_rows(preferences);
-        assert_eq!(rows.len(), 13);
+        assert_eq!(rows.len(), 14);
         assert_eq!(rows[0], "Slash menu: tabs (tabs|combined)");
         assert_eq!(
             rows[2],
@@ -1628,6 +1667,20 @@ mod tests {
             "Mouse: wheel and clicks (wheel and clicks|wheel only|off)"
         );
         assert_eq!(rows[12], "Copy on select: on (on|off)");
+        assert_eq!(
+            rows[13],
+            "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)"
+        );
+        for shortcut in NewlineShortcut::ALL {
+            assert!(apply_setting(
+                &mut preferences,
+                &format!("14 {}", shortcut.label().to_ascii_lowercase())
+            ));
+            assert_eq!(preferences.newline, shortcut);
+            cycle_setting(&mut preferences, 13, true);
+            cycle_setting(&mut preferences, 13, false);
+            assert_eq!(preferences.newline, shortcut);
+        }
         assert!(apply_setting(&mut preferences, "1 combined"));
         assert!(apply_setting(&mut preferences, "2  fullscreen"));
         assert!(apply_setting(&mut preferences, "3 8"));
@@ -1805,6 +1858,14 @@ mod tests {
                 ..Preferences::default()
             },
             Preferences::default(),
+            Preferences {
+                newline: NewlineShortcut::AltEnter,
+                ..Preferences::default()
+            },
+            Preferences {
+                newline: NewlineShortcut::CtrlEnter,
+                ..Preferences::default()
+            },
         ] {
             save_settings(&admission, preferences).await.unwrap();
             assert_eq!(restore_settings(&admission).await.unwrap(), preferences);
@@ -1855,7 +1916,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":4,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true}}"#
+            br#"{"version":5,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"}}"#
         );
         // A complete version-3 record upgrades in place, keeping its choices with the pointer defaults.
         let finite = Preferences {
@@ -1877,6 +1938,20 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(decode_settings(&upgraded), Ok(finite));
+        let mut invalid_shortcut: Value = serde_json::from_slice(&original).unwrap();
+        invalid_shortcut["preferences"]["newline"] = "enter".into();
+        let invalid_shortcut = serde_json::to_vec(&invalid_shortcut).unwrap();
+        root.record(RecordKind::UiPreferences)
+            .replace(&invalid_shortcut)
+            .unwrap();
+        assert!(restore_settings(&admission).await.is_err());
+        assert_eq!(
+            root.record(RecordKind::UiPreferences)
+                .read()
+                .unwrap()
+                .unwrap(),
+            invalid_shortcut
+        );
         root.record(RecordKind::UiPreferences)
             .replace(&original)
             .unwrap();
@@ -1960,9 +2035,15 @@ mod tests {
             resume_goal: None,
         };
         arany::FaultPlan::fail_record_sync(admission.state_dir.clone(), "ui-preferences.json");
-        let unconfirmed = save_settings(&admission, Preferences::default())
-            .await
-            .unwrap_err();
+        let unconfirmed = save_settings(
+            &admission,
+            Preferences {
+                newline: NewlineShortcut::AltEnter,
+                ..Preferences::default()
+            },
+        )
+        .await
+        .unwrap_err();
         assert_eq!(unconfirmed, SaveError::Unconfirmed);
         assert!(!save_failure_notice(&unconfirmed).contains("kept"));
         assert!(
