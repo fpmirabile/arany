@@ -240,13 +240,9 @@ mod tests {
                 (
                     AgentPhase::RootPlan,
                     CollaborationPolicy::Single,
-                    Some(crate::tools::ToolContext {
-                        invoked_skill: None,
-                        stop_bytes: 0,
-                        catalog: "NO_DISCLOSURE".into(),
-                        history_summary: None,
-                        steps: Vec::new(),
-                    }),
+                    Some(crate::tools::ToolContext::new(serde_json::json!(
+                        "NO_DISCLOSURE"
+                    ))),
                 ),
                 (
                     AgentPhase::ChildWork,

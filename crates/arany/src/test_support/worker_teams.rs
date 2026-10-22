@@ -76,7 +76,7 @@ impl TeamProvider {
 
     fn delegation(&self, request: &ProviderRequest, wave: u8) -> ProviderOutcome {
         let catalog: serde_json::Value =
-            serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog).unwrap();
+            serde_json::from_str(request.input.tools.as_ref().unwrap().catalog()).unwrap();
         let digest = serde_json::from_value(catalog["agents"][0]["digest"].clone()).unwrap();
         let count = if matches!(self.case, "cap" | "hard_cap") {
             8
@@ -311,7 +311,7 @@ impl TeamProvider {
             .flat_map(|s| &s.observations)
             .collect();
         let pending =
-            serde_json::from_str::<serde_json::Value>(&tools.catalog).unwrap()["pending_workers"]
+            serde_json::from_str::<serde_json::Value>(tools.catalog()).unwrap()["pending_workers"]
                 .as_array()
                 .is_some_and(|p| !p.is_empty());
         let mut stale = self.stale.lock().unwrap();

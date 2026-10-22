@@ -1863,7 +1863,7 @@ async fn agent_definition_guard_registry_research_selection_and_replay() {
             .contains("untrusted body text")
     );
     let catalog: Value =
-        serde_json::from_str(&requests[1].input.tools.as_ref().unwrap().catalog).unwrap();
+        serde_json::from_str(requests[1].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(catalog["operations"], json!(["read"]));
     assert!(
         std::fs::read(fixture.workspace.join(".git/config")).unwrap() == hostile_git.as_bytes(),
@@ -1957,7 +1957,7 @@ async fn agent_definition_guard_skips_invalid_files_and_refuses_their_selection(
         let (result, requests, _) = fixture.run(vec![finish("answer")], None, true).await;
         assert_eq!(result.run.status, RunStatus::Finished, "{case}");
         let catalog: Value =
-            serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
+            serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
         assert_eq!(
             catalog["agents"].as_array().map_or(0, Vec::len),
             listed,

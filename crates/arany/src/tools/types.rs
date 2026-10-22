@@ -1225,21 +1225,14 @@ pub struct ToolStep {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolContext {
     pub invoked_skill: Option<ToolObservation>,
-    pub catalog: String,
+    catalog: String,
+    git_reads: bool,
     pub history_summary: Option<String>,
     pub steps: Vec<ToolStep>,
     pub stop_bytes: usize,
 }
 
 impl ToolStep {
-    pub(crate) fn model_result(&self, index: usize, observation: &ToolObservation) -> Value {
-        if self.cleared {
-            cleared_model_result(observation)
-        } else {
-            model_result(observation, self.feedback(index))
-        }
-    }
-
     pub(crate) fn feedback(&self, index: usize) -> &[String] {
         self.hook_feedback.get(&index).map_or(&[], Vec::as_slice)
     }
@@ -1255,26 +1248,6 @@ impl ToolStep {
         denied.disposition == ToolDisposition::Denied
             && super::permissions::narrows(&denied.intent.call, &next.intent.call)
     }
-
-    fn rendered_len(&self) -> usize {
-        self.turn.len()
-            + self.plan.as_ref().map_or(0, |plan| {
-                plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
-            })
-            + self
-                .observations
-                .iter()
-                .enumerate()
-                .map(|(index, observation)| {
-                    self.model_result(index, observation).to_string().len() + RESULT_ENVELOPE_BYTES
-                })
-                .sum::<usize>()
-            + self
-                .facts
-                .and_then(|facts| serde_json::to_string(&facts).ok())
-                .map_or(0, |facts| facts.len() + RESULT_ENVELOPE_BYTES)
-            + self.steering_notes.iter().map(String::len).sum::<usize>()
-    }
 }
 
 const RESULT_ENVELOPE_BYTES: usize = 128;
@@ -1284,6 +1257,77 @@ fn skill_context_bytes(skill: &ToolObservation) -> usize {
 }
 
 impl ToolContext {
+    pub fn new(catalog: Value) -> Self {
+        let mut context = Self {
+            invoked_skill: None,
+            catalog: String::new(),
+            git_reads: false,
+            history_summary: None,
+            steps: Vec::new(),
+            stop_bytes: 0,
+        };
+        context.set_catalog(&catalog);
+        context
+    }
+
+    pub fn catalog(&self) -> &str {
+        &self.catalog
+    }
+
+    pub fn set_catalog(&mut self, catalog: &Value) {
+        self.catalog = catalog.to_string();
+        self.git_reads = self.catalog.len() <= MAX_TOOL_CATALOG_BYTES
+            && super::catalog::has_git_reads(&super::catalog::catalog_call_schemas(catalog));
+    }
+
+    fn command_git_hint(&self, call: &ToolCall) -> Option<String> {
+        (self.git_reads && matches!(call, ToolCall::Command { .. }))
+            .then(|| super::catalog::COMMAND_GIT_HINT.concat())
+    }
+
+    pub(crate) fn model_result(&self, step: &ToolStep, index: usize) -> Value {
+        let observation = &step.observations[index];
+        if step.cleared {
+            cleared_model_result(observation)
+        } else {
+            let mut value = model_result(observation, step.feedback(index));
+            if let Some(hint) = self.command_git_hint(&observation.intent.call)
+                && value["output"]["exit_code"]
+                    .as_i64()
+                    .is_some_and(|code| code != 0)
+                && value["output"]["stderr"]
+                    .as_str()
+                    .is_some_and(|stderr| stderr.contains("not a git repository"))
+            {
+                value["hint"] = json!(hint);
+                if value.to_string().len() > MAX_TOOL_RESULT_BYTES {
+                    value.as_object_mut().expect("model result").remove("hint");
+                }
+            }
+            value
+        }
+    }
+
+    fn step_len(&self, step: &ToolStep) -> usize {
+        step.turn.len()
+            + step.plan.as_ref().map_or(0, |plan| {
+                plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
+            })
+            + step
+                .observations
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    self.model_result(step, index).to_string().len() + RESULT_ENVELOPE_BYTES
+                })
+                .sum::<usize>()
+            + step
+                .facts
+                .and_then(|facts| serde_json::to_string(&facts).ok())
+                .map_or(0, |facts| facts.len() + RESULT_ENVELOPE_BYTES)
+            + step.steering_notes.iter().map(String::len).sum::<usize>()
+    }
+
     pub(crate) fn with_invoked_skill_len(&self, skill: &ToolObservation) -> usize {
         self.rendered_len() + skill_context_bytes(skill)
     }
@@ -1336,7 +1380,11 @@ impl ToolContext {
             + self.invoked_skill.as_ref().map_or(0, skill_context_bytes)
             + self.stop_bytes
             + self.history_summary.as_ref().map_or(0, String::len)
-            + self.steps.iter().map(ToolStep::rendered_len).sum::<usize>()
+            + self
+                .steps
+                .iter()
+                .map(|step| self.step_len(step))
+                .sum::<usize>()
     }
 
     pub(crate) fn projected_len(&self, summary: Option<&str>, steps: usize) -> usize {
@@ -1346,27 +1394,28 @@ impl ToolContext {
             + summary.map_or(0, str::len)
             + self.steps[steps..]
                 .iter()
-                .map(ToolStep::rendered_len)
+                .map(|step| self.step_len(step))
                 .sum::<usize>()
     }
 
     pub(crate) fn reserved_len(&self, step: &ToolStep, calls: &[&ToolCall]) -> usize {
         self.rendered_len()
-            + step.rendered_len()
+            + self.step_len(step)
             + calls
                 .iter()
                 .map(|call| {
                     let effect = if call.mutates() { "applied" } else { "none" };
-                    model_projection(
+                    let mut value = model_projection(
                         call,
                         ToolDisposition::Succeeded,
                         &json!(""),
                         effect,
                         CacheUpdate::NotApplicable,
-                    )
-                    .to_string()
-                    .len()
-                        + RESULT_ENVELOPE_BYTES
+                    );
+                    if let Some(hint) = self.command_git_hint(call) {
+                        value["hint"] = json!(hint);
+                    }
+                    value.to_string().len() + RESULT_ENVELOPE_BYTES
                 })
                 .sum::<usize>()
     }
@@ -1378,7 +1427,7 @@ impl ToolContext {
                 step.observations
                     .iter()
                     .enumerate()
-                    .map(|(index, observation)| step.model_result(index, observation))
+                    .map(|(index, _)| self.model_result(step, index))
             })
             .collect()
     }

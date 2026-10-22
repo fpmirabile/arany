@@ -92,7 +92,10 @@ fn context_decision(
         prefix_steps = index + 1;
         if !step.cleared {
             for (index, observation) in step.observations.iter().enumerate() {
-                before += step.model_result(index, observation).to_string().len();
+                // Clearing receipts count recorded results, excluding catalog-derived hints.
+                before += crate::tools::types::model_result(observation, step.feedback(index))
+                    .to_string()
+                    .len();
                 after += crate::tools::types::cleared_model_result(observation)
                     .to_string()
                     .len();
@@ -681,6 +684,50 @@ mod tests {
     use super::*;
     use crate::provider::test_support::{observation, tool_context};
     use crate::tools::{ToolCall, ToolStep};
+
+    #[test]
+    fn clearing_receipts_exclude_catalog_derived_hint_bytes() {
+        let observed = observation(
+            ToolCall::Command {
+                program: "cargo".into(),
+                args: vec!["git".into()],
+                cwd: ".".into(),
+            },
+            r#"{"exit_code":128,"stderr":"fatal: not a git repository"}"#,
+        );
+        let recorded = crate::tools::types::model_result(&observed, &[])
+            .to_string()
+            .len();
+        let cleared = crate::tools::types::cleared_model_result(&observed)
+            .to_string()
+            .len();
+        let mut context = tool_context(serde_json::json!({"git": {}}));
+        context.steps = vec![
+            ToolStep {
+                cleared: false,
+                plan: None,
+                turn: crate::provider::ProviderTurn::scripted(),
+                requests: Vec::new(),
+                observations: vec![observed],
+                facts: None,
+                steering_notes: Vec::new(),
+                calls_remaining: None,
+                hook_feedback: Default::default(),
+            };
+            4
+        ];
+        assert_eq!(
+            context.model_result(&context.steps[0], 0)["hint"],
+            crate::tools::catalog::COMMAND_GIT_HINT.concat()
+        );
+        let ContextDecision::Clear { bytes, .. } = context_decision(&context, 1, 0, false) else {
+            panic!("clear the oldest whole step");
+        };
+        assert_eq!(bytes, recorded - cleared);
+        let before = context.rendered_len();
+        context.steps[0].cleared = true;
+        assert!(before - context.rendered_len() > bytes);
+    }
 
     #[test]
     fn context_decisions_cover_threshold_projection_recent_tail_and_whole_steps() {

@@ -296,7 +296,7 @@ async fn native_git_journey_helper() {
 
     let requests = requests.lock().unwrap().clone();
     let catalog: serde_json::Value =
-        serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
+        serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(
         catalog["git"]["operations"],
         json!(["git_status", "git_diff", "git_log", "git_branch"])
