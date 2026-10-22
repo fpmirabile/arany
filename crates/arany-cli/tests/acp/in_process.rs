@@ -2033,6 +2033,7 @@ async fn budget_stop_reasons_match_reopened_goal_receipts() {
             .unwrap()
             .unwrap();
         assert_eq!(view.goals[0].budget_closed, !finish);
+        assert_eq!(view.goals[0].budget_refusal.is_some(), !finish);
         if !finish {
             assert_eq!(
                 response["result"]["_meta"]["arany.budgetRefusal"],

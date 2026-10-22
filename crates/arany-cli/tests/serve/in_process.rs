@@ -2114,6 +2114,7 @@ async fn failed_accepted_turns_complete_with_error_guidance_instead_of_rpc_error
         );
         assert_eq!(requests.lock().unwrap().len(), 1);
         assert_eq!(view.goals[0].budget_closed, budget_stop);
+        assert_eq!(view.goals[0].budget_refusal.is_some(), budget_stop);
         assert_eq!(
             completed["params"]["turn"]["goal"]["budgetRefusal"],
             json!(view.goals[0].budget_refusal)
