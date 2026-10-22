@@ -56,8 +56,8 @@ pub(crate) use events::{
 };
 pub(crate) use events::{
     goal_started_v7_payload, goal_started_v7_to_v8, pre_git_write_payload, pre_glob_payload,
-    pre_host_git_payload, pre_multiedit_payload, pre_typed_prefix_payload, run_started_fits,
-    run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    pre_host_git_payload, pre_host_payload, pre_multiedit_payload, pre_typed_prefix_payload,
+    run_started_fits, run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
     run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};

@@ -53,6 +53,7 @@ impl Fixture {
     fn intent(&self, actor: AgentRunId, call: ToolCall, target: EffectTarget) -> EffectIntent {
         EffectIntent {
             host: None,
+            host_command: None,
             target,
             id: uuid::Uuid::now_v7(),
             run_id: self.run,
@@ -615,6 +616,7 @@ fn fixture_with_manifest(
         compaction_event_sequence: None,
         compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
+            host_epoch: None,
             contract_version: 1,
             config_digest: [1; 32],
             permissions_digest: None,
@@ -1775,6 +1777,7 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
         run_id: f.run,
         agent_run_id: f.primary,
         verdict: PermissionVerdict {
+            host: None,
             intent_digest: intent.digest(),
             decision: Decision::Ask,
             mode: None,
@@ -2376,6 +2379,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
         run_id: f.run,
         agent_run_id: f.child,
         verdict: PermissionVerdict {
+            host: None,
             intent_digest: intent.digest(),
             decision: Decision::Allow,
             mode: Some(PermissionMode::AcceptEdits),
@@ -3524,6 +3528,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                 run_id: f.run,
                 agent_run_id: actor,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: pending.digest(),
                     mode: Some(PermissionMode::Default),
                     decision: Decision::Deny,
@@ -4560,7 +4565,7 @@ fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
             }
             assert_eq!(
                 SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
-                requested == Denied || parent == HumanOnly
+                requested == Denied && parent == Denied
             );
         }
     }
