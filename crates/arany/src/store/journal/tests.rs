@@ -1495,10 +1495,11 @@ async fn check_capacity_and_refused_appends_preserve_the_committed_prefix() {
     );
     assert!(journal.receipt().disposition.is_none());
     assert!(
-        journal
-            .call_started(crate::CheckCallKind::Answer)
-            .await
-            .is_err()
+        matches!(
+            journal.call_started(crate::CheckCallKind::Answer).await,
+            Err(StoreError::Closed)
+        ),
+        "an unconfirmed journal refuses further dispatch"
     );
     drop(journal);
     let store = Store::open(StateRoot::open_existing(&path).unwrap()).unwrap();
