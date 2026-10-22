@@ -1448,6 +1448,7 @@
     },
     "RewindEffect": {
       "enum": [
+        "host",
         "unguardedCommand",
         "mcp",
         "cache",

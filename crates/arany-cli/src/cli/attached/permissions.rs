@@ -97,7 +97,7 @@ const ADD: u8 = 1;
 const ENTRY_BASE: u8 = 2;
 const SAVED: &str = "Typed Git rules saved; they apply from the next Run";
 const SETTINGS_NOTE: &str = "The first save creates permissions.json with the default mode, which also governs other Tools.";
-const HOST_NOTE: &str = "unavailable; human approval required";
+const HOST_NOTE: &str = "host; human approval required";
 
 pub(super) enum PermissionArea {
     FolderTrust,
@@ -138,7 +138,7 @@ fn decision_label(decision: Decision) -> &'static str {
 }
 
 fn verb_label(prefix: TypedGitPrefix) -> String {
-    if prefix.available() {
+    if !matches!(prefix, TypedGitPrefix::Push | TypedGitPrefix::PrCreate) {
         prefix.label().to_owned()
     } else {
         format!("{} ({HOST_NOTE})", prefix.label())

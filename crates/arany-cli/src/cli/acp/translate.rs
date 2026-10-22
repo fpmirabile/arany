@@ -1520,7 +1520,11 @@ async fn permission_request(
                 && a.completion.is_none()
         });
         let remaining = expires_at_ms.saturating_sub(now_ms());
-        if !valid || state.permission.is_some() || remaining == 0 || intent.call.is_unguarded() {
+        if !valid
+            || state.permission.is_some()
+            || remaining == 0
+            || (intent.call.is_unguarded() || intent.call.is_host())
+        {
             None
         } else {
             let cwd = &state

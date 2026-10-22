@@ -179,6 +179,7 @@ mod tests {
     // A Read Tool with the given observation, `None` when only its intent is journaled.
     fn tool(observed: Option<(ToolDisposition, CacheUpdate)>) -> crate::session::ToolView {
         let intent = crate::tools::EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::new(),
