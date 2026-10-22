@@ -178,7 +178,7 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 => serde_json::json!(r#"synthetic summary"#),
                 3 => {
                     serde_json::json!("prior answer")
                 }
@@ -564,7 +564,7 @@ fn agent_chats_switch_to_each_child_and_back_without_changing_history() {
                 (1, _) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                (2, _) => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                (2, _) => serde_json::json!(r#"synthetic summary"#),
                 (_, Some("root_plan")) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})
                 }
@@ -1073,7 +1073,7 @@ fn gated_team_server(
                 (1, _) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                (2, _) => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                (2, _) => serde_json::json!(r#"synthetic summary"#),
                 (3, _) => serde_json::json!("prior answer"),
                 (_, Some("root_plan")) => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"first child task","profile":null},{"objective":"second child task","profile":null}]}})

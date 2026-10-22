@@ -218,7 +218,7 @@ fn synthetic_server(
             1 => {
                 serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
             }
-            2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+            2 => serde_json::json!(r#"synthetic summary"#),
             3 => {
                 serde_json::json!("A".repeat(24 * 1024))
             }
@@ -233,9 +233,8 @@ fn synthetic_server(
                 };
                 serde_json::json!(result)
             }
-            _ => serde_json::json!(r#"{"summary":"derived summary"}"#),
+            _ => serde_json::json!(r#"derived summary"#),
         };
-        let text = arany::semantic::compaction_probe_reply(&wire, text);
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
 }

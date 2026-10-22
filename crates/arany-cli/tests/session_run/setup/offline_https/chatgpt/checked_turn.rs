@@ -228,35 +228,26 @@ pub(super) fn respond_after_catalog(
         (
             "resp_check_direct",
             "Synthetic conformance check: finish directly",
-            "arany_outcome",
             serde_json::json!("done"),
         ),
         (
             "resp_check_delegate",
             "Synthetic conformance check: delegate exactly one",
-            "arany_outcome",
             serde_json::json!({"outcome": {"type": "delegate", "children":[{"objective":"Explain two","profile":null}]}}),
         ),
         (
             "resp_check_compact",
             "Synthetic conformance question",
-            "arany_compaction",
-            serde_json::json!(r#"{"summary":"Condensed"}"#),
+            serde_json::json!(r#"Condensed"#),
         ),
-        (
-            "resp_offline_chatgpt",
-            OBJECTIVE,
-            "arany_outcome",
-            serde_json::json!(ANSWER),
-        ),
+        ("resp_offline_chatgpt", OBJECTIVE, serde_json::json!(ANSWER)),
         (
             "resp_offline_chatgpt_followup",
             FOLLOWUP_OBJECTIVE,
-            "arany_outcome",
             serde_json::json!(FOLLOWUP_ANSWER),
         ),
     ];
-    for (index, (id, expected_input, format, outcome)) in probes.into_iter().enumerate() {
+    for (index, (id, expected_input, outcome)) in probes.into_iter().enumerate() {
         let body = checked_request(output, "POST /v1/responses").expect("Responses body");
         assert_eq!(body["model"], "gpt-6.1-sol");
         assert_eq!(body["reasoning"]["effort"], "medium");
@@ -264,11 +255,7 @@ pub(super) fn respond_after_catalog(
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(body.get("previous_response_id").is_none());
-        if format == "arany_compaction" {
-            assert_eq!(body["text"]["format"]["name"], format);
-        } else {
-            assert!(body.get("text").is_none());
-        }
+        assert!(body.get("text").is_none());
         let rendered_input = body["input"].to_string();
         let content = rendered_input.as_str();
         assert!(content.contains(expected_input), "wrong probe or Run input");
@@ -864,12 +851,11 @@ pub(super) fn accept_check_and_run(
                 .find(|(name, _)| *name == stage)
             {
                 assert!(text.contains(&format!(
-                    "response_shape messages={} commentary={} finals={} unphased={} structured={} done_messages=0 done_finals=0",
+                    "response_shape messages={} commentary={} finals={} unphased={} done_messages=0 done_finals=0",
                     phases.len(),
                     phases.iter().filter(|phase| **phase == Some("commentary")).count(),
                     phases.iter().filter(|phase| **phase == Some("final_answer")).count(),
                     phases.iter().filter(|phase| phase.is_none()).count(),
-                    phases.len(),
                 )));
             }
             assert!(

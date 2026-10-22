@@ -281,7 +281,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                _ => serde_json::json!(r#"synthetic summary"#),
             };
             send_response(&mut stream, index, text);
         }

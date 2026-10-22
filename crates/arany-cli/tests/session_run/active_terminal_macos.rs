@@ -900,7 +900,7 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                         1 => {
                             serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                         }
-                        _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                        _ => serde_json::json!(r#"synthetic summary"#),
                     };
                     send_response(&mut stream, index, outcome);
                 }

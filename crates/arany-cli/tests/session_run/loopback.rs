@@ -88,9 +88,6 @@ pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -
                 let body = request[header_end..header_end + body_len].to_vec();
                 let wire: serde_json::Value = serde_json::from_slice(&body).expect("JSON request");
                 LAST_REQUEST_STREAMING.set(Some(wire["stream"] == true));
-                let reply = arany::semantic::compaction_probe_reply(&wire, serde_json::Value::Null);
-                COMPACTION_PROBE_REPLY
-                    .with_borrow_mut(|pending| *pending = (!reply.is_null()).then_some(reply));
                 return body;
             }
         }
@@ -100,7 +97,6 @@ pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 thread_local! {
     static LAST_REQUEST_STREAMING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
-    static COMPACTION_PROBE_REPLY: std::cell::RefCell<Option<serde_json::Value>> = const { std::cell::RefCell::new(None) };
 }
 
 // The reply format follows the "stream" field of the request this thread read last.
@@ -119,9 +115,6 @@ pub(super) fn send_response_for(
     text: serde_json::Value,
     streaming: bool,
 ) {
-    let text = COMPACTION_PROBE_REPLY
-        .with_borrow_mut(|pending| pending.take())
-        .unwrap_or(text);
     let response = serde_json::json!({
         "id": format!("resp_{}", index + 1),
         "status": "completed",
@@ -150,9 +143,6 @@ pub(super) fn send_messages_response_for(
     text: serde_json::Value,
     streaming: bool,
 ) {
-    let text = COMPACTION_PROBE_REPLY
-        .with_borrow_mut(|pending| pending.take())
-        .unwrap_or(text);
     let response = serde_json::json!({
         "id": format!("msg_{}", index + 1), "type":"message", "role":"assistant", "model":model,
         "stop_reason": if text.is_object() { "tool_use" } else { "end_turn" },
@@ -282,7 +272,7 @@ pub(super) fn held_stream_provider(state: &Path, answer: &'static str) -> HeldSt
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                _ => serde_json::json!(r#"synthetic summary"#),
             };
             send_response(&mut stream, index, text);
         }

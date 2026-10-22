@@ -769,7 +769,7 @@ mod journey {
                     1 => {
                         json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                     }
-                    2 => json!(r#"{"summary":"synthetic summary"}"#),
+                    2 => json!(r#"synthetic summary"#),
                     3 | 5 => {
                         assert_eq!(input["phase"], "root_plan");
                         assert!(body.to_string().contains("\"inspect\""));

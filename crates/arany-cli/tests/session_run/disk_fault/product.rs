@@ -48,7 +48,7 @@ fn limited_exec_reports_store_failure_without_an_answer() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                _ => serde_json::json!(r#"synthetic summary"#),
             };
             send_response(&mut stream, index, response);
         }
