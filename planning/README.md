@@ -50,7 +50,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Ready: one PR for peer defaults across attached, exec and serve, retaining durable accounting and finite action/storage bounds |
 | [Large draft attachments](./large-draft-attachments/README.md) | Ready: three PRs for durable pasted text, full-capacity typed/restored drafts and clipboard/path image chips |
 | [Git write workflow](./git-write-workflow/README.md) | S3 in progress: human-approved host push and PR creation; local writes and typed prefix rules landed |
-| [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
 | [Persistent worker assignment views](./worker-assignment-views/README.md) | Future C3 assignment-long Guard views, read-only assignment-time cache and MCP invocation exclusion; admission gate remains |
 | [Goal RPI](./goal-rpi/README.md) | Proposed durable phases, plan gate, bounded grilling, phase context and explicit headless RPI |
