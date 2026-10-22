@@ -7347,14 +7347,7 @@ mod goal_replay_tests {
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "pinned guidance".into(),
-            attestation: Some(crate::tools::Attestation::Guard(
-                crate::tools::GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: intent.digest(),
-                    enforcement_digest: intent.enforcement_digest,
-                    limits: intent.limits.clone(),
-                },
-            )),
+            attestation: Some(crate::tools::Attestation::for_site(&intent)),
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -7365,6 +7358,20 @@ mod goal_replay_tests {
             agent_run_id: actor,
             observation,
         };
+        let mut guarded = observation.clone();
+        guarded.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            },
+        ));
+        assert!(rejected(&view, finish(guarded.clone())));
+        guarded.attestation = None;
+        guarded.disposition = ToolDisposition::Failed;
+        guarded.enforcement_cause = Some(crate::tools::EnforcementCause::GuardBootstrap);
+        assert!(rejected(&view, finish(guarded)));
         let mut failed = view.clone();
         observation.disposition = ToolDisposition::Failed;
         apply(&mut failed, finish(observation.clone())).unwrap();
