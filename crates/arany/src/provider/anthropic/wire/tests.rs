@@ -21,7 +21,7 @@ fn decode(request: &ProviderRequest, fixture: &Value) -> Result<ProviderResponse
     decode_run(
         &serde_json::to_vec(fixture).unwrap(),
         &RunScope {
-            model: MODEL,
+            model: &request.model,
             output_cap: request.max_output_tokens,
             secret: KEY,
             offered: &conversation
@@ -246,6 +246,34 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
     }
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
+    for model in [
+        "deepseek-flash",
+        "vendor.other/exact-1",
+        "kimi-k3",
+        "k3-256k",
+    ] {
+        for signature in [None, Some(""), Some("opaque-signature")] {
+            let request = primary_request(model);
+            let mut fixture = response("tool_use", content.clone());
+            fixture["model"] = json!(model);
+            match signature {
+                Some(value) => fixture["content"][0]["signature"] = json!(value),
+                None => {
+                    fixture["content"][0]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("signature");
+                }
+            }
+            let accepted = decode(&request, &fixture).unwrap();
+            assert_eq!(
+                accepted.turn.items("anthropic").unwrap(),
+                fixture["content"].as_array().unwrap().clone()
+            );
+            fixture["model"] = json!("claude-sonnet-5");
+            assert!(decode(&request, &fixture).is_err());
+        }
+    }
 }
 
 #[test]
@@ -492,6 +520,55 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
 }
 
 #[test]
+fn custom_messages_optional_effort_preserves_strict_compaction() {
+    let request = read_only_request("deepseek-flash");
+    let conversation = render::conversation(&request).unwrap();
+    let omitted = run_body_with_optional_effort(&request, &conversation, None).unwrap();
+    assert!(omitted.get("output_config").is_none());
+    assert!(omitted.get("thinking").is_none());
+    assert_eq!(omitted["model"], "deepseek-flash");
+    let compact = CompactionRequest {
+        session_id: request.session_id,
+        covered_run_id: request.run_id,
+        model: request.model.clone(),
+        previous_summary: None,
+        items: vec![],
+        max_output_tokens: 1024,
+    };
+    let strict = compaction_body_with_optional_effort(&compact, None);
+    assert!(strict["output_config"].get("effort").is_none());
+    assert_eq!(
+        strict["output_config"]["format"]["schema"],
+        summary_schema()
+    );
+    assert!(strict.get("thinking").is_none());
+    for effort in Effort::ALL {
+        assert_eq!(
+            run_body_with_optional_effort(&request, &conversation, Some(effort)).unwrap(),
+            run_body(&request, &conversation, effort).unwrap()
+        );
+        assert_eq!(
+            compaction_body_with_optional_effort(&compact, Some(effort)),
+            compaction_body(&compact, effort)
+        );
+        assert_eq!(
+            compaction_body_with_optional_effort(&compact, Some(effort))["output_config"]["effort"],
+            effort.as_str()
+        );
+    }
+    let mut review = request;
+    review.phase = AgentPhase::ToolReview;
+    review.input.role = crate::provider::PromptRole::ToolReview;
+    let conversation = render::conversation(&review).unwrap();
+    let strict = run_body_with_optional_effort(&review, &conversation, None).unwrap();
+    assert_eq!(
+        strict["output_config"]["format"]["schema"],
+        conversation.outcome
+    );
+    assert!(strict["output_config"].get("effort").is_none());
+}
+
+#[test]
 fn anthropic_usage_reports_cache_read_and_creation_separately() {
     let answer = decode(
         &read_only_request(MODEL),
@@ -503,6 +580,120 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
     assert_eq!(answer.usage.cache_creation_input_tokens, Some(3));
     assert_eq!(answer.usage.output_tokens, Some(8));
     assert!(answer.usage.cache_consistent());
+    let mut detailed = response("end_turn", json!([text_block(answer_text())]));
+    detailed["usage"]["output_tokens_details"] = json!({"thinking_tokens": 5});
+    let usage = decode(&read_only_request(MODEL), &detailed).unwrap().usage;
+    assert_eq!(usage.output_tokens, Some(8));
+    assert_eq!(usage.input_tokens, Some(12 + 3 + 4));
+    let mut missing = response("end_turn", json!([text_block(answer_text())]));
+    missing["usage"] = json!({"input_tokens":12,"output_tokens":8});
+    let usage = decode(&read_only_request(MODEL), &missing).unwrap().usage;
+    assert_eq!(usage.cache_read_input_tokens, None);
+    assert_eq!(usage.cache_creation_input_tokens, None);
+    assert_eq!(usage.input_tokens, Some(12));
+    assert_eq!(usage.output_tokens, Some(8));
+    for model in [MODEL, "kimi-k3"] {
+        let request = read_only_request(model);
+        for flat in [None, Some(3)] {
+            let mut fixture = response("end_turn", json!([text_block(answer_text())]));
+            fixture["model"] = json!(model);
+            let usage = fixture["usage"].as_object_mut().unwrap();
+            usage.remove("cache_creation_input_tokens");
+            if let Some(flat) = flat {
+                usage.insert("cache_creation_input_tokens".into(), json!(flat));
+            }
+            usage.insert(
+                "cache_creation".into(),
+                json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2}),
+            );
+            let expected = decode(&request, &fixture).unwrap().usage;
+            assert_eq!(expected.input_tokens, Some(19));
+            assert_eq!(expected.cache_creation_input_tokens, Some(3));
+            assert_eq!(expected.cache_read_input_tokens, Some(4));
+            assert_eq!(expected.output_tokens, Some(8));
+            let (publisher, _) = crate::provider::ResponsePreview::new();
+            let streamed = run_stream_for(
+                &render::semantic::messages_stream(&fixture),
+                model,
+                publisher,
+            )
+            .unwrap()
+            .unwrap();
+            let streamed: Value = serde_json::from_slice(&streamed).unwrap();
+            assert_eq!(decode(&request, &streamed).unwrap().usage, expected);
+            fixture["content"] = json!([text_block(r#"{"summary":"short"}"#)]);
+            assert_eq!(
+                decode_compaction(&serde_json::to_vec(&fixture).unwrap(), model, 1024)
+                    .unwrap()
+                    .usage,
+                expected
+            );
+        }
+    }
+    for flat in [None, Some(3)] {
+        for nested in [
+            json!({}),
+            json!({"ephemeral_5m_input_tokens":1}),
+            json!({"ephemeral_1h_input_tokens":2}),
+            json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2,"unexpected":0}),
+            json!({"ephemeral_5m_input_tokens":u32::MAX,"ephemeral_1h_input_tokens":1}),
+            json!({"ephemeral_5m_input_tokens":u32::MAX,"ephemeral_1h_input_tokens":0}),
+            json!(false),
+            json!([]),
+        ]
+        .into_iter()
+        .chain(
+            ["ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens"]
+                .into_iter()
+                .flat_map(|field| {
+                    [
+                        json!(-1),
+                        json!(1.5),
+                        json!("2"),
+                        json!(null),
+                        json!(u64::from(u32::MAX) + 1),
+                    ]
+                    .into_iter()
+                    .map(move |value| {
+                        let mut nested =
+                            json!({"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":2});
+                        nested[field] = value;
+                        nested
+                    })
+                }),
+        ) {
+            let mut fixture = response("end_turn", json!([text_block(answer_text())]));
+            fixture["usage"]
+                .as_object_mut()
+                .unwrap()
+                .remove("cache_creation_input_tokens");
+            if let Some(flat) = flat {
+                fixture["usage"]["cache_creation_input_tokens"] = json!(flat);
+            }
+            fixture["usage"]["cache_creation"] = nested;
+            assert!(matches!(
+                decode(&read_only_request(MODEL), &fixture),
+                Err(ProviderError::InvalidOutcome)
+            ));
+        }
+    }
+    let mut inconsistent = response("end_turn", json!([text_block(answer_text())]));
+    inconsistent["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":1});
+    assert!(matches!(
+        decode(&read_only_request(MODEL), &inconsistent),
+        Err(ProviderError::InvalidOutcome)
+    ));
+    let mut zero = response("end_turn", json!([text_block(answer_text())]));
+    zero["usage"]
+        .as_object_mut()
+        .unwrap()
+        .remove("cache_creation_input_tokens");
+    zero["usage"]["cache_creation"] =
+        json!({"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":0});
+    let usage = decode(&read_only_request(MODEL), &zero).unwrap().usage;
+    assert_eq!(usage.cache_creation_input_tokens, Some(0));
+    assert_eq!(usage.input_tokens, Some(16));
     for field in ["cache_read_input_tokens", "cache_creation_input_tokens"] {
         for invalid in [
             json!(-1),
@@ -917,7 +1108,15 @@ fn run_stream(
     wire: &str,
     preview: crate::provider::ResponsePreview,
 ) -> Result<Option<Vec<u8>>, ProviderError> {
-    let mut decoder = MessageStream::new(KEY, "model-1", preview);
+    run_stream_for(wire, "model-1", preview)
+}
+
+fn run_stream_for(
+    wire: &str,
+    model: &str,
+    preview: crate::provider::ResponsePreview,
+) -> Result<Option<Vec<u8>>, ProviderError> {
+    let mut decoder = MessageStream::new(KEY, model, preview);
     let mut completed = None;
     for byte in wire.bytes() {
         if let Some(response) = decoder.feed(&[byte])? {
@@ -977,53 +1176,71 @@ fn overloaded_stream_after_tool_input_never_allows_fallback() {
 fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
     use crate::provider::{PreviewText, ResponsePreview};
     let outcome = "line one\nline two 🚀";
-    let wire = sse(&[
-        message_start(),
-        json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"INTERNAL_CANARY"}}),
-        json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"signature"}}),
-        json!({"type":"content_block_stop","index":0}),
-        json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
-        json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":outcome}}),
-        json!({"type":"content_block_stop","index":1}),
-        json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}),
-        json!({"type":"message_stop"}),
-    ]);
-    let (publisher, observed) = ResponsePreview::new();
-    let completed = run_stream(&wire, publisher).unwrap().unwrap();
-    assert_eq!(
-        **observed.borrow(),
-        PreviewText {
-            answer: "line one\nline two 🚀".into(),
-            ..Default::default()
+    for model in ["model-1", "kimi-k3", "k3-256k"] {
+        for signature in [None, Some(""), Some("signature")] {
+            let mut start = message_start();
+            start["message"]["model"] = json!(model);
+            let mut events = vec![
+                start,
+                json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}),
+                json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"INTERNAL_CANARY"}}),
+                json!({"type":"content_block_stop","index":0}),
+                json!({"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}),
+                json!({"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":outcome}}),
+                json!({"type":"content_block_stop","index":1}),
+                json!({"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}),
+                json!({"type":"message_stop"}),
+            ];
+            if let Some(signature) = signature {
+                let middle = signature.len() / 2;
+                for part in [&signature[..middle], &signature[middle..]]
+                    .into_iter()
+                    .rev()
+                {
+                    events.insert(3, json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":part}}));
+                }
+            }
+            let wire = sse(&events);
+            let (publisher, observed) = ResponsePreview::new();
+            let completed = run_stream_for(&wire, model, publisher).unwrap().unwrap();
+            assert_eq!(
+                **observed.borrow(),
+                PreviewText {
+                    answer: "line one\nline two 🚀".into(),
+                    ..Default::default()
+                }
+            );
+            let mut request = read_only_request(model);
+            request.max_output_tokens = 32;
+            let conversation = render::conversation(&request).unwrap();
+            let accepted = decode_run(
+                &completed,
+                &RunScope {
+                    model,
+                    output_cap: 32,
+                    secret: KEY,
+                    offered: &conversation
+                        .tools
+                        .clone()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .chain(outcome_specs(&conversation.outcome))
+                        .collect::<Vec<_>>(),
+                    review: request.input.role == crate::provider::PromptRole::ToolReview,
+                },
+            )
+            .unwrap();
+            assert!(
+                matches!(accepted.outcome, ProviderOutcome::Answer(Answer { text: result }) if result == "line one\nline two 🚀")
+            );
+            assert_eq!(accepted.usage.input_tokens, Some(19));
+            assert_eq!(accepted.usage.cache_read_input_tokens, Some(4));
+            assert_eq!(accepted.usage.cache_creation_input_tokens, Some(3));
+            let thinking = &accepted.turn.items("anthropic").unwrap()[0];
+            assert_eq!(thinking["thinking"], "INTERNAL_CANARY");
+            assert_eq!(thinking.get("signature").and_then(Value::as_str), signature);
         }
-    );
-    let mut request = read_only_request("model-1");
-    request.max_output_tokens = 32;
-    let conversation = render::conversation(&request).unwrap();
-    let accepted = decode_run(
-        &completed,
-        &RunScope {
-            model: "model-1",
-            output_cap: 32,
-            secret: KEY,
-            offered: &conversation
-                .tools
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .chain(outcome_specs(&conversation.outcome))
-                .collect::<Vec<_>>(),
-            review: request.input.role == crate::provider::PromptRole::ToolReview,
-        },
-    )
-    .unwrap();
-    assert!(
-        matches!(accepted.outcome, ProviderOutcome::Answer(Answer { text: result }) if result == "line one\nline two 🚀")
-    );
-    assert_eq!(accepted.usage.input_tokens, Some(19));
-    assert_eq!(accepted.usage.cache_read_input_tokens, Some(4));
-    assert_eq!(accepted.usage.cache_creation_input_tokens, Some(3));
+    }
     for invalid in [
         json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unsafe"}}),
         json!({"type":"message_stop"}),
@@ -1058,36 +1275,39 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
         json!({"type":"message_stop"}),
     ]);
-    let wire = sse(&events);
-    let (publisher, observed) = ResponsePreview::new();
-    let first = run_stream(&wire, publisher).unwrap().unwrap();
-    let (publisher, _) = ResponsePreview::new();
-    let second = run_stream(&wire, publisher).unwrap().unwrap();
-    assert_eq!(
-        first, second,
-        "assembly is byte-stable for one event sequence"
-    );
-    assert!(
-        !observed.borrow().answer.contains("main.rs"),
-        "tool input is never previewed"
-    );
-    let request = primary_request("model-1");
-    let conversation = render::conversation(&request).unwrap();
-    let scope = RunScope {
-        model: "model-1",
-        output_cap: 4096,
-        secret: KEY,
-        offered: conversation.tools.as_deref().unwrap(),
-        review: false,
-    };
-    let accepted = decode_run(&first, &scope).unwrap();
-    let ProviderOutcome::Tools(requests) = accepted.outcome else {
-        panic!("one Tool request");
-    };
-    assert!(
-        matches!(&requests[0].call, crate::tools::ToolCall::Read { path, limit: None, .. } if path == "src/main.rs")
-    );
-    assert_eq!(accepted.turn.items("anthropic").unwrap().len(), 2);
+    for model in ["model-1", "kimi-k3", "k3-256k"] {
+        events[0]["message"]["model"] = json!(model);
+        let wire = sse(&events);
+        let (publisher, observed) = ResponsePreview::new();
+        let first = run_stream_for(&wire, model, publisher).unwrap().unwrap();
+        let (publisher, _) = ResponsePreview::new();
+        let second = run_stream_for(&wire, model, publisher).unwrap().unwrap();
+        assert_eq!(
+            first, second,
+            "assembly is byte-stable for one event sequence"
+        );
+        assert!(
+            !observed.borrow().answer.contains("main.rs"),
+            "tool input is never previewed"
+        );
+        let request = primary_request(model);
+        let conversation = render::conversation(&request).unwrap();
+        let scope = RunScope {
+            model,
+            output_cap: 4096,
+            secret: KEY,
+            offered: conversation.tools.as_deref().unwrap(),
+            review: false,
+        };
+        let accepted = decode_run(&first, &scope).unwrap();
+        let ProviderOutcome::Tools(requests) = accepted.outcome else {
+            panic!("one Tool request");
+        };
+        assert!(
+            matches!(&requests[0].call, crate::tools::ToolCall::Read { path, limit: None, .. } if path == "src/main.rs")
+        );
+        assert_eq!(accepted.turn.items("anthropic").unwrap().len(), 2);
+    }
     for invalid in [
         vec![
             json!({"type":"content_block_start","index":u64::MAX,"content_block":{"type":"text","text":""}}),
@@ -1711,60 +1931,78 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
 
 #[test]
 fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
-    let mut request = primary_request(MODEL);
-    request.collaboration = CollaborationPolicy::Auto {
-        max_active_children: 2,
-    };
-    let reply = response(
-        "tool_use",
-        json!([tool_use(
-            "delegate_1",
-            "arany_delegate",
-            json!({"children":[{"objective":"inspect","profile":null}], "agent":null})
-        )]),
-    );
-    let delegated = decode(&request, &reply).unwrap();
-    request.phase = AgentPhase::RootSynthesis;
-    request.input.child_results = vec![crate::provider::ChildResult {
-        objective: "inspect".into(),
-        summary: "s".into(),
-        result: "child canary".into(),
-    }];
-    request
-        .input
-        .tools
-        .as_mut()
-        .unwrap()
-        .steps
-        .push(crate::tools::ToolStep {
-            plan: None,
-            turn: delegated.turn,
-            requests: Vec::new(),
-            observations: Vec::new(),
-            facts: None,
-            steering_notes: Vec::new(),
-            calls_remaining: None,
-            cleared: false,
-            hook_feedback: Default::default(),
-        });
-    let messages = body(&request, Effort::Low)["messages"]
-        .as_array()
-        .unwrap()
-        .clone();
-    let call = messages
-        .iter()
-        .position(|message| message["content"][0]["type"] == "tool_use")
-        .expect("replayed delegate");
-    assert_eq!(
-        messages[call + 1]["content"][0],
-        json!({"type": "tool_result", "tool_use_id": "delegate_1", "content": DELEGATED_OUTPUT})
-    );
-    assert!(
-        messages[call + 1]["content"][1]["text"]
-            .as_str()
-            .unwrap()
-            .contains("child canary")
-    );
+    for model in ["deepseek-flash", "kimi-k3", "k3-256k"] {
+        for signature in [None, Some(""), Some("unchanged")] {
+            let mut request = primary_request(model);
+            request.collaboration = CollaborationPolicy::Auto {
+                max_active_children: 2,
+            };
+            let mut reply = response(
+                "tool_use",
+                json!([tool_use(
+                    "delegate_1",
+                    "arany_delegate",
+                    json!({"children":[{"objective":"inspect","profile":null}], "agent":null})
+                )]),
+            );
+            reply["model"] = json!(model);
+            let mut thinking = json!({"type":"thinking","thinking":"opaque"});
+            if let Some(signature) = signature {
+                thinking["signature"] = json!(signature);
+            }
+            reply["content"]
+                .as_array_mut()
+                .unwrap()
+                .insert(0, thinking.clone());
+            let delegated = decode(&request, &reply).unwrap();
+            request.phase = AgentPhase::RootSynthesis;
+            request.input.child_results = vec![crate::provider::ChildResult {
+                objective: "inspect".into(),
+                summary: "s".into(),
+                result: "child canary".into(),
+            }];
+            request
+                .input
+                .tools
+                .as_mut()
+                .unwrap()
+                .steps
+                .push(crate::tools::ToolStep {
+                    plan: None,
+                    turn: delegated.turn,
+                    requests: Vec::new(),
+                    observations: Vec::new(),
+                    facts: None,
+                    steering_notes: Vec::new(),
+                    calls_remaining: None,
+                    cleared: false,
+                    hook_feedback: Default::default(),
+                });
+            let messages = body(&request, Effort::Low)["messages"]
+                .as_array()
+                .unwrap()
+                .clone();
+            let call = messages
+                .iter()
+                .position(|message| {
+                    message["content"].as_array().is_some_and(|blocks| {
+                        blocks.iter().any(|block| block["type"] == "tool_use")
+                    })
+                })
+                .expect("replayed delegate");
+            assert_eq!(messages[call]["content"][0], thinking);
+            assert_eq!(
+                messages[call + 1]["content"][0],
+                json!({"type": "tool_result", "tool_use_id": "delegate_1", "content": DELEGATED_OUTPUT})
+            );
+            assert!(
+                messages[call + 1]["content"][1]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("child canary")
+            );
+        }
+    }
 }
 
 #[test]

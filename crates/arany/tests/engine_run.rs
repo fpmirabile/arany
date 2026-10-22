@@ -3534,6 +3534,63 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
 
 #[cfg(unix)]
 #[test]
+fn user_instructions_lead_the_project_files_and_are_pinned_by_digest() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("runtime");
+    runtime.block_on(async {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
+        std::fs::write(workspace.join("AGENTS.md"), "Root rule").expect("root");
+        std::fs::write(workspace.join("notes/AGENTS.md"), "Notes rule").expect("nested");
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
+        let state_path = temp.path().join("state");
+        let state = StateRoot::admit(&state_path).expect("private state");
+        let user_file = state_path.join("AGENTS.md");
+        std::fs::write(&user_file, "User rule").expect("user instruction");
+        std::fs::set_permissions(&user_file, std::fs::Permissions::from_mode(0o600))
+            .expect("user instruction mode");
+        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "Done".into(),
+        })]);
+        let requests = Arc::clone(&provider.requests);
+        let provider = Arc::new(provider);
+        let engine = engine_support::open(state, EngineConfig::default()).expect("engine");
+        let mut nested = request(&workspace, "Question");
+        nested.launch_directory = Some(workspace.join("notes"));
+        let outcome = run_to_end(&engine, &provider, nested)
+            .await
+            .expect("run completes");
+        let guidance: Vec<_> = requests.lock().expect("requests lock")[0]
+            .input
+            .workspace_guidance
+            .iter()
+            .map(|guidance| (guidance.path.clone(), guidance.text.clone()))
+            .collect();
+        assert_eq!(
+            guidance,
+            [
+                ("user AGENTS.md".to_owned(), "User rule".to_owned()),
+                ("AGENTS.md".to_owned(), "Root rule".to_owned()),
+                ("notes/AGENTS.md".to_owned(), "Notes rule".to_owned()),
+            ]
+        );
+        let config = outcome.run.config.expect("pinned config");
+        assert_eq!(
+            config.user_instruction_digest,
+            Some(Sha256::digest(b"User rule").into())
+        );
+        assert_eq!(config.instruction_sources.len(), 2);
+        engine.close().await.expect("engine shutdown");
+    });
+}
+
+#[cfg(unix)]
+#[test]
 fn workspace_paths_fail_closed_before_a_run_is_accepted() {
     use std::os::unix::fs::symlink;
 
@@ -3714,6 +3771,25 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
         ));
         std::fs::remove_file(workspace.join("AGENTS.md")).expect("clear test instruction");
         std::fs::remove_file(workspace.join("notes/AGENTS.md")).expect("clear nested");
+        // The user file has its own cap, privacy and encoding checks; none truncates or falls back.
+        use std::os::unix::fs::PermissionsExt;
+        let user_file = temp.path().join("state/AGENTS.md");
+        for (bytes, mode) in [
+            (vec![b'u'; 64 * 1024 + 1], 0o600),
+            (b"rule".to_vec(), 0o644),
+            (vec![0xff], 0o600),
+        ] {
+            std::fs::write(&user_file, &bytes).expect("user instruction");
+            std::fs::set_permissions(&user_file, std::fs::Permissions::from_mode(mode))
+                .expect("user instruction mode");
+            let result = run_to_end(&engine, &provider, request(&workspace, "Question")).await;
+            if bytes == [0xff] {
+                assert!(matches!(result, Err(EngineError::InputNotUtf8)));
+            } else {
+                assert!(matches!(result, Err(EngineError::Store(_))), "{mode:o}");
+            }
+        }
+        std::fs::remove_file(&user_file).expect("clear user instruction");
 
         std::fs::write(
             workspace.join("notes/facts.txt"),

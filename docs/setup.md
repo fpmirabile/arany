@@ -169,6 +169,105 @@ API workspace; saved selections never inherit ambient workspace variables.
 [Provider account spec](./specs/provider.md#native-models-and-accounts)
 own workspace validation and admission.
 
+## Anthropic-compatible custom routes
+
+Generic Messages routes require a private version-2 `provider-profiles.json` in
+`STATE` and exact conformance before use. Only the selected `ARANY_PROVIDER_*`
+environment key is used; native Anthropic accounts and workspace headers do not
+supply credentials. Keep the file private (`0600` on Unix).
+
+**DeepSeek is UNAVAILABLE until strict compaction is proven.** It lacks evidence
+for the provider-enforced compaction schema Arany requires. Ordinary answers,
+delegation and plausible summary JSON cannot establish that support. Do not
+configure DeepSeek or relax compaction to enable it.
+
+Kimi platform API keys use the following complete document in
+`STATE/provider-profiles.json`, outside the Workspace, with mode `0600`:
+
+```json
+{
+  "version": 2,
+  "profiles": [
+    {
+      "name": "kimi-api",
+      "protocol": "anthropic-messages",
+      "base_url": "https://api.moonshot.ai/anthropic",
+      "auth": "bearer",
+      "model": "kimi-k3",
+      "credential_env": "ARANY_PROVIDER_KIMI_API_KEY",
+      "outcome_encoding": "native_tools",
+      "privacy": "user_authorized",
+      "max_output_tokens": 4096,
+      "capability_evidence_version": 2,
+      "efforts": []
+    }
+  ]
+}
+```
+
+Supply your platform key through `ARANY_PROVIDER_KIMI_API_KEY`, using your
+private environment outside the repository. The platform documents
+schema-constrained output, but the exact endpoint/model must still pass Arany's
+unchanged conformance check. Checks send synthetic data only and may be billable:
+
+```sh
+arany provider check custom:kimi-api --state-dir STATE
+```
+
+Only after that exact check succeeds:
+
+```sh
+arany exec --state-dir STATE --provider custom:kimi-api --model kimi-k3 "Your task"
+```
+
+An empty effort list omits the override. Explicit platform efforts
+`["low", "high", "max"]` require individual conformance; never inherit Claude
+defaults or translate unsupported values. The platform base sends to
+`https://api.moonshot.ai/anthropic/v1/messages`.
+
+**Kimi Code is UNAVAILABLE pending endpoint-specific strict-compaction evidence.**
+Its console keys belong to a separate subscription service and billing route.
+Platform schema documentation does not establish Code support; this is unknown,
+not proof that Code cannot enforce schemas. Keep this candidate separate from
+the usable platform document; it grants no admission:
+
+```json
+{
+  "version": 2,
+  "profiles": [
+    {
+      "name": "kimi-code",
+      "protocol": "anthropic-messages",
+      "base_url": "https://api.kimi.com/coding/",
+      "auth": "x-api-key",
+      "model": "k3-256k",
+      "credential_env": "ARANY_PROVIDER_KIMI_CODE_KEY",
+      "outcome_encoding": "native_tools",
+      "privacy": "user_authorized",
+      "max_output_tokens": 4096,
+      "capability_evidence_version": 2,
+      "efforts": []
+    }
+  ]
+}
+```
+
+The Code candidate sends to `https://api.kimi.com/coding/v1/messages`; retain
+`.com` unless the owner explicitly selects another region. Confirm the exact
+tier-visible model and billing settings first. Other Code candidates (`k3`,
+`kimi-for-coding`, `kimi-for-coding-highspeed`) each need their own exact check;
+a mistyped HighSpeed ID can select another model. An entitlement failure can
+return 401 and never selects a platform key or another billing route. Native
+Anthropic credentials and the two Kimi keys are isolated, even when another key
+is available. Arany always identifies itself as `arany/<version>`; it never
+impersonates kimi-cli or reuses its OAuth client or registration.
+
+The [dated vendor research](./research/deepseek-kimi-glm-providers-2026-10.md#kimi-platform-api-and-code-subscription)
+links the platform schema and Code endpoint, model and identity sources. Existing
+valid version-1 Responses profiles migrate automatically and require a fresh
+check. GLM Standard-key recipes remain planned. Live acceptance and native
+platform evidence remain [owner checks](../NEXT_STEPS.md#daily-use-first).
+
 ## Select a private roster preset
 
 Create a private `provider-roster.json` in the State directory outside the Workspace, using owner-only file permissions:

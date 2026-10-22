@@ -1,16 +1,21 @@
-use super::{CustomProfileError, PinnedDestination};
+use super::{CustomProfile, CustomProfileError, MessagesAuth, PinnedDestination, Protocol};
 use crate::provider::ProviderError;
 use crate::provider::{
     CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, MAX_RESPONSE_BYTES,
-    ProviderRequest, ProviderResponse, Usage, openai::wire, raw_reflects_secret, render,
+    ProviderRequest, ProviderResponse, Usage, anthropic::wire as messages, openai::wire,
+    raw_reflects_secret, render,
 };
-use reqwest::{Client, header};
+use reqwest::{
+    Client,
+    header::{self, HeaderValue},
+};
 use serde_json::Value;
 
 pub(super) struct CustomTransport {
     client: Client,
     endpoint: String,
     key: String,
+    protocol: Protocol,
 }
 
 #[derive(Clone, Copy)]
@@ -28,6 +33,7 @@ pub(super) enum TransportError {
 
 impl CustomTransport {
     pub(super) fn new(
+        profile: &CustomProfile,
         destination: &PinnedDestination,
         key: String,
     ) -> Result<Self, CustomProfileError> {
@@ -38,6 +44,7 @@ impl CustomTransport {
             client: destination.client()?,
             endpoint: destination.endpoint().to_owned(),
             key,
+            protocol: profile.protocol.clone(),
         })
     }
 
@@ -75,23 +82,55 @@ impl CustomTransport {
             return Err(TransportError::InvalidOutcome);
         }
         let conversation = render::conversation(request).map_err(|_| TransportError::Rejected)?;
-        let mut body = match effort {
-            Some(value) => wire::run_body_with_effort(request, &conversation, value),
-            None => wire::run_body(request, &conversation),
+        let mut body = match &self.protocol {
+            Protocol::OpenaiResponses => match effort {
+                Some(value) => wire::run_body_with_effort(request, &conversation, value),
+                None => wire::run_body(request, &conversation),
+            },
+            Protocol::AnthropicMessages { .. } => {
+                messages::run_body_with_optional_effort(request, &conversation, effort)
+            }
         }
         .map_err(|_| TransportError::Rejected)?;
-        let scope = wire::RunScope::new(request, &conversation, &self.key);
         let bytes = if stream {
             body["stream"] = Value::Bool(true);
             self.send_streamed(body, &request.model, preview).await?
         } else {
             self.send(body).await?
         };
-        let response = if stream {
-            wire::decode_streamed_run(&bytes, &scope).map_err(|_| TransportError::InvalidOutcome)?
-        } else {
-            wire::decode_run(&bytes, &scope).map_err(|_| TransportError::InvalidOutcome)?
-        };
+        let response = match &self.protocol {
+            Protocol::OpenaiResponses => {
+                let scope = wire::RunScope::new(request, &conversation, &self.key);
+                if stream {
+                    wire::decode_streamed_run(&bytes, &scope)
+                        .map_err(|_| ProviderError::InvalidOutcome)
+                } else {
+                    wire::decode_run(&bytes, &scope)
+                }
+            }
+            Protocol::AnthropicMessages { .. } => {
+                let offered: Vec<_> = conversation
+                    .tools
+                    .iter()
+                    .flatten()
+                    .cloned()
+                    .chain(crate::provider::tool_specs::outcome_specs(
+                        &conversation.outcome,
+                    ))
+                    .collect();
+                messages::decode_run(
+                    &bytes,
+                    &messages::RunScope {
+                        model: &request.model,
+                        output_cap: request.max_output_tokens,
+                        secret: &self.key,
+                        offered: &offered,
+                        review: request.input.role == crate::provider::PromptRole::ToolReview,
+                    },
+                )
+            }
+        }
+        .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
@@ -106,16 +145,53 @@ impl CustomTransport {
         request: &CompactionRequest,
         effort: Option<Effort>,
     ) -> Result<CompactionResponse, TransportError> {
+        self.compact_request(request, effort, None).await
+    }
+
+    pub(super) async fn probe_compaction(
+        &self,
+        request: &CompactionRequest,
+        effort: Option<Effort>,
+        nonce: &str,
+    ) -> Result<CompactionResponse, TransportError> {
+        self.compact_request(request, effort, Some(nonce)).await
+    }
+
+    async fn compact_request(
+        &self,
+        request: &CompactionRequest,
+        effort: Option<Effort>,
+        nonce: Option<&str>,
+    ) -> Result<CompactionResponse, TransportError> {
         if !(1..=1024).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
-        let body = effort.map_or_else(
-            || wire::compaction_body(request),
-            |value| wire::compaction_body_with_effort(request, value),
-        );
+        let mut body = match &self.protocol {
+            Protocol::OpenaiResponses => effort.map_or_else(
+                || wire::compaction_body(request),
+                |value| wire::compaction_body_with_effort(request, value),
+            ),
+            Protocol::AnthropicMessages { .. } => {
+                messages::compaction_body_with_optional_effort(request, effort)
+            }
+        };
+        if let Some(nonce) = nonce {
+            let schema = match &self.protocol {
+                Protocol::OpenaiResponses => &mut body["text"]["format"]["schema"],
+                Protocol::AnthropicMessages { .. } => {
+                    &mut body["output_config"]["format"]["schema"]
+                }
+            };
+            schema["properties"]["summary"]["enum"] = serde_json::json!([nonce]);
+        }
         let bytes = self.send(body).await?;
-        let response = wire::decode_compaction(&bytes, &request.model)
-            .map_err(|_| TransportError::InvalidOutcome)?;
+        let response = match &self.protocol {
+            Protocol::OpenaiResponses => wire::decode_compaction(&bytes, &request.model),
+            Protocol::AnthropicMessages { .. } => {
+                messages::decode_compaction(&bytes, &request.model, request.max_output_tokens)
+            }
+        }
+        .map_err(|_| TransportError::InvalidOutcome)?;
         if !valid_usage(response.usage, request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
@@ -125,21 +201,48 @@ impl CustomTransport {
         Ok(response)
     }
 
+    fn request(&self, request: &Value) -> Result<reqwest::RequestBuilder, TransportError> {
+        let body = match &self.protocol {
+            Protocol::OpenaiResponses => wire::encode_request(request),
+            Protocol::AnthropicMessages { .. } => messages::encode_request(request),
+        }
+        .map_err(|_| TransportError::InvalidOutcome)?;
+        let request = self
+            .client
+            .post(&self.endpoint)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::ACCEPT_ENCODING, "identity")
+            .header(
+                header::USER_AGENT,
+                concat!("arany/", env!("CARGO_PKG_VERSION")),
+            )
+            .body(body);
+        Ok(match &self.protocol {
+            Protocol::OpenaiResponses => request.bearer_auth(&self.key),
+            Protocol::AnthropicMessages { auth, .. } => {
+                let request = request.header("anthropic-version", "2023-06-01");
+                match auth {
+                    MessagesAuth::Bearer => request.bearer_auth(&self.key),
+                    MessagesAuth::ApiKey => {
+                        let mut key = HeaderValue::from_str(&self.key)
+                            .map_err(|_| TransportError::Rejected)?;
+                        key.set_sensitive(true);
+                        request.header("x-api-key", key)
+                    }
+                }
+            }
+        })
+    }
+
     async fn send_streamed(
         &self,
         request: Value,
         model: &str,
         preview: Option<crate::provider::ResponsePreview>,
     ) -> Result<Vec<u8>, TransportError> {
-        let body = wire::encode_request(&request).map_err(|_| TransportError::InvalidOutcome)?;
         let mut response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.key)
-            .header(header::CONTENT_TYPE, "application/json")
+            .request(&request)?
             .header(header::ACCEPT, "text/event-stream")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .body(body)
             .send()
             .await
             .map_err(|error| send_failure(&error))?;
@@ -148,20 +251,37 @@ impl CustomTransport {
             return Err(status_failure(&mut response).await);
         }
         streaming_admission(response.status(), destination_matches)?;
-        crate::provider::openai::read_streamed_reply(&mut response, &self.key, model, preview)
-            .await
-            .map_err(stream_failure)
+        let bytes = match &self.protocol {
+            Protocol::OpenaiResponses => {
+                crate::provider::openai::read_streamed_reply(
+                    &mut response,
+                    &self.key,
+                    model,
+                    preview,
+                )
+                .await
+            }
+            Protocol::AnthropicMessages { .. } => {
+                crate::provider::anthropic::read_streamed_reply(
+                    &mut response,
+                    &self.key,
+                    model,
+                    preview,
+                )
+                .await
+            }
+        }
+        .map_err(stream_failure)?;
+        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+            crate::provider::parse_response_json(&bytes)
+                .map_err(|_| TransportError::InvalidOutcome)?;
+        }
+        Ok(bytes)
     }
 
     async fn send(&self, request: Value) -> Result<Vec<u8>, TransportError> {
-        let body = wire::encode_request(&request).map_err(|_| TransportError::InvalidOutcome)?;
         let mut response = self
-            .client
-            .post(&self.endpoint)
-            .bearer_auth(&self.key)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::ACCEPT_ENCODING, "identity")
-            .body(body)
+            .request(&request)?
             .send()
             .await
             .map_err(|error| send_failure(&error))?;
@@ -178,6 +298,10 @@ impl CustomTransport {
                 ProviderError::PartialTransport => TransportError::PartialTransport,
                 _ => TransportError::InvalidOutcome,
             })?;
+        if matches!(&self.protocol, Protocol::AnthropicMessages { .. }) {
+            crate::provider::parse_response_json(&bytes)
+                .map_err(|_| TransportError::InvalidOutcome)?;
+        }
         if raw_reflects_secret(&bytes, &self.key) {
             return Err(TransportError::InvalidOutcome);
         }
@@ -239,4 +363,31 @@ fn valid_usage(usage: Usage, cap: u32) -> bool {
             .output_tokens
             .is_some_and(|value| value > 0 && value <= cap)
         && usage.cache_consistent()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn messages_api_key_header_is_sensitive() {
+        let key = "synthetic-private-key";
+        let transport = CustomTransport {
+            client: Client::new(),
+            endpoint: "http://127.0.0.1:9321/v1/messages".into(),
+            key: key.into(),
+            protocol: Protocol::AnthropicMessages {
+                base_url: "http://127.0.0.1:9321".into(),
+                auth: MessagesAuth::ApiKey,
+            },
+        };
+        let request = transport
+            .request(&serde_json::json!({}))
+            .unwrap_or_else(|_| panic!("synthetic request"))
+            .build()
+            .expect("request headers");
+        assert_eq!(request.headers()["x-api-key"], key);
+        assert!(request.headers()["x-api-key"].is_sensitive());
+        assert!(!format!("{request:?}").contains(key));
+    }
 }

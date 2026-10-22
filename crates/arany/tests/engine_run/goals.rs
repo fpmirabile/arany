@@ -198,11 +198,48 @@ fn paged_read_outcomes() -> Vec<ProviderOutcome> {
     outcomes
 }
 
+#[tokio::test]
+async fn user_and_project_guidance_stay_first_in_the_goal_compaction_input() {
+    compact_with_guidance(
+        "Inspect the bounded file in pages",
+        ("User rule.", "Project rule."),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn escape_heavy_guidance_does_not_refuse_goal_compaction() {
+    let hostile = "\"\\\u{1}".repeat(21_000);
+    compact_with_guidance("Inspect the bounded file in pages", (&hostile, &hostile)).await;
+}
+
 async fn compact_read_only_goal_prefix(objective: &str) {
+    compact_with_guidance(objective, ("", "")).await;
+}
+
+async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = paged_read_workspace(temp.path());
     let state_path = temp.path().join("state");
+    let expected_paths: Vec<&str> = [(user, "user AGENTS.md"), (project, "AGENTS.md")]
+        .into_iter()
+        .filter(|(text, _)| !text.is_empty())
+        .map(|(_, path)| path)
+        .collect();
     let outcomes = paged_read_outcomes();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::create_dir_all(&state_path).expect("state");
+        std::fs::set_permissions(&state_path, std::fs::Permissions::from_mode(0o700))
+            .expect("private state");
+        if !user.is_empty() {
+            let file = state_path.join("AGENTS.md");
+            std::fs::write(&file, user).expect("user guidance");
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                .expect("private user guidance");
+            std::fs::write(workspace.join("AGENTS.md"), project).expect("project guidance");
+        }
+    }
     let good_compaction = || {
         Ok(CompactionResponse {
             summary:
@@ -321,7 +358,29 @@ async fn compact_read_only_goal_prefix(objective: &str) {
         );
         let goal = &input["pinned_goal"];
         assert_eq!(goal["objective"], objective);
-        assert_eq!(goal["project_instructions"], serde_json::json!([]));
+        let listed = goal["project_instructions"].as_array().unwrap();
+        assert_eq!(
+            listed
+                .iter()
+                .map(|entry| entry["path"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected_paths
+        );
+        if user.len() < 1024 {
+            assert_eq!(
+                listed
+                    .iter()
+                    .map(|entry| entry["text"].as_str())
+                    .collect::<Vec<_>>(),
+                [user, project]
+                    .iter()
+                    .filter(|t| !t.is_empty())
+                    .map(|t| Some(*t))
+                    .collect::<Vec<_>>()
+            );
+        } else {
+            assert!(listed.iter().all(|entry| entry.get("text").is_none()));
+        }
         assert_eq!(goal["includes"], serde_json::json!([]));
         assert_eq!(goal["plan_contract"], serde_json::Value::Null);
         assert_eq!(
@@ -1556,6 +1615,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
+                user_instruction_digest: None,
                 instruction_sources: Vec::new(),
                 launch_directory: String::new(),
                 include_digests: Vec::new(),
@@ -5397,6 +5457,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 provider_concurrency: 1,
                 workspace_device: identity.device,
                 workspace_inode: identity.inode,
+                user_instruction_digest: None,
                 instruction_sources: Vec::new(),
                 launch_directory: String::new(),
                 include_digests: Vec::new(),

@@ -55,7 +55,8 @@ pub(crate) use events::{
 };
 pub(crate) use events::{
     pre_git_write_payload, pre_glob_payload, pre_typed_prefix_payload, run_started_fits,
-    run_started_v18_payload, run_started_v18_to_v19,
+    run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]

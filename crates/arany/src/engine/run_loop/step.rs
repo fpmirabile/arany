@@ -1056,7 +1056,8 @@ impl RunLoop<'_> {
         );
         let unguarded = call.is_unguarded();
         let researcher = matches!(grant, Grant::Researcher { .. });
-        if (runtime.permissions().is_some() || unguarded)
+        let git_write = call.is_git() && call.facts().mutates;
+        if (runtime.permissions().is_some() || unguarded || git_write)
             && (!runtime.allows(call)
                 || researcher
                     && !call.is_child_research()
