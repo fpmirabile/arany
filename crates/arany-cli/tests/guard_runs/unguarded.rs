@@ -150,6 +150,9 @@ impl Host {
         };
         let mut input = request(workspace, "Run the failing command");
         input.session_id = self.session;
+        if input.session_id.is_some() {
+            input.title = None;
+        }
         input.include_paths.clear();
         input.policy = self.policy;
         input.goal.budget = Some(budget());

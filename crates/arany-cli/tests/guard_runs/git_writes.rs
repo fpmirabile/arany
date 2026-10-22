@@ -404,6 +404,16 @@ fn verdict_of(view: &SessionView, run: usize) -> arany::permissions::PermissionV
 async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift() {
     for drift in [false, true] {
         let repo = Repo::new();
+        let path = repo.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let find = std::fs::canonicalize("/usr/bin/find").unwrap();
+        config["commands"] = json!([{
+            "name":"find", "executable":find,
+            "sha256":Sha256::digest(std::fs::read(&find).unwrap()).iter()
+                .map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "interpreter":false, "inputs":[]
+        }]);
+        std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
         let engine = engine_support::open(
             StateRoot::open_existing(&repo.state).unwrap(),
             EngineConfig {
@@ -423,8 +433,8 @@ async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift()
             mission: input.objective.clone(),
             resource_class: arany::ToolResourceClass::Default,
             command_timeout_ms: None,
-            paths: vec!["src/a.txt".into()],
-            commands: Vec::new(),
+            paths: vec![".".into()],
+            commands: vec!["find".into()],
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
@@ -585,6 +595,7 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
         let mut input = request(&repo.workspace, "Inspect the repository");
         input.session_id = Some(first.session_id);
+        input.title = None;
         input.include_paths.clear();
         let controls = RunControls {
             tools: ToolGrant::Configured,
