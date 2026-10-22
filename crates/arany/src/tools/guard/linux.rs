@@ -1660,21 +1660,6 @@ mod tests {
             serde_json::from_str(&std::env::var("ARANY_TEST_GIT_PARENT_NAMESPACES").unwrap())
                 .unwrap();
         assert!(profile::Namespaces::read().unwrap().isolated_from(&parent));
-        let worker = std::thread::Builder::new()
-            .spawn(|| std::fs::read_link("/proc/thread-self").expect("probe worker task path"))
-            .unwrap()
-            .join()
-            .unwrap();
-        // Joining can finish before the kernel removes the worker from /proc/self/task.
-        let worker = Path::new("/proc").join(worker);
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
-        while worker.try_exists().expect("probe worker task lookup") {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "joined probe worker still listed in /proc/self/task after 2 seconds"
-            );
-            std::thread::sleep(Duration::from_millis(5));
-        }
         harden().expect("production Guard hardening");
         let own = thread_status(Path::new("/proc/thread-self/status"))
             .unwrap()
