@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 mod agents;
 mod model;
 pub mod rewind;
+pub(crate) mod usage;
 #[cfg(test)]
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
@@ -20,6 +21,7 @@ pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };
+pub use usage::usage_pages;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Output {

@@ -2683,8 +2683,13 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
     for width in [16, 20, 24, 40, 50, 80] {
         for height in [4, 6, 7, 8] {
             for color in [false, true] {
-                for (selected, name) in [(0, "Models"), (1, "Agents"), (2, "Resume"), (3, "Setup")]
-                {
+                for (selected, name) in [
+                    (0, "Models"),
+                    (1, "Agents"),
+                    (2, "Resume"),
+                    (3, "Setup"),
+                    (4, "Usage"),
+                ] {
                     for has_draft in [false, true] {
                         let mut terminal =
                             Terminal::new(TestBackend::new(width, height)).expect("quick selector");
@@ -2692,7 +2697,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                             .draw(|frame| {
                                 draw_quick_actions_frame(
                                     frame,
-                                    bottom_area(frame.area(), 6),
+                                    bottom_area(frame.area(), 7),
                                     selected,
                                     true,
                                     has_draft,
@@ -4246,6 +4251,50 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
                 assert!(screen.contains("> /literal child note"));
             }
             assert!(!composer.has_open_menu());
+        }
+    }
+}
+
+#[test]
+fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
+    let page = "Session totals\nInput: 12,340 known; some calls unreported\nCache write (included in input): unknown (not reported)\nChatGPT weekly: unknown (not reported)\nGroups 1-1 of 1\n";
+    for width in [80, 50, 40, 16] {
+        let lines = usage_lines(page, width);
+        assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        let joined = lines.join(" ");
+        for phrase in [
+            "Session totals",
+            "some calls unreported",
+            "unknown (not reported)",
+        ] {
+            assert!(joined.contains(phrase));
+        }
+        for color in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            for scroll in [0, lines.len()] {
+                terminal
+                    .draw(|frame| {
+                        draw_usage_frame(
+                            frame,
+                            frame.area(),
+                            &lines,
+                            scroll,
+                            (0, 2),
+                            true,
+                            Palette { color },
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let header = (0..width)
+                    .map(|x| buffer[(x, 0)].symbol())
+                    .collect::<String>();
+                let footer = (0..width)
+                    .map(|x| buffer[(x, 7)].symbol())
+                    .collect::<String>();
+                assert!(header.contains("Usage 1/2"));
+                assert!(footer.contains("Esc"));
+            }
         }
     }
 }

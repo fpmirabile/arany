@@ -383,7 +383,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "Notice: Model: model-1 \u{b7} default; /model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
                     .as_bytes(),
             );
-            patterns.push(b"Notice: Working \xc2\xb7 request ");
+            patterns.push(b"Request: ");
             patterns.push(b"\r\n");
         }
         if expect_help {
@@ -1075,7 +1075,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             .and_then(|config| config.context_usage.as_ref())
             .expect("current Run footprint");
         let status = format!(
-            "Notice: Working · request {}% of local limit · 1 agent. Includes chat, instructions, files and images; not model tokens. Details: /agents\r\n",
+            "Request: {}% of local request budget; not model tokens\r\nIncludes chat, instructions, files and images\r\n",
             usage.utilization_percent(),
         );
         assert_eq!(transcript.matches(&status).count(), 1);

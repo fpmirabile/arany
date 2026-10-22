@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready` — Research and Plan gates passed; no material owner questions.
+- Status: `In progress` — U1 implemented; U2 is next.
 - Owner: Fernando Mirabile
 - Last updated: 2026-10-22
-- Scope: Research and Plan only; implementation has not started.
+- Remaining scope: U2 passive ChatGPT plan windows, then U3 API/custom rate limits.
 
 ## Outcome and scope
 
@@ -34,7 +34,7 @@ admits the official direct-use route only, without API-key fallback.
 [Session persistence](../../docs/specs/session.md#persistence-facts) owns replay;
 [terminal output](../../docs/specs/terminal.md#conversation-progress-and-history)
 owns local measurements and inert accessible presentation. These are the
-implementation contracts to extend, not evidence that this proposal exists.
+contracts for U1 token reporting and the remaining limit-observation slices.
 
 Existing [Provider usage types](../../crates/arany/src/provider.rs) and
 [call/compaction records](../../crates/arany/src/session/events/records.rs)
@@ -44,17 +44,17 @@ commits before continuation; [compaction](../../crates/arany/src/engine/compacti
 [routing](../../crates/arany/src/engine/routing.rs) identify the remaining fact
 owners. The [agent](../../crates/arany/src/session/reducer/agent.rs) and
 [Goal](../../crates/arany/src/session/reducer/goal.rs) reducers accumulate total
-and cache-read tokens with uncertainty, but the
-[views](../../crates/arany/src/session/reducer.rs) lack a complete separate-counter
-usage report, including retained in-Run compaction usage.
+and cache-read tokens with uncertainty, and the
+[views](../../crates/arany/src/session/reducer.rs) now retain U1's separate-counter
+usage projection, including in-Run compaction usage.
 
 [Subscription](../../crates/arany/src/provider/openai/subscription.rs) and
 [custom transport](../../crates/arany/src/provider/custom/transport.rs) have no
 normalized quota snapshot; [HTTP failures](../../crates/arany/src/provider.rs)
 and [retry records](../../crates/arany/src/provider/routing.rs) retain limited
 retry guidance. The [registry](../../crates/arany-cli/src/terminal/commands.rs)
-has neither `/context` nor `/usage`: [attached `/status`](../../crates/arany-cli/src/cli/attached/controls.rs)
-reports Session/Run or local-context facts,
+exposes `/usage`; [attached `/status`](../../crates/arany-cli/src/cli/attached/controls.rs)
+opens that report with Session/Run and local-context facts,
 [agent details](../../crates/arany-cli/src/presentation/agents.rs) show last-call
 tokens, and [Goal presentation](../../crates/arany-cli/src/presentation.rs) shows
 known totals. Slice sections below name the evidence owners to extend.
@@ -312,32 +312,10 @@ production header captures or accounts.
 
 ### U1 — Inspect reported token usage for every admitted Provider
 
-One PR delivers `/usage` and expanded `/status` from current Events. Existing
-Provider response → Engine call/compaction commitment → reducer totals and
-completeness → shared terminal report is the complete path. Include primary,
-children, review, retries, fallback, all compaction forms, resume and fork scope;
-show unknown limits without claiming their acquisition. Map documented Responses
-`input_tokens_details.cache_write_tokens` into the existing cache-creation counter
-for native, custom and shared subscription decoding. Preserve independent
-absence of reads/writes and verify zero, overflow and inconsistent subsets.
-Carry the counter through call/compaction Events to reopened terminal output;
-no new persisted field or cache request policy is needed. Update Provider for
-that mapping and Terminal/Session for scope, interaction, units and reporting.
-
-Extend the [Engine Goal journey](../../crates/arany/tests/engine_run/goals.rs),
-[Responses corpus](../../crates/arany/src/provider/openai/wire/tests.rs),
-[Messages corpus](../../crates/arany/src/provider/anthropic/wire/tests.rs),
-[subscription corpus](../../crates/arany/src/provider/openai/subscription/tests.rs),
-[routing journey](../../crates/arany/tests/engine_run/routing.rs),
-[reducer corpus](../../crates/arany/src/session/reducer/tests.rs),
-[command registry](../../crates/arany-cli/src/terminal/commands.rs),
-[linear corpus](../../crates/arany-cli/src/terminal/linear.rs) and
-[attached controls](../../crates/arany-cli/src/cli/attached/controls.rs).
-Verify mixed Providers, cache subset accounting, missing counters, interrupted
-reservations, no double-counted compaction, inherited/local distinction and
-credential-free unsaved inspection. Add one end-to-end attached/reopen observation
-to the [Session journey](../../crates/arany-cli/tests/session_run.rs), including
-the complete linear report rather than truncated notices.
+Implemented. Current token mapping, scope and interaction live in the
+[Provider](../../docs/specs/provider.md#usage-provenance-and-reliability),
+[Session](../../docs/specs/session.md#persistence-facts) and
+[Terminal](../../docs/specs/terminal.md#reported-usage) contracts.
 
 ### U2 — Show ChatGPT plan windows from committed response observations
 

@@ -1079,6 +1079,7 @@ pub(super) mod cleanup_tests {
             child_drafts: Vec::new(),
             primary_draft_bytes: 0,
             help_selected: None,
+            usage_panel: None,
             clipboard: None,
             clipboard_paste: None,
             deferred_input: None,

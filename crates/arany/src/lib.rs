@@ -72,7 +72,7 @@ pub use session::{
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
     RunFailure, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId, SessionListItem,
-    SessionPage, SessionView, ToolView, WorkspaceIdentity,
+    SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView, WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
