@@ -250,7 +250,16 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
             "tool_use",
             json!([tool_use("toolu_1", "arany_read", input.clone())]),
         );
-        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{input}");
+        let decoded = decode(&request, &fixture).expect("typed range reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("Read call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{input}");
+        assert_eq!(
+            serde_json::to_value(&calls[0].call).unwrap(),
+            json!({"operation":"read", "path":"src/main.rs", "offset":offset, "limit":limit})
+        );
     }
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
@@ -514,17 +523,12 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
             &request,
             &response("tool_use", json!([tool_use("toolu_1", name, input)])),
         );
-        assert_eq!(
-            matches!(
-                decoded,
-                Ok(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(_),
-                    ..
-                })
-            ),
-            accepted,
-            "{name} accepted={accepted}"
-        );
+        let decoded = decoded.expect("typed content reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("write or edit")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{name} valid={accepted}");
     }
 }
 

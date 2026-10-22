@@ -2053,14 +2053,24 @@ fn read_arguments_require_nullable_line_ranges() {
         (json!(0), json!(1), false),
         (json!(1), json!(0), false),
         (json!(1), json!(2001), false),
-        (json!(-1), json!(1), false),
-        (json!(1.5), json!(1), false),
     ] {
         let args = json!({"path":"README.md","offset":offset,"limit":limit});
         let fixture = response("completed", json!([function_call("arany_read", &args)]));
-        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{args}");
+        let decoded = decode(&request, &fixture).expect("typed range reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("Read call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{args}");
+        assert_eq!(
+            serde_json::to_value(&calls[0].call).unwrap(),
+            json!({"operation":"read", "path":"README.md", "offset":offset, "limit":limit})
+        );
     }
     for args in [
+        json!({"path":"README.md","offset":-1,"limit":1}),
+        json!({"path":"README.md","offset":1.5,"limit":1}),
+        json!({"path":"README.md","offset":u64::from(u32::MAX) + 1,"limit":1}),
         json!({"path":"README.md","offset":null}),
         json!({"path":"README.md","limit":null}),
     ] {
