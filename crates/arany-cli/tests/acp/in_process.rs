@@ -1695,14 +1695,13 @@ impl Adapter {
             workspace_inode: 2,
             call,
             limits: arany::ToolLimits::default(),
-            expires_at_ms: arany::now_ms().saturating_add(60_000),
             use_count: 1,
         }
     }
 
     async fn permission(&self, intent: &arany::EffectIntent, id: i64) {
         self.events.send(Message::Request(Request { jsonrpc:Default::default(),id:RequestId::Integer(id),method:"item/tool/requestApproval".into(),params:Some(json!({
-            "threadId":self.session,"turnId":self.run,"itemId":intent.id,"startedAtMs":0,"expiresAtMs":intent.expires_at_ms,"intent":intent,
+            "threadId":self.session,"turnId":self.run,"itemId":intent.id,"startedAtMs":0,"intent":intent,
             "lines":["Review <script>unsafe</script>\u{001b}[2J", "```\n![untrusted](https://invalid.example)"]
         })) })).await.unwrap();
     }
@@ -2207,7 +2206,7 @@ async fn load_and_resume_translate_pinned_schema_without_private_state() {
 }
 
 #[tokio::test]
-async fn tools_permissions_and_expiry_validate_without_private_state() {
+async fn tools_permissions_wait_and_withdraw_without_private_state() {
     let _deadline = crate::cli::serve::tests::deadline();
     let mut adapter = Adapter::new().await;
     adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
@@ -2246,10 +2245,20 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         (
             12,
             json!({"outcome":"selected","optionId":"allow_always"}),
-            "decline",
+            "unavailable",
         ),
-        (13, json!({"outcome":"selected"}), "decline"),
-        (14, Value::Null, "decline"),
+        (13, json!({"outcome":"selected"}), "unavailable"),
+        (14, Value::Null, "unavailable"),
+        (
+            15,
+            json!({"outcome":"selected","optionId":"reject_once"}),
+            "unavailable",
+        ),
+        (
+            16,
+            json!({"outcome":"selected","optionId":"unknown"}),
+            "unavailable",
+        ),
     ] {
         adapter.permission(&intent, index).await;
         let request = adapter.next().await;
@@ -2280,13 +2289,18 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         )
         .await
         .unwrap();
-        let Some(serve::server::ClientMessage::Message(Message::Response(response))) =
-            adapter.input.recv().await
-        else {
-            panic!("approval reply")
-        };
-        assert_eq!(response.id, RequestId::Integer(index));
-        assert_eq!(response.result["decision"], decision);
+        match adapter.input.recv().await.unwrap() {
+            serve::server::ClientMessage::Message(Message::Response(response)) => {
+                assert_eq!(response.id, RequestId::Integer(index));
+                assert_eq!(response.result["decision"], decision);
+            }
+            serve::server::ClientMessage::Message(Message::Error(error)) => {
+                assert_eq!(decision, "unavailable");
+                assert_eq!(error.id, Some(RequestId::Integer(index)));
+                assert_eq!(error.error.message, "Approval channel unavailable");
+            }
+            _ => panic!("approval reply"),
+        }
         // Duplicate and unknown IDs cannot resolve another intent.
         for id in [request["id"].clone(), json!(999)] {
             let reply = json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
@@ -2305,10 +2319,9 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     adapter.permission(&intent, 20).await;
     let permission = adapter.next().await;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(61)).await;
-    let withdrawal = adapter.next().await;
-    assert_eq!(withdrawal["method"], "$/cancel_request");
-    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::time::resume();
+    assert!(adapter.output.try_recv().is_err());
     let late = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
     translate::input(
         wire::decode(&encode_line(&late).unwrap()).unwrap(),
@@ -2319,8 +2332,12 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     )
     .await
     .unwrap();
-    assert!(adapter.input.try_recv().is_err());
-    tokio::time::resume();
+    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+        adapter.input.recv().await
+    else {
+        panic!("late allow")
+    };
+    assert_eq!(reply.result["decision"], "accept");
     for _ in 0..256 {
         adapter
             .outbound
@@ -2330,18 +2347,35 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     adapter.permission(&intent, 21).await;
     drop(adapter.events.reserve_many(256).await.unwrap());
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::time::resume();
     for _ in 0..256 {
         adapter.output.recv().await.unwrap();
     }
-    tokio::time::resume();
+    let delayed = adapter.next().await;
+    assert_eq!(
+        delayed["params"]["toolCall"]["rawInput"]["id"],
+        intent.id.to_string()
+    );
+    adapter
+        .events
+        .send(Message::Notification(Notification {
+            jsonrpc: Default::default(),
+            method: "$/cancel_request".into(),
+            params: Some(json!({"requestId":21})),
+        }))
+        .await
+        .unwrap();
+    let withdrawal = adapter.next().await;
+    assert_eq!(withdrawal["method"], "$/cancel_request");
+    assert_eq!(withdrawal["params"]["requestId"], delayed["id"]);
     let fresh = adapter.intent(intent.call.clone());
     adapter.permission(&fresh, 22).await;
     let permission = adapter.next().await;
     assert_eq!(
         permission["params"]["toolCall"]["rawInput"]["id"],
         fresh.id.to_string(),
-        "an unsent expired request must never reach the client"
+        "a withdrawn request must free the permission slot"
     );
     let error = json!({"jsonrpc":"2.0","id":permission["id"],"error":{"code":-32603,"message":"Client refused"}});
     translate::input(
@@ -2353,12 +2387,12 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     )
     .await
     .unwrap();
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("client error denies")
+        panic!("client error is unavailable")
     };
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.id, Some(RequestId::Integer(22)));
     let observation = arany::ToolObservation {
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
@@ -2366,6 +2400,7 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         limit_cause: None,
         output: "````\n<script>data</script>\u{001b}[2J".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -2648,6 +2683,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         limit_cause: None,
         output: "é`\u{001b}".repeat(64 * 1024),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -2664,13 +2700,13 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         cwd: ".".into(),
     };
     adapter.permission(&big, 100).await;
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("oversized approval denies")
+        panic!("oversized approval is unavailable")
     };
-    assert_eq!(reply.id, RequestId::Integer(100));
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.id, Some(RequestId::Integer(100)));
+    assert_eq!(reply.error.message, "Approval channel unavailable");
     assert!(
         adapter.output.try_recv().is_err(),
         "oversized approval must never be sent"
@@ -2682,12 +2718,12 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         justification: "untrusted".into(),
     });
     adapter.permission(&unguarded, 101).await;
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("human-only approval denies")
+        panic!("human-only approval is unavailable")
     };
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.error.message, "Approval channel unavailable");
     assert!(adapter.output.try_recv().is_err());
     adapter.close().await;
 }
@@ -3426,6 +3462,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
         limit_cause: None,
         output: "Outcome unknown".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -3507,6 +3544,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         limit_cause: None,
         output: "Outcome unknown".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter

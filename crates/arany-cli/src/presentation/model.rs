@@ -528,7 +528,6 @@ mod tests {
             workspace_inode: 1,
             call: arany::ToolCall::List { path: ".".into() },
             limits: Default::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         run.tools.push(arany::ToolView {
@@ -602,6 +601,7 @@ mod tests {
             disposition: arany::ToolDisposition::Succeeded,
             output: String::new(),
             attestation: Some(arany::Attestation::Guard(guard)),
+            approval_cause: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         });
         {
@@ -749,7 +749,6 @@ mod tests {
                 limit: None,
             },
             limits: Default::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         run.agents[2].tools.push(arany::ToolView {
@@ -1147,6 +1146,53 @@ mod tests {
                 .unwrap()
                 .contains("Provider rejected the request.")
         );
+        run.agents
+            .iter_mut()
+            .for_each(|agent| agent.provider_calls.clear());
+        run.tools = vec![crate::presentation::tool_fixture(
+            arany::ToolCall::Read {
+                path: "file".into(),
+                offset: None,
+                limit: None,
+            },
+            "Action denied or approval expired",
+        )];
+        for (cause, expected) in [
+            (arany::ApprovalCause::Cancelled, "Run cancelled."),
+            (arany::ApprovalCause::Paused, "Goal paused."),
+            (
+                arany::ApprovalCause::ChannelUnavailable,
+                "Approval channel unavailable.",
+            ),
+            (arany::ApprovalCause::Declined, "Action denied."),
+            (
+                arany::ApprovalCause::ChildTimeout,
+                "Child approval wait timed out.",
+            ),
+        ] {
+            let observation = run.tools[0].observation.as_mut().unwrap();
+            observation.disposition = arany::ToolDisposition::Denied;
+            observation.attestation = None;
+            observation.approval_cause = Some(cause);
+            assert_eq!(
+                run_feedback(run).unwrap(),
+                format!(
+                    "{expected} No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings."
+                )
+            );
+            if matches!(
+                cause,
+                arany::ApprovalCause::Cancelled | arany::ApprovalCause::Paused
+            ) {
+                run.status = RunStatus::Cancelled;
+                assert_eq!(
+                    run_feedback(run).unwrap(),
+                    format!("{expected} No answer was committed. You can submit a new task.")
+                );
+                run.status = RunStatus::Failed;
+            }
+        }
+        run.tools.clear();
         run.status = RunStatus::Cancelled;
         assert_eq!(
             run_feedback(run).unwrap(),

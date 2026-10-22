@@ -177,7 +177,13 @@ impl Fixture {
                 approval = inbox.next(), if mode.is_some() => {
                     humans += 1;
                     assert_eq!(humans, 1, "only the proposed Tool may ask");
-                    approval.unwrap().decide(!self.deny_humans);
+                    let approval = approval.unwrap();
+                    if !team {
+                        tokio::time::pause();
+                        tokio::time::advance(Duration::from_secs(3600)).await;
+                        tokio::time::resume();
+                    }
+                    approval.decide(!self.deny_humans);
                 }
             }
         };
@@ -1007,6 +1013,86 @@ async fn researcher_review_503_falls_back_and_the_run_completes() {
             .disposition,
         arany::ToolDisposition::Succeeded
     );
+}
+
+#[tokio::test]
+async fn late_approval_keeps_file_and_executable_preconditions() {
+    for case in ["file", "executable"] {
+        let fixture = Fixture::new(Some(&json!({"permissions":{"ask":["Edit", "Bash"]}})), true);
+        let executable = fixture._temp.path().join("approved-shell");
+        std::fs::copy(std::fs::canonicalize("/bin/sh").unwrap(), &executable).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config_path = fixture.state.join("tools.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        config["commands"][0]["executable"] = json!(executable);
+        private_file(&config_path, &serde_json::to_vec(&config).unwrap());
+        let call = if case == "file" {
+            arany::ToolCall::Write {
+                path: "notes/facts.txt".into(),
+                expected_digest: Some(hash(b"Fact")),
+                content: "approved".into(),
+            }
+        } else {
+            arany::ToolCall::Command {
+                program: "sh".into(),
+                args: vec!["-c".into(), "printf approved > notes/ran.txt".into()],
+                cwd: String::new(),
+            }
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            arany::test_support::scenario::plan_outcome(plan(&call)),
+            tool_outcome(call),
+            finish("answer"),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let mut input = request(&fixture.workspace, "Complete the approved action");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Single;
+        input.goal.budget = Some(budget());
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let human = async {
+            let approval = inbox.next().await.unwrap();
+            let presented = approval.intent.clone();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::time::resume();
+            if case == "file" {
+                std::fs::write(fixture.workspace.join("notes/facts.txt"), b"concurrent").unwrap();
+            } else {
+                std::fs::copy(std::fs::canonicalize("/usr/bin/true").unwrap(), &executable)
+                    .unwrap();
+            }
+            approval.decide(true);
+            presented
+        };
+        let (result, presented) =
+            tokio::join!(run_with(&fixture.engine, &provider, input, controls), human);
+        let outcome = result.unwrap();
+        assert!(!fixture.workspace.join("notes/ran.txt").exists(), "{case}");
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+            if case == "file" {
+                b"concurrent".as_slice()
+            } else {
+                b"Fact".as_slice()
+            }
+        );
+        let (_, view) = fixture.reopen(outcome.session_id).await;
+        let tool = &view.runs[0].tools[0];
+        assert_eq!(tool.intent, presented, "{case}");
+        assert!(tool.permission_verdict.as_ref().unwrap().approved);
+        let observed = tool.observation.as_ref().unwrap();
+        assert_ne!(
+            observed.disposition,
+            arany::ToolDisposition::Succeeded,
+            "{case}"
+        );
+    }
 }
 
 #[tokio::test]

@@ -24,7 +24,6 @@ mod goal_recovery_tests {
                 limit: Some(32),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         let tool = ToolView {
@@ -45,6 +44,7 @@ mod goal_recovery_tests {
                     String::new()
                 },
                 attestation: None,
+                approval_cause: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
@@ -1570,7 +1570,6 @@ mod goal_replay_tests {
                 limit: Some(32),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         review.runs[0].tools.push(ToolView {
@@ -2586,6 +2585,7 @@ mod goal_replay_tests {
                         .then_some(crate::tools::LimitCause::Resource),
                     output: String::new(),
                     attestation: None,
+                    approval_cause: None,
                     cache_update,
                 }),
                 review_call_index: None,
@@ -2617,6 +2617,7 @@ mod goal_replay_tests {
                 limit_cause: None,
                 output: String::new(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
@@ -2644,6 +2645,7 @@ mod goal_replay_tests {
                 limit_cause: None,
                 output: String::new(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             }),
             review_call_index: None,
@@ -3562,7 +3564,6 @@ mod goal_replay_tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -4226,6 +4227,7 @@ mod goal_replay_tests {
                         "The effect is outside the active Goal plan; no operation was dispatched"
                             .into(),
                     attestation: None,
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             },
@@ -4375,7 +4377,6 @@ mod goal_replay_tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         observation_for(intent, content)
@@ -4413,6 +4414,7 @@ mod goal_replay_tests {
             intent,
             disposition: ToolDisposition::Succeeded,
             output,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         }
     }
@@ -5263,11 +5265,11 @@ mod goal_replay_tests {
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
-            for (event, version) in [
-                (started(intent.digest(), &hook_intent), 5),
-                (finished(hook_observation.clone(), deny.clone()), 10),
+            for event in [
+                started(intent.digest(), &hook_intent),
+                finished(hook_observation.clone(), deny.clone()),
             ] {
-                assert_eq!(event.version(), version);
+                let version = event.version();
                 let payload = event.payload().unwrap();
                 assert_eq!(
                     Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
@@ -7230,6 +7232,7 @@ mod goal_replay_tests {
                     limits: intent.limits.clone(),
                 },
             )),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -7331,6 +7334,7 @@ mod goal_replay_tests {
                     limits: intent.limits.clone(),
                 },
             )),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,

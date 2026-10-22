@@ -33,7 +33,6 @@ mod goal_success_tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         ToolObservation {
@@ -49,6 +48,7 @@ mod goal_success_tests {
             intent,
             disposition,
             output,
+            approval_cause: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         }
     }
@@ -1649,7 +1649,6 @@ mod payload_version_tests {
                 limit: Some(16),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         crate::tools::ToolObservation {
@@ -1663,6 +1662,7 @@ mod payload_version_tests {
             intent,
             disposition: crate::tools::ToolDisposition::Succeeded,
             output: "{}".into(),
+            approval_cause: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         }
     }
@@ -1738,18 +1738,67 @@ mod payload_version_tests {
             agent_run_id: agent,
             observation: read_observation(run, agent),
         };
+        for cause in [
+            crate::tools::ApprovalCause::Cancelled,
+            crate::tools::ApprovalCause::Paused,
+            crate::tools::ApprovalCause::ChannelUnavailable,
+            crate::tools::ApprovalCause::Declined,
+            crate::tools::ApprovalCause::ChildTimeout,
+        ] {
+            let mut stopped = finished.clone();
+            let Event::ToolFinished { observation, .. } = &mut stopped else {
+                unreachable!()
+            };
+            observation.disposition = crate::tools::ToolDisposition::Denied;
+            observation.attestation = None;
+            observation.approval_cause = Some(cause);
+            observation.output = "Opaque historical detail".into();
+            assert_eq!(
+                Event::decode(
+                    stopped.kind(),
+                    stopped.version(),
+                    &stopped.payload().unwrap(),
+                    Some(run),
+                    Some(agent)
+                )
+                .unwrap(),
+                stopped
+            );
+        }
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(21));
+        assert_eq!(payload_version("ToolFinished"), Some(finished.version()));
         assert_eq!(
-            Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode(
+                "ToolFinished",
+                finished.version(),
+                &payload,
+                Some(run),
+                Some(agent)
+            )
+            .expect("current"),
             finished
+        );
+        let mut missing_cause: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        missing_cause
+            .as_object_mut()
+            .unwrap()
+            .remove("approval_cause");
+        assert!(
+            Event::decode(
+                finished.kind(),
+                finished.version(),
+                &missing_cause.to_string(),
+                Some(run),
+                Some(agent)
+            )
+            .is_err()
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("checkpoint");
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1761,14 +1810,14 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 21, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", finished.version(), &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &missing.to_string(),
                 Some(run),
                 Some(agent)
@@ -1781,14 +1830,14 @@ mod payload_version_tests {
         assert!(
             Event::decode(
                 "ToolFinished",
-                21,
+                finished.version(),
                 &unknown.to_string(),
                 Some(run),
                 Some(agent)
             )
             .is_err()
         );
-        for previous in [20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
+        for previous in [21, 20, 19, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7] {
             assert!(matches!(
                 Event::decode("ToolFinished", previous, &payload, Some(run), Some(agent)),
                 Err(ReplayError::UnknownEvent)
@@ -1841,7 +1890,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(15));
+        assert_eq!(payload_version("ToolStarted"), Some(started.version()));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
@@ -1987,7 +2036,7 @@ mod payload_version_tests {
             let payload = event.payload().expect("payload");
             let version = match event {
                 Event::RunStarted { .. } => 20,
-                Event::ToolStarted { .. } => 15,
+                Event::ToolStarted { .. } => 16,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
             };

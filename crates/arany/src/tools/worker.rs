@@ -462,6 +462,7 @@ impl View {
             enforcement_cause,
             limit_cause,
             attestation,
+            approval_cause: None,
             cache_update: super::CacheUpdate::NotApplicable,
         }
     }
@@ -469,7 +470,6 @@ impl View {
     fn check(&self, intent: &EffectIntent) -> Result<(), ToolError> {
         if self.stopped
             || self.pending.is_some()
-            || intent.expires_at_ms <= super::now_ms()
             || intent.run_id != self.run_id
             || intent.policy_digest != self.policy_digest
             || intent.enforcement_digest
@@ -1616,6 +1616,7 @@ mod tests {
             output,
             enforcement_cause: None,
             limit_cause: None,
+            approval_cause: None,
             cache_update: super::super::CacheUpdate::NotApplicable,
         };
         view.pending = Some(observation.intent.id);
@@ -2060,7 +2061,7 @@ mod tests {
                 4 => invalid.run_id = crate::session::RunId::new(),
                 5 => invalid.policy_digest = [8; 32],
                 6 => invalid.workspace_inode += 1,
-                _ => invalid.expires_at_ms = 1,
+                _ => invalid.use_count = 2,
             }
             assert!(
                 view.edit(&runtime, invalid, Cancellation::new())
@@ -2234,6 +2235,7 @@ mod tests {
                 })),
                 enforcement_cause: None,
                 limit_cause: None,
+                approval_cause: None,
                 cache_update: super::super::CacheUpdate::Discarded,
             };
             let action = Action {
@@ -2346,6 +2348,7 @@ mod tests {
                 })),
                 enforcement_cause: None,
                 limit_cause: None,
+                approval_cause: None,
                 cache_update: super::super::CacheUpdate::Discarded,
             };
             let action = Action {
@@ -2625,6 +2628,7 @@ mod tests {
             })),
             enforcement_cause: None,
             limit_cause: None,
+            approval_cause: None,
             cache_update: super::super::CacheUpdate::NotApplicable,
         };
         assert!(wire_valid(&observation, &intent));

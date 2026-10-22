@@ -276,7 +276,6 @@ fn largest_tool_started_payload() -> String {
             content: "\u{1}".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES),
         },
         limits: crate::tools::ToolLimits::default(),
-        expires_at_ms: u64::MAX,
         use_count: 1,
     };
     assert!(intent.valid());

@@ -6809,11 +6809,10 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
                         normalize_facts(facts);
                     }
                     for observation in &mut step.observations {
-                        // Normalize the per-run intent identities and expiry, which never enter model input.
+                        // Normalize the per-run intent identities, which never enter model input.
                         observation.intent.id = Uuid::nil();
                         observation.intent.run_id = normalized_run;
                         observation.intent.agent_run_id = normalized_actor;
-                        observation.intent.expires_at_ms = 0;
                     }
                 }
                 input

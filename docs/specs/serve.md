@@ -237,7 +237,7 @@ effect outcome.
 
 ## Server requests
 
-The server advertises `approvals_v1` and sends requests with a fresh integer ID
+The server advertises `approvals_v2` and sends requests with a fresh integer ID
 starting at 1 for each connection, independent of client request IDs. IDs are
 never reused across turns. Requests go only to the client owning the turn.
 
@@ -247,38 +247,39 @@ never reused across turns. Requests go only to the client owning the turn.
 | `item/fileChange/requestApproval` | Write, Edit, Mkdir and ApplyChangeset |
 | `item/tool/requestApproval` | All remaining calls, including MCP, Skills and reads |
 
-All carry `{threadId,turnId,itemId,startedAtMs,expiresAtMs,intent,lines}`.
+All carry `{threadId,turnId,itemId,startedAtMs,intent,lines}`.
 `intent` is the exact journaled immutable EffectIntent; `itemId` is its UUID,
 `turnId` its Run, `startedAtMs` the matching committed ToolStarted timestamp,
-and `expiresAtMs` its pinned expiry. `lines` uses the terminal's sanitized human
+and there is no expiry field. `lines` uses the terminal's sanitized human
 approval renderer, including its full unguarded warning when applicable.
 Failure to recover the matching committed intent, or a request above the
-message size limit, denies without sending a request.
+message size limit, records unavailable approval without sending a request.
 
 The client returns `{decision:"accept"|"decline"|"cancel"}`. Accept resolves
-only that one pending ToolApproval; decline denies; cancel denies then signals
-turn cancellation. A matching client error or invalid result denies. Unknown,
-expired, cancelled, finished or already resolved request IDs never change a
+only that one pending ToolApproval; decline denies; cancel signals turn
+cancellation before resolving the pending reply as unavailable. A matching
+client error or invalid result records unavailable approval. Unknown,
+withdrawn, cancelled, finished or already resolved request IDs never change a
 decision and get no reply. `acceptForSession` is excluded because an immutable
 one-use intent cannot become a remembered permission rule.
 
-Unanswered requests expire at the existing Engine approval deadline. EOF,
-turn interruption, completion and output closure deny outstanding requests.
-Approval delivery, expiry and cancellation run independently of outbound
-notification progress: a full outbound queue cannot hold Journal appends or
-prevent expiry. A request still waiting for outbound capacity at expiry is
-never sent. A request already queued can reach a slow client after expiry;
-its reply is late and cannot authorize anything. At most one approval is
-pending per connection. The Engine can abandon an ask before its intent expires
-(a child's delegation deadline), which clears the pending request at once; a
-request that still arrives while another is pending denies immediately without
-evicting or renewing the first. The Engine inbox additionally has one
-bounded ingress slot.
+Unanswered primary requests remain pending without a wall-clock deadline while
+the owning connection and Run remain live. EOF, turn interruption, pause,
+completion and output closure withdraw outstanding requests. Failed or unsent
+delivery is unavailable approval, not human decline. Approval delivery and
+withdrawal run independently of outbound notification progress: a full output
+queue cannot hold Journal appends or prevent cancellation. A connected slow
+client alone does not expire a request. Replies to withdrawn requests cannot
+authorize an effect, even if the request was already queued to the client.
+At most one approval is pending per connection; the Engine inbox has one
+bounded ingress slot. The Engine can abandon a child ask at its temporary
+issue-time/delegation deadline, clearing its request. An excess ask refuses
+without evicting or renewing the first.
 
 This client is the human approval channel. Human-only requests, including
 `command_unguarded` and hook asks, always require an explicit human client
 decision; this transport adds no AI or automatic approval. Engine permission
-composition, intent expiry, cancellation, Policy, one-use grants and Guard
+composition, pin revalidation, cancellation, Policy, one-use grants and Guard
 admission still apply. Hook execution remains owned by the Tools contract.
 
 ## Limits and compatibility
@@ -318,11 +319,11 @@ native evidence remains with [NEXT_STEPS](../../NEXT_STEPS.md).
 
 The protocol uses capability strings for feature detection; schema artifact
 versioning is separate. Implemented strings are `threads_v1`, `turns_v1`,
-`items_v1`, `interrupt_receipt_v1`, `approvals_v1`, `events_subscribe_v1`,
+`items_v1`, `interrupt_receipt_v1`, `approvals_v2`, `events_subscribe_v1`,
 `receipt_get_v1`, `thread_fork_v1`, `turn_steer_v1`, `goal_pause_v1` (the latter also
 covers `goal/resume`), `thread_settings_update_v1`, `thread_unsubscribe_v1`, `thread_list_v1`, `thread_rewind_v1`. Breaking wire changes require a new
 capability string and at most one release of deprecation compatibility during
-pre-beta; stored formats retain their existing no-migration contract.
+pre-beta; stored formats follow the [journal migration contract](./execution.md#journal-migration).
 
 ## Acceptance scenarios and evidence owners
 
@@ -336,7 +337,7 @@ pre-beta; stored formats retain their existing no-migration contract.
 | Durable start and ordered completion | Exact canonical transcript, schema validation, reopened SessionStarted/MessageAccepted/MessageCommitted/RunFinished and reduced history; resume returns the same items | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [transcript](../../crates/arany-cli/tests/fixtures/serve/basic.jsonl), [Engine creation scenario](../../crates/arany/tests/engine_run.rs) |
 | Protocol state, capacity and transport recovery | Initialization refusals, 64-thread refusal without eviction, 64/256 queue backpressure, oversized/malformed duplex input recovery, tap-gap sequence and missed count | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Cancellation and failure | Busy refusal, interrupt and EOF commit cancellation, three-second grace despite a stalled client, failed accepted turns carry compiled guidance rather than RPC errors | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
-| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; accept dispatches once; decline, invalid result, timeout, EOF and cancel deny; late/duplicate/unknown replies change no decision and get no reply; oversized requests deny unsent; full outbound queue cannot prevent expiry or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
+| Tool history and human approvals | Reopened dispositions and uncertain unfinished ToolStarted; approval payload equals committed intent and timestamp; late accept to a live primary request dispatches once; decline denies, invalid result/EOF/unsent delivery are unavailable, cancel interrupts; withdrawn/duplicate/unknown replies change no decision and get no reply; full outbound queue cannot prevent cancellation or Journal completion | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Session lifecycle | Close frees a slot after 64 loaded threads, retains durable history and cancels an active submission before releasing it; list pages include only admitted Workspace metadata, enforce page/line/cursor bounds, reject foreign and invalid cursors and never execute | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs) |
 | Live approval settings | Closed mode values and schema-valid result; unknown thread and unsupported/oversized modes refuse; ACP exercises active switches and immutable pending asks | [Serve corpus](../../crates/arany-cli/tests/serve/in_process.rs), [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Steering, pause and resume | Pause and steer are accepted between autonomous Runs (unit test); an exhausted paused Goal's resume closes it Failed in a second server over the same State, proving the pause survived exit; a note is journaled once and refused when empty, over 8 KiB, over the Run budget or over 64 KiB; steer, pause and resume without an active turn or resumable Goal return closed reasons; pause ends the turn `interrupted` and `goal/resume` runs the pinned objective once with one `GoalResumed`; an oversized line is rejected by the line cap | [Serve corpus](../../crates/arany-cli/tests/serve/goal_controls.rs), [protocol bounds](../../crates/arany-cli/src/protocol/tests.rs) |

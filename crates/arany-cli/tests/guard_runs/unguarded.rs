@@ -163,6 +163,9 @@ impl Host {
                     let approval = approval.unwrap();
                     match approval.unguarded.clone() {
                         Some(prompt) => {
+                            tokio::time::pause();
+                            tokio::time::advance(Duration::from_secs(3600)).await;
+                            tokio::time::resume();
                             prompts.push(prompt);
                             intents.push(approval.intent.clone());
                             approval.decide(replies.pop().expect("a scripted reply"));

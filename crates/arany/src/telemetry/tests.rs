@@ -727,7 +727,6 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
                 justification: "Run the failed command once".into(),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         let digest = intent.digest();
@@ -771,6 +770,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
                     limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                         .then_some(crate::tools::LimitCause::Resource),
                     output: "tool-output-canary".repeat(1024),
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             });

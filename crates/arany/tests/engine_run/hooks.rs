@@ -67,7 +67,6 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 cwd: String::new(),
             },
             limits: arany::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         let hook = Event::HookStarted {
@@ -103,6 +102,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 })),
                 intent, disposition: arany::ToolDisposition::Succeeded,
                 output: serde_json::json!({"exit_code":0,"stdout":serde_json::json!({"continue":false,"stopReason":reason}).to_string(),"stderr":"","stdout_total":{"bytes":serde_json::json!({"continue":false,"stopReason":reason}).to_string().len(),"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string(),
+                approval_cause: None,
                 cache_update: arany::CacheUpdate::NotApplicable, enforcement_cause: None, limit_cause: None,
             },
         },

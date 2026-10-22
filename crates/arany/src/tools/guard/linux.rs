@@ -954,7 +954,7 @@ pub(super) async fn execute_inner(
     let permit = tokio::select! {
         biased;
         () = cancellation.cancelled() => return Err(ToolError::Operation),
-        permit = super::admission::acquire(intent.id, intent.expires_at_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
+        permit = super::admission::acquire(intent.id, intent.limits.runtime_ms, |queued| runtime.queue_changed(intent.id, queued)) => permit?,
     };
     let capacity_started = tokio::time::Instant::now();
     let active_window = runtime.begin_active_action(capacity_started).await?;

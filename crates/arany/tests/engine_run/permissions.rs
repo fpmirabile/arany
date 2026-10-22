@@ -413,3 +413,189 @@ async fn a_read_denied_skill_resource_is_denied_before_any_guard_task() {
         "the resource never reached the model"
     );
 }
+
+#[tokio::test]
+async fn primary_approval_wait_preserves_identity_and_refuses_withdrawal_or_drift() {
+    use arany::permissions::PermissionSource;
+    for case in [
+        "late_allow",
+        "rule_change",
+        "decline",
+        "cancel",
+        "pause",
+        "disconnected",
+        "headless",
+        "drift",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
+        let state = temp.path().join("state");
+        let root = StateRoot::admit(&state).unwrap();
+        private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
+        private_file(
+            &state.join("permissions.json"),
+            br#"{"permissions":{"ask":["Read"]}}"#,
+        );
+        let engine = engine_support::open(
+            root,
+            EngineConfig {
+                guard_executable: Some(std::env::current_exe().unwrap()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(arany::ToolCall::Read {
+                path: "notes/facts.txt".into(),
+                offset: None,
+                limit: Some(32),
+            }),
+            arany::test_support::goals::finish_with("done"),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let cancellation = RunCancellation::new();
+        let steering = arany::RunSteering::new();
+        let mut input = request(&workspace, "Read the facts");
+        input.include_paths.clear();
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: (case != "headless").then_some(approvals),
+            cancellation: cancellation.clone(),
+            steering: Some(steering.clone()),
+            ..Default::default()
+        };
+        let answer = async {
+            if case == "headless" {
+                return None;
+            }
+            let approval = inbox.next().await.expect("pending approval");
+            let presented = approval.intent.clone();
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::time::resume();
+            assert_eq!(
+                provider.requests.lock().unwrap().len(),
+                1,
+                "{case}: idle wait made no call"
+            );
+            match case {
+                "cancel" => {
+                    cancellation.cancel();
+                    approval.decide(true);
+                }
+                "pause" => {
+                    steering.pause();
+                    drop(approval);
+                }
+                "disconnected" => drop(approval),
+                "drift" => {
+                    std::fs::rename(&workspace, temp.path().join("original")).unwrap();
+                    std::fs::create_dir(&workspace).unwrap();
+                    approval.decide(true);
+                }
+                "decline" => approval.decide(false),
+                "rule_change" => {
+                    private_file(
+                        &state.join("permissions.json"),
+                        br#"{"permissions":{"deny":["Read"]}}"#,
+                    );
+                    approval.decide(true);
+                }
+                "late_allow" => approval.decide(true),
+                _ => unreachable!(),
+            }
+            Some(presented)
+        };
+        let (result, presented) =
+            tokio::join!(run_with(&engine, &provider, input, controls), answer);
+        let outcome = result.unwrap();
+        let calls = provider.requests.lock().unwrap().len();
+        engine.close().await.unwrap();
+        let (events, view) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+        let run = view.runs.last().unwrap();
+        assert_eq!(run.tools.len(), 1, "{case}");
+        let tool = &run.tools[0];
+        if let Some(presented) = presented {
+            assert_eq!(tool.intent, presented, "{case}");
+        }
+        let observation = tool.observation.as_ref().unwrap();
+        assert_eq!(observation.intent, tool.intent);
+        assert_eq!(
+            observation.approval_cause,
+            match case {
+                "cancel" => Some(arany::ApprovalCause::Cancelled),
+                "pause" => Some(arany::ApprovalCause::Paused),
+                "disconnected" | "headless" => Some(arany::ApprovalCause::ChannelUnavailable),
+                "decline" => Some(arany::ApprovalCause::Declined),
+                "late_allow" | "rule_change" | "drift" => None,
+                _ => unreachable!(),
+            },
+            "{case}"
+        );
+        assert_eq!(
+            observation.attestation.is_some(),
+            matches!(case, "late_allow" | "rule_change"),
+            "{case}"
+        );
+        assert_eq!(
+            calls,
+            if matches!(case, "late_allow" | "rule_change") {
+                2
+            } else {
+                1
+            },
+            "{case}"
+        );
+        let (verdict_index, verdict) = events
+            .iter()
+            .enumerate()
+            .find_map(|(i, e)| match &e.event {
+                Event::ToolPermissionDecided { verdict, .. } => Some((i, verdict)),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            events[..verdict_index]
+                .iter()
+                .any(|e| matches!(e.event, Event::ToolStarted { .. }))
+        );
+        assert!(
+            events[verdict_index + 1..]
+                .iter()
+                .any(|e| matches!(e.event, Event::ToolFinished { .. }))
+        );
+        assert_eq!(
+            verdict.source,
+            if matches!(case, "headless" | "disconnected" | "cancel" | "pause") {
+                PermissionSource::UnavailableApproval
+            } else {
+                PermissionSource::Human
+            },
+            "{case}"
+        );
+        assert_eq!(
+            run.status,
+            if matches!(case, "late_allow" | "rule_change") {
+                RunStatus::Finished
+            } else if matches!(case, "cancel" | "pause") {
+                RunStatus::Cancelled
+            } else {
+                RunStatus::Failed
+            },
+            "{case}"
+        );
+        assert_eq!(
+            provider.requests.lock().unwrap().len(),
+            calls,
+            "replay never dispatches"
+        );
+        let active = events
+            .iter()
+            .find_map(|e| match e.event {
+                Event::RunFinished { active_ms, .. } => Some(active_ms),
+                _ => None,
+            })
+            .unwrap();
+        assert!(active < 60_000, "{case}: human wait was charged");
+    }
+}

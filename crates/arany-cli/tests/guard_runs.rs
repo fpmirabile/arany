@@ -2131,7 +2131,7 @@ mod goals {
     #[tokio::test]
     async fn approval_wait_is_not_charged_to_the_runs_active_time() {
         use std::os::unix::fs::PermissionsExt;
-        const APPROVAL_WAIT: Duration = Duration::from_secs(20);
+        const APPROVAL_WAIT: Duration = Duration::from_secs(3600);
         let temp = tempfile::tempdir().expect("temporary root");
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");

@@ -49,7 +49,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Approvals wait for the human](./approvals-wait/README.md) | `Ready`: A1 non-host primary approvals now; A2 transition-driven child wait accounting; A3 host expiry after #279 |
+| [Approvals wait for the human](./approvals-wait/README.md) | `In progress`: A1 non-host primary approvals; A2 transition-driven child wait accounting; A3 host expiry after #279 |
 | [Rewind confirmation](./rewind-confirmation/README.md) | `Ready`: R1 live preview confirmation without wall-clock expiry, after approvals A1 |
 | [Budget feedback](./budget-feedback/README.md) | `Ready`: G1 reproduce/classify budget refusal, persist its reservation detail and render deterministic explanations; independent of approvals |
 | [Tool failure continuation](./failure-feedback/README.md) | `Ready`: C1 primary failure/decline results and sanitized continuation after approvals A1; C2 delegated feedback |

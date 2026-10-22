@@ -432,7 +432,7 @@ fn every_conformance_message_validates_against_the_schema() {
         "item/fileChange/requestApproval",
         "item/tool/requestApproval",
     ] {
-        let params = json!({"threadId": thread_id, "turnId": run_id, "itemId": "tool", "startedAtMs": 1, "expiresAtMs": 2, "intent": {"expires_at_ms": 2}, "lines": ["Allow read?"]});
+        let params = json!({"threadId": thread_id, "turnId": run_id, "itemId": "tool", "startedAtMs": 1, "intent": {}, "lines": ["Allow read?"]});
         validate(&schema, &schema["serverRequests"][name]["params"], &params);
         for decision in ["accept", "decline", "cancel"] {
             validate(

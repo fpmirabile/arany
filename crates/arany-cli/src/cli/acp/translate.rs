@@ -1,18 +1,14 @@
 use super::{Config, tools, wire};
 use crate::cli::serve::server::ClientMessage;
-use arany::{RunId, SessionId, now_ms};
+use arany::{RunId, SessionId};
 use arany_cli::protocol::{methods::*, rpc::*};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
-    time::Duration,
 };
-use tokio::{
-    sync::{Notify, mpsc},
-    time::Instant,
-};
+use tokio::sync::{Notify, mpsc};
 
 pub(super) type Shared = Arc<Mutex<State>>;
 
@@ -41,8 +37,6 @@ struct Session {
 struct Permission {
     id: RequestId,
     serve_id: RequestId,
-    deadline: Instant,
-    expires_at_ms: u64,
     item_id: String,
     sent: bool,
 }
@@ -608,16 +602,9 @@ pub(super) async fn output(
         if let Some(withdrawal) = withdraw_permission(&state, None, false) {
             emit(&outbound, withdrawal).await?;
         }
-        let (deadline, changed) = {
-            let state = state.lock().expect("translator state");
-            (
-                state.permission.as_ref().map(|p| p.deadline),
-                state.changed.clone(),
-            )
-        };
+        let changed = state.lock().expect("translator state").changed.clone();
         let message = tokio::select! { biased;
             () = changed.notified() => continue,
-            () = async { tokio::time::sleep_until(deadline.expect("permission deadline")).await }, if deadline.is_some() => continue,
             message = inbound.recv() => message,
         };
         let Some(message) = message else { break };
@@ -1438,12 +1425,25 @@ async fn approval_response(
     id: RequestId,
     decision: &str,
 ) -> Result<(), String> {
-    serve
-        .send(ClientMessage::Message(Message::Response(Response {
+    let message = if decision == "unavailable" {
+        Message::Error(ErrorResponse {
+            jsonrpc: Default::default(),
+            id: Some(id),
+            error: ErrorObject {
+                code: -32603,
+                message: "Approval channel unavailable".into(),
+                data: None,
+            },
+        })
+    } else {
+        Message::Response(Response {
             jsonrpc: Default::default(),
             id,
             result: json!({"decision":decision}),
-        })))
+        })
+    };
+    serve
+        .send(ClientMessage::Message(message))
         .await
         .map_err(|_| "serve input closed".into())
 }
@@ -1460,17 +1460,18 @@ async fn permission_reply(
         {
             "accept"
         }
+        Some(outcome) if outcome["outcome"] == "selected" && outcome["optionId"] == "deny" => {
+            "decline"
+        }
         Some(outcome) if outcome["outcome"] == "cancelled" => "cancel",
-        _ => "decline",
+        _ => "unavailable",
     };
     let pending = {
         let mut state = state.lock().expect("translator state");
         if state.active.as_ref().is_some_and(|a| a.cancelled) {
             return Ok(());
         }
-        let pending = state.permission.take_if(|p| {
-            p.id == id && p.sent && Instant::now() < p.deadline && now_ms() < p.expires_at_ms
-        });
+        let pending = state.permission.take_if(|p| p.id == id && p.sent);
         if decision == "cancel"
             && pending.is_some()
             && let Some(active) = &mut state.active
@@ -1488,10 +1489,9 @@ async fn permission_reply(
 fn withdraw_permission(state: &Shared, id: Option<&RequestId>, force: bool) -> Option<Value> {
     let mut state = state.lock().expect("translator state");
     let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
-    let pending = state.permission.take_if(|p| {
-        id.is_none_or(|id| *id == p.serve_id)
-            && (force || cancelled || Instant::now() >= p.deadline || now_ms() >= p.expires_at_ms)
-    })?;
+    let pending = state
+        .permission
+        .take_if(|p| id.is_none_or(|id| *id == p.serve_id) && (force || cancelled))?;
     pending.sent.then(
         || json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":pending.id}}),
     )
@@ -1504,10 +1504,7 @@ async fn permission_request(
     request: Request,
 ) -> Result<(), String> {
     let Ok(params) = parse::<ApprovalParams>(request.params) else {
-        return approval_response(serve, request.id, "decline").await;
-    };
-    let Ok(expires_at_ms) = u64::try_from(params.expires_at_ms) else {
-        return approval_response(serve, request.id, "decline").await;
+        return approval_response(serve, request.id, "unavailable").await;
     };
     let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
         .map_err(|_| "invalid serve approval intent")?;
@@ -1519,8 +1516,7 @@ async fn permission_request(
                 && !a.cancelled
                 && a.completion.is_none()
         });
-        let remaining = expires_at_ms.saturating_sub(now_ms());
-        if !valid || state.permission.is_some() || remaining == 0 || intent.call.is_unguarded() {
+        if !valid || state.permission.is_some() || intent.call.is_unguarded() {
             None
         } else {
             let cwd = &state
@@ -1550,26 +1546,22 @@ async fn permission_request(
             if encode_line(&message).is_err() {
                 None
             } else {
-                let deadline = Instant::now() + Duration::from_millis(remaining);
                 state.permission = Some(Permission {
                     id,
                     serve_id: request.id.clone(),
-                    deadline,
-                    expires_at_ms,
                     item_id: params.item_id.clone(),
                     sent: false,
                 });
-                Some((message, deadline, state.changed.clone()))
+                Some((message, state.changed.clone()))
             }
         }
     };
-    let Some((message, deadline, changed)) = prepared else {
-        return approval_response(serve, request.id, "decline").await;
+    let Some((message, changed)) = prepared else {
+        return approval_response(serve, request.id, "unavailable").await;
     };
     loop {
         let permit = tokio::select! { biased;
             () = changed.notified() => None,
-            () = tokio::time::sleep_until(deadline) => None,
             permit = output.reserve() => Some(permit.map_err(|_| "ACP output closed")?),
         };
         let mut state = state.lock().expect("translator state");
@@ -1577,7 +1569,7 @@ async fn permission_request(
         let live = state
             .permission
             .as_ref()
-            .is_some_and(|p| Instant::now() < p.deadline && now_ms() < p.expires_at_ms);
+            .is_some_and(|p| p.serve_id == request.id);
         if cancelled || !live {
             return Ok(());
         }

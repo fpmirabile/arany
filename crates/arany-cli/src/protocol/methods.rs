@@ -10,7 +10,7 @@ pub const CAPABILITIES: &[&str] = &[
     "turns_v1",
     "items_v1",
     "interrupt_receipt_v1",
-    "approvals_v1",
+    "approvals_v2",
     "events_subscribe_v1",
     "receipt_get_v1",
     "thread_fork_v1",
@@ -810,7 +810,6 @@ pub struct ApprovalParams {
     pub turn_id: RunId,
     pub item_id: String,
     pub started_at_ms: i64,
-    pub expires_at_ms: i64,
     #[schemars(with = "serde_json::Map<String, Value>")]
     pub intent: Value,
     pub lines: Vec<String>,

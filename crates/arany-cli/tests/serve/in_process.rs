@@ -1291,7 +1291,6 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             cwd: ".".into(),
         },
         limits: arany::ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     for (disposition, status) in [
@@ -1311,6 +1310,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
                 .then_some(arany::LimitCause::Resource),
             output: "bounded\noutput".into(),
             attestation: None,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         let item =
@@ -1329,6 +1329,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         limit_cause: None,
         output: String::new(),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert_eq!(
@@ -1477,7 +1478,7 @@ enum ApprovalCase {
     Cancel,
     Interrupt,
     Eof,
-    Timeout,
+    LateAccept,
     Duplicate,
     Invalid,
     ClientError,
@@ -1519,9 +1520,9 @@ async fn approval_cancel_interrupt_and_eof_deny() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn approval_timeout_denies_and_ignores_a_late_response() {
+async fn approval_remains_answerable_after_the_former_deadline() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Timeout).await;
+    approval_scenario(ApprovalCase::LateAccept).await;
 }
 
 #[cfg(unix)]
@@ -1533,7 +1534,7 @@ async fn approval_duplicate_and_unknown_responses_cannot_resolve_another_intent(
 
 #[cfg(unix)]
 #[tokio::test]
-async fn approval_expires_and_journal_finishes_while_outbound_is_full() {
+async fn approval_cancel_journals_while_outbound_is_full() {
     let _deadline = deadline();
     approval_scenario(ApprovalCase::Backpressure).await;
 }
@@ -1612,7 +1613,7 @@ async fn approval_scenario(case: ApprovalCase) {
             next(&mut output).await["result"]["capabilities"]
                 .as_array()
                 .unwrap()
-                .contains(&json!("approvals_v1"))
+                .contains(&json!("approvals_v2"))
         );
         let start = json!({"cwd":workspace,"provider":"openai","model":"gpt-5.4","tools":true,"permissionMode":"auto","collaboration":"single"});
         input.send(request(2, "thread/start", start)).await.unwrap();
@@ -1637,6 +1638,9 @@ async fn approval_scenario(case: ApprovalCase) {
                 }
             }
             tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::time::resume();
+            input.send(ClientMessage::Eof).await.unwrap();
             let mut denied = false;
             loop {
                 if let Some(arany::Tapped::Committed(event)) = events.next().await {
@@ -1650,7 +1654,6 @@ async fn approval_scenario(case: ApprovalCase) {
                     }
                 }
             }
-            tokio::time::resume();
             assert_eq!(stalled.capacity(), 0);
         } else {
             let mut approval = None;
@@ -1671,7 +1674,8 @@ async fn approval_scenario(case: ApprovalCase) {
             assert_eq!(params["threadId"], thread);
             assert_eq!(params["turnId"], params["intent"]["run_id"]);
             assert_eq!(params["itemId"], params["intent"]["id"]);
-            assert_eq!(params["expiresAtMs"], params["intent"]["expires_at_ms"]);
+            assert!(params.get("expiresAtMs").is_none());
+            assert!(params["intent"].get("expires_at_ms").is_none());
             let intent: arany::EffectIntent =
                 serde_json::from_value(params["intent"].clone()).unwrap();
             assert_eq!(
@@ -1694,13 +1698,22 @@ async fn approval_scenario(case: ApprovalCase) {
                     ))
                     .await
                     .unwrap(),
-                ApprovalCase::Cancel => input
-                    .send(decision(
-                        approval["id"].clone(),
-                        json!({"decision":"cancel"}),
-                    ))
-                    .await
-                    .unwrap(),
+                ApprovalCase::Cancel => {
+                    input
+                        .send(decision(
+                            approval["id"].clone(),
+                            json!({"decision":"cancel"}),
+                        ))
+                        .await
+                        .unwrap();
+                    input
+                        .send(decision(
+                            approval["id"].clone(),
+                            json!({"decision":"accept"}),
+                        ))
+                        .await
+                        .unwrap();
+                }
                 ApprovalCase::Interrupt => input
                     .send(request(
                         5,
@@ -1710,25 +1723,10 @@ async fn approval_scenario(case: ApprovalCase) {
                     .await
                     .unwrap(),
                 ApprovalCase::Eof => input.send(ClientMessage::Eof).await.unwrap(),
-                ApprovalCase::Timeout => {
+                ApprovalCase::LateAccept => {
                     tokio::time::pause();
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .as_millis();
-                    let remaining = u128::from(intent.expires_at_ms).saturating_sub(now);
-                    tokio::time::advance(Duration::from_millis(
-                        u64::try_from(remaining).unwrap() + 1,
-                    ))
-                    .await;
+                    tokio::time::advance(Duration::from_secs(3600)).await;
                     tokio::time::resume();
-                    loop {
-                        if let Some(arany::Tapped::Committed(event)) = events.next().await
-                            && matches!(event.event, Event::ToolPermissionDecided { .. })
-                        {
-                            break;
-                        }
-                    }
                     input
                         .send(decision(
                             approval["id"].clone(),
@@ -1804,7 +1802,10 @@ async fn approval_scenario(case: ApprovalCase) {
             if message["method"] == "turn/completed" {
                 let interrupted = matches!(
                     case,
-                    ApprovalCase::Cancel | ApprovalCase::Interrupt | ApprovalCase::Eof
+                    ApprovalCase::Cancel
+                        | ApprovalCase::Interrupt
+                        | ApprovalCase::Eof
+                        | ApprovalCase::Backpressure
                 );
                 assert_eq!(
                     message["params"]["turn"]["status"] == "interrupted",
@@ -1828,7 +1829,7 @@ async fn approval_scenario(case: ApprovalCase) {
                 .await
                 .unwrap();
         }
-        if case != ApprovalCase::Eof {
+        if !matches!(case, ApprovalCase::Eof | ApprovalCase::Backpressure) {
             input.send(ClientMessage::Eof).await.unwrap();
         }
         (serde_json::from_value(thread).unwrap(), wire_approval)
@@ -1858,7 +1859,10 @@ async fn approval_scenario(case: ApprovalCase) {
                 .flat_map(|agent| agent.tools.iter()),
         )
         .collect();
-    let accepted = matches!(case, ApprovalCase::Accept | ApprovalCase::Duplicate);
+    let accepted = matches!(
+        case,
+        ApprovalCase::Accept | ApprovalCase::Duplicate | ApprovalCase::LateAccept
+    );
     assert_eq!(
         tools.len(),
         if case == ApprovalCase::Duplicate {
@@ -1880,8 +1884,34 @@ async fn approval_scenario(case: ApprovalCase) {
         }
     );
     for tool in &tools {
+        assert_eq!(
+            tool.observation.as_ref().unwrap().approval_cause,
+            match case {
+                ApprovalCase::Decline => Some(arany::ApprovalCause::Declined),
+                ApprovalCase::Cancel
+                | ApprovalCase::Interrupt
+                | ApprovalCase::Eof
+                | ApprovalCase::Backpressure => Some(arany::ApprovalCause::Cancelled),
+                ApprovalCase::Invalid | ApprovalCase::ClientError =>
+                    Some(arany::ApprovalCause::ChannelUnavailable),
+                ApprovalCase::Accept | ApprovalCase::LateAccept | ApprovalCase::Duplicate => None,
+            }
+        );
         let verdict = tool.permission_verdict.as_ref().unwrap();
-        assert_eq!(verdict.source, arany::permissions::PermissionSource::Human);
+        assert_eq!(
+            verdict.source,
+            if matches!(
+                case,
+                ApprovalCase::Accept
+                    | ApprovalCase::LateAccept
+                    | ApprovalCase::Decline
+                    | ApprovalCase::Duplicate
+            ) {
+                arany::permissions::PermissionSource::Human
+            } else {
+                arany::permissions::PermissionSource::UnavailableApproval
+            }
+        );
         assert_eq!(
             verdict.approved,
             tool.observation.as_ref().unwrap().disposition == arany::ToolDisposition::Succeeded

@@ -509,6 +509,7 @@ impl RunLoop<'_> {
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
                     attestation: None,
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                     enforcement_cause: None,
                     limit_cause: None,
@@ -523,6 +524,7 @@ impl RunLoop<'_> {
                     disposition: ToolDisposition::Failed,
                     output: error.to_string(),
                     attestation: None,
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                     enforcement_cause: None,
                     limit_cause: None,
@@ -546,6 +548,7 @@ impl RunLoop<'_> {
                 intent_digest: intent.digest(),
                 data,
             }),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -1099,8 +1102,6 @@ impl RunLoop<'_> {
         if intent.limits.runtime_ms < 1_000 {
             return Ok(None);
         }
-        intent.expires_at_ms =
-            crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
         self.shape_worker_intent(&mut intent, child.agent_run_id)?;
         let observation = self
             .run_intent(
@@ -1144,7 +1145,7 @@ impl RunLoop<'_> {
                 data,
             },
         };
-        let Some(mut intent) = self.primary_intent(runtime, call.clone())? else {
+        let Some(intent) = self.primary_intent(runtime, call.clone())? else {
             self.record_capacity_stop().await?;
             self.discard_worker(
                 id,
@@ -1155,9 +1156,6 @@ impl RunLoop<'_> {
             .await?;
             return Ok(false);
         };
-        intent.expires_at_ms = intent
-            .expires_at_ms
-            .saturating_add(self.hook_admission(runtime, &call, &call).1);
         let tool_id = intent.id;
         let result = self
             .run_intent(

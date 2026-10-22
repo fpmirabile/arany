@@ -113,16 +113,19 @@ enum AskSite {
     },
     Delegated {
         deadline: Instant,
+        approval_deadline: Instant,
     },
 }
 
 struct AskOptions {
+    deadline: Instant,
     unguarded_prompt: Option<UnguardedPrompt>,
     allow_auto_edits: bool,
     remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
 }
 
 struct Resolution {
+    timed_out: bool,
     approved: bool,
     source: PermissionSource,
     active_time_exhausted: bool,
@@ -472,8 +475,6 @@ impl RunLoop<'_> {
                     if intent.limits.runtime_ms < 1_000 {
                         return Ok(Err(SizingRefusal::DelegationDeadline));
                     }
-                    intent.expires_at_ms =
-                        crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
                 }
                 Some(intent)
             }
@@ -481,10 +482,6 @@ impl RunLoop<'_> {
         let Some(mut intent) = intent else {
             return Ok(Err(SizingRefusal::ActiveTime));
         };
-        // The PreToolUse hooks run before dispatch, so the authorization outlives them.
-        intent.expires_at_ms = intent
-            .expires_at_ms
-            .saturating_add(self.hook_admission(runtime, &intent.call, post_call).1);
         let integration = (matches!(intent.call, ToolCall::Command { .. })
             && matches!(intent.target, crate::worker::EffectTarget::Workspace))
         .then(|| ToolCall::ApplyChangeset {
@@ -659,8 +656,6 @@ impl RunLoop<'_> {
         } else {
             0
         };
-        intent.expires_at_ms =
-            crate::tools::now_ms().saturating_add(u64::from(intent.limits.runtime_ms));
         Ok(Some(intent))
     }
 
@@ -680,7 +675,7 @@ impl RunLoop<'_> {
                     + STORE_ACTION_OVERHEAD,
             );
         let available = available.saturating_sub(self.hook_time(runtime, &intent.call, available));
-        // Half for the Guard capacity wait (it ends at `expires_at_ms`), half for the run itself.
+        // Half for the post-approval Guard capacity wait, half for the run itself.
         let runtime_ms = intent
             .limits
             .runtime_ms
@@ -689,7 +684,6 @@ impl RunLoop<'_> {
             return None;
         }
         intent.limits.runtime_ms = runtime_ms;
-        intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
         Some(intent)
     }
 
@@ -735,6 +729,8 @@ impl RunLoop<'_> {
         {
             return Ok(Err(refusal.into()));
         }
+        let approval_deadline = Instant::now()
+            + Duration::from_millis(u64::from(intent.limits.runtime_ms).saturating_add(pre_ms));
         let agent_run_id = intent.agent_run_id;
         // A researcher's Tool runs inside its delegation's reservation.
         let action_ms = match grant {
@@ -761,7 +757,14 @@ impl RunLoop<'_> {
         let mut narrowed = None;
         let mut candidate = None;
         let verdict = match self
-            .before_dispatch(grant, runtime, intent, permission, narrowable)
+            .before_dispatch(
+                grant,
+                runtime,
+                intent,
+                permission,
+                narrowable,
+                approval_deadline,
+            )
             .await
         {
             Ok(verdict) => verdict,
@@ -1099,6 +1102,7 @@ impl RunLoop<'_> {
         intent: EffectIntent,
         permission: Permission,
         narrowable: bool,
+        approval_deadline: Instant,
     ) -> Result<Verdict, EngineError> {
         let config = runtime.permissions();
         let site = grant.site();
@@ -1163,6 +1167,7 @@ impl RunLoop<'_> {
                     &intent,
                     mode,
                     AskOptions {
+                        deadline: approval_deadline,
                         unguarded_prompt: facts.unguarded_prompt(),
                         allow_auto_edits: allow_auto_edits
                             && hooks.restriction != Some(Decision::Ask),
@@ -1378,6 +1383,7 @@ impl RunLoop<'_> {
                     chain,
                     AskSite::Delegated {
                         deadline: *deadline,
+                        approval_deadline: options.deadline,
                     },
                 )
                 .await
@@ -1417,6 +1423,13 @@ impl RunLoop<'_> {
         }
     }
 
+    async fn approval_paused(&self) {
+        match self.controls.steering.as_ref() {
+            Some(steering) => steering.paused().await,
+            None => std::future::pending().await,
+        }
+    }
+
     async fn human_reply(
         &self,
         approvals: &crate::tools::ToolApprovals,
@@ -1426,20 +1439,16 @@ impl RunLoop<'_> {
         remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
     ) -> ApprovalReply {
         let mut cancellation = self.controls.cancellation.clone();
-        let expires = intent.expires_at_ms.saturating_sub(crate::tools::now_ms());
         let reply = tokio::select! {
             biased;
-            () = cancellation.cancelled() => ApprovalReply::Deny,
-            result = tokio::time::timeout(Duration::from_millis(expires), async {
+            () = cancellation.cancelled() => ApprovalReply::Unavailable,
+            () = self.approval_paused() => ApprovalReply::Unavailable,
+            reply = async {
                 match prompt.clone() {
                     Some(prompt) => approvals.ask_unguarded(intent, prompt).await,
-                    None => {
-                        approvals
-                            .ask_local(intent, allow_auto_edits, remember_prefix)
-                            .await
-                    }
+                    None => approvals.ask_local(intent, allow_auto_edits, remember_prefix).await,
                 }
-            }) => result.unwrap_or(ApprovalReply::Deny),
+            } => reply,
         };
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         match reply {
@@ -1742,6 +1751,7 @@ impl RunLoop<'_> {
     ) -> Result<Resolution, EngineError> {
         let initial_mode = self.terminal_mode();
         let mut resolution = Resolution {
+            timed_out: false,
             approved: false,
             source: PermissionSource::UnavailableApproval,
             active_time_exhausted: false,
@@ -1752,7 +1762,7 @@ impl RunLoop<'_> {
                 Resolver::AiReview { objective } => {
                     let review = match &site {
                         AskSite::Primary { .. } => self.review_tool(objective, intent, None).await,
-                        AskSite::Delegated { deadline } => {
+                        AskSite::Delegated { deadline, .. } => {
                             self.review_tool(objective, intent, Some(*deadline)).await
                         }
                     };
@@ -1791,31 +1801,40 @@ impl RunLoop<'_> {
                     }
                 }
                 Resolver::Human => match &site {
-                    AskSite::Delegated { deadline } => {
+                    AskSite::Delegated {
+                        deadline,
+                        approval_deadline,
+                    } => {
                         let Some(approvals) = self.controls.approvals else {
                             return Ok(resolution);
                         };
                         let mut cancellation = self.controls.cancellation.clone();
-                        let expires = Duration::from_millis(
-                            intent.expires_at_ms.saturating_sub(crate::tools::now_ms()),
-                        );
                         // A sibling Provider call keeps the shared delegation interval active.
                         let idle = self.ledger().providers_idle()?;
                         let started = Instant::now();
-                        let (approved, source) = tokio::select! {
+                        let (reply, timed_out) = tokio::select! {
                             biased;
-                            () = cancellation.cancelled() => (false, PermissionSource::UnavailableApproval),
-                            result = tokio::time::timeout_at((*deadline).min(Instant::now() + expires), approvals.ask(intent)) => {
-                                (result.unwrap_or(false), PermissionSource::Human)
-                            }
+                            () = cancellation.cancelled() => (ApprovalReply::Unavailable, false),
+                            () = self.approval_paused() => (ApprovalReply::Unavailable, false),
+                            () = tokio::time::sleep_until((*deadline).min(*approval_deadline)) => (ApprovalReply::Unavailable, true),
+                            reply = approvals.ask_local(intent, false, None) => (reply, false),
                         };
                         if idle {
                             self.ledger().exclude_idle_approval(started.elapsed())?;
                         }
-                        resolution.approved = approved
-                            && !self.pause_requested()
+                        resolution.approved = matches!(
+                            reply,
+                            ApprovalReply::AllowOnce
+                                | ApprovalReply::AllowAlwaysInProject
+                                | ApprovalReply::AllowPrefixInFolder
+                        ) && !self.pause_requested()
                             && !self.controls.cancellation.is_cancelled();
-                        resolution.source = source;
+                        resolution.source = if reply == ApprovalReply::Unavailable {
+                            PermissionSource::UnavailableApproval
+                        } else {
+                            PermissionSource::Human
+                        };
+                        resolution.timed_out = timed_out;
                     }
                     AskSite::Primary {
                         unguarded_prompt,
@@ -1837,8 +1856,19 @@ impl RunLoop<'_> {
                                             *remember_prefix,
                                         )
                                         .await;
-                                    resolution.source = PermissionSource::Human;
-                                    resolution.approved = reply != ApprovalReply::Deny;
+                                    resolution.source = if reply == ApprovalReply::Unavailable {
+                                        PermissionSource::UnavailableApproval
+                                    } else {
+                                        PermissionSource::Human
+                                    };
+                                    resolution.approved =
+                                        matches!(
+                                            reply,
+                                            ApprovalReply::AllowOnce
+                                                | ApprovalReply::AllowAlwaysInProject
+                                                | ApprovalReply::AllowPrefixInFolder
+                                        ) && !self.controls.cancellation.is_cancelled()
+                                            && !self.pause_requested();
                                     // A remembered rule is saved only after this human verdict is committed.
                                     resolution.save = match reply {
                                         ApprovalReply::AllowAlwaysInProject => {
@@ -1847,7 +1877,9 @@ impl RunLoop<'_> {
                                         ApprovalReply::AllowPrefixInFolder => {
                                             remember_prefix.map(RuleSave::Prefix)
                                         }
-                                        ApprovalReply::Deny | ApprovalReply::AllowOnce => None,
+                                        ApprovalReply::Deny
+                                        | ApprovalReply::Unavailable
+                                        | ApprovalReply::AllowOnce => None,
                                     };
                                     let resume_at = resolution.approved.then(Instant::now);
                                     self.settle_active_pause(pause, resume_at)?;
@@ -2127,11 +2159,14 @@ pub(super) enum NotDispatched {
     OutsidePlan,
     ActiveTime,
     Paused,
+    Cancelled,
     TokenBudget,
     UnsavedRule,
     SaveUnconfirmed,
     UnguardedNeedsHuman,
     ApprovalRefused,
+    ApprovalUnavailable,
+    ApprovalTimedOut,
 }
 
 #[derive(Clone, Copy)]
@@ -2151,10 +2186,13 @@ impl NotDispatched {
             | Self::UnguardedNotOffered(_)
             | Self::OutsidePlan
             | Self::Paused
+            | Self::Cancelled
             | Self::TokenBudget
             | Self::UnsavedRule
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
+            | Self::ApprovalUnavailable
+            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => ActiveTimeEffect::Recheck,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(
@@ -2180,10 +2218,13 @@ impl NotDispatched {
             | Self::OutsidePlan
             | Self::ActiveTime
             | Self::Paused
+            | Self::Cancelled
             | Self::TokenBudget
             | Self::UnsavedRule
             | Self::SaveUnconfirmed
             | Self::UnguardedNeedsHuman
+            | Self::ApprovalUnavailable
+            | Self::ApprovalTimedOut
             | Self::ApprovalRefused => true,
             Self::TimeoutLimit { .. }
             | Self::HookDenied(_)
@@ -2372,10 +2413,13 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             | NotDispatched::OutsidePlan
             | NotDispatched::ActiveTime
             | NotDispatched::Paused
+            | NotDispatched::Cancelled
             | NotDispatched::TokenBudget
             | NotDispatched::UnsavedRule
             | NotDispatched::SaveUnconfirmed
             | NotDispatched::UnguardedNeedsHuman
+            | NotDispatched::ApprovalUnavailable
+            | NotDispatched::ApprovalTimedOut
             | NotDispatched::ApprovalRefused => {
                 (facts.permission.decision, facts.unresolved_source())
             }
@@ -2409,8 +2453,27 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
         ))
     };
     let outcome = match facts.site {
+        _ if after.cancelled => refused(if after.paused {
+            NotDispatched::Paused
+        } else {
+            NotDispatched::Cancelled
+        }),
+        _ if after.paused && after.approval.is_some() && !active_time_exhausted => {
+            refused(NotDispatched::Paused)
+        }
+        _ if after
+            .approval
+            .as_ref()
+            .is_some_and(|approval| approval.timed_out) =>
+        {
+            refused(NotDispatched::ApprovalTimedOut)
+        }
         DispatchSite::Researcher if approved => Ok(Dispatch::Direct),
-        DispatchSite::Researcher => refused(NotDispatched::ApprovalRefused),
+        DispatchSite::Researcher => refused(if source == PermissionSource::UnavailableApproval {
+            NotDispatched::ApprovalUnavailable
+        } else {
+            NotDispatched::ApprovalRefused
+        }),
         DispatchSite::Primary if active_time_exhausted => Err(refuse(
             NotDispatched::ActiveTime,
             Some(StopCause::ActiveTime),
@@ -2435,7 +2498,11 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
         {
             refused(NotDispatched::UnguardedNeedsHuman)
         }
-        DispatchSite::Primary => refused(NotDispatched::ApprovalRefused),
+        DispatchSite::Primary => refused(if source == PermissionSource::UnavailableApproval {
+            NotDispatched::ApprovalUnavailable
+        } else {
+            NotDispatched::ApprovalRefused
+        }),
     };
     DispatchDecision {
         outcome,
@@ -2484,10 +2551,13 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         | NotDispatched::OutsidePlan
         | NotDispatched::ActiveTime
         | NotDispatched::Paused
+        | NotDispatched::Cancelled
         | NotDispatched::TokenBudget
         | NotDispatched::UnsavedRule
         | NotDispatched::SaveUnconfirmed
         | NotDispatched::UnguardedNeedsHuman
+        | NotDispatched::ApprovalUnavailable
+        | NotDispatched::ApprovalTimedOut
         | NotDispatched::ApprovalRefused => None,
     };
     let (disposition, output) = match reason {
@@ -2542,6 +2612,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             ToolDisposition::Denied,
             "The effect is outside the active Goal plan; no operation was dispatched".into(),
         ),
+        NotDispatched::Cancelled => (
+            ToolDisposition::Denied,
+            "Run cancelled before this operation; no operation was dispatched".into(),
+        ),
         NotDispatched::Paused => (
             ToolDisposition::Denied,
             "Goal paused before this operation; no operation was dispatched".into(),
@@ -2554,12 +2628,44 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             ToolDisposition::Denied,
             "Unguarded re-run needs interactive approval or an exact-command rule for this project; no operation was dispatched".into(),
         ),
+        NotDispatched::ApprovalUnavailable => (
+            ToolDisposition::Denied,
+            "Approval channel unavailable; no operation was dispatched".into(),
+        ),
+        NotDispatched::ApprovalTimedOut => (
+            ToolDisposition::Denied,
+            "Child approval wait timed out; no operation was dispatched".into(),
+        ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
             "Approval was not granted; no operation was dispatched".into(),
         ),
     };
     let mut observation = undispatched(intent, disposition, output);
+    observation.approval_cause = match reason {
+        NotDispatched::Cancelled => Some(crate::tools::ApprovalCause::Cancelled),
+        NotDispatched::Paused => Some(crate::tools::ApprovalCause::Paused),
+        NotDispatched::ApprovalUnavailable
+        | NotDispatched::HumanOnlyUnavailable
+        | NotDispatched::UnguardedNeedsHuman => {
+            Some(crate::tools::ApprovalCause::ChannelUnavailable)
+        }
+        NotDispatched::ApprovalTimedOut => Some(crate::tools::ApprovalCause::ChildTimeout),
+        NotDispatched::ApprovalRefused => Some(crate::tools::ApprovalCause::Declined),
+        NotDispatched::TimeoutLimit { .. }
+        | NotDispatched::HookDenied(_)
+        | NotDispatched::DelegationDeadline
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::ModeDenied
+        | NotDispatched::HookFailureAfterClassify
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed => None,
+    };
     if timed.is_some() {
         observation.limit_cause = timed;
     }
@@ -2611,6 +2717,7 @@ fn undispatched(
         disposition,
         output: output.into(),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -3245,8 +3352,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn human_wait_and_dispatch_pins_do_not_consult_the_system_clock() {
+        let step = include_str!("step.rs");
+        let tools = include_str!("../../tools.rs");
+        let guard = include_str!("../../tools/guard.rs");
+        for (source, start, end) in [
+            (
+                step,
+                "    async fn human_reply(",
+                "    async fn dispatch_primary(",
+            ),
+            (
+                step,
+                "    async fn resolve_ask(",
+                "    async fn review_tool(",
+            ),
+            (
+                step,
+                "    async fn dispatch_primary(",
+                "    async fn dispatch_guard(",
+            ),
+            (tools, "    async fn run_unguarded(", "    fn pinned_root("),
+            (tools, "    fn pinned_root(", "    async fn run_in_process("),
+            (guard, "fn validate_task(", "fn restore_cache("),
+        ] {
+            let body = source
+                .split_once(start)
+                .unwrap()
+                .1
+                .split_once(end)
+                .unwrap()
+                .0;
+            for clock in ["now_ms(", "SystemTime", "expires_at_ms"] {
+                assert!(!body.contains(clock), "{start} reintroduced {clock}");
+            }
+        }
+    }
+
     fn resolution(approved: bool, source: PermissionSource) -> Resolution {
         Resolution {
+            timed_out: false,
             approved,
             source,
             active_time_exhausted: false,
@@ -3390,14 +3536,16 @@ mod tests {
             (decide(Primary, asks(Auto), &none, &[TokensSpentAfterAsk], ok(true, S::AiReview)), Some(Auto), no(N::TokenBudget, None), ask_, S::AiReview),
             (decide(Primary, asks(Request), &none, &[Paused], exhausted_ask), Some(Request), no(N::ActiveTime, Some(StopCause::ActiveTime)), ask_, S::Human),
             (decide(Primary, asks(Request), &none, &[Offered, Batch], ok(false, S::UnavailableApproval)), Some(Request), no(N::UnguardedNeedsHuman, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
-            (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::Cancelled)), ask_, S::Human),
-            (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalRefused, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[Offered, Cancelled], ok(false, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
+            (decide(Primary, asks(Auto), &none, &[Batch], ok(false, S::UnavailableApproval)), Some(Auto), no(N::ApprovalUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[Cancelled], ok(true, S::Human)), Some(Request), no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::Human),
             // A researcher after its Ask, or where it would have been.
             (decide(Researcher, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Researcher, asks(Auto), &none, &[], ok(true, S::AiReview)), Some(Auto), Ok(Dispatch::Direct), ask_, S::AiReview),
-            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalRefused, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
-            (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::ApprovalRefused, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
-            (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::ApprovalRefused, Some(StopCause::Paused)), ask_, S::Human),
+            (decide(Researcher, asks(Request), &none, &[], Some(Resolution { timed_out: true, ..resolution(false, S::UnavailableApproval) })), Some(Request), no(N::ApprovalTimedOut, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Blocked, Deadline], None), None, no(N::ApprovalUnavailable, Some(StopCause::DelegationDeadline)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[TokensSpent, Cancelled], None), None, no(N::Cancelled, Some(StopCause::Cancelled)), ask_, S::UnavailableApproval),
+            (decide(Researcher, asks(Request), &none, &[Paused, Cancelled], ok(false, S::Human)), Some(Request), no(N::Paused, Some(StopCause::Paused)), ask_, S::Human),
         ];
         for (index, ((asked, decided), asks, outcome, decision, source)) in
             rows.into_iter().enumerate()

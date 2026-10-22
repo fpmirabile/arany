@@ -11,7 +11,31 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 17] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 21] = [
+    (
+        "ToolStarted",
+        15,
+        GLOB_TOOLSTARTED,
+        include_str!("toolstarted-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        21,
+        GLOB_TOOLFINISHED,
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        5,
+        GLOB_HOOKSTARTED,
+        include_str!("hookstarted-without-expiry.json"),
+    ),
+    (
+        "HookFinished",
+        10,
+        GLOB_HOOKFINISHED,
+        include_str!("hookfinished-without-expiry.json"),
+    ),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -1514,5 +1538,91 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
         assert!(!path.join(DIR).exists(), "{case}");
         assert!(!path.join("archive").exists(), "{case}");
         replays(&root, &sessions);
+    }
+}
+
+#[test]
+fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() {
+    for (name, fixture) in [
+        ("worker", crate::session::worker_protocol_fixture()),
+        ("command", crate::session::worker_command_protocol_fixture()),
+        ("compacted", crate::session::worker_compacted_fixture(true)),
+    ] {
+        for interrupted in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut connection = Connection::open(temp.path().join("history.sqlite3")).unwrap();
+            connection.execute_batch(SCHEMA_SQL).unwrap();
+            let mut pins = HashMap::new();
+            let mut expected = Vec::new();
+            for envelope in fixture.envelopes() {
+                let event = &envelope.event;
+                let mut value: Value = serde_json::from_str(&event.payload().unwrap()).unwrap();
+                let intent = value
+                    .get("intent")
+                    .or_else(|| value.get("observation")?.get("intent"))
+                    .cloned();
+                repin_intents(&mut value, &pins);
+                let expiring = matches!(
+                    event,
+                    Event::ToolStarted { .. }
+                        | Event::ToolFinished { .. }
+                        | Event::HookStarted { .. }
+                        | Event::HookFinished { .. }
+                );
+                if let Some(original) = intent.filter(|_| expiring) {
+                    let current: crate::tools::EffectIntent =
+                        serde_json::from_value(original).unwrap();
+                    let target = if event.kind() == "HookFinished" {
+                        &mut value["observation"]["intent"]
+                    } else {
+                        &mut value["intent"]
+                    };
+                    target["expires_at_ms"] = serde_json::json!(1);
+                    let historical = crate::session::expiring_intent_text(target).unwrap();
+                    let old = Sha256::digest(historical.as_bytes()).into();
+                    pins.insert(current.digest(), old);
+                    crate::session::replace_intent_pin(&mut value, &current.digest(), &old);
+                }
+                if event.kind() == "ToolFinished" {
+                    value.as_object_mut().unwrap().remove("approval_cause");
+                } else if event.kind() == "HookFinished" {
+                    value["observation"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("approval_cause");
+                }
+                let payload = if expiring {
+                    crate::session::expiring_payload(event.kind(), &value.to_string()).unwrap()
+                } else {
+                    Event::decode(
+                        event.kind(),
+                        event.version(),
+                        &value.to_string(),
+                        envelope.run_id,
+                        envelope.agent_run_id,
+                    )
+                    .unwrap()
+                    .payload()
+                    .unwrap()
+                };
+                connection.execute("INSERT INTO events (sequence,session_id,run_id,agent_run_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,0)", rusqlite::params![i64::try_from(envelope.sequence).unwrap(), envelope.session_id.to_string(), envelope.run_id.map(|id| id.to_string()), envelope.agent_run_id.map(|id| id.to_string()), event.kind(), event.version() - i64::from(expiring), payload]).unwrap();
+                expected.push(envelope.event);
+                if interrupted && expiring {
+                    break;
+                }
+            }
+            repin(&connection, |_| {});
+            let transaction = connection.transaction().unwrap();
+            assert!(rewrite_events(&transaction, &REGISTRY).unwrap() > 0);
+            transaction.commit().unwrap();
+            validate_all(&connection, MAX_VALIDATION_EVENTS).unwrap();
+            drop(connection);
+            let reopened = Connection::open(temp.path().join("history.sqlite3")).unwrap();
+            let actual: Vec<_> = rows(&reopened)
+                .into_iter()
+                .map(|row| row.decode().unwrap().event)
+                .collect();
+            assert_eq!(actual, expected, "{name}, interrupted={interrupted}");
+        }
     }
 }

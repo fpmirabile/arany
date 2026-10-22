@@ -676,8 +676,8 @@ pub(super) async fn submit_objective(
                             let _ = super::permissions::cycle(composer);
                             approvals.set_mode(composer.approval_mode().unwrap_or_default());
                         }
-                        TerminalInput::Escape | TerminalInput::EndOfInput => {
-                            pending.take().expect("pending action").decide(arany::ApprovalReply::Deny);
+                        input if interrupt_approval_input(&input, &cancellation) => {
+                            pending.take();
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
                         TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % choices.len(),
@@ -1414,9 +1414,39 @@ async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result
     Ok(())
 }
 
+fn interrupt_approval_input(input: &TerminalInput, cancellation: &arany::RunCancellation) -> bool {
+    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
+        cancellation.cancel();
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn approval_end_of_input_and_escape_cancel_without_a_decline() {
+        for input in [TerminalInput::EndOfInput, TerminalInput::Escape] {
+            let cancellation = arany::RunCancellation::new();
+            assert!(interrupt_approval_input(&input, &cancellation));
+            assert!(
+                !cancellation.cancel(),
+                "interruption already cancelled the Run"
+            );
+        }
+        let cancellation = arany::RunCancellation::new();
+        assert!(!interrupt_approval_input(
+            &TerminalInput::Submit,
+            &cancellation
+        ));
+        assert!(
+            cancellation.cancel(),
+            "ordinary approval input did not cancel"
+        );
+    }
 
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {

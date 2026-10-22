@@ -192,7 +192,6 @@ mod tests {
                 limit: Some(32),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         crate::session::ToolView {
@@ -209,6 +208,7 @@ mod tests {
                     disposition,
                     output: String::new(),
                     attestation: None,
+                    approval_cause: None,
                     cache_update,
                 }
             }),

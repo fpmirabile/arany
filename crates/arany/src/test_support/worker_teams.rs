@@ -1035,6 +1035,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                     attestation: None,
                     enforcement_cause: None,
                     limit_cause: None,
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             });

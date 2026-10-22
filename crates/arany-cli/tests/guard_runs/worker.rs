@@ -65,6 +65,8 @@ async fn closed_bundle(
 }
 
 pub(super) async fn worker_case(case: &'static str) {
+    let approval_timeout = case == "approval_timeout";
+    let case = if approval_timeout { "denial" } else { case };
     // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
     // child call; each case pads to the largest prefix that still reaches its capacity stop.
     let padding = match case {
@@ -269,10 +271,20 @@ pub(super) async fn worker_case(case: &'static str) {
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
-            Some(approval) = inbox.next(), if case != "no_channel" => {
+            Some(mut approval) = inbox.next(), if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
                     arany::FaultPlan::lose_guard_receipt(approval.intent.id); injected = true;
+                }
+                if approval_timeout && private {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_millis(u64::from(approval.intent.limits.runtime_ms) + 1)).await;
+                    tokio::time::resume();
+                    tokio::select! {
+                        result = &mut running => { approval.decide(true); break result; }
+                        () = approval.abandoned() => approval.decide(true),
+                    }
+                    continue;
                 }
                 approval.decide(!(case == "denial" && private || case == "integration_denial" && !private));
             }
@@ -323,6 +335,28 @@ pub(super) async fn worker_case(case: &'static str) {
             Some(b"original a".as_slice())
         );
         store.close().await.unwrap();
+    }
+    if approval_timeout {
+        let tool = run
+            .agents
+            .iter()
+            .flat_map(|agent| &agent.tools)
+            .find(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.output
+                        == "Child approval wait timed out; no operation was dispatched"
+                })
+            })
+            .expect("child timeout observation");
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+        assert_eq!(
+            tool.observation.as_ref().unwrap().approval_cause,
+            Some(arany::ApprovalCause::ChildTimeout)
+        );
+        assert_eq!(
+            tool.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::UnavailableApproval
+        );
     }
     let worker = run
         .agents
@@ -774,6 +808,10 @@ pub(super) async fn worker_case(case: &'static str) {
                 let tool = run.tools.last().unwrap();
                 assert_eq!(tool.hooks.len(), 1);
                 assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+                assert_eq!(
+                    tool.observation.as_ref().unwrap().approval_cause,
+                    Some(arany::ApprovalCause::ChildTimeout)
+                );
             }
             if case == "private_loss" {
                 assert!(injected, "{case}");
@@ -842,6 +880,7 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "calls",
         "tokens",
         "denial",
+        "approval_timeout",
         "no_channel",
         "integration_denial",
         "private_loss",

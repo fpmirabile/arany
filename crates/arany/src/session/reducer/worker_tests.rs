@@ -62,7 +62,6 @@ impl Fixture {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -123,6 +122,7 @@ impl Fixture {
                 enforcement_cause: None,
                 limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                     .then_some(crate::tools::LimitCause::Resource),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             },
         })
@@ -1567,8 +1567,8 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         ("AgentSpawned", 12),
         ("ProviderCallRecorded", 15),
         ("AgentFinished", 10),
-        ("ToolStarted", 15),
-        ("ToolFinished", 21),
+        ("ToolStarted", 16),
+        ("ToolFinished", 22),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),
@@ -2324,6 +2324,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
                         data,
                     }),
                 }),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             },
         },
@@ -2576,6 +2577,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
             output: "{}".into(),
             enforcement_cause: None,
             limit_cause: None,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         },
     };
@@ -3413,6 +3415,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             } else {
                 serde_json::json!({"exit_code":2,"stdout":"","stderr":"blocked","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset":{"files":[]}}).to_string()
             },
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -3462,6 +3465,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                         disposition: ToolDisposition::Denied,
                         output: "Hook denied this Tool: blocked".into(),
                         attestation: None,
+                        approval_cause: None,
                         cache_update: CacheUpdate::NotApplicable,
                         enforcement_cause: None,
                         limit_cause: None,
@@ -3795,6 +3799,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             intent: intent.clone(), disposition, output: serde_json::json!({"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
             attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(crate::LimitCause::Resource),
+            approval_cause: None,
             cache_update: if result == "stopped_unknown" { CacheUpdate::Uncertain } else { CacheUpdate::NotApplicable },
         };
         let finished = Event::HookFinished {
@@ -3937,6 +3942,7 @@ impl Fixture {
                 attestation: Some(Attestation::WorkerCommand {
                     receipt: receipt(&intent),
                 }),
+                approval_cause: None,
                 cache_update: CacheUpdate::Discarded,
                 output: serde_json::to_string(&WorkerCommandResult {
                     exit_code: Some(0),

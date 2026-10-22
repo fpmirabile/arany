@@ -339,7 +339,7 @@ impl Driver {
             }
             let answer: &[u8] = match case {
                 "escape" | "typeahead" => b"\x1b",
-                // Mouse records, malformed ones carrying digits and Ctrl+C, answer nothing; Escape then denies.
+                // Mouse records, malformed ones carrying digits and Ctrl+C, answer nothing; Escape then cancels.
                 "mouse-digits" => {
                     b"\x1b[<0;1;x1M\x1b[<0;2;1;1M\x1b[<0;1;1~2M\x1b[<0;1;1\x031m\x1b[<0;5;20M\x1b[<0;5;20m\x1b[<64;5;5M\x1b"
                 }
@@ -362,7 +362,7 @@ impl Driver {
         // The replay assertions check which one each case reached.
         const OUTCOMES: [&str; 5] = [
             "APPROVAL_FINAL",
-            "Action denied or approval expired",
+            "Action denied",
             "Run cancelled",
             "Goal paused",
             "Run failed",
@@ -424,7 +424,7 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
         );
         assert_eq!(
             run.status,
-            if case == "cancel" {
+            if matches!(case, "cancel" | "escape" | "mouse-digits" | "typeahead") {
                 RunStatus::Cancelled
             } else if denied {
                 RunStatus::Failed

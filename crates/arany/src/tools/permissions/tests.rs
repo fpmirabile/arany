@@ -1463,7 +1463,6 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
             workspace_inode: 1,
             call: command("sh", &["-c", "true"]),
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         },
         disposition: crate::tools::ToolDisposition::Denied,
@@ -1471,6 +1470,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
         limit_cause: None,
         output: "x".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(ignored(HookIgnoreReason::NotCompleted).valid_for(&observation));

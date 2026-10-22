@@ -106,7 +106,7 @@ Failures send no mode/config update and retain the prior value. Reloading while
 that Session's mode change is awaiting acknowledgment returns `busy`, preventing
 stale settings from replacing a pending change. Changes during an active prompt
 use the next approval decision; a pending permission request is neither resolved
-nor withdrawn, its intent and expiry stay fixed, and its eventual one-use verdict
+nor withdrawn, its intent stays fixed, and its eventual one-use verdict
 is journaled normally.
 
 The [Tools mode composition](./tools.md#modes-and-approval-decisions) remains
@@ -192,23 +192,26 @@ in `rawInput`, escaped and fenced approval lines, and exactly these ordered opti
 | `deny` | `reject_once` | Deny |
 | `allow_once` | `allow_once` | Allow once |
 
-A selected `allow_once` maps to serve `accept`; `deny`, an unknown option,
-malformed result or client error maps to `decline`. A cancelled outcome maps to
-`cancel` (deny, then interrupt the turn). The reply can resolve only its one
-outstanding, already sent request before the pinned expiry; unknown, duplicate,
-late and cancelled IDs change nothing. ACP request IDs are independent of both
-client request IDs and internal serve IDs. `allow_always` is never offered.
+A selected `allow_once` maps to serve `accept`; `deny` maps to `decline`; an unknown option,
+malformed result or client error records unavailable approval. A cancelled outcome maps to
+`cancel` (interrupt the turn and withdraw the pending operation). The reply can resolve only its one
+outstanding, already sent live request; unknown, duplicate,
+withdrawn and cancelled IDs change nothing. ACP request IDs are independent of both
+client request IDs and internal serve IDs. `allow_always` is never offered. The offered rejection ID is `deny`; `reject_once` is its option kind, not an accepted ID. Any other ID records unavailable approval.
 Ordinary client decisions are user-configured verdicts; ACP cannot attest a
 human gesture, so human-only requests follow the
 [Tools contract](./tools.md#modes-and-approval-decisions). All normal Policy,
 one-use grant, journal and Guard checks still apply.
 
-Expiry, cancellation, Tool completion or serve withdrawal retire the pending
+Cancellation, Tool completion or serve withdrawal retire the pending
 permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
-owns denial and expiry independently of outbound capacity; a slow client may
-receive an already expired request or delayed withdrawal, and cannot authorize
-it. An oversized permission is denied without sending or truncating its intent
-or approval lines. No transport configuration widens the private grant.
+owns withdrawal independently of outbound capacity. A primary permission has no
+wall-clock expiry; a still-connected slow client remains answerable. A client
+may receive an already withdrawn request or delayed withdrawal, and cannot
+authorize it. Child requests retain their temporary Engine timer. An oversized
+permission records unavailable approval without sending or truncating its intent
+or approval lines; invalid results and client errors are also unavailable, not
+human decline. No transport configuration widens the private grant.
 
 A committed serve `item/completed` agentMessage produces exactly one
 `session/update` with `update.sessionUpdate:"agent_message_chunk"` and
@@ -345,7 +348,7 @@ State storage and all per-action resource limits remain unchanged.
 | Pinned collaboration admission | New, load and resume retain CLI `single` or a zero child limit; a later prompt requesting delegation spawns no child in committed history | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Load admission and recovery | Unknown Sessions, foreign Workspace identities, relative/State-overlapping cwd, additional roots, active/locked Sessions and oversized history refuse without partial replay; unfinished Runs/intents retain interrupted/uncertain facts without execution | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Admitted Tool permission round trip | Allow dispatches once; reject denies; reopened intent, verdict and observation equal the permission payload and committed projections | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
-| Permission correlation and withdrawal | Only allow_once/reject_once offered; unknown, duplicate, late, invalid/error replies deny or do nothing; timeout, client cancellation and server withdrawal cannot authorize a Tool | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
+| Permission correlation and withdrawal | Only allow_once/reject_once offered; a late reply to a live primary request remains answerable; unknown, duplicate, withdrawn or invalid/error replies cannot authorize a Tool; client cancellation and server withdrawal remain effective under output backpressure | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Rich prompt and inert Tool data | Oversized resources, blobs, image MIME/base64/count/byte overflow reject; context closing tags neutralized; PNG and image-only conversion, original cwd spelling, uncertain metadata, escaped titles, longer fences and truncation markers validate against the pinned schema | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs) |
 | Human-only Asks unavailable | Hook Ask under Auto and unguarded proposals, even with exact project rules, make no client request, dispatch nothing and replay unavailable_approval | [ACP corpus](../../crates/arany-cli/tests/acp/in_process.rs), [Guard permission corpus](../../crates/arany-cli/tests/guard_runs/permissions.rs), [unguarded corpus](../../crates/arany-cli/tests/guard_runs/unguarded.rs) |
 
