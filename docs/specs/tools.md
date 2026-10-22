@@ -473,7 +473,8 @@ or snapshots. The observation is point-in-time and is not an atomic host total.
 
 One inventory runs at a time, with no queue, retry or refresh. A shared 30-second
 cooperative deadline, 16,384 scanned entries, depth 32, 4 KiB paths, 8 MiB
-identity/path index and 128 cache identities bound work before allocation.
+identity/path index and the [cache-identity limit](#persistent-workspace-build-cache)
+bound work before allocation.
 Exhaustion or arithmetic overflow stops the affected scan and marks a partial
 known subtotal, never an exact complete zero. Cancellation publishes no complete
 report, closes handles and performs no cleanup; blocking work remains owned
