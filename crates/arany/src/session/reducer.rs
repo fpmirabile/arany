@@ -96,6 +96,8 @@ pub struct GoalView {
     pub continues: Option<GoalId>,
     /// Failed because the budget ran out (`GoalFinished.exhausted`).
     pub budget_closed: bool,
+    pub budget_refusal: Option<super::BudgetRefusal>,
+    pub(crate) run_start_usage: super::GoalUsage,
 }
 
 impl GoalView {

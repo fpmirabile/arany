@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step.
-const EVENT_FIXTURES: [EventFixture<'static>; 39] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 40] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -45,6 +45,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 39] = [
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
+    ("GoalFinished", 7, GOAL_FINISHED_V7, GOAL_FINISHED_V8),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
@@ -96,6 +97,8 @@ const EVENT_FIXTURES: [EventFixture<'static>; 39] = [
         GLOB_PROVIDERCALLRECORDED,
     ),
 ];
+const GOAL_FINISHED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true}"#;
+const GOAL_FINISHED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true,"budget_refusal":null}"#;
 
 #[test]
 fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {

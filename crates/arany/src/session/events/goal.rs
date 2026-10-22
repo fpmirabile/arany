@@ -11,6 +11,112 @@ pub const MAX_GOAL_PLAN_SKILLS: usize = 64;
 pub const MAX_GOAL_PLAN_CONTRACT_BYTES: usize = 8 * 1024;
 pub const MAX_GOAL_REPORT_BYTES: usize = 8 * 1024;
 pub(crate) const STORE_ACTION_OVERHEAD_MS: u64 = 5_000;
+pub const MAX_BUDGET_REFUSAL_BYTES: usize = 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetRefusalCause {
+    Exhausted,
+    UnknownUsage,
+    InsufficientHeadroom,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetAction {
+    Provider,
+    Tool,
+    Delegation,
+    Compaction,
+    Run,
+    Resume,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BudgetChargeBasis {
+    Observed,
+    Conservative,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BudgetRefusal {
+    pub dimension: super::super::GoalLimit,
+    pub cause: BudgetRefusalCause,
+    pub action: BudgetAction,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub run_id: Option<RunId>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub agent_run_id: Option<AgentRunId>,
+    pub used: u64,
+    pub limit: u64,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub requested: Option<u64>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub required_minimum: Option<u64>,
+    pub token_usage_unknown: bool,
+    pub charge_basis: BudgetChargeBasis,
+}
+
+impl BudgetRefusal {
+    pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        use super::super::GoalLimit;
+        let valid_cause = match self.cause {
+            BudgetRefusalCause::Exhausted => self.used >= self.limit,
+            BudgetRefusalCause::UnknownUsage => {
+                self.dimension == GoalLimit::Tokens && self.token_usage_unknown
+            }
+            BudgetRefusalCause::InsufficientHeadroom => {
+                self.dimension == GoalLimit::ActiveTime
+                    && self.used < self.limit
+                    && self
+                        .required_minimum
+                        .is_some_and(|minimum| minimum > STORE_ACTION_OVERHEAD_MS)
+                    && self
+                        .required_minimum
+                        .is_some_and(|minimum| minimum > self.limit - self.used)
+            }
+        };
+        let valid_amounts = match self.dimension {
+            GoalLimit::Tokens => self.requested.is_none() && self.required_minimum.is_none(),
+            GoalLimit::Calls | GoalLimit::Runs => {
+                self.requested == Some(1) && self.required_minimum == Some(1)
+            }
+            GoalLimit::ActiveTime => match (self.requested, self.required_minimum) {
+                (None, None) => self.cause == BudgetRefusalCause::Exhausted,
+                (Some(requested), Some(minimum)) => {
+                    requested >= minimum
+                        && (minimum > STORE_ACTION_OVERHEAD_MS
+                            || requested.checked_sub(minimum) == Some(STORE_ACTION_OVERHEAD_MS - 1)
+                                && matches!(
+                                    self.action,
+                                    BudgetAction::Tool | BudgetAction::Delegation
+                                ))
+                }
+                (None, Some(minimum)) => minimum == STORE_ACTION_OVERHEAD_MS + 1,
+                (Some(_), None) => false,
+            },
+        };
+        if self.limit == 0
+            || match self.dimension {
+                GoalLimit::Calls => self.limit > u64::from(MAX_GOAL_PROVIDER_CALLS),
+                GoalLimit::Runs => self.limit > u64::from(MAX_GOAL_RUNS),
+                GoalLimit::ActiveTime => self.limit > MAX_GOAL_ACTIVE_MS,
+                GoalLimit::Tokens => false,
+            }
+            || !valid_cause
+            || self.dimension == GoalLimit::Tokens
+                && self.token_usage_unknown != (self.cause == BudgetRefusalCause::UnknownUsage)
+            || !valid_amounts
+            || self.agent_run_id.is_some() && self.run_id.is_none()
+            || !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_BUDGET_REFUSAL_BYTES)
+        {
+            return Err(ReplayError::InvalidPayload);
+        }
+        Ok(())
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -35,7 +141,7 @@ impl Default for GoalBudget {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GoalUsage {
     pub(crate) runs: usize,
     pub(crate) provider_calls: u32,
@@ -45,6 +151,67 @@ pub(crate) struct GoalUsage {
 }
 
 impl GoalBudget {
+    pub(crate) fn refusal(&self, usage: GoalUsage, action: BudgetAction) -> Option<BudgetRefusal> {
+        use super::super::GoalLimit;
+        let (dimension, used, limit) = if let Some(limit) = self
+            .max_tokens
+            .filter(|limit| usage.token_usage_unknown || usage.known_tokens >= *limit)
+        {
+            (GoalLimit::Tokens, usage.known_tokens, limit)
+        } else if let Some(limit) = self
+            .max_provider_calls
+            .filter(|limit| usage.provider_calls >= *limit)
+        {
+            (
+                GoalLimit::Calls,
+                u64::from(usage.provider_calls),
+                u64::from(limit),
+            )
+        } else if let Some(limit) = self
+            .max_active_ms
+            .filter(|limit| limit.saturating_sub(usage.active_ms) <= STORE_ACTION_OVERHEAD_MS)
+        {
+            (GoalLimit::ActiveTime, usage.active_ms, limit)
+        } else if usage.runs >= usize::from(self.max_runs) {
+            (GoalLimit::Runs, usage.runs as u64, u64::from(self.max_runs))
+        } else {
+            return None;
+        };
+        let (cause, amount) = if dimension == GoalLimit::Tokens && usage.token_usage_unknown {
+            (BudgetRefusalCause::UnknownUsage, None)
+        } else if dimension == GoalLimit::ActiveTime && used < limit {
+            (
+                BudgetRefusalCause::InsufficientHeadroom,
+                Some(STORE_ACTION_OVERHEAD_MS + 1),
+            )
+        } else {
+            (
+                BudgetRefusalCause::Exhausted,
+                match dimension {
+                    GoalLimit::Tokens | GoalLimit::ActiveTime => None,
+                    GoalLimit::Calls | GoalLimit::Runs => Some(1),
+                },
+            )
+        };
+        Some(BudgetRefusal {
+            dimension,
+            cause,
+            action,
+            run_id: None,
+            agent_run_id: None,
+            used,
+            limit,
+            requested: if cause == BudgetRefusalCause::InsufficientHeadroom {
+                None
+            } else {
+                amount
+            },
+            required_minimum: amount,
+            token_usage_unknown: usage.token_usage_unknown,
+            charge_basis: BudgetChargeBasis::Observed,
+        })
+    }
+
     pub fn validate(&self) -> Result<(), ReplayError> {
         if self
             .max_provider_calls
