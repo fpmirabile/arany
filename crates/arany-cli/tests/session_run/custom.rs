@@ -1487,8 +1487,7 @@ fn messages_preview_cancellation_discards_secret_tail() {
     );
 }
 
-// An answer row alone is not settled: the agents panel and pending rows show the same text
-// while the Run is active, and `ready` can be drawn before the answer row is printed.
+// The agents panel repeats answer text while a Run is active, so require the row and `ready`.
 #[cfg(target_os = "linux")]
 #[track_caller]
 fn wait_settled(
