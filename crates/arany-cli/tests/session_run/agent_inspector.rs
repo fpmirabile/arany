@@ -1541,8 +1541,7 @@ fn exit_live_after_refusal(
     };
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut from = pty.capture_from;
-    // A settling Run refuses `/exit` with a History notice that stays; resend once a newer
-    // refusal is followed by the idle status.
+    // The `/exit` refusal notice persists, so resend after a newer refusal reaches idle.
     'exit: loop {
         from = checkpoint_screen(
             &mut pty.transcript,
