@@ -5,6 +5,56 @@ use arany::{
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_closed_git_views(
+    state: &std::path::Path,
+    home: &std::path::Path,
+    workspace: &std::path::Path,
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+) {
+    use arany_cli::presentation::{Output, render_session};
+    use arany_cli::protocol::EventLine;
+    for format in ["text", "jsonl"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("HOME", home)
+            .current_dir(workspace)
+            .args(["show", "--state-dir"])
+            .arg(state)
+            .args(["--output", format])
+            .arg(view.id.to_string())
+            .bounded_output_for(std::time::Duration::from_secs(30), 4 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stderr, b"");
+        let canary = b"BRANCH_DISCLOSURE_CANARY";
+        for bytes in [
+            &output.stdout,
+            &output.stderr,
+            &std::fs::read(state.join("events.sqlite3")).unwrap(),
+        ] {
+            assert!(!bytes.windows(canary.len()).any(|window| window == canary));
+        }
+        if format == "text" {
+            assert_eq!(
+                output.stdout,
+                render_session(view, events, Output::Text).as_bytes()
+            );
+        } else {
+            let actual: Vec<EventLine> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                actual,
+                events.iter().map(EventLine::from).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 use process::BoundedOutput;
 use std::process::Command;
 

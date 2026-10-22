@@ -222,6 +222,9 @@ mod tests {
                 ToolCall::GitBranch {
                     name: Some("topic".into()),
                     start_point: None,
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 [true; 3],
             ),
@@ -261,6 +264,9 @@ mod tests {
                 ToolCall::GitBranch {
                     name: None,
                     start_point: None,
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 [false; 3],
             ),

@@ -1184,6 +1184,8 @@ fn restrictions_hide_result_paths_of_broader_calls_they_did_not_resolve() {
         (&search("."), "src/a.rs", false),
         (&glob(""), "private/a.rs", true),
         (&status, "private/a", true),
+        (&branch_call(None), "private/a", true),
+        (&branch_call(None), "src/a.key", true),
         // A matching ask on the call's own path was approved before dispatch.
         (&search("a.key"), "a.key", false),
         (&search("vault"), "vault/b.key", true),
@@ -2045,6 +2047,9 @@ fn branch_call(name: Option<&str>) -> ToolCall {
     ToolCall::GitBranch {
         name: name.map(Into::into),
         start_point: None,
+        scope: None,
+        base: None,
+        max_count: None,
     }
 }
 

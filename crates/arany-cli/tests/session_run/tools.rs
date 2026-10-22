@@ -3037,7 +3037,14 @@ impl Provider for GitJourney {
                 revision: Some("missing-branch".into()),
                 max_count: 1,
             }),
-            4 => ProviderOutcome::Answer(Answer {
+            4 => crate::tool_outcome(ToolCall::GitBranch {
+                name: None,
+                start_point: None,
+                scope: Some("all".into()),
+                base: Some("HEAD~1".into()),
+                max_count: Some(16),
+            }),
+            5 => ProviderOutcome::Answer(Answer {
                 text: "Git state observed".into(),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
@@ -3090,6 +3097,32 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         &home,
         &["commit", "-q", "-am", "second commit"],
     );
+    std::fs::write(workspace.join(".env"), "private fixture\n").unwrap();
+    host_git(GIT, &workspace, &home, &["add", ".env"]);
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["commit", "-q", "-m", "BRANCH_DISCLOSURE_CANARY"],
+    );
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["update-ref", "refs/heads/protected", "HEAD"],
+    );
+    host_git(
+        GIT,
+        &workspace,
+        &home,
+        &["update-ref", "refs/heads/main", "HEAD~1"],
+    );
+    std::fs::create_dir_all(workspace.join(".git/refs/remotes/review")).unwrap();
+    std::fs::copy(
+        workspace.join(".git/refs/heads/main"),
+        workspace.join(".git/refs/remotes/review/topic"),
+    )
+    .unwrap();
     std::fs::write(workspace.join("src/a.txt"), "delta\n").unwrap();
     std::fs::write(workspace.join("src/new.txt"), "new\n").unwrap();
     let gitconfig = home.join(".gitconfig");
@@ -3223,7 +3256,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         "{:?}",
         outcome.run.tools
     );
-    assert_eq!(outcome.run.tools.len(), 4);
+    assert_eq!(outcome.run.tools.len(), 5);
 
     let output = |index: usize| -> Value {
         let observation = outcome.run.tools[index].observation.as_ref().unwrap();
@@ -3265,7 +3298,40 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     assert_eq!(failed.disposition, ToolDisposition::Failed);
     assert!(failed.attestation.is_some());
 
+    let branches = output(4);
+    assert_eq!(branches["comparison_base"]["revision"], "HEAD~1");
+    assert_eq!(branches["history_complete"], true);
+    let rows = branches["branches"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    for row in [&rows[0], &rows[2]] {
+        assert_eq!(row["subject"], "second commit");
+        assert_eq!(row["ahead"], 1);
+        assert_eq!(row["behind"], 0);
+    }
+    assert_eq!(rows[0]["name"], "refs/heads/main");
+    assert_eq!(rows[1]["name"], "refs/heads/protected");
+    assert!(rows[1]["subject"].is_null());
+    assert_eq!(rows[1]["subject_withheld"], true);
+    assert_eq!(rows[2]["name"], "refs/remotes/review/topic");
+    assert_eq!(rows[2]["kind"], "remote");
+    let observation = outcome.run.tools[4].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+    assert!(observation.attestation.is_some());
+
     let requests = requests.lock().unwrap().clone();
+    assert!(!format!("{requests:?}").contains("BRANCH_DISCLOSURE_CANARY"));
+    assert_eq!(
+        requests[5]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .observations()
+            .last()
+            .unwrap()
+            .output,
+        observation.output
+    );
     let catalog: Value =
         serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(
@@ -3284,12 +3350,22 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         "Workspace or repository changed: {changed:?}"
     );
 
+    std::fs::rename(workspace.join(".git"), home.join("repository-after-run")).unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
     let events = store.load_session(outcome.session_id).await.unwrap();
+    let replay = SessionView::replay(outcome.session_id, &events)
+        .unwrap()
+        .unwrap();
+    assert_eq!(replay.runs.last().unwrap(), &outcome.run);
+    store.close().await.unwrap();
+    crate::assert_closed_git_views(&state_path, &home, &workspace, &events, &replay);
     let is_git = |call: &ToolCall| {
         matches!(
             call,
-            ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+            ToolCall::GitStatus { .. }
+                | ToolCall::GitDiff { .. }
+                | ToolCall::GitLog { .. }
+                | ToolCall::GitBranch { name: None, .. }
         )
     };
     let started = events
@@ -3300,7 +3376,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         .iter()
         .filter(|event| matches!(&event.event, arany::Event::ToolFinished { observation, .. } if is_git(&observation.intent.call)))
         .count();
-    assert_eq!((started, finished), (4, 4));
+    assert_eq!((started, finished), (5, 5));
 }
 
 #[path = "tools/inline_approval.rs"]
