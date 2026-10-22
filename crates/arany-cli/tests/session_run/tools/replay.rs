@@ -1254,7 +1254,7 @@ pub(super) async fn native_command_changeset_corpus(
         ("nonzero", "exit 7", None),
         (
             "selection",
-            "test ! -e src/asset; test ! -e src/ignored/secret; test ! -r /seed/command-selection.json; mkdir src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore",
+            "test ! -e src/asset; test ! -e src/ignored/secret; test ! -r /prepared/command-selection.json; mkdir src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore",
             None,
         ),
         ("ai-approve", "", None),
