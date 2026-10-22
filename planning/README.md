@@ -30,6 +30,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Status
 
 - `Draft`
+- `Ready` (Research and Plan gates passed; no material open questions)
 - `Ready` (Plan gate passed; implementation may depend on a linked slice)
 - `In progress`
 - `Blocked`
@@ -45,9 +46,11 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Draft: three command slices; exact parser dependency awaits owner approval; placement decided with implementation gates |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Draft: typed discovery/suggestions, then Git disclosure; shares parser approval and explicitly depends on snapshot PR1 (selector and enforced preparation) |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
+| [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
