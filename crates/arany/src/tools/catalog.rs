@@ -18,6 +18,7 @@ pub enum Site {
     InProcess,
     Guard,
     Unguarded,
+    Host,
 }
 
 #[derive(Debug)]
@@ -92,7 +93,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 22] = [
+pub(crate) static ALL: [OperationFacts; 24] = [
     read_row(
         "list",
         Family::File,
@@ -232,6 +233,22 @@ pub(crate) static ALL: [OperationFacts; 22] = [
         21,
         "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
     ),
+    OperationFacts {
+        site: Site::Host,
+        ..git_write_row(
+            "git_push",
+            22,
+            "Push one local branch to the same remote branch at an explicit HTTPS or SSH URL. Always asks a human for this host operation; no force, deletion or automatic retry.",
+        )
+    },
+    OperationFacts {
+        site: Site::Host,
+        ..git_write_row(
+            "gh_pr_create",
+            23,
+            "Create a GitHub pull request with an explicit repository, base, head and payload. Always asks a human for this host operation; never pushes or forks.",
+        )
+    },
 ];
 
 static GIT_BRANCH_LIST: OperationFacts = OperationFacts {
@@ -284,6 +301,8 @@ impl ToolCall {
             Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
             Self::GitBranch { .. } => &ALL[19],
             Self::GitSwitch { .. } => &ALL[20],
+            Self::GitPush { .. } => &ALL[22],
+            Self::GhPrCreate { .. } => &ALL[23],
         }
     }
 }
@@ -296,10 +315,15 @@ pub(crate) fn facts_of(call: &Value) -> Option<&'static OperationFacts> {
     by_name(call["properties"]["operation"]["enum"][0].as_str()?)
 }
 
-pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
+pub(crate) fn git_operations(write: bool, host: bool) -> Vec<&'static str> {
     ALL.iter()
         .filter(|facts| {
-            facts.family == Family::Git && (write || !facts.mutates || facts.name == "git_branch")
+            facts.family == Family::Git
+                && (if facts.site == Site::Host {
+                    host
+                } else {
+                    write || !facts.mutates || facts.name == "git_branch"
+                })
         })
         .map(|facts| facts.name)
         .collect()
@@ -331,7 +355,7 @@ pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =
     "2025-11-25 stdio; catalog listing with mcp_list only";
-pub(crate) const GIT_SCOPE: &str = "Status, diff, log, branches, commits and switches of the Workspace-root repository under Git defaults, never its configuration or hooks; paths are Workspace-relative and \".\" is the whole repository.";
+pub(crate) const GIT_SCOPE: &str = "Status, diff, log, branches, commits and switches of the Workspace-root repository, plus separately human-approved host push and PR creation. Git uses inert private configuration, never repository configuration or hooks; paths are Workspace-relative and \".\" is the whole repository.";
 
 impl OperationFacts {
     // Approval modes may pre-approve typed file edits; process and Git writes keep asking.
@@ -382,6 +406,7 @@ pub(crate) fn call_schemas() -> Vec<Value> {
 
 pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
     let git_writes = catalog["git"]["write"] == true;
+    let host_writes = catalog["git"]["host"] == true;
     let mut calls = call_schemas();
     calls.retain_mut(|call| {
         let Some(facts) = facts_of(call) else {
@@ -407,7 +432,7 @@ pub(crate) fn catalog_call_schemas(catalog: &Value) -> Vec<Value> {
                 let listed = catalog["git"]["operations"]
                     .as_array()
                     .is_some_and(|names| names.iter().any(|name| name == facts.name));
-                if !facts.mutates || catalog["write"] == true && git_writes && listed {
+                if !facts.mutates || catalog["write"] == true && (if facts.site == Site::Host { host_writes } else { git_writes }) && listed {
                     return true;
                 }
                 if facts.name == "git_branch" && listed {
@@ -661,6 +686,18 @@ mod tests {
                     replace_all: false,
                 }],
             },
+            ToolCall::GitPush {
+                remote: "https://github.com/o/r.git".into(),
+                branch: "topic".into(),
+            },
+            ToolCall::GhPrCreate {
+                repository: "github.com/o/r".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                title: "T".into(),
+                body: String::new(),
+                draft: true,
+            },
         ]
     }
 
@@ -696,6 +733,33 @@ mod tests {
                 for field in ["name", "start_point"] {
                     assert_eq!(branch["properties"][field]["type"], expected);
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn host_git_catalog_does_not_depend_on_local_guard_write_support() {
+        for write in [false, true] {
+            for host in [false, true] {
+                let catalog = json!({
+                    "write": write,
+                    "git": {"write": false, "host": host, "operations": ["git_push", "gh_pr_create"]},
+                    "commands": [{"name":"gh", "interpreter":false, "inputs":[]}]
+                });
+                let offered: Vec<_> = catalog_call_schemas(&catalog)
+                    .iter()
+                    .filter_map(facts_of)
+                    .filter(|facts| facts.site == Site::Host)
+                    .map(|facts| facts.name)
+                    .collect();
+                assert_eq!(
+                    offered,
+                    if write && host {
+                        vec!["git_push", "gh_pr_create"]
+                    } else {
+                        vec![]
+                    }
+                );
             }
         }
     }

@@ -53,6 +53,7 @@ impl Fixture {
     fn intent(&self, actor: AgentRunId, call: ToolCall, target: EffectTarget) -> EffectIntent {
         EffectIntent {
             host: None,
+            host_command: None,
             target,
             id: uuid::Uuid::now_v7(),
             run_id: self.run,
@@ -1740,6 +1741,93 @@ fn worker_protocol_bulk_file_content_and_serialized_bounds() {
         b"{\"files\":[],\"extra\":0}".as_slice(),
     ] {
         assert!(decode_data(raw, WorkerDataPurpose::Handover).is_err());
+    }
+}
+
+pub(crate) fn host_protocol_fixture() -> Fixture {
+    use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+    let mut f = fixture();
+    let first = f
+        .events
+        .iter()
+        .position(|e| matches!(e, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::Read { .. })))
+        .unwrap();
+    f.events.truncate(first);
+    for event in &mut f.events {
+        if let Event::GoalPlanContractRecorded { contract, .. } = event {
+            contract.paths = vec![".".into()];
+        }
+    }
+    let mut intent = f.intent(
+        f.primary,
+        ToolCall::GitPush {
+            remote: "https://github.com/o/r.git".into(),
+            branch: "main".into(),
+        },
+        EffectTarget::Workspace,
+    );
+    intent.host = Some(crate::HostIntent {
+        source_oid: "1".repeat(40),
+        refspec: format!("{}:refs/heads/main", "1".repeat(40)),
+    });
+    intent.limits.network = crate::NetworkGrant::Host;
+    f.started(&intent);
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Ask,
+            mode: None,
+            basis: PermissionSource::Mode,
+            source: PermissionSource::Human,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+    f
+}
+
+#[test]
+fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
+    for outcome in [
+        None,
+        Some(ToolDisposition::Succeeded),
+        Some(ToolDisposition::Uncertain),
+        Some(ToolDisposition::Denied),
+    ] {
+        let mut f = host_protocol_fixture();
+        let intent = match &f.events[f.events.len() - 2] {
+            Event::ToolStarted { intent, .. } => intent.clone(),
+            _ => unreachable!(),
+        };
+        if let Some(disposition) = outcome {
+            let receipt =
+                (disposition != ToolDisposition::Denied).then(|| Attestation::for_site(&intent));
+            f.observed(&intent, disposition, receipt, "host: synthetic outcome");
+        }
+        let view = f.view();
+        let expected = outcome != Some(ToolDisposition::Denied);
+        assert_eq!(
+            view.runs[0]
+                .tools
+                .iter()
+                .find(|t| t.intent.call.is_host())
+                .unwrap()
+                .ran_host(),
+            expected
+        );
+        assert_eq!(view.runs[0].host_tools(), usize::from(expected));
+        let plan = crate::session::rewind::plan(&view, &view.rewinds.checkpoints[0]).unwrap();
+        assert_eq!(
+            plan.non_rewindable
+                .iter()
+                .any(|(_, effect)| *effect == crate::session::rewind::NonRewindable::Host),
+            expected
+        );
     }
 }
 

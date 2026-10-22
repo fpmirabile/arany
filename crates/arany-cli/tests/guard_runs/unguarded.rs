@@ -277,7 +277,7 @@ async fn primary_host_request_needs_no_prior_failure_and_replays_after_human_all
         .await;
     assert_eq!(seen.unconsumed, 0);
     assert_eq!(seen.prompts.len(), 1);
-    assert!(seen.intents[0].host.is_some());
+    assert!(seen.intents[0].host_command.is_some());
     assert_eq!(
         seen.prompts[0].executable,
         std::fs::canonicalize("/bin/sh").unwrap().to_str().unwrap()
@@ -594,7 +594,7 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
             )
             .await;
         assert!(seen.prompts.is_empty());
-        assert!(last_tool(&seen).intent.host.is_some());
+        assert!(last_tool(&seen).intent.host_command.is_some());
         denied(
             &seen,
             "Host interpreter requires a matching tools.json command with interpreter: true",
@@ -602,7 +602,7 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
         let (_, view) = host.reopen(seen.outcome.session_id).await;
         assert_eq!(view.runs[0].unguarded_tools(), 0);
         let tool = view.runs[0].tools.last().unwrap();
-        assert!(tool.intent.host.is_some());
+        assert!(tool.intent.host_command.is_some());
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
         assert!(!tool.permission_verdict.as_ref().unwrap().approved);
     }

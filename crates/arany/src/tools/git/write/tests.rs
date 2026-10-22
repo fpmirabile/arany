@@ -93,6 +93,7 @@ impl Repo {
         self.intent = uuid::Uuid::now_v7();
         let intent = EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: self.intent,
             run_id: crate::session::RunId::new(),

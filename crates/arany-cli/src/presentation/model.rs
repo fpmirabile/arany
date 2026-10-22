@@ -520,6 +520,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id,
             run_id,
@@ -738,6 +739,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run.id,

@@ -35,7 +35,12 @@ pub(super) fn apply(
         let git_write = observation.intent.call.is_git() && observation.intent.call.facts().mutates;
         let first_use_verdict = git_write
             && pending_tool(run, *agent_run_id).is_ok_and(|tool| tool.permission_verdict.is_some());
-        if configured || definition_mode.is_some() || unguarded || first_use_verdict {
+        if configured
+            || definition_mode.is_some()
+            || unguarded
+            || first_use_verdict
+            || observation.intent.call.is_host()
+        {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
@@ -130,8 +135,7 @@ pub(super) fn apply(
                 && !(permissions_pinned
                     && primary
                     && typed_basis
-                    && TypedGitPrefix::of_call(&pending_call)
-                        .is_some_and(TypedGitPrefix::available)
+                    && TypedGitPrefix::of_call(&pending_call).is_some()
                     && (!typed_source
                         // An allow whose dispatch a later plan, budget or pause gate refused is unapproved.
                         || verdict.decision == Decision::Allow
@@ -147,6 +151,19 @@ pub(super) fn apply(
                 || !(permissions_pinned || definition_mode.is_some() || unguarded || first_use)
                 || definition_mode == Some(crate::tools::permissions::PermissionMode::DontAsk)
                     && verdict.decision == crate::tools::permissions::Decision::Ask
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if pending_call.is_host()
+                && verdict.approved
+                && (!primary
+                    || verdict.source != PermissionSource::Human
+                    || verdict.decision != Decision::Ask
+                    || matches!(
+                        verdict.mode,
+                        Some(PermissionMode::Plan | PermissionMode::DontAsk)
+                    )
+                    || pending_tool(run, *agent_run_id)?.intent.host.is_none())
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -1050,7 +1067,7 @@ fn valid_host_approval(
     let Some(host) = &verdict.host else {
         return false;
     };
-    let Some(pin) = &tool.intent.host else {
+    let Some(pin) = &tool.intent.host_command else {
         return false;
     };
     let crate::tools::ToolCall::CommandUnguarded { program, args, .. } = &tool.intent.call else {

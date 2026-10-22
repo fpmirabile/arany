@@ -41,6 +41,8 @@ fn operation(call: &ToolCall) -> Operation {
         | ToolCall::GitCommit { .. }
         | ToolCall::GitBranch { .. }
         | ToolCall::GitSwitch { .. }
+        | ToolCall::GitPush { .. }
+        | ToolCall::GhPrCreate { .. }
         | ToolCall::Glob { .. } => Operation::Other,
     }
 }

@@ -119,7 +119,7 @@ pub(super) fn wrapper_interpreters_admitted(
     let super::ToolCall::CommandUnguarded { args, cwd, .. } = &intent.call else {
         return false;
     };
-    let Some(host) = &intent.host else {
+    let Some(host) = &intent.host_command else {
         return false;
     };
     let workspace = Path::new(&host.workspace);
@@ -240,7 +240,7 @@ pub(crate) fn prohibited_intent(intent: &super::EffectIntent) -> bool {
         return false;
     };
     prohibited(program, args)
-        || intent.host.as_ref().is_some_and(|pin| {
+        || intent.host_command.as_ref().is_some_and(|pin| {
             let cwd = Path::new(&pin.workspace).join(cwd);
             live_prohibited(program, args, &cwd, &pin.path)
                 || live_prohibited(&pin.executable, args, &cwd, &pin.path)
@@ -405,8 +405,8 @@ pub(crate) fn same_approval(prior: &super::EffectIntent, next: &super::EffectInt
     p == program
         && a == args
         && c == cwd
-        && prior.host.is_some()
-        && prior.host == next.host
+        && prior.host_command.is_some()
+        && prior.host_command == next.host_command
         && prior.workspace_device == next.workspace_device
         && prior.workspace_inode == next.workspace_inode
         && prior.policy_digest == next.policy_digest
@@ -837,7 +837,7 @@ async fn wait(
     }
 }
 
-async fn stop_group(group: Pid) -> bool {
+pub(super) async fn stop_group(group: Pid) -> bool {
     let _ = kill_process_group(group, Signal::KILL);
     for _ in 0..GROUP_POLLS {
         if test_kill_process_group(group) == Err(Errno::SRCH) {
@@ -961,7 +961,8 @@ mod tests {
         let mut host = pin("sh", &fixture.workspace, root.to_str().unwrap()).unwrap();
         host.executable = "/usr/bin/env".into();
         let mut intent = crate::tools::EffectIntent {
-            host: Some(host),
+            host: None,
+            host_command: Some(host),
             target: crate::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::RunId::new(),

@@ -15,6 +15,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let run_id = RunId::new();
     let command_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -65,6 +66,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     tools.extend((0..15).map(|index| {
         let intent = EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id,
@@ -313,6 +315,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     late_run.tools.push(late_rejected_command);
     let uncertain_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -413,6 +416,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     byte_run.tools.truncate(13);
     let failed_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -509,6 +513,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         for failure_index in 0..denied_count {
             let intent = EffectIntent {
                 host: None,
+                host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: Uuid::now_v7(),
                 run_id,
@@ -672,7 +677,8 @@ fn read_evidence_names_the_site_that_attested_it() {
 
 fn read_intent(call: &ToolCall) -> EffectIntent {
     EffectIntent {
-        host: call.is_unguarded().then(crate::tools::types::test_host_pin),
+        host: None,
+        host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id: RunId::new(),
@@ -1055,4 +1061,33 @@ fn rewind_facts_remain_in_the_bounded_goal_report_after_evidence_is_invalidated(
     let bytes = serde_json::to_vec(&report).unwrap();
     assert!(bytes.len() > crate::session::MAX_GOAL_REPORT_BYTES * 3 / 4);
     report.validate().unwrap();
+}
+
+#[test]
+fn host_git_goal_evidence_names_the_separate_host_class() {
+    for call in [
+        ToolCall::GitPush {
+            remote: "https://github.com/o/r.git".into(),
+            branch: "topic".into(),
+        },
+        ToolCall::GhPrCreate {
+            repository: "github.com/o/r".into(),
+            base: "main".into(),
+            head: "topic".into(),
+            title: "T".into(),
+            body: String::new(),
+            draft: false,
+        },
+    ] {
+        let mut intent = read_intent(&call);
+        intent.host = Some(crate::HostIntent {
+            source_oid: "1".repeat(40),
+            refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+        });
+        let receipt = Attestation::for_site(&intent);
+        let evidence =
+            goal_report_evidence(&call, "host: remote operation completed.", Some(&receipt));
+        assert!(evidence.starts_with("A human-approved host run attested host "));
+        assert!(!evidence.contains("Guard") && !evidence.contains("unguarded"));
+    }
 }
