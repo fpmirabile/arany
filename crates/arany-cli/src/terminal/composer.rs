@@ -1377,6 +1377,7 @@ mod tests {
         assert_eq!(composer.text(), format!("\\{payload}"));
         assert_eq!(&composer.text()[composer.pastes[0].range.clone()], payload);
         for selected in NewlineShortcut::ALL {
+            let mut composer = Composer::default();
             composer.set_newline_shortcut(selected);
             assert_eq!(composer.newline_hint(), "\\ then Enter");
             for received in NewlineShortcut::ALL {
@@ -1400,6 +1401,7 @@ mod tests {
             composer.clear();
             composer.apply(TerminalInput::Newline);
             assert_eq!(composer.text(), "\n");
+            assert_eq!(composer.newline_hint(), selected.label());
         }
     }
 
