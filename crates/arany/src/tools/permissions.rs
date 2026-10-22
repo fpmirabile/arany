@@ -54,14 +54,25 @@ pub enum PermissionSource {
     AiReview,
     UnavailableApproval,
     PinnedGrant,
-    ExactCommandRule,
+    SessionApproval,
     Hook,
     TypedPrefixRule,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct HostApproval {
+    pub epoch: uuid::Uuid,
+    pub session: bool,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub source_intent: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PermissionVerdict {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostApproval>,
     pub intent_digest: [u8; 32],
     pub decision: Decision,
     #[serde(deserialize_with = "Option::deserialize")]
@@ -274,6 +285,7 @@ impl PermissionConfig {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule
                 )
                 && !call.is_unguarded()
+                && !call.is_host()
             {
                 ApprovalMode::Auto
             } else {
@@ -369,6 +381,7 @@ impl PermissionConfig {
                 || facts.spawns_process
                 || matches!(facts.family, Family::Mcp | Family::Git));
         let allow_skips_approval = !call.is_unguarded()
+            && !call.is_host()
             && !auto_review
             && !(self.mode == PermissionMode::AcceptEdits
                 && facts.asks_approval

@@ -125,6 +125,7 @@ struct CompactionWindow {
 }
 
 struct Summary {
+    rate_limits: Option<crate::provider::RateLimits>,
     status: CompactionStatus,
     response_id: Option<String>,
     usage: Usage,
@@ -180,12 +181,12 @@ impl RunLoop<'_> {
         deadline: Option<Instant>,
     ) -> Result<PrimaryContext, EngineError> {
         let reserve = self.controls.tools.map_or(0, |runtime| {
-            crate::tools::types::MAX_TOOL_RESULT_BYTES
-                + crate::provider::max_turn_bytes(request.max_output_tokens)
-                + crate::tools::ToolRuntime::step_context_reserve(
-                    true,
-                    Self::maximum_feedback_reserve(runtime),
-                )
+            let reserve = crate::tools::ToolRuntime::continuation_reserve(
+                crate::provider::max_turn_bytes(request.max_output_tokens),
+                Self::maximum_feedback_reserve(runtime),
+            );
+            let limit = runtime.context_limit_bytes();
+            if reserve > limit { limit / 2 } else { reserve }
         });
         match self
             .compact_tool_context_if_needed(request, reserve, deadline)
@@ -208,11 +209,7 @@ impl RunLoop<'_> {
         }
         if let Some((context, runtime)) = request.input.tools.as_ref().zip(self.controls.tools)
             && matches!(
-                context_capacity(
-                    context.rendered_len(),
-                    runtime.context_limit_bytes(),
-                    reserve
-                ),
+                context_capacity(context.rendered_len(), runtime.context_limit_bytes(), 0),
                 ContextCapacity::Full
             )
         {
@@ -311,16 +308,32 @@ impl RunLoop<'_> {
                 for step in &mut context.steps[..prefix_steps] {
                     step.cleared = true;
                 }
-                if bytes >= crate::tools::types::MAX_TOOL_RESULT_BYTES {
+                if bytes >= crate::tools::types::MAX_TOOL_RESULT_BYTES
+                    && matches!(
+                        context_capacity(context.rendered_len(), context_limit, reserve),
+                        ContextCapacity::Fits
+                    )
+                {
                     return Ok(());
                 }
             }
         }
-        let Some(window) = self
-            .select_compaction_window(request, context_limit)
-            .await?
-        else {
-            return Ok(());
+        let mut summary_limit = context_limit.saturating_sub(reserve);
+        let window = self
+            .select_compaction_window(request, summary_limit)
+            .await?;
+        let window = match window {
+            Some(window) => window,
+            None => {
+                summary_limit = context_limit;
+                let Some(window) = self
+                    .select_compaction_window(request, summary_limit)
+                    .await?
+                else {
+                    return Ok(());
+                };
+                window
+            }
         };
         if !self.ledger().admits(Action::Compaction) {
             return Ok(());
@@ -373,7 +386,7 @@ impl RunLoop<'_> {
         reservation.commit()?;
 
         let summary = self
-            .summarize(request, &window, deadline, context_limit)
+            .summarize(request, &window, deadline, summary_limit)
             .await?;
         self.record_compaction(request, window, summary).await?;
         if let Some(segment) = active_segment {
@@ -550,6 +563,7 @@ impl RunLoop<'_> {
         let source_bytes = u32::try_from(source_len).map_err(|_| EngineError::InvalidRequest)?;
 
         let call_deadline = deadline.min(Instant::now() + COMPACTION_CALL_DEADLINE);
+        let limits = crate::provider::RateLimitSlot::default();
         let response = self
             .routing
             .compact(
@@ -557,6 +571,7 @@ impl RunLoop<'_> {
                 self.primary_id,
                 call_deadline,
                 self.controls.cancellation.clone(),
+                limits.clone(),
             )
             .await?;
         let failed = |reason| {
@@ -599,6 +614,7 @@ impl RunLoop<'_> {
             }
         }
         Ok(Summary {
+            rate_limits: limits.take(),
             status,
             response_id,
             usage,
@@ -618,6 +634,7 @@ impl RunLoop<'_> {
             .provider(crate::provider::ProviderRole::Compaction, self.primary_id)?;
         let identity = provider.identity();
         let record = CompactionRecord {
+            rate_limits: summary.rate_limits,
             covered_run_id: self.run_id,
             covered_sequence: window.covered_sequence,
             source_digest: window.source_digest,

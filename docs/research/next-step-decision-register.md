@@ -300,6 +300,49 @@ owns methodology; [next steps](../../NEXT_STEPS.md#daily-use-first) owns the rem
 named-host evidence and provisional objectives. This does not claim macOS, cold
 disk, long-history, large-snapshot or live Provider latency support.
 
+### D-24 — User-local known-owner storage metadata
+
+The 2026-10-22 lead default permits explicit local aggregated private-storage
+metadata, including secret-containing files only in category totals. Ownership
+comes from existing directory admission and storage owners, not ambient search
+or filename prefixes. This avoids opening malformed history or credentials just
+to explain disk usage. The report is not model authority or a Tool disclosure.
+
+OpenCode's [known-path uninstall preview](https://github.com/anomalyco/opencode/blob/b42c31613fdcbd220e859bea357fea48260a6c7a/packages/cli/src/commands/handlers/uninstall.ts#L23)
+supplies the explicit-coverage inspection precedent. The inspected
+[Codex command inventory](https://github.com/openai/codex/blob/61f34c35af77777db4d77d0ea2aeb8547a6b4523/codex-rs/cli/src/main.rs#L149-L250)
+and [OpenCode stats](https://github.com/anomalyco/opencode/blob/b42c31613fdcbd220e859bea357fea48260a6c7a/packages/cli/src/commands/handlers/stats.ts#L95)
+establish no shared disk-report schema; Arany uses existing local text conventions.
+No cleanup implementation or public JSON protocol is justified. Allocation is
+separate from logical size and reclaimability because filesystem sharing and
+sparse backing make those quantities different. The
+[Tool contract](../specs/tools.md#local-storage-inventory) owns accepted behavior;
+the [remaining plan](../../planning/arany-storage/README.md) owns Guard expansion.
+
+### D-25 — Branch reads use Git semantics with inert tracking metadata
+
+Decided 2026-10-22. Extend the existing read form of `git_branch` rather than
+add another listing Tool: its grant, plan availability and macOS read path
+already own this operation. Standard Git scopes and ref identities follow
+[for-each-ref](https://git-scm.com/docs/git-for-each-ref); the pinned
+[Codex branch comparison](https://github.com/openai/codex/blob/86e17e98c7f901277aeeb4649cf1b01462b082f2/codex-rs/git-utils/src/branch.rs)
+uses [rev-list count semantics](https://git-scm.com/docs/git-rev-list).
+Arany captures OIDs before dependent reads so mutable ref names cannot silently
+change the meaning of a committed observation. Arany counts a bounded left/right
+stream instead of requesting an unlimited count; a per-row timer also bounds
+merge-base work. Separate subject captures keep one verbose tip from consuming
+the batch's output allowance and avoid requiring newer Git format atoms on both
+platform pins. [Tools](../specs/tools.md#branch-discovery) owns the caps and
+partial-result semantics.
+
+Git's `%(upstream)` depends on configuration that the neutralized view deliberately
+does not apply. Reading only a bounded direct metadata subset as data preserves
+the Safe AI cage; guessing `origin/<branch>` would invent an association. Includes
+and unusual refspecs therefore report unsupported instead of broadening Git's
+configuration authority. The [Tool contract](../specs/tools.md#branch-discovery)
+owns exact syntax, fidelity, disclosure and bounds; execution reuses its existing
+concrete Engine/Guard boundary with no new adapter or privilege.
+
 ### Rejected layering
 
 Retained from the 2026-10-04 architecture review (its report is folded into this register):

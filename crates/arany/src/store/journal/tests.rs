@@ -262,6 +262,8 @@ fn run_start_admission_reserves_the_current_version_payload_exceptions() {
 // The largest typed Write: a six-byte escape per content byte and a long escaped path.
 fn largest_tool_started_payload() -> String {
     let intent = crate::tools::EffectIntent {
+        host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: crate::session::RunId::new(),

@@ -171,7 +171,7 @@ fn send_sse(input: &mut impl Write, id: &str, text: serde_json::Value) {
     input
         .write_all(
             format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nx-codex-primary-used-percent: 25.5\r\nx-codex-primary-window-minutes: 300\r\nx-codex-primary-reset-at: 2000000000\r\nx-codex-secondary-used-percent: 70\r\nx-codex-secondary-window-minutes: 10080\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 stream.len()
             )
             .as_bytes(),
@@ -354,7 +354,7 @@ pub(super) fn respond_after_catalog(
     );
     let rejected_body = format!("{FAILURE_BODY_CANARY} {ACCESS} {REFRESH}");
     // A Retry-After beyond the action deadline is never waited out, so the 429 fails the Run at once.
-    input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 86400\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
+    input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nx-codex-secondary-used-percent: 71\r\nx-codex-secondary-window-minutes: 10080\r\nRetry-After: 86400\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
     let completed = |model: &str, text: serde_json::Value| {
         format!(
             "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
@@ -985,6 +985,15 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
         assert_eq!(run.agents[0].provider_calls.len(), 1);
         let call = &run.agents[0].provider_calls[0];
         assert_eq!(call.response_id.as_deref(), Some(response_id));
+        let limits = call.rate_limits.as_ref().expect("committed header facts");
+        assert_eq!(
+            limits.primary.as_ref().unwrap().used_percent.map(f64::from),
+            Some(25.5)
+        );
+        assert_eq!(
+            limits.secondary.as_ref().unwrap().window_minutes,
+            Some(10080)
+        );
         assert_eq!(call.input_tokens, Some(12));
         assert_eq!(call.output_tokens, Some(8));
         assert_eq!(
@@ -1082,6 +1091,15 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
     ] {
         assert_eq!(call.phase, phase);
         assert_eq!(call.response_id.as_deref(), Some(response_id));
+        let limits = call.rate_limits.as_ref().expect("committed header facts");
+        assert_eq!(
+            limits.primary.as_ref().unwrap().used_percent.map(f64::from),
+            Some(25.5)
+        );
+        assert_eq!(
+            limits.secondary.as_ref().unwrap().window_minutes,
+            Some(10080)
+        );
         assert_eq!(call.input_tokens, Some(12));
         assert_eq!(call.output_tokens, Some(8));
         assert_eq!(
@@ -1138,6 +1156,17 @@ pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_js
         "hostile Retry-After was waited out"
     );
     let call = &failed.agents[0].provider_calls[0];
+    assert_eq!(
+        call.rate_limits
+            .as_ref()
+            .unwrap()
+            .secondary
+            .as_ref()
+            .unwrap()
+            .used_percent
+            .map(f64::from),
+        Some(71.0)
+    );
     assert_eq!(call.phase, arany::AgentPhase::RootPlan);
     assert_eq!(call.disposition, arany::ProviderCallDisposition::Rejected);
     // A 429 whose body names no quota is a rate limit, not proof of an exhausted plan.

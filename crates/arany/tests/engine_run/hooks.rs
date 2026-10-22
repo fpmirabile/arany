@@ -53,6 +53,8 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let actor = result.run.agents[0].id;
         let config = result.run.config.as_ref().unwrap();
         let intent = arany::EffectIntent {
+            host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: result.run.id,
@@ -176,7 +178,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, outcome.version());
         assert_eq!(
             connection
                 .execute(
@@ -272,111 +274,128 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
 #[tokio::test]
 async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay() {
     use arany::UnguardedGrant::{Denied, HumanOnly};
-    for inherited in [Denied, HumanOnly] {
-        let temp = tempfile::tempdir().unwrap();
-        let workspace = arany::test_support::goals::facts_workspace(temp.path(), "fact");
-        let state = temp.path().join("state");
-        let root = StateRoot::admit(&state).unwrap();
-        let shell = std::fs::canonicalize("/bin/sh").unwrap();
-        let sha256: String = Sha256::digest(std::fs::read(&shell).unwrap())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let mut config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
-            "commands":[{"name":"sh","executable":shell,"sha256":sha256,"interpreter":true,"inputs":[]}],
-            "skills":[],"mcp":[]});
-        if inherited == HumanOnly {
-            config["child_unguarded"] = serde_json::json!(inherited);
-        }
-        std::fs::write(
-            state.join("tools.json"),
-            serde_json::to_vec(&config).unwrap(),
-        )
-        .unwrap();
-        std::fs::set_permissions(
-            state.join("tools.json"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
-        let engine = engine_support::open(
-            root,
-            EngineConfig {
-                guard_executable: Some(std::env::current_exe().unwrap()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let provider = Arc::new(ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect facts".into(),
-                    profile: None,
-                }],
-            }),
-            arany::test_support::goals::finish_with("fact"),
-            arany::test_support::goals::finish_with("answer"),
-        ]));
-        let mut input = request(&workspace, "Inspect facts");
-        input.policy = arany::CollaborationPolicy::Auto {
-            max_active_children: 1,
-        };
-        let outcome = run_with(
-            &engine,
-            &provider,
-            input,
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = arany::test_support::goals::facts_workspace(temp.path(), "fact");
+    let state = temp.path().join("state");
+    let root = StateRoot::admit(&state).unwrap();
+    let shell = std::fs::canonicalize("/bin/sh").unwrap();
+    let sha256: String = Sha256::digest(std::fs::read(&shell).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let mut config = serde_json::json!({"version":1,"workspace_paths":["notes"],"write":false,
+        "commands":[{"name":"sh","executable":shell,"sha256":sha256,"interpreter":true,"inputs":[]}],
+        "skills":[],"mcp":[]});
+    std::fs::write(
+        state.join("tools.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        state.join("tools.json"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let engine = engine_support::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Delegate(Delegate {
+            agent: None,
+            children: vec![arany::ChildAssignment {
+                editor: None,
+                objective: "Inspect facts".into(),
+                profile: None,
+            }],
+        }),
+        arany::test_support::goals::finish_with("fact"),
+        arany::test_support::goals::finish_with("answer"),
+    ]));
+    config["child_unguarded"] = serde_json::json!(HumanOnly);
+    std::fs::write(
+        state.join("tools.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        engine.submit(
+            AdmittedProviders::single(provider.clone()),
+            request(&workspace, "Inspect facts"),
             RunControls {
                 tools: ToolGrant::Configured,
                 ..Default::default()
             },
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.run.status, RunStatus::Finished);
-        let child = outcome.run.agents[1].id;
-        assert_eq!(
-            outcome.run.agents[1].grant,
-            Some(arany::ChildGrant::ReadOnly {
-                unguarded: inherited
-            })
-        );
-        {
-            let calls = provider.requests.lock().unwrap();
-            let catalog: serde_json::Value =
-                serde_json::from_str(calls[1].input.tools.as_ref().unwrap().catalog()).unwrap();
-            assert_eq!(catalog["commands"], serde_json::json!([]));
-        }
-        engine.close().await.unwrap();
-        let (events, _) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
-        for requested in [Denied, HumanOnly] {
-            let mut changed = events.clone();
-            for event in &mut changed {
-                if let Event::AgentSpawned {
-                    agent_run_id,
-                    grant,
-                    ..
-                } = &mut event.event
-                    && *agent_run_id == child
-                {
-                    *grant = Some(arany::ChildGrant::ReadOnly {
-                        unguarded: requested,
-                    });
-                }
-            }
-            assert_eq!(
-                SessionView::replay(outcome.session_id, &changed).is_ok(),
-                requested == Denied || inherited == HumanOnly
-            );
-        }
-        let mut forged = events;
-        for event in &mut forged {
-            if let Event::RunStarted { config, .. } = &mut event.event {
-                let policy = config.tool_policy.as_mut().unwrap();
-                policy.unguarded = Denied;
-                policy.child_unguarded = HumanOnly;
-            }
-        }
-        assert!(SessionView::replay(outcome.session_id, &forged).is_err());
+        ),
+        Err(EngineError::Tool(arany::ToolError::Configuration))
+    ));
+    assert!(provider.requests.lock().unwrap().is_empty());
+    config["child_unguarded"] = serde_json::json!(Denied);
+    std::fs::write(
+        state.join("tools.json"),
+        serde_json::to_vec(&config).unwrap(),
+    )
+    .unwrap();
+    let mut input = request(&workspace, "Inspect facts");
+    input.policy = arany::CollaborationPolicy::Auto {
+        max_active_children: 1,
+    };
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let child = outcome.run.agents[1].id;
+    assert_eq!(
+        outcome.run.agents[1].grant,
+        Some(arany::ChildGrant::ReadOnly { unguarded: Denied })
+    );
+    {
+        let calls = provider.requests.lock().unwrap();
+        let catalog: serde_json::Value =
+            serde_json::from_str(calls[1].input.tools.as_ref().unwrap().catalog()).unwrap();
+        assert_eq!(catalog["commands"], serde_json::json!([]));
     }
+    engine.close().await.unwrap();
+    let (events, _) = arany::test_support::goals::replayed(&state, outcome.session_id).await;
+    for requested in [Denied, HumanOnly] {
+        let mut changed = events.clone();
+        for event in &mut changed {
+            if let Event::AgentSpawned {
+                agent_run_id,
+                grant,
+                ..
+            } = &mut event.event
+                && *agent_run_id == child
+            {
+                *grant = Some(arany::ChildGrant::ReadOnly {
+                    unguarded: requested,
+                });
+            }
+        }
+        assert_eq!(
+            SessionView::replay(outcome.session_id, &changed).is_ok(),
+            requested == Denied
+        );
+    }
+    let mut forged = events;
+    for event in &mut forged {
+        if let Event::RunStarted { config, .. } = &mut event.event {
+            let policy = config.tool_policy.as_mut().unwrap();
+            policy.unguarded = Denied;
+            policy.child_unguarded = HumanOnly;
+        }
+    }
+    assert!(SessionView::replay(outcome.session_id, &forged).is_err());
 }

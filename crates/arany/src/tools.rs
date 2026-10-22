@@ -20,7 +20,7 @@ mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
 pub(crate) mod types;
-mod unguarded;
+pub(crate) mod unguarded;
 pub(crate) mod unguarded_rules;
 pub(crate) mod worker;
 mod workspace;
@@ -35,6 +35,7 @@ pub use approval::{
 };
 pub use cancel::Cancellation;
 use config::Config;
+pub(crate) use git::host::sweep_stale as sweep_host_scratch;
 pub(crate) use git::recover_locks as report_git_locks;
 pub use skills::{ProjectSkills, project_skills};
 pub(crate) use skills::{parse_json, parse_json_bounded};
@@ -95,8 +96,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
-    OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
+    FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS,
+    NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
     ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
     ToolStep, UnguardedGrant, UnguardedReceipt,
 };
@@ -109,6 +110,10 @@ pub enum ToolError {
         #[source]
         source: Box<ToolError>,
     },
+    #[error("No admitted credential-helper search directory")]
+    HostHelperSearch,
+    #[error("Credential includes cannot be safely omitted")]
+    CredentialIncludes,
     #[error("tools require a private tools.json; see docs/tools.md")]
     MissingConfiguration,
     #[error("Tool configuration is invalid or unsafe")]
@@ -179,13 +184,16 @@ impl ToolError {
 #[derive(Clone)]
 pub(crate) struct PermissionSnapshot {
     config: std::sync::Arc<permissions::PermissionConfig>,
-    digest: [u8; 32],
+    pub(crate) digest: [u8; 32],
 }
 
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
+    pub(crate) host_settings_admitted: bool,
+    guard_available: bool,
     config: Config,
     git_writes_available: bool,
+    host_authentication: std::sync::Arc<Option<git::host::Authentication>>,
     worker: Option<std::sync::Arc<worker::Action>>,
     handover: Option<std::sync::Arc<[u8]>>,
     pub(crate) definitions: std::sync::Arc<definitions::DefinitionSnapshots>,
@@ -535,6 +543,10 @@ impl ToolRuntime {
         (capacity >= 128).then_some(capacity)
     }
 
+    pub(crate) fn continuation_reserve(turn_bytes: usize, feedback: usize) -> usize {
+        types::MAX_TOOL_RESULT_BYTES + turn_bytes + Self::step_context_reserve(true, feedback)
+    }
+
     pub(crate) fn step_context_reserve(command_integration: bool, feedback: usize) -> usize {
         512 + feedback
             + if command_integration {
@@ -549,6 +561,14 @@ impl ToolRuntime {
             ToolCall::ApplyChangeset {
                 source: crate::session::worker::ChangesetSource::WorkerHandover { .. },
             } => self.config.write,
+            _ if call.is_host() => {
+                self.config.allows(call)
+                    && self
+                        .host_authentication
+                        .as_ref()
+                        .as_ref()
+                        .is_some_and(|auth| auth.allows(call))
+            }
             _ => self.config.allows(call),
         }
     }
@@ -695,7 +715,7 @@ impl ToolRuntime {
     ) -> Result<Self, ToolError> {
         #[cfg(target_os = "macos")]
         let capture = guard::FixtureSpan::begin(guard::FixtureStage::ToolAdmission);
-        guard::check_available()?;
+        let guard_available = guard::check_available().is_ok();
         let enforcement_digest = guard::enforcement_digest(&[])?;
         let root = fs::open_directory(workspace)?;
         state
@@ -719,6 +739,7 @@ impl ToolRuntime {
             snapshot.config = std::sync::Arc::new(config);
             snapshot
         });
+        let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
@@ -739,11 +760,12 @@ impl ToolRuntime {
             fs::reject_overlap(Path::new(path), &account)?;
         }
         #[cfg(target_os = "macos")]
-        let system_programs = if config.commands.is_empty() && config.mcp.is_empty() {
-            None
-        } else {
-            Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
-        };
+        let system_programs =
+            if !guard_available || config.commands.is_empty() && config.mcp.is_empty() {
+                None
+            } else {
+                Some(std::sync::Arc::new(guard::SystemPrograms::admit()?))
+            };
         #[cfg(target_os = "macos")]
         let process_enforcement_digest = guard::macos_runtime_enforcement_digest(
             system_programs.as_deref(),
@@ -753,10 +775,25 @@ impl ToolRuntime {
         let process_enforcement_digest = guard::enforcement_digest(&config.runtime_grants)?;
         #[cfg(target_os = "macos")]
         capture.complete();
+        let skill_roots = config
+            .skills
+            .iter()
+            .map(|skill| {
+                (
+                    skill.name.clone(),
+                    fs::open_directory(Path::new(&skill.directory))
+                        .ok()
+                        .map(std::sync::Arc::new),
+                )
+            })
+            .collect();
         Ok(Self {
+            host_settings_admitted: true,
+            guard_available,
             definitions: std::sync::Arc::new(definitions),
             config,
             git_writes_available: guard::git_writes_available(),
+            host_authentication,
             worker: None,
             handover: None,
             permissions,
@@ -774,6 +811,7 @@ impl ToolRuntime {
             )),
             workspace: workspace.to_owned(),
             reads: Some(InProcessReads {
+                skills: skill_roots,
                 root: std::sync::Arc::new(root),
                 slots: std::sync::Arc::clone(&IN_PROCESS_READS),
             }),
@@ -804,7 +842,7 @@ impl ToolRuntime {
         let mut receipt = self.config.receipt();
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
-        receipt.unguarded_rules_digest = self.exact_command_rules().map(|rules| rules.digest);
+        receipt.unguarded_rules_digest = None;
         receipt
     }
 
@@ -839,8 +877,8 @@ impl ToolRuntime {
             .map(|snapshot| snapshot.config.as_ref())
     }
 
-    fn exact_command_rules(&self) -> Option<&unguarded_rules::ExactCommandRules> {
-        self.unguarded_rules.as_ref()
+    pub(crate) fn has_inactive_host_rules(&self) -> bool {
+        self.unguarded_rules.is_some()
     }
 
     pub(crate) fn command_executable(&self, name: &str) -> Option<&str> {
@@ -851,29 +889,11 @@ impl ToolRuntime {
             .map(|program| program.executable.as_str())
     }
 
-    pub(crate) fn matches_exact_command_rule(&self, call: &ToolCall) -> bool {
-        self.exact_command_rules()
-            .is_some_and(|rules| rules.matches(call, self.workspace_identity, &self.workspace))
-    }
-
-    pub(crate) fn record_exact_command_rule(&self, call: &ToolCall) -> Result<(), ToolError> {
-        fs::validate_workspace(self)?;
-        let state = self
-            .cache_state
-            .as_deref()
-            .ok_or(ToolError::Configuration)?;
-        unguarded_rules::ExactCommandRules::record(
-            state,
-            &self.workspace,
-            self.workspace_identity,
-            call,
-        )
-    }
-
     pub(crate) fn record_typed_prefix_rule(
         &self,
         prefix: permissions::TypedGitPrefix,
-    ) -> Result<(), ToolError> {
+        expected: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], ToolError> {
         fs::validate_workspace(self)?;
         let state = self
             .cache_state
@@ -884,6 +904,7 @@ impl ToolRuntime {
             &self.workspace,
             self.workspace_identity,
             prefix,
+            expected,
         )
         .map_err(|error| match error {
             permissions::SettingsError::Busy => ToolError::AccountBusy,
@@ -893,10 +914,11 @@ impl ToolRuntime {
     }
 
     pub(crate) fn allows_skill(&self, name: &str) -> bool {
-        self.config.allows(&ToolCall::Skill {
-            name: name.to_owned(),
-            resource: None,
-        })
+        self.guard_available
+            && self.config.allows(&ToolCall::Skill {
+                name: name.to_owned(),
+                resource: None,
+            })
     }
 
     pub(crate) fn hides_skill_from_model(&self, name: &str) -> bool {
@@ -907,12 +929,13 @@ impl ToolRuntime {
     }
 
     fn skill_rows(&self) -> Vec<serde_json::Value> {
-        self.config.skills.iter().filter(|skill| !skill.disable_model_invocation
+        self.config.skills.iter().filter(|skill| self.guard_available && !skill.disable_model_invocation
             && !self.skill_file_path(&skill.name, "SKILL.md").is_some_and(|path| self.permissions().is_some_and(|config| config.restricts_read(&path)))).map(|skill| serde_json::json!({"name":skill.name,"description":skill.description.chars().take(96).collect::<String>()})).collect()
     }
 
     fn command_rows(&self, names: Option<&[String]>) -> Vec<serde_json::Value> {
         self.config.commands.iter()
+            .filter(|_| self.guard_available)
             .filter(|p| names.is_none_or(|names| names.contains(&p.name)))
             .map(|program| serde_json::json!({"name":program.name,"interpreter":program.interpreter,
                 "inputs":program.inputs.iter().map(|input| format!("/inputs/{}/{}", program.name, input.destination)).collect::<Vec<_>>()}))
@@ -923,15 +946,25 @@ impl ToolRuntime {
         let catalog = serde_json::json!({
             "host_clock": {"unix_ms": now_ms(), "timezone":"UTC"},
             "workspace_paths": self.config.workspace_paths,
-            "write": self.config.write,
-            "file_tools": catalog::FILE_TOOLS,
+            "write": self.config.write && self.guard_available,
+            "file_tools": if self.guard_available { catalog::FILE_TOOLS } else { "" },
             "commands": self.command_rows(None),
             "command_contract": catalog::COMMAND_CONTRACT,
+            "host_commands": true,
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
-            "git": if self.config.git_available() {
+            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "git": if self.guard_available && self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
-                serde_json::json!({"write":write,"operations":catalog::git_operations(write),"scope":catalog::GIT_SCOPE})
+                let operations: Vec<_> = catalog::git_operations(write, self.config.write)
+                    .into_iter()
+                    .filter(|name| match *name {
+                        "git_push" | "gh_pr_create" => self.host_authentication.as_ref().as_ref()
+                            .is_some_and(|auth| auth.offers(name)),
+                        _ => true,
+                    })
+                    .filter(|name| *name != "gh_pr_create" || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .collect();
+                serde_json::json!({"write":write,"host":self.config.write,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },
@@ -945,7 +978,7 @@ impl ToolRuntime {
 
     pub(crate) fn worker_policy(&self) -> Option<crate::session::worker::WorkerPolicy> {
         use crate::session::worker::*;
-        (self.config.write && self.definitions.pin().is_some())
+        (self.guard_available && self.config.write && self.definitions.pin().is_some())
             .then(|| WorkerPolicy {
                 parent_grant: WorkerGrant {
                     commands: {
@@ -974,7 +1007,13 @@ impl ToolRuntime {
                         WorkerTool::Command,
                     ],
                     skills: self.config.skills.iter().map(|s| s.name.clone()).collect(),
-                    mcp_servers: self.config.mcp.iter().map(|s| s.name.clone()).collect(),
+                    mcp_servers: self
+                        .config
+                        .mcp
+                        .iter()
+                        .filter(|_| self.guard_available)
+                        .map(|s| s.name.clone())
+                        .collect(),
                     permission_mode: self.permissions().map(permissions::PermissionConfig::mode),
                 },
                 concurrency: 4,
@@ -1000,10 +1039,14 @@ impl ToolRuntime {
         let mut catalog: serde_json::Value =
             serde_json::from_str(context.catalog()).map_err(|_| ToolError::Configuration)?;
         catalog["workspace_paths"] = serde_json::json!(grant.read_paths);
-        catalog["write"] = serde_json::json!(true);
+        catalog["write"] = serde_json::json!(self.guard_available);
         catalog["skills"] = serde_json::json!([]);
         catalog["mcp_servers"] = serde_json::json!([]);
-        catalog["file_tools"] = serde_json::json!(catalog::FILE_TOOLS);
+        catalog["file_tools"] = serde_json::json!(if self.guard_available {
+            catalog::FILE_TOOLS
+        } else {
+            ""
+        });
         catalog["commands"] = serde_json::json!(self.command_rows(Some(&grant.commands)));
         if !grant.commands.is_empty() {
             catalog["command_contract"] = serde_json::json!(catalog::WORKER_COMMAND_CONTRACT);
@@ -1032,10 +1075,10 @@ impl ToolRuntime {
             "host_clock": {"unix_ms": now_ms(), "timezone": "UTC"},
             "workspace_paths": self.config.workspace_paths,
             "write": false,
-            "file_tools": catalog::RESEARCH_FILE_TOOLS,
+            "file_tools": if self.guard_available { catalog::RESEARCH_FILE_TOOLS } else { "" },
             "commands": [],
             "skills": self.skill_rows(),
-            "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
+            "mcp_servers": self.config.mcp.iter().filter(|_| self.guard_available).map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::RESEARCH_MCP_PROTOCOL})).collect::<Vec<_>>(),
             "tool_calls_remaining": tool_calls_remaining,
         });
         let context = ToolContext::new(catalog);
@@ -1056,7 +1099,43 @@ impl ToolRuntime {
         } else {
             self.enforcement_digest
         };
+        let limits = if call.is_host() {
+            ToolLimits {
+                network: NetworkGrant::Host,
+                runtime_ms: 600_000,
+                cache_requested_bytes: 0,
+                cache_bytes: 0,
+                cache_candidate_bytes: 0,
+                ..ToolLimits::default()
+            }
+        } else {
+            ToolLimits::default()
+        };
         EffectIntent {
+            host: git::host::pin(&self.workspace, &call).ok(),
+            host_command: match &call {
+                ToolCall::CommandUnguarded { program, .. } => {
+                    let path = std::env::var("PATH").unwrap_or_default();
+                    let requested = self.command_executable(program).unwrap_or(program);
+                    unguarded::pin(requested, &self.workspace, &path)
+                        .ok()
+                        .map(|mut pin| {
+                            pin.state_roots = [
+                                self.cache_state
+                                    .as_ref()
+                                    .map(|state| state.path().to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                                StateRoot::account_path()
+                                    .map(|path| path.to_string_lossy().into_owned())
+                                    .unwrap_or_default(),
+                            ];
+                            pin.permissions_digest =
+                                self.permissions.as_ref().map(|snapshot| snapshot.digest);
+                            pin
+                        })
+                }
+                _ => None,
+            },
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -1066,15 +1145,50 @@ impl ToolRuntime {
             workspace_device: self.workspace_identity.device,
             workspace_inode: self.workspace_identity.inode,
             call,
-            limits: ToolLimits::default(),
+            limits,
             expires_at_ms: now_ms().saturating_add(60_000),
             use_count: 1,
         }
     }
 
+    pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
+        self.cache_state.as_ref().is_some_and(|state| {
+            Self::load_permissions(state)
+                .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
+        })
+    }
+
+    pub(crate) async fn host_interpreter_admitted(&self, intent: &EffectIntent) -> bool {
+        let ToolCall::CommandUnguarded { program, .. } = &intent.call else {
+            return false;
+        };
+        let Some(pin) = intent.host_command.as_ref() else {
+            return false;
+        };
+        if (unguarded::interpreter(program) || unguarded::interpreter(&pin.executable))
+            && !self.config.commands.iter().any(|command| {
+                command.interpreter
+                    && command.executable == pin.executable
+                    && command.sha256 == pin.sha256
+            })
+        {
+            return false;
+        }
+        if !unguarded::wrapper(program) && !unguarded::wrapper(&pin.executable) {
+            return true;
+        }
+        let intent = intent.clone();
+        let commands = self.config.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            unguarded::wrapper_interpreters_admitted(&intent, &commands)
+        })
+        .await
+        .unwrap_or(false)
+    }
+
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
-            Site::InProcess | Site::Unguarded => Duration::ZERO,
+            Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
             Site::Guard => guard::RESERVATION_OVERHEAD,
         }
     }
@@ -1101,6 +1215,11 @@ impl ToolRuntime {
         intent: EffectIntent,
         cancellation: Cancellation,
     ) -> ToolObservation {
+        if matches!(intent.call.facts().site, Site::Guard | Site::InProcess)
+            && !self.guard_available
+        {
+            return unstarted_observation(intent, ToolError::ProtectionUnavailable);
+        }
         if matches!(
             intent.target,
             crate::worker::EffectTarget::WorkerView { .. }
@@ -1143,6 +1262,20 @@ impl ToolRuntime {
         }
         match intent.call.facts().site {
             Site::InProcess => self.run_in_process(intent, cancellation).await,
+            Site::Host => {
+                if let Err(error) = self.pinned_root(&intent) {
+                    return unstarted_observation(intent, error);
+                }
+                git::host::run(
+                    &self.config,
+                    self.host_authentication.as_ref().as_ref(),
+                    self.cache_state.as_deref(),
+                    &self.workspace,
+                    intent,
+                    cancellation,
+                )
+                .await
+            }
             Site::Unguarded => self.run_unguarded(intent, cancellation).await,
             Site::Guard => match guard::execute(self, &intent, cancellation).await {
                 Ok(observation) => observation,
@@ -1169,12 +1302,47 @@ impl ToolRuntime {
         if let Err(error) = self.pinned_root(&intent) {
             return unstarted_observation(intent, error);
         }
-        let Some(pinned) = self.config.commands.iter().find(|row| &row.name == program) else {
+        if unguarded::prohibited_intent(&intent) {
+            let output = unguarded::manual_handoff(&intent.call);
+            return ToolObservation {
+                enforcement_cause: None,
+                limit_cause: None,
+                intent,
+                disposition: ToolDisposition::Denied,
+                output,
+                attestation: None,
+                cache_update: CacheUpdate::NotApplicable,
+            };
+        }
+        let Some(pin) = &intent.host_command else {
             return unstarted_observation(intent, ToolError::Configuration);
+        };
+        if !self.host_interpreter_admitted(&intent).await {
+            return unstarted_observation(intent, ToolError::Configuration);
+        }
+        if !self.host_settings_admitted || !self.host_settings_current(pin) {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        }
+        let checked_pin = pin.clone();
+        let workspace = self.workspace.clone();
+        if !tokio::task::spawn_blocking(move || checked_pin.verify(&workspace))
+            .await
+            .is_ok_and(|result| result.is_ok())
+        {
+            return unstarted_observation(intent, ToolError::ChangedInput);
+        }
+        let pinned = config::Program {
+            name: program.clone(),
+            executable: pin.executable.clone(),
+            sha256: pin.sha256.clone(),
+            interpreter: true,
+            inputs: Vec::new(),
         };
         let outcome = unguarded::run(
             unguarded::Request {
-                program: pinned,
+                launcher: &self.guard_executable,
+                program: &pinned,
+                host: Some(pin),
                 args,
                 cwd,
                 workspace: &self.workspace,
@@ -1262,6 +1430,26 @@ impl ToolRuntime {
         let read = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let root = runtime.pinned_root(&read_intent)?;
+            if let ToolCall::Skill { name, .. } = &read_intent.call {
+                let skill = runtime
+                    .config
+                    .skills
+                    .iter()
+                    .find(|skill| &skill.name == name)
+                    .ok_or(ToolError::Configuration)?;
+                let skill_root = runtime
+                    .reads
+                    .as_ref()
+                    .and_then(|reads| reads.skills.get(name))
+                    .and_then(Option::as_ref)
+                    .ok_or(ToolError::Path)?;
+                return Ok(skills::read(
+                    skill_root,
+                    skill,
+                    &read_intent.call,
+                    read_intent.limits.result_bytes as usize,
+                ));
+            }
             let hidden = runtime.hidden_paths(&read_intent.call);
             Ok(fs::inspect(
                 &root,
@@ -1310,6 +1498,7 @@ impl ToolRuntime {
 
 #[derive(Clone)]
 struct InProcessReads {
+    skills: std::collections::BTreeMap<String, Option<std::sync::Arc<cap_std::fs::Dir>>>,
     root: std::sync::Arc<cap_std::fs::Dir>,
     slots: std::sync::Arc<tokio::sync::Semaphore>,
 }
@@ -1402,18 +1591,49 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         Site::InProcess => "Read",
         Site::Guard => "Guard",
         Site::Unguarded => "Unguarded",
+        Site::Host => "host",
     };
     record_failure(site, &intent, &error);
+    let mut output = match &error {
+        ToolError::QueueFull => format!("{error}. No operation was dispatched."),
+        _ => format!(
+            "{site} {} unavailable before dispatch; no operation was dispatched.",
+            failure_stage(&error)
+        ),
+    };
+    if intent.call.facts().site == Site::Guard && !matches!(error, ToolError::QueueFull) {
+        let cause = failure_check(&error).unwrap_or(match &error {
+            ToolError::Operation => "Guard startup failed; exact cause was not reported",
+            _ => failure_stage(&error),
+        });
+        let next = match &error {
+            ToolError::GuardRejected(guard::GuardStage::NamespaceBootstrap) => {
+                "Enable unprivileged user namespaces and Bubblewrap for Arany, then resend your message."
+            }
+            ToolError::GuardRejected(guard::GuardStage::NativeManager) => {
+                "Restore the user service manager and its resource controls, then resend your message."
+            }
+            ToolError::ChangedInput | ToolError::Path | ToolError::FilesystemDenied => {
+                "Check the admitted files and folder permissions, then resend your message to pin them again."
+            }
+            _ => {
+                "Check the Guard executable and native sandbox prerequisites, then resend your message."
+            }
+        };
+        let diagnostic = if cfg!(debug_assertions) {
+            " For details, inspect development.log in the Session State directory."
+        } else {
+            ""
+        };
+        let detail = format!(" Cause: {cause}. {next}{diagnostic}");
+        if output.len() + detail.len() <= intent.limits.result_bytes as usize {
+            output.push_str(&detail);
+        }
+    }
     ToolObservation {
         enforcement_cause,
         limit_cause: None,
-        output: match error {
-            ToolError::QueueFull => format!("{error}. No operation was dispatched."),
-            _ => format!(
-                "{site} {} unavailable before dispatch; no operation was dispatched.",
-                failure_stage(&error)
-            ),
-        },
+        output,
         intent,
         disposition: ToolDisposition::Failed,
         attestation: None,
@@ -1449,6 +1669,8 @@ pub fn now_ms() -> u64 {
         .try_into()
         .unwrap_or(u64::MAX)
 }
+
+pub use unguarded::tool_host_main;
 
 pub fn tool_guard_main() -> std::process::ExitCode {
     guard::helper_main()

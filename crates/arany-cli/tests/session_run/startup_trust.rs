@@ -1137,7 +1137,7 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
             super::session_picker::pump(output, input, transcript, answered);
             assert!(
                 Instant::now() < deadline,
-                "trusted startup screen stage missing: {}",
+                "trusted startup screen stage {needle:?} missing: {}",
                 super::session_picker::screen_rows(transcript, 80, 24).join(" | ")
             );
             thread::yield_now();
@@ -1201,6 +1201,23 @@ fn trusted_startup_does_not_enumerate_optional_runtime_candidates() {
         &mut transcript,
         &mut answered,
         "New conversation",
+    );
+    wait(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        "Up/Down · Left/Right page · Esc close",
+    );
+    let closed_at = transcript.len();
+    input.write_all(b"\x1b").unwrap();
+    super::session_picker::wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (closed_at, 80, 24),
+        "Ask a question, or type / for commands",
     );
     input.write_all(b"\x03").unwrap();
     wait(
@@ -1798,13 +1815,13 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "verb menu",
-        &shows("gh pr create (unavailable; human approval required)"),
+        &shows("gh pr create (host; human approval required)"),
     );
     assert!(super::session_picker::screen_contains(
         &transcript,
         80,
         24,
-        "unavailable; human approval required"
+        "host; human approval required"
     ));
     input.write_all(b"\r").unwrap();
     until(

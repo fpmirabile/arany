@@ -30,6 +30,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     const INTEGRATION_FINISHED: usize = TOOL_STARTED + 3;
     const INTEGRATED_NEXT_CALL_RESERVED: usize = TOOL_STARTED + 4;
     let policy = arany::ToolPolicyReceipt {
+        host_epoch: None,
         permissions_digest: None,
         contract_version: 1,
         config_digest: [1; 32],
@@ -74,6 +75,8 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         cwd: String::new(),
     };
     let intent = arany::EffectIntent {
+        host: None,
+        host_command: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: run,
@@ -111,6 +114,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         run_id: run,
         agent_run_id: primary,
         record: ProviderCallRecord {
+            rate_limits: None,
             delegation: None,
             phase: AgentPhase::RootPlan,
             disposition,

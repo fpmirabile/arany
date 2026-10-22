@@ -4595,6 +4595,14 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .await
         .expect("latest fork in Workspace");
         assert_eq!(continued.id, fork_id);
+        assert!(!continued.usage.groups.is_empty());
+        assert!(
+            continued
+                .usage
+                .groups
+                .iter()
+                .all(|group| group.session_id == first.session_id)
+        );
         let listed = list_sessions(
             StateRoot::open_existing(&state_path).expect("state readmission"),
             workspace.clone(),

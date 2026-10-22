@@ -35,7 +35,12 @@ pub(super) fn apply(
         let git_write = observation.intent.call.is_git() && observation.intent.call.facts().mutates;
         let first_use_verdict = git_write
             && pending_tool(run, *agent_run_id).is_ok_and(|tool| tool.permission_verdict.is_some());
-        if configured || definition_mode.is_some() || unguarded || first_use_verdict {
+        if configured
+            || definition_mode.is_some()
+            || unguarded
+            || first_use_verdict
+            || observation.intent.call.is_host()
+        {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
@@ -48,6 +53,9 @@ pub(super) fn apply(
                 )
                 .0;
                 if verdict.approved
+                    && !(unguarded
+                        && mode == PermissionMode::DontAsk
+                        && verdict.source == PermissionSource::SessionApproval)
                     && (restriction == crate::tools::permissions::Decision::Deny
                         || restriction == crate::tools::permissions::Decision::Ask
                             && !matches!(
@@ -86,6 +94,7 @@ pub(super) fn apply(
             agent_run_id,
             verdict,
         } => {
+            let host_valid = valid_host_approval(current, *run_id, *agent_run_id, verdict);
             let run = active_run(current, *run_id)?;
             let definition_mode = super::definition_mode(run, *agent_run_id)?;
             let policy = run
@@ -94,7 +103,6 @@ pub(super) fn apply(
                 .and_then(|config| config.tool_policy.as_ref());
             let permissions_pinned =
                 policy.is_some_and(|policy| policy.permissions_digest.is_some());
-            let rules_pinned = policy.is_some_and(|policy| policy.unguarded_rules_digest.is_some());
             let pending_call = pending_tool(run, *agent_run_id)?.intent.call.clone();
             let unguarded = pending_call.is_unguarded();
             let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
@@ -127,8 +135,7 @@ pub(super) fn apply(
                 && !(permissions_pinned
                     && primary
                     && typed_basis
-                    && TypedGitPrefix::of_call(&pending_call)
-                        .is_some_and(TypedGitPrefix::available)
+                    && TypedGitPrefix::of_call(&pending_call).is_some()
                     && (!typed_source
                         // An allow whose dispatch a later plan, budget or pause gate refused is unapproved.
                         || verdict.decision == Decision::Allow
@@ -147,22 +154,23 @@ pub(super) fn apply(
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            if unguarded
+            if pending_call.is_host()
                 && verdict.approved
-                && (!matches!(
-                    verdict.source,
-                    crate::tools::permissions::PermissionSource::Human
-                        | crate::tools::permissions::PermissionSource::ExactCommandRule
-                ) || verdict.decision == crate::tools::permissions::Decision::Deny
-                    || run.primary().is_none_or(|agent| agent.id != *agent_run_id)
-                    || run
-                        .unguarded_failure(&pending_call)
-                        .is_none_or(|(_, hook)| {
-                            hook && (verdict.source
-                                != crate::tools::permissions::PermissionSource::Human
-                                || verdict.decision != Decision::Ask)
-                        }))
+                && (!primary
+                    || verdict.source != PermissionSource::Human
+                    || verdict.decision != Decision::Ask
+                    || matches!(
+                        verdict.mode,
+                        Some(PermissionMode::Plan | PermissionMode::DontAsk)
+                    )
+                    || pending_tool(run, *agent_run_id)?.intent.host.is_none())
             {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if unguarded && verdict.approved && !host_valid {
+                return Err(ReplayError::InvalidTransition);
+            }
+            if !unguarded && verdict.host.is_some() {
                 return Err(ReplayError::InvalidTransition);
             }
             if verdict.source == crate::tools::permissions::PermissionSource::AiReview
@@ -206,10 +214,10 @@ pub(super) fn apply(
             {
                 return Err(ReplayError::InvalidTransition);
             }
-            let exact_rule = verdict.basis
-                == crate::tools::permissions::PermissionSource::ExactCommandRule
-                || verdict.source == crate::tools::permissions::PermissionSource::ExactCommandRule;
-            if exact_rule && !(rules_pinned && tool.intent.call.is_unguarded()) {
+            if (verdict.basis == PermissionSource::SessionApproval
+                || verdict.source == PermissionSource::SessionApproval)
+                && !(unguarded && host_valid)
+            {
                 return Err(ReplayError::InvalidTransition);
             }
             let hooks_open = tool.hooks.iter().any(|hook| hook.outcome.is_none());
@@ -234,6 +242,22 @@ pub(super) fn apply(
                 return Err(ReplayError::InvalidTransition);
             }
             tool.permission_verdict = Some(verdict.clone());
+            if unguarded && verdict.approved {
+                for agent in &mut run.agents {
+                    if let Some(worker) = &mut agent.assignment {
+                        worker.verification = None;
+                    }
+                }
+                let goal = current
+                    .goals
+                    .iter_mut()
+                    .find(|goal| goal.active_run == Some(*run_id))
+                    .ok_or(ReplayError::InvalidTransition)?;
+                if let Some(contract) = &goal.plan_contract {
+                    goal.success_state = contract.initial_success_state();
+                    goal.success_criterion_satisfied = false;
+                }
+            }
         }
         Event::HookStarted {
             run_id,
@@ -1016,4 +1040,77 @@ pub(super) fn before_lifecycle_event(
         }
     }
     Ok(())
+}
+
+fn valid_host_approval(
+    view: &SessionView,
+    run_id: crate::session::RunId,
+    actor: crate::session::AgentRunId,
+    verdict: &crate::tools::permissions::PermissionVerdict,
+) -> bool {
+    let Some(run) = view.runs.last().filter(|run| run.id == run_id) else {
+        return false;
+    };
+    if run.primary().is_none_or(|agent| agent.id != actor) {
+        return false;
+    }
+    let Some(tool) = run.tools.last() else {
+        return false;
+    };
+    let Some(policy) = run
+        .config
+        .as_ref()
+        .and_then(|config| config.tool_policy.as_ref())
+    else {
+        return false;
+    };
+    let Some(host) = &verdict.host else {
+        return false;
+    };
+    let Some(pin) = &tool.intent.host_command else {
+        return false;
+    };
+    let crate::tools::ToolCall::CommandUnguarded { program, args, .. } = &tool.intent.call else {
+        return false;
+    };
+    if policy.unguarded != crate::tools::UnguardedGrant::HumanOnly
+        || policy.host_epoch != Some(host.epoch)
+        || host.epoch.get_version() != Some(uuid::Version::SortRand)
+        || verdict.decision == Decision::Deny
+        || !pin.valid()
+        || crate::tools::unguarded::prohibited(program, args)
+        || crate::tools::unguarded::prohibited(&pin.executable, args)
+    {
+        return false;
+    }
+    match verdict.source {
+        PermissionSource::Human => {
+            host.source_intent.is_none()
+                && verdict.basis != PermissionSource::SessionApproval
+                && verdict.decision == Decision::Ask
+                && (!host.session
+                    || matches!(verdict.mode, None | Some(PermissionMode::Default))
+                        && view.host_grants(host.epoch).count() < 128)
+        }
+        PermissionSource::SessionApproval => {
+            !host.session
+                && verdict.decision == Decision::Allow
+                && !crate::tools::unguarded::state_target(&tool.intent.call, pin)
+                && matches!(
+                    verdict.mode,
+                    None | Some(PermissionMode::Default | PermissionMode::DontAsk)
+                )
+                && verdict.basis == PermissionSource::SessionApproval
+                && verdict.hook_restriction.is_none()
+                && host.source_intent.is_some()
+                && view.host_approval(&tool.intent, host.epoch) == host.source_intent
+        }
+        PermissionSource::Rule
+        | PermissionSource::Mode
+        | PermissionSource::AiReview
+        | PermissionSource::UnavailableApproval
+        | PermissionSource::PinnedGrant
+        | PermissionSource::Hook
+        | PermissionSource::TypedPrefixRule => false,
+    }
 }

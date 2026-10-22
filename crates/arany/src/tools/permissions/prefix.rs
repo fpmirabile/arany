@@ -45,10 +45,6 @@ impl TypedGitPrefix {
         }
     }
 
-    pub fn available(self) -> bool {
-        !matches!(self, Self::Push | Self::PrCreate)
-    }
-
     fn from_tokens(tokens: &[String]) -> Option<Self> {
         Self::ALL.into_iter().find(|prefix| {
             prefix.tokens().len() == tokens.len()
@@ -61,6 +57,8 @@ impl TypedGitPrefix {
             ToolCall::GitCommit { .. } => Some(Self::Commit),
             ToolCall::GitBranch { name: Some(_), .. } => Some(Self::Branch),
             ToolCall::GitSwitch { .. } => Some(Self::Switch),
+            ToolCall::GitPush { .. } => Some(Self::Push),
+            ToolCall::GhPrCreate { .. } => Some(Self::PrCreate),
             _ => None,
         }
     }
@@ -281,12 +279,13 @@ impl PermissionSettings {
         workspace: &Path,
         admitted: crate::session::WorkspaceIdentity,
         prefix: TypedGitPrefix,
-    ) -> Result<(), SettingsError> {
+        expected: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], SettingsError> {
         save(
             state,
             workspace,
             admitted,
-            None,
+            Some(expected),
             true,
             TypedPrefixEdit::Insert {
                 prefix,
@@ -294,7 +293,7 @@ impl PermissionSettings {
                 folder: true,
             },
         )
-        .map(drop)
+        .and_then(|settings| settings.digest.ok_or(SettingsError::Invalid))
     }
 }
 
@@ -688,9 +687,49 @@ mod tests {
                 &workspace,
                 crate::tools::workspace_identity(&moved).unwrap(),
                 TypedGitPrefix::Commit,
+                None,
             ),
             Err(SettingsError::Folder)
         ));
+    }
+
+    #[test]
+    fn remembering_returns_its_written_digest_and_refuses_unexpected_settings() {
+        let (_temp, state, workspace) = setup();
+        let file = state.path().join("permissions.json");
+        std::fs::write(&file, b"{}").unwrap();
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+            .unwrap();
+        let identity = crate::tools::workspace_identity(&workspace).unwrap();
+        let expected = PermissionSettings::load(&state, &workspace)
+            .unwrap()
+            .digest();
+        let written = PermissionSettings::remember(
+            &state,
+            &workspace,
+            identity,
+            TypedGitPrefix::Commit,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(
+            Some(written),
+            PermissionSettings::load(&state, &workspace)
+                .unwrap()
+                .digest()
+        );
+        let bytes = std::fs::read(&file).unwrap();
+        assert!(matches!(
+            PermissionSettings::remember(
+                &state,
+                &workspace,
+                identity,
+                TypedGitPrefix::Branch,
+                expected
+            ),
+            Err(SettingsError::Conflict)
+        ));
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
     }
 
     #[test]
@@ -698,8 +737,14 @@ mod tests {
         let (temp, state, workspace) = setup();
         let identity = crate::tools::workspace_identity(&workspace).unwrap();
         assert!(
-            PermissionSettings::remember(&state, &workspace, identity, TypedGitPrefix::Commit)
-                .is_err()
+            PermissionSettings::remember(
+                &state,
+                &workspace,
+                identity,
+                TypedGitPrefix::Commit,
+                None
+            )
+            .is_err()
         );
         assert!(!temp.path().join("state/permissions.json").exists());
     }

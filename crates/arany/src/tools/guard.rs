@@ -698,6 +698,9 @@ pub(super) async fn execute(
     intent: &EffectIntent,
     cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
+    if let Err(error) = check_available() {
+        return dispatch_result(intent, false, Err(error));
+    }
     let mut dispatched = false;
     #[cfg(target_os = "macos")]
     let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
@@ -1411,7 +1414,6 @@ pub(super) struct GuardContext<'a> {
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
-    pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
@@ -1779,19 +1781,13 @@ pub(super) fn helper_main() -> ExitCode {
         stage = BootstrapStage::Workspace;
         let family = task.intent.call.facts().family;
         if task.worker.is_none()
-            && (matches!(family, Family::File | Family::Git)
-                || cfg!(target_os = "macos") && family == Family::Skill)
+            && matches!(family, Family::File | Family::Git)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
         let definition = definition_bytes(&task)?;
-        let skill = if task.intent.call.facts().family == Family::Skill {
-            Some(load_skill_bytes(&task)?)
-        } else {
-            None
-        };
         let (image, handover) = receive_bulk(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
         {
@@ -1866,7 +1862,6 @@ pub(super) fn helper_main() -> ExitCode {
             config: &task.config,
             root: &root,
             workspace,
-            skill,
             hook_stdin: task.hook_stdin.as_deref(),
             hidden: &task.hidden,
             definition,
@@ -1930,41 +1925,6 @@ fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
         (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
         (_, None) => Ok(None),
     }
-}
-
-fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
-    let ToolCall::Skill { name, resource } = &task.intent.call else {
-        return Err(ToolError::Configuration);
-    };
-    let resource = resource.as_deref().unwrap_or("SKILL.md");
-    #[cfg(target_os = "macos")]
-    let path = {
-        let skill = task
-            .config
-            .skills
-            .iter()
-            .find(|skill| &skill.name == name)
-            .ok_or(ToolError::Configuration)?;
-        Path::new(&skill.directory)
-            .join(resource)
-            .to_str()
-            .ok_or(ToolError::Path)?
-            .to_owned()
-    };
-    #[cfg(not(target_os = "macos"))]
-    let path = format!("/skills/{name}/{resource}");
-    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
-    if task
-        .config
-        .skills
-        .iter()
-        .find(|skill| &skill.name == name)
-        .and_then(|skill| skill.files.get(resource))
-        != Some(&hex_digest(&bytes))
-    {
-        return Err(ToolError::ChangedInput);
-    }
-    Ok(bytes)
 }
 
 pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {
@@ -2325,12 +2285,6 @@ mod tests {
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
-        let unguarded = ToolCall::CommandUnguarded {
-            program: "sh".into(),
-            args: vec!["-c".into(), "exit 0".into()],
-            cwd: String::new(),
-            justification: "Run the failed hook once".into(),
-        };
         for (stage, setup) in [
             (BootstrapStage::Admission, false),
             (BootstrapStage::Workspace, false),
@@ -2360,11 +2314,6 @@ mod tests {
             );
             assert!(observation.valid(), "{failure}");
             assert_eq!(observation.stops_run(), !setup, "{failure}");
-            assert_eq!(
-                qualifying_hook_failure(&unguarded, std::iter::once(&observation)).is_some(),
-                setup,
-                "{failure}"
-            );
             assert!(dispatch_result(&hook, true, parse_observation(&encoded)).is_err());
         }
     }
@@ -2808,6 +2757,8 @@ mod tests {
 
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
@@ -2865,13 +2816,6 @@ mod tests {
             model_observation(&observation)["enforcement_cause"],
             "Guard enforcement: bootstrap failed before dispatch"
         );
-        let unguarded = ToolCall::CommandUnguarded {
-            program: "node".into(),
-            args: Vec::new(),
-            cwd: String::new(),
-            justification: "Run the failed command once".into(),
-        };
-        assert!(qualifying_guard_failure(&unguarded, std::iter::once(&observation)).is_none());
         assert!(dispatch_result(&intent, true, parse_observation(&encoded)).is_err());
     }
 
@@ -3558,6 +3502,8 @@ mod tests {
                 handover: None,
                 config: config.clone(),
                 intent: EffectIntent {
+                    host: None,
+                    host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: crate::session::RunId::new(),

@@ -22,6 +22,8 @@ use crate::tools::{
 use std::time::Duration;
 use tokio::time::Instant;
 
+const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
+
 pub(super) mod hooks;
 
 use hooks::{HookFold, HookStop};
@@ -129,10 +131,88 @@ struct Resolution {
     save: Option<RuleSave>,
 }
 
+struct HostPermission {
+    permission: Permission,
+    epoch: Option<uuid::Uuid>,
+    source: Option<[u8; 32]>,
+    remember: bool,
+}
+
+impl HostPermission {
+    fn verdict(
+        &self,
+        approved: bool,
+        host: bool,
+        save: Option<RuleSave>,
+    ) -> Option<crate::tools::permissions::HostApproval> {
+        (host && (approved || self.source.is_some()))
+            .then_some(self.epoch)
+            .flatten()
+            .map(|epoch| crate::tools::permissions::HostApproval {
+                epoch,
+                session: approved && matches!(save, Some(RuleSave::Session)),
+                source_intent: self.source,
+            })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostReuseFacts {
+    host: bool,
+    settings_admitted: bool,
+    mode: Option<crate::tools::permissions::PermissionMode>,
+    terminal_mode: Option<ApprovalMode>,
+    session_scope: bool,
+    permission: Permission,
+    hook_restriction: Option<Decision>,
+    state_target: Option<bool>,
+    epoch: Option<uuid::Uuid>,
+    source: Option<[u8; 32]>,
+    grants: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum HostReuse {
+    OnceOnly,
+    OfferSession,
+    Reuse([u8; 32]),
+}
+
+fn decide_host_reuse(facts: &HostReuseFacts) -> HostReuse {
+    use crate::tools::permissions::PermissionMode;
+    if !facts.host
+        || !facts.settings_admitted
+        || !matches!(
+            facts.mode,
+            None | Some(PermissionMode::Default | PermissionMode::DontAsk)
+        )
+        || facts.terminal_mode != Some(ApprovalMode::Request)
+        || !facts.session_scope
+        || facts.permission.basis == PermissionSource::Rule
+        || facts.hook_restriction.is_some()
+        || facts.state_target != Some(false)
+        || facts.epoch.is_none()
+        || facts.permission.decision == Decision::Deny
+            && !(facts.permission.basis == PermissionSource::Mode
+                && facts.mode == Some(PermissionMode::DontAsk))
+    {
+        return HostReuse::OnceOnly;
+    }
+    match facts.source {
+        Some(source) => HostReuse::Reuse(source),
+        None if facts.grants < 128
+            && matches!(facts.mode, None | Some(PermissionMode::Default)) =>
+        {
+            HostReuse::OfferSession
+        }
+        None => HostReuse::OnceOnly,
+    }
+}
+
 #[derive(Clone, Copy)]
 enum RuleSave {
     Prefix(crate::tools::permissions::TypedGitPrefix),
-    ExactCommand,
+    Session,
 }
 
 #[derive(Clone, Copy)]
@@ -209,9 +289,21 @@ impl Permission {
         self
     }
 
+    fn narrow_for_intent(self, mode: Option<ApprovalMode>, intent: &EffectIntent) -> Self {
+        if intent.call.is_host() && intent.host.is_none() {
+            Self {
+                decision: Decision::Deny,
+                basis: PermissionSource::PinnedGrant,
+                approval: None,
+            }
+        } else {
+            self.narrow_terminal(mode, &intent.call)
+        }
+    }
+
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
-            && self.basis != PermissionSource::ExactCommandRule
+            && self.basis != PermissionSource::SessionApproval
             && let Some(mode) = mode.filter(|mode| {
                 // A user-owned typed allow is the prompt-free path in Request and Auto-edits; Auto keeps its review.
                 mode.asks(call)
@@ -281,29 +373,13 @@ impl RunLoop<'_> {
             hook_feedback: Default::default(),
         };
         loop {
-            let intent =
-                match self.sized_intent(&grant, runtime, &step, call.clone(), &source_call)? {
-                    Ok(intent) => intent,
-                    Err(refusal @ SizingRefusal::DelegationDeadline) => {
-                        return Ok(StepEnd::Stopped(
-                            match self
-                                .record_delegation_deadline(&grant, runtime, call)
-                                .await?
-                            {
-                                Ok(()) => refusal.into(),
-                                Err(admission) => admission.into(),
-                            },
-                        ));
-                    }
-                    Err(refusal @ SizingRefusal::ActiveTime) => {
-                        self.active_time_floor
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                    Err(refusal @ SizingRefusal::ContextFull) => {
-                        return Ok(StepEnd::Stopped(refusal.into()));
-                    }
-                };
+            let intent = match self
+                .prepare_step_intent(&grant, runtime, &step, call.clone(), &source_call)
+                .await?
+            {
+                Ok(intent) => intent,
+                Err(cause) => return Ok(StepEnd::Stopped(cause)),
+            };
             let command = matches!(intent.call, ToolCall::Command { .. })
                 && matches!(intent.target, crate::worker::EffectTarget::Workspace);
             let source_intent_digest = intent.digest();
@@ -387,22 +463,6 @@ impl RunLoop<'_> {
                 HookStop::ActiveTime => return Ok(StepEnd::Stopped(StopCause::ActiveTime)),
             }
         }
-        if matches!(grant, Grant::Primary { .. }) {
-            for (index, observation) in step.observations.iter().enumerate() {
-                let proposals = self.hook_rerun_feedback(observation.intent.digest())?;
-                if proposals.is_empty() {
-                    continue;
-                }
-                let feedback = step.hook_feedback.entry(index).or_default();
-                for proposal in proposals {
-                    if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
-                        <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
-                    {
-                        feedback.push(proposal);
-                    }
-                }
-            }
-        }
         grant.context_mut()?.steps.push(step);
         if self.hook_requested_stop()? {
             return Ok(StepEnd::Stopped(StopCause::HookStop));
@@ -430,7 +490,38 @@ impl RunLoop<'_> {
         }
     }
 
-    fn sized_intent(
+    async fn prepare_step_intent(
+        &self,
+        grant: &Grant<'_>,
+        runtime: &ToolRuntime,
+        step: &ToolStep,
+        call: ToolCall,
+        post_call: &ToolCall,
+    ) -> Result<Result<EffectIntent, StopCause>, EngineError> {
+        let sized = self
+            .sized_intent(grant, runtime, step, call.clone(), post_call)
+            .await?;
+        match sized {
+            Ok(intent) => Ok(Ok(intent)),
+            Err(refusal @ SizingRefusal::DelegationDeadline) => Ok(Err(
+                match self
+                    .record_delegation_deadline(grant, runtime, call)
+                    .await?
+                {
+                    Ok(()) => refusal.into(),
+                    Err(admission) => admission.into(),
+                },
+            )),
+            Err(refusal @ SizingRefusal::ActiveTime) => {
+                self.active_time_floor
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                Ok(Err(refusal.into()))
+            }
+            Err(refusal @ SizingRefusal::ContextFull) => Ok(Err(refusal.into())),
+        }
+    }
+
+    async fn sized_intent(
         &self,
         grant: &Grant<'_>,
         runtime: &ToolRuntime,
@@ -439,7 +530,7 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
     ) -> Result<Result<EffectIntent, SizingRefusal>, EngineError> {
         let intent = match grant {
-            Grant::Primary { .. } => self.primary_intent(runtime, call)?,
+            Grant::Primary { .. } => self.primary_intent(runtime, call).await?,
             Grant::Researcher { child, deadline } => {
                 let Some(mut intent) =
                     self.researcher_intent(runtime, child.agent_run_id, call, *deadline)
@@ -504,11 +595,20 @@ impl RunLoop<'_> {
         };
         intent.limits.result_bytes = if matches!(intent.call, ToolCall::ApplyChangeset { .. }) {
             128
-        } else {
-            if capacity < MAX_TOOL_RESULT_BYTES {
-                return Ok(Err(SizingRefusal::ContextFull));
-            }
+        } else if matches!(
+            intent.call,
+            ToolCall::Read { .. }
+                | ToolCall::List { .. }
+                | ToolCall::Search { .. }
+                | ToolCall::Glob { .. }
+                | ToolCall::Skill { .. }
+        ) || intent.call.is_git() && !intent.call.mutates()
+        {
+            capacity.min(MAX_TOOL_RESULT_BYTES) as u32
+        } else if capacity >= MAX_TOOL_RESULT_BYTES {
             MAX_TOOL_RESULT_BYTES as u32
+        } else {
+            return Ok(Err(SizingRefusal::ContextFull));
         };
         Ok(Ok(intent))
     }
@@ -555,6 +655,7 @@ impl RunLoop<'_> {
                 run_id: self.run_id,
                 agent_run_id: child.agent_run_id,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: intent.digest(),
                     mode: Some(mode),
                     decision: permission.decision,
@@ -582,14 +683,22 @@ impl RunLoop<'_> {
         Ok(Ok(()))
     }
 
-    pub(super) fn primary_intent(
+    pub(super) async fn primary_intent(
         &self,
         runtime: &ToolRuntime,
         call: ToolCall,
     ) -> Result<Option<EffectIntent>, EngineError> {
         let command = matches!(call, ToolCall::Command { .. });
         let timeout_limit = self.ledger().command_timeout_limit(&call)?;
-        let mut intent = runtime.intent(self.run_id, self.primary_id, call);
+        let mut intent = if call.is_unguarded() {
+            let runtime = runtime.clone();
+            let (run, actor) = (self.run_id, self.primary_id);
+            tokio::task::spawn_blocking(move || runtime.intent(run, actor, call))
+                .await
+                .map_err(|_| ToolError::Operation)?
+        } else {
+            runtime.intent(self.run_id, self.primary_id, call)
+        };
         let (resource_class, requested_runtime_ms, resource_settings) =
             self.ledger().requested_command_resources()?;
         if command {
@@ -712,22 +821,7 @@ impl RunLoop<'_> {
         post_call: &ToolCall,
         narrowable: bool,
     ) -> Result<IntentResult, EngineError> {
-        let mut permission = self.permission(grant, runtime, &intent.call);
-        if intent.call.is_unguarded()
-            && permission.decision != Decision::Deny
-            && self.ledger().view(|view| {
-                view.runs
-                    .last()
-                    .and_then(|run| run.unguarded_failure(&intent.call))
-                    .is_some_and(|(_, hook)| hook)
-            })?
-        {
-            permission.decision = Decision::Ask;
-            permission.approval = Some(ApprovalMode::Request);
-            if permission.basis == PermissionSource::ExactCommandRule {
-                permission.basis = PermissionSource::Mode;
-            }
-        }
+        let permission = self.permission(grant, runtime, &intent.call);
         let (hook_events, pre_ms, post_ms) = self.hook_admission(runtime, &intent.call, post_call);
         if let Err(refusal) = self
             .admit_tool(grant, runtime, &intent, permission, hook_events, narrowable)
@@ -1070,15 +1164,14 @@ impl RunLoop<'_> {
             basis = PermissionSource::PinnedGrant;
             approval = None;
         }
-        if unguarded && decision != Decision::Deny {
-            // Only a human or an exact project rule approves a host run; no mode or review does.
+        if call.is_host() && decision != Decision::Deny {
             decision = Decision::Ask;
             approval = Some(ApprovalMode::Request);
-            if basis != PermissionSource::Rule && runtime.matches_exact_command_rule(call) {
-                decision = Decision::Allow;
-                basis = PermissionSource::ExactCommandRule;
-                approval = None;
-            }
+        }
+        if unguarded && decision != Decision::Deny {
+            // Host approval never uses AI review or ordinary allow rules.
+            decision = Decision::Ask;
+            approval = Some(ApprovalMode::Request);
         }
         let permission = Permission {
             decision,
@@ -1095,6 +1188,70 @@ impl RunLoop<'_> {
         }
     }
 
+    fn host_permission(
+        &self,
+        runtime: &ToolRuntime,
+        intent: &EffectIntent,
+        permission: Permission,
+        hooks: &HookFold,
+    ) -> Result<HostPermission, EngineError> {
+        let (epoch, source, grants) = self.ledger().view(|view| {
+            let epoch = view
+                .runs
+                .last()
+                .and_then(|run| run.config.as_ref())
+                .and_then(|config| config.tool_policy.as_ref())
+                .and_then(|policy| policy.host_epoch);
+            (
+                epoch,
+                epoch.and_then(|epoch| view.host_approval(intent, epoch)),
+                epoch.map_or(0, |epoch| view.host_grants(epoch).count()),
+            )
+        })?;
+        let facts = HostReuseFacts {
+            host: intent.call.is_unguarded(),
+            settings_admitted: runtime.host_settings_admitted,
+            mode: runtime.permissions().map(|config| config.mode()),
+            terminal_mode: self.terminal_mode(),
+            session_scope: self
+                .controls
+                .approvals
+                .is_some_and(|approvals| approvals.admits_session_scope()),
+            permission,
+            hook_restriction: hooks.restriction,
+            state_target: intent
+                .host_command
+                .as_ref()
+                .map(|pin| crate::tools::unguarded::state_target(&intent.call, pin)),
+            epoch,
+            source,
+            grants,
+        };
+        let (permission, source, remember) = match decide_host_reuse(&facts) {
+            HostReuse::OnceOnly => (permission, None, false),
+            HostReuse::OfferSession => (permission, None, true),
+            HostReuse::Reuse(source) => (
+                Permission {
+                    decision: Decision::Allow,
+                    basis: PermissionSource::SessionApproval,
+                    approval: None,
+                },
+                Some(source),
+                false,
+            ),
+        };
+        Ok(HostPermission {
+            permission,
+            epoch,
+            source,
+            remember,
+        })
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keep hook narrowing, human approval and journal-before-dispatch ordering together"
+    )]
     async fn before_dispatch(
         &self,
         grant: &Grant<'_>,
@@ -1108,17 +1265,24 @@ impl RunLoop<'_> {
         let allow_auto_edits = permission.decision == Decision::Allow
             && self.terminal_mode() == Some(ApprovalMode::Request)
             && intent.call.facts().mutates;
-        let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
+        let permission = permission.narrow_for_intent(self.terminal_mode(), &intent);
         let timeout_limit = self.ledger().command_timeout_limit(&intent.call)?;
+        let hooks_allowed = self
+            .host_permission(runtime, &intent, permission, &HookFold::none())?
+            .permission
+            .decision
+            != Decision::Deny;
+        let goal_allows = intent.call.is_internal()
+            || match grant {
+                Grant::Primary { .. } => self.plan_allows(&intent.call)?,
+                Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
+            };
         let hooks = match config {
             Some(config)
                 if !intent.call.is_internal()
-                    && permission.decision != Decision::Deny
+                    && hooks_allowed
                     && timeout_limit.is_none()
-                    && match grant {
-                        Grant::Primary { .. } => self.plan_allows(&intent.call)?,
-                        Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
-                    } =>
+                    && goal_allows =>
             {
                 // Boxed like the other Tool futures so the hook loop does not inflate every agent step.
                 Box::pin(self.pre_tool_use_hooks(grant, runtime, config, &intent, narrowable))
@@ -1128,25 +1292,30 @@ impl RunLoop<'_> {
         };
         let permission =
             permission.narrow_hooks(hooks.restriction, config.map(|config| config.mode()));
+        let host_permission = self.host_permission(runtime, &intent, permission, &hooks)?;
+        let permission = host_permission.permission;
         let facts = DispatchFacts {
             site,
             permission,
             hooks: &hooks,
             timeout_limit,
-            human_only_unavailable: self.controls.approvals.is_some_and(|approvals| {
-                !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
-            }),
+            host: intent.call.is_host(),
+            host_unpinned: intent.call.is_host() && intent.host.is_none(),
+            human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
+                || self.controls.approvals.is_some_and(|approvals| {
+                    !approvals
+                        .admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+                }),
             unguarded: match grant {
-                Grant::Primary { request, .. } if intent.call.is_unguarded() => {
-                    Some(self.unguarded(runtime, request, &intent)?)
-                }
+                Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
+                    gate: unguarded_gate(runtime, &intent).await.map(|mut prompt| {
+                        prompt.remember = host_permission.remember;
+                        prompt
+                    }),
+                }),
                 Grant::Primary { .. } | Grant::Researcher { .. } => None,
             },
-            goal_allows: intent.call.is_internal()
-                || match grant {
-                    Grant::Primary { .. } => self.plan_allows(&intent.call)?,
-                    Grant::Researcher { .. } => self.ledger().allows_tool(&intent.call),
-                },
+            goal_allows,
             runtime_allows: runtime.allows(&intent.call),
             can_start_provider_call: self.ledger().can_start_provider_call(),
             guard_site: intent.call.facts().site == crate::tools::catalog::Site::Guard,
@@ -1225,8 +1394,7 @@ impl RunLoop<'_> {
             }
         };
         let mode = effective_permission_mode(config, grant);
-        let local_git_write = matches!(grant, Grant::Primary { .. }) && git_write;
-        if mode.is_some() || unguarded || local_git_write {
+        if mode.is_some() || unguarded || matches!(grant, Grant::Primary { .. }) && git_write {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && decided.source == PermissionSource::AiReview {
@@ -1238,6 +1406,7 @@ impl RunLoop<'_> {
                 run_id: self.run_id,
                 agent_run_id,
                 verdict: PermissionVerdict {
+                    host: host_permission.verdict(approved, unguarded, save),
                     intent_digest: digest,
                     decision: decided.decision,
                     mode,
@@ -1251,8 +1420,7 @@ impl RunLoop<'_> {
             })
             .await?;
         }
-        let verdict = self.save_remembered_rule(runtime, site, verdict, save)?;
-        Ok(verdict)
+        self.save_remembered_rule(runtime, site, verdict, save)
     }
 
     // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
@@ -1272,8 +1440,36 @@ impl RunLoop<'_> {
                 Some(save),
             ) => {
                 let saved = match save {
-                    RuleSave::Prefix(prefix) => runtime.record_typed_prefix_rule(prefix),
-                    RuleSave::ExactCommand => runtime.record_exact_command_rule(&intent.call),
+                    RuleSave::Prefix(prefix) => {
+                        let expected = self
+                            .controls
+                            .host_settings
+                            .lock()
+                            .expect("host permissions lock")
+                            .as_ref()
+                            .filter(|settings| !settings.changed)
+                            .map(|settings| settings.digest);
+                        expected
+                            .ok_or(ToolError::ChangedInput)
+                            .and_then(|expected| {
+                                runtime
+                                    .record_typed_prefix_rule(prefix, expected)
+                                    .map(|digest| {
+                                        let mut pinned = self
+                                            .controls
+                                            .host_settings
+                                            .lock()
+                                            .expect("host permissions lock");
+                                        if let Some(settings) = pinned.as_mut()
+                                            && !settings.changed
+                                            && settings.digest == expected
+                                        {
+                                            settings.digest = Some(digest);
+                                        }
+                                    })
+                            })
+                    }
+                    RuleSave::Session => Ok(()),
                 };
                 if saved.is_ok() {
                     Verdict::Dispatch {
@@ -1294,25 +1490,6 @@ impl RunLoop<'_> {
                 }
             }
             (verdict, _) => verdict,
-        })
-    }
-
-    fn unguarded(
-        &self,
-        runtime: &ToolRuntime,
-        request: &ProviderRequest,
-        intent: &EffectIntent,
-    ) -> Result<Unguarded, EngineError> {
-        let hook_failure = self.ledger().view(|view| {
-            view.runs
-                .last()
-                .and_then(|run| run.unguarded_failure(&intent.call))
-                .filter(|(_, hook)| *hook)
-                .map(|(observation, _)| observation.clone())
-        })?;
-        Ok(Unguarded {
-            late_hook_failure: hook_failure.is_some(),
-            gate: unguarded_gate(runtime, request, intent, hook_failure.as_ref()),
         })
     }
 
@@ -1446,9 +1623,13 @@ impl RunLoop<'_> {
         };
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         match reply {
-            ApprovalReply::AllowAlwaysInProject if !remember => ApprovalReply::AllowOnce,
+            ApprovalReply::AllowForSession if !remember => ApprovalReply::Deny,
             ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
-                ApprovalReply::AllowOnce
+                if intent.call.is_unguarded() {
+                    ApprovalReply::Deny
+                } else {
+                    ApprovalReply::AllowOnce
+                }
             }
             reply => reply,
         }
@@ -1844,9 +2025,7 @@ impl RunLoop<'_> {
                                     resolution.approved = reply != ApprovalReply::Deny;
                                     // A remembered rule is saved only after this human verdict is committed.
                                     resolution.save = match reply {
-                                        ApprovalReply::AllowAlwaysInProject => {
-                                            Some(RuleSave::ExactCommand)
-                                        }
+                                        ApprovalReply::AllowForSession => Some(RuleSave::Session),
                                         ApprovalReply::AllowPrefixInFolder => {
                                             remember_prefix.map(RuleSave::Prefix)
                                         }
@@ -1936,6 +2115,7 @@ impl RunLoop<'_> {
             return Err(error);
         }
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
+        let limits = crate::provider::RateLimitSlot::default();
         let result = self
             .routing
             .invoke(
@@ -1943,6 +2123,7 @@ impl RunLoop<'_> {
                 review_deadline,
                 self.controls.cancellation.clone(),
                 None,
+                limits.clone(),
             )
             .await?;
         self.settle_result(&result)?;
@@ -1957,7 +2138,14 @@ impl RunLoop<'_> {
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
-            record: call_record(AgentPhase::ToolReview, &result, valid, None, None),
+            record: call_record(
+                AgentPhase::ToolReview,
+                &result,
+                valid,
+                None,
+                None,
+                limits.take(),
+            ),
         })
         .await?;
         if let Some(active_segment) = active_segment {
@@ -2110,9 +2298,11 @@ pub(super) enum HookDenial {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum UnguardedRefusal {
-    NoPriorFailure,
+    SettingsChanged,
+    UnavailableProgram,
+    InterpreterNotAdmitted,
+    PrivilegeTool,
     GuardAlias,
-    ProtectedPath,
 }
 
 #[must_use]
@@ -2123,9 +2313,9 @@ pub(super) enum NotDispatched {
     DelegationDeadline,
     DenyRule,
     OutsideGrant,
+    HostSourceUnavailable,
     ModeDenied,
     HumanOnlyUnavailable,
-    HookFailureAfterClassify,
     UnguardedNotOffered(UnguardedRefusal),
     OutsidePlan,
     ActiveTime,
@@ -2150,8 +2340,7 @@ impl NotDispatched {
             Self::HookDenied(HookDenial::ActiveTime) | Self::ActiveTime => {
                 ActiveTimeEffect::Exhausted
             }
-            Self::HookFailureAfterClassify
-            | Self::UnguardedNotOffered(_)
+            Self::UnguardedNotOffered(_)
             | Self::OutsidePlan
             | Self::Paused
             | Self::TokenBudget
@@ -2170,6 +2359,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => ActiveTimeEffect::Untouched,
         }
@@ -2178,8 +2368,7 @@ impl NotDispatched {
     // The primary decides these after its gates, where it clears the queue hint and re-reads active time.
     fn decided_at_approval(&self) -> bool {
         match self {
-            Self::HookFailureAfterClassify
-            | Self::UnguardedNotOffered(_)
+            Self::UnguardedNotOffered(_)
             | Self::OutsidePlan
             | Self::ActiveTime
             | Self::Paused
@@ -2193,6 +2382,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => false,
         }
@@ -2221,7 +2411,6 @@ struct DispatchDecision<'a> {
 }
 
 struct Unguarded {
-    late_hook_failure: bool,
     gate: Result<UnguardedPrompt, UnguardedRefusal>,
 }
 
@@ -2232,6 +2421,8 @@ struct DispatchFacts<'a> {
     hooks: &'a HookFold,
     timeout_limit: Option<(u32, u32)>,
     human_only_unavailable: bool,
+    host: bool,
+    host_unpinned: bool,
     unguarded: Option<Unguarded>,
     goal_allows: bool,
     runtime_allows: bool,
@@ -2262,6 +2453,7 @@ fn remember_candidate(
     call: &ToolCall,
 ) -> Option<crate::tools::permissions::TypedGitPrefix> {
     (matches!(grant, Grant::Primary { .. })
+        && !call.is_host()
         && typed_allow_takes_effect(mode)
         && permission.decision == Decision::Ask
         && permission.basis == PermissionSource::Mode
@@ -2283,6 +2475,16 @@ impl<'a> DispatchFacts<'a> {
         let Permission {
             decision, basis, ..
         } = self.permission;
+        if self
+            .unguarded
+            .as_ref()
+            .is_some_and(|host| matches!(host.gate, Err(UnguardedRefusal::PrivilegeTool)))
+        {
+            return Err(refuse(
+                NotDispatched::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool),
+                None,
+            ));
+        }
         if let Some((requested, maximum)) = self.timeout_limit {
             return Err(refuse(
                 NotDispatched::TimeoutLimit { requested, maximum },
@@ -2297,12 +2499,15 @@ impl<'a> DispatchFacts<'a> {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
                         NotDispatched::DenyRule
                     }
+                    PermissionSource::PinnedGrant if self.host_unpinned => {
+                        NotDispatched::HostSourceUnavailable
+                    }
                     PermissionSource::PinnedGrant => NotDispatched::OutsideGrant,
                     PermissionSource::Mode
                     | PermissionSource::Human
                     | PermissionSource::AiReview
                     | PermissionSource::UnavailableApproval
-                    | PermissionSource::ExactCommandRule
+                    | PermissionSource::SessionApproval
                     | PermissionSource::Hook => NotDispatched::ModeDenied,
                 };
                 (reason, None)
@@ -2319,15 +2524,10 @@ impl<'a> DispatchFacts<'a> {
                 Some(StopCause::ToolStopped),
             ));
         }
-        if let Some(unguarded) = &self.unguarded {
-            if unguarded.late_hook_failure
-                && (decision != Decision::Ask || basis == PermissionSource::ExactCommandRule)
-            {
-                return Err(refuse(NotDispatched::HookFailureAfterClassify, None));
-            }
-            if let Err(refusal) = &unguarded.gate {
-                return Err(refuse(NotDispatched::UnguardedNotOffered(*refusal), None));
-            }
+        if let Some(unguarded) = &self.unguarded
+            && let Err(refusal) = &unguarded.gate
+        {
+            return Err(refuse(NotDispatched::UnguardedNotOffered(*refusal), None));
         }
         if !self.goal_allows {
             return Err(refuse(NotDispatched::OutsidePlan, None));
@@ -2369,8 +2569,8 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             | NotDispatched::DelegationDeadline
             | NotDispatched::DenyRule
             | NotDispatched::OutsideGrant
+            | NotDispatched::HostSourceUnavailable
             | NotDispatched::ModeDenied
-            | NotDispatched::HookFailureAfterClassify
             | NotDispatched::UnguardedNotOffered(_)
             | NotDispatched::OutsidePlan
             | NotDispatched::ActiveTime
@@ -2389,7 +2589,7 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             source,
         };
     }
-    let (approved, source, active_time_exhausted) = match (&after.approval, facts.site) {
+    let (mut approved, mut source, active_time_exhausted) = match (&after.approval, facts.site) {
         (Some(resolution), _) => (
             resolution.approved,
             resolution.source,
@@ -2401,6 +2601,10 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
         }
         (None, DispatchSite::Researcher) => (true, facts.permission.basis, false),
     };
+    if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
+        approved = false;
+        source = PermissionSource::UnavailableApproval;
+    }
     let refused = |reason| {
         Err(refuse(
             reason,
@@ -2480,9 +2684,9 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         NotDispatched::HookDenied(_)
         | NotDispatched::DenyRule
         | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
         | NotDispatched::ModeDenied
         | NotDispatched::HumanOnlyUnavailable
-        | NotDispatched::HookFailureAfterClassify
         | NotDispatched::UnguardedNotOffered(_)
         | NotDispatched::OutsidePlan
         | NotDispatched::ActiveTime
@@ -2517,6 +2721,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             ToolDisposition::Denied,
             "Tool operation is outside the pinned grant".into(),
         ),
+        NotDispatched::HostSourceUnavailable => (
+            ToolDisposition::Denied,
+            "Host source data is unavailable; no operation was dispatched".into(),
+        ),
         NotDispatched::ModeDenied => (
             ToolDisposition::Denied,
             "Permission mode denied this Tool".into(),
@@ -2525,21 +2733,24 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             ToolDisposition::Denied,
             "Human-only approval is unavailable on this channel; no operation was dispatched".into(),
         ),
-        NotDispatched::HookFailureAfterClassify => (
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::SettingsChanged) => (
             ToolDisposition::Denied,
-            "A hook failure arrived after this re-run was classified; propose it again; no operation was dispatched".into(),
+            "Host command refused: permission settings changed outside admission; use /permissions to re-admit them. Nothing ran".into(),
         ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::NoPriorFailure) => (
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::UnavailableProgram) => (
             ToolDisposition::Denied,
-            "No identical command failed under the Guard in this Run; no operation was dispatched".into(),
+            "Host program could not be pinned through an absolute PATH outside the Workspace; nothing ran".into(),
+        ),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted) => (
+            ToolDisposition::Denied,
+            "Host interpreter requires a matching tools.json command with interpreter: true, executable path and digest; nothing ran".into(),
         ),
         NotDispatched::UnguardedNotOffered(UnguardedRefusal::GuardAlias) => (
             ToolDisposition::Denied,
             "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched".into(),
         ),
-        NotDispatched::UnguardedNotOffered(UnguardedRefusal::ProtectedPath) => (
-            ToolDisposition::Denied,
-            "The Guard denied a protected path or set-ID entry; an unguarded re-run is not offered; no operation was dispatched".into(),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool) => (
+            ToolDisposition::Denied, crate::tools::unguarded::manual_handoff(&intent.call),
         ),
         NotDispatched::OutsidePlan => (
             ToolDisposition::Denied,
@@ -2555,7 +2766,7 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         ),
         NotDispatched::UnguardedNeedsHuman => (
             ToolDisposition::Denied,
-            "Unguarded re-run needs interactive approval or an exact-command rule for this project; no operation was dispatched".into(),
+            "Host command needs fresh human approval on this channel; previous exact project approvals are inactive; no operation was dispatched".into(),
         ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
@@ -2618,48 +2829,38 @@ fn undispatched(
     }
 }
 
-fn unguarded_gate(
+async fn unguarded_gate(
     runtime: &ToolRuntime,
-    request: &ProviderRequest,
     intent: &EffectIntent,
-    hook_failure: Option<&ToolObservation>,
 ) -> Result<UnguardedPrompt, UnguardedRefusal> {
-    let ToolCall::CommandUnguarded {
-        program, args, cwd, ..
-    } = &intent.call
-    else {
-        return Err(UnguardedRefusal::NoPriorFailure);
+    let ToolCall::CommandUnguarded { args, .. } = &intent.call else {
+        return Err(UnguardedRefusal::UnavailableProgram);
     };
-    let observed = request
-        .input
-        .tools
+    if crate::tools::unguarded::prohibited_intent(intent) {
+        return Err(UnguardedRefusal::PrivilegeTool);
+    }
+    if !runtime.host_settings_admitted {
+        return Err(UnguardedRefusal::SettingsChanged);
+    }
+    let pin = intent
+        .host_command
         .as_ref()
-        .map(ToolContext::observations)
-        .unwrap_or_default();
+        .ok_or(UnguardedRefusal::UnavailableProgram)?;
+    if !runtime.host_settings_current(pin) {
+        return Err(UnguardedRefusal::SettingsChanged);
+    }
+    if !runtime.host_interpreter_admitted(intent).await {
+        return Err(UnguardedRefusal::InterpreterNotAdmitted);
+    }
     if crate::tools::types::uses_guard_alias(args) {
         return Err(UnguardedRefusal::GuardAlias);
     }
-    let Some(prior) = hook_failure.or_else(|| {
-        crate::tools::types::qualifying_guard_failure(&intent.call, observed.iter().copied())
-    }) else {
-        let denied_path = observed.iter().rev().any(|observation| {
-            observation.enforcement_cause == Some(crate::tools::EnforcementCause::FilesystemDenied)
-                && matches!(&observation.intent.call,
-                    ToolCall::Command { program: p, args: a, cwd: c } if p == program && a == args && c == cwd)
-        });
-        return Err(if denied_path {
-            UnguardedRefusal::ProtectedPath
-        } else {
-            UnguardedRefusal::NoPriorFailure
-        });
-    };
     Ok(UnguardedPrompt {
-        executable: runtime
-            .command_executable(program)
-            .ok_or(UnguardedRefusal::NoPriorFailure)?
-            .to_owned(),
-        attribution: prior.enforcement_cause,
-        remember: hook_failure.is_none(),
+        executable: pin.executable.clone(),
+        attribution: None,
+        remember: true,
+        sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
+        inactive_rules: runtime.has_inactive_host_rules(),
     })
 }
 
@@ -2738,10 +2939,23 @@ impl RunLoop<'_> {
                 crate::session::RunFailure::ToolStopped,
             ));
         }
-        let intent = match self.primary_intent(runtime, call.clone())? {
+        let mut intent = match self.primary_intent(runtime, call.clone()).await? {
             None => return Ok(SkillInitialization::Stopped),
             Some(intent) => intent,
         };
+        let tools = request
+            .input
+            .tools
+            .as_ref()
+            .ok_or(EngineError::InvalidRequest)?;
+        let Some(capacity) =
+            runtime.result_capacity(tools.rendered_len(), INVOKED_SKILL_ENVELOPE_BYTES)
+        else {
+            return Ok(SkillInitialization::Failed(
+                crate::session::RunFailure::ToolContextFull,
+            ));
+        };
+        intent.limits.result_bytes = capacity.min(MAX_TOOL_RESULT_BYTES) as u32;
         let grant = Grant::Primary {
             request,
             review_allowed: false,
@@ -2800,7 +3014,7 @@ impl RunLoop<'_> {
                 index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
                 raw_digest: file.digest,
             };
-            let Some(mut intent) = self.primary_intent(runtime, call)? else {
+            let Some(mut intent) = self.primary_intent(runtime, call).await? else {
                 self.active_time_floor
                     .store(true, std::sync::atomic::Ordering::Relaxed);
                 return Ok(DefinitionInitialization::Stopped);
@@ -3160,6 +3374,168 @@ mod tests {
     }
 
     #[test]
+    fn host_reuse_and_session_offers_share_eligibility() {
+        use crate::tools::permissions::PermissionMode as M;
+        let baseline = HostReuseFacts {
+            host: true,
+            settings_admitted: true,
+            mode: Some(M::Default),
+            terminal_mode: Some(ApprovalMode::Request),
+            session_scope: true,
+            permission: Permission {
+                basis: PermissionSource::Mode,
+                ..asks(ApprovalMode::Request)
+            },
+            hook_restriction: None,
+            state_target: Some(false),
+            epoch: Some(uuid::Uuid::now_v7()),
+            source: None,
+            grants: 0,
+        };
+        for (facts, expected) in [
+            (baseline, HostReuse::OfferSession),
+            (
+                HostReuseFacts {
+                    mode: None,
+                    ..baseline
+                },
+                HostReuse::OfferSession,
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    grants: 128,
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    grants: 128,
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+        ] {
+            assert_eq!(decide_host_reuse(&facts), expected);
+        }
+        for ineligible in [
+            HostReuseFacts {
+                host: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                settings_admitted: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::AcceptEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Plan),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::AutoEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                session_scope: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: allow(PermissionSource::Rule),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: asks(ApprovalMode::Request),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Rule),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Mode),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::PinnedGrant),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Ask),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Deny),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: Some(true),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                epoch: None,
+                ..baseline
+            },
+        ] {
+            for source in [None, Some([1; 32])] {
+                assert_eq!(
+                    decide_host_reuse(&HostReuseFacts {
+                        source,
+                        ..ineligible
+                    }),
+                    HostReuse::OnceOnly
+                );
+            }
+        }
+    }
+
+    #[test]
     fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
         use crate::tools::permissions::PermissionMode as M;
         assert!(typed_allow_takes_effect(Some(M::Default)));
@@ -3259,6 +3635,8 @@ mod tests {
 
     fn prompt() -> Result<UnguardedPrompt, UnguardedRefusal> {
         Ok(UnguardedPrompt {
+            sensitive: false,
+            inactive_rules: false,
             executable: "/bin/make".into(),
             attribution: None,
             remember: true,
@@ -3267,10 +3645,15 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq)]
     enum Fact {
+        Host,
+        HostUnpinned,
         Timeout,
         HumanOnly,
-        LateHookFailure,
         NotOffered,
+        PrivilegeTool,
+        SettingsChanged,
+        UnavailableProgram,
+        InterpreterNotAdmitted,
         Offered,
         OutsidePlan,
         Blocked,
@@ -3291,9 +3674,17 @@ mod tests {
         approval: Option<Resolution>,
     ) -> (Option<ApprovalMode>, DispatchDecision<'a>) {
         let has = |fact| facts.contains(&fact);
-        let gate = if has(Fact::NotOffered) {
+        let gate = if has(Fact::PrivilegeTool) {
+            Some(Err(UnguardedRefusal::PrivilegeTool))
+        } else if has(Fact::SettingsChanged) {
+            Some(Err(UnguardedRefusal::SettingsChanged))
+        } else if has(Fact::UnavailableProgram) {
+            Some(Err(UnguardedRefusal::UnavailableProgram))
+        } else if has(Fact::InterpreterNotAdmitted) {
+            Some(Err(UnguardedRefusal::InterpreterNotAdmitted))
+        } else if has(Fact::NotOffered) {
             Some(Err(UnguardedRefusal::GuardAlias))
-        } else if has(Fact::Offered) || has(Fact::LateHookFailure) {
+        } else if has(Fact::Offered) {
             Some(prompt())
         } else {
             None
@@ -3303,11 +3694,10 @@ mod tests {
             permission,
             hooks,
             timeout_limit: has(Fact::Timeout).then_some((9_000, 5_000)),
+            host: has(Fact::Host) || has(Fact::HostUnpinned),
+            host_unpinned: has(Fact::HostUnpinned),
             human_only_unavailable: has(Fact::HumanOnly),
-            unguarded: gate.map(|gate| Unguarded {
-                late_hook_failure: has(Fact::LateHookFailure),
-                gate,
-            }),
+            unguarded: gate.map(|gate| Unguarded { gate }),
             goal_allows: !has(Fact::OutsidePlan),
             runtime_allows: !has(Fact::Blocked),
             can_start_provider_call: !has(Fact::TokensSpent),
@@ -3322,6 +3712,65 @@ mod tests {
             deadline_reached: has(Fact::Deadline),
         };
         (facts.ask(), decide_dispatch(&facts, &after))
+    }
+
+    #[test]
+    fn host_dispatch_requires_an_explicit_human_resolution() {
+        let permission = Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Mode,
+            approval: Some(ApprovalMode::Request),
+        };
+        let hooks = HookFold::none();
+        for source in [
+            None,
+            Some(PermissionSource::Mode),
+            Some(PermissionSource::Rule),
+            Some(PermissionSource::AiReview),
+            Some(PermissionSource::Human),
+        ] {
+            let resolution = source.map(|source| Resolution {
+                approved: true,
+                source,
+                active_time_exhausted: false,
+                save: None,
+            });
+            let (_, decision) = decide(
+                DispatchSite::Primary,
+                permission,
+                &hooks,
+                &[Fact::Host, Fact::InProcess],
+                resolution,
+            );
+            assert_eq!(
+                decision.outcome.is_ok(),
+                source == Some(PermissionSource::Human)
+            );
+        }
+    }
+
+    #[test]
+    fn host_dispatch_preserves_explicit_human_denial() {
+        let permission = Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Mode,
+            approval: Some(ApprovalMode::Request),
+        };
+        let hooks = HookFold::none();
+        let (_, decision) = decide(
+            DispatchSite::Primary,
+            permission,
+            &hooks,
+            &[Fact::Host, Fact::InProcess],
+            Some(Resolution {
+                approved: false,
+                source: PermissionSource::Human,
+                active_time_exhausted: false,
+                save: None,
+            }),
+        );
+        assert!(decision.outcome.is_err());
+        assert_eq!(decision.source, PermissionSource::Human);
     }
 
     #[test]
@@ -3364,10 +3813,18 @@ mod tests {
         #[rustfmt::skip]
         let rows = [
             // Gate refusals, decided before any Ask.
+            (decide(Primary, asks(Request), &none, &[PrivilegeTool, Timeout], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[SettingsChanged], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::SettingsChanged), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[UnavailableProgram], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::UnavailableProgram), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[InterpreterNotAdmitted], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted), None), ask_, S::UnavailableApproval),
+            (decide(Primary, allow(S::SessionApproval), &none, &[Offered, InProcess], None), None, Ok(Dispatch::Direct), allow_, S::SessionApproval),
             (decide(Primary, allow(S::Rule), &none, &[Timeout], None), None, no(timeout(), None), allow_, S::Rule),
             (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
             (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),
             (decide(Researcher, deny(S::PinnedGrant), &none, &[], None), None, no(N::OutsideGrant, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::PinnedGrant), &none, &[HostUnpinned], None), None, no(N::HostSourceUnavailable, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::Hook), &denied, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
+            (decide(Primary, deny(S::PinnedGrant), &exhausted, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), deny_, S::PinnedGrant),
             (decide(Primary, deny(S::Mode), &none, &[], None), None, no(N::ModeDenied, None), deny_, S::Mode),
             (decide(Primary, deny(S::Hook), &denied, &[], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
             (decide(Primary, deny(S::Hook), &narrowing, &[], None), None, narrow(N::HookDenied(HookDenial::Narrowed("Read".into()))), deny_, S::Hook),
@@ -3378,12 +3835,11 @@ mod tests {
             (decide(Researcher, allow(S::Rule), &exhausted, &[], None), None, no(N::HookDenied(HookDenial::DelegationDeadline), Some(StopCause::DelegationDeadline)), allow_, S::Rule),
             (decide(Primary, asks(Request), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Rule), &none, &[HumanOnly], None), None, no(N::HumanOnlyUnavailable, Some(StopCause::ToolStopped)), ask_, S::UnavailableApproval),
-            (decide(Primary, allow(S::ExactCommandRule), &none, &[LateHookFailure], None), None, no(N::HookFailureAfterClassify, None), allow_, S::ExactCommandRule),
             (decide(Primary, asks(Request), &none, &[NotOffered], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::GuardAlias), None), ask_, S::UnavailableApproval),
             (decide(Primary, asks(Auto), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), ask_, S::UnavailableApproval),
             (decide(Researcher, allow(S::Mode), &none, &[OutsidePlan], None), None, no(N::OutsidePlan, None), allow_, S::Mode),
             // The primary after its Ask, or where it would have been.
-            (decide(Primary, asks(Request), &none, &[LateHookFailure], ok(true, S::Human)), Some(Request), Ok(Dispatch::QueuePause), ask_, S::Human),
+            (decide(Primary, asks(Request), &none, &[Offered], ok(true, S::Human)), Some(Request), Ok(Dispatch::QueuePause), ask_, S::Human),
             (decide(Primary, allow(S::Rule), &none, &[Paused], None), None, Ok(Dispatch::QueuePause), allow_, S::Rule),
             (decide(Primary, allow(S::Rule), &none, &[InProcess], None), None, Ok(Dispatch::Direct), allow_, S::Rule),
             (decide(Primary, asks(Auto), &none, &[Blocked], None), None, Ok(Dispatch::QueuePause), ask_, S::UnavailableApproval),

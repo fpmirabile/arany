@@ -10,6 +10,8 @@ mod goal_recovery_tests {
         let goal_id = GoalId::new();
         let run_id = RunId::new();
         let intent = EffectIntent {
+            host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -51,6 +53,7 @@ mod goal_recovery_tests {
             finished_sequence: disposition.map(|_| 2),
         };
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Interrupted Goal".into(),
@@ -61,6 +64,7 @@ mod goal_recovery_tests {
                 inode: 2,
             }),
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 0,
             last_sequence: 1,
             lineage: None,
@@ -194,6 +198,7 @@ mod goal_replay_tests {
             compaction_event_sequence: None,
             compaction_content_digest: None,
             tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
+                host_epoch: None,
                 permissions_digest: None,
                 contract_version: 1,
                 config_digest: [1; 32],
@@ -211,6 +216,7 @@ mod goal_replay_tests {
         tokens: Option<u32>,
     ) -> ProviderCallRecord {
         ProviderCallRecord {
+            rate_limits: None,
             delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
                 vec![crate::session::worker::ChildAssignment::Researcher {
                     objective: "Check the child result".into(),
@@ -418,6 +424,78 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn run_started_host_epochs_follow_live_runs_and_resume_boundaries() {
+        let old = uuid::Uuid::now_v7();
+        let newer = uuid::Uuid::now_v7();
+        for (name, previous, resumed, next, accepted) in [
+            ("consecutive", vec![old], false, old, true),
+            ("resumed", vec![old], true, old, false),
+            ("older", vec![old, newer], false, old, false),
+            ("new", vec![old], false, newer, true),
+            ("new-after-resume", vec![old], true, newer, true),
+        ] {
+            let (session, goal) = (SessionId::new(), GoalId::new());
+            let mut events = vec![goal_started(
+                goal,
+                GoalBudget {
+                    max_runs: 8,
+                    ..Default::default()
+                },
+            )];
+            for epoch in previous {
+                let (run, agent) = (RunId::new(), AgentRunId::new());
+                let mut config = config(CollaborationPolicy::Single, true);
+                config.tool_policy.as_mut().unwrap().host_epoch = Some(epoch);
+                events.extend(start_run(goal, run, agent, config));
+                events.extend(cancel_run(run, agent));
+            }
+            if resumed {
+                events.push(Event::GoalResumed { goal_id: goal });
+            }
+            let mut config = config(CollaborationPolicy::Single, true);
+            config.tool_policy.as_mut().unwrap().host_epoch = Some(next);
+            let run = RunId::new();
+            let mut started = start_run(goal, run, AgentRunId::new(), config);
+            started.truncate(3);
+            let event = started.pop().unwrap();
+            assert!(matches!(event, Event::RunStarted { .. }));
+            events.extend(started);
+            let envelopes = session_with(session, events);
+            let mut view = SessionView::replay_open(session, &envelopes)
+                .unwrap()
+                .unwrap();
+            assert!(view.runs.last().unwrap().config.is_none());
+            let boundary = envelopes
+                .iter()
+                .find(|envelope| {
+                    if resumed {
+                        matches!(envelope.event, Event::GoalResumed { .. })
+                    } else {
+                        matches!(envelope.event, Event::SessionStarted { .. })
+                    }
+                })
+                .unwrap();
+            assert_eq!(view.host_epoch_floor, boundary.sequence, "{name}");
+            assert_eq!(
+                view.runs[0].accepted_sequence > view.host_epoch_floor,
+                !resumed,
+                "{name}"
+            );
+            let sequence = view.last_sequence + 1;
+            let (run_id, agent_run_id) = event.scope();
+            let result = view.apply_committed(&EventEnvelope {
+                session_id: session,
+                sequence,
+                run_id,
+                agent_run_id,
+                event,
+                created_at_ms: 0,
+            });
+            assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+        }
+    }
+
+    #[test]
     fn run_failure_is_present_exactly_on_failed_terminal_events() {
         use crate::session::RunFailure;
         let session = SessionId::new();
@@ -460,6 +538,12 @@ mod goal_replay_tests {
                 agent,
                 config(CollaborationPolicy::Single, false),
             ));
+            events.push(Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: agent,
+                active_ceiling_ms: 0,
+            });
             events.push(Event::AgentFinished {
                 worker: None,
                 run_id: run,
@@ -481,7 +565,10 @@ mod goal_replay_tests {
             let result = SessionView::replay(session, &session_with(session, events));
             assert_eq!(result.is_ok(), accepted, "{disposition:?} {failure:?}");
             if accepted {
-                assert_eq!(result.unwrap().unwrap().runs[0].failure, failure);
+                let view = result.unwrap().unwrap();
+                assert_eq!(view.runs[0].failure, failure);
+                assert_eq!(view.usage.pending, [(session, run, Some(agent))]);
+                assert!(view.usage.groups.is_empty());
             }
         }
     }
@@ -600,6 +687,7 @@ mod goal_replay_tests {
             compacted.push(Event::ContextCompacted {
                 active_ms: Some(0),
                 record: crate::session::events::CompactionRecord {
+                    rate_limits: None,
                     covered_run_id: run,
                     covered_sequence: paused.runs[0].finished_sequence.unwrap(),
                     source_digest: crate::session::lineage::prefix_digest(
@@ -773,6 +861,7 @@ mod goal_replay_tests {
                     run_id: run,
                     agent_run_id: child,
                     fallback: ProviderFallback {
+                        rate_limits: None,
                         role: ProviderRole::Child,
                         call_index: 0,
                         failure: ProviderCallDisposition::Unavailable,
@@ -867,6 +956,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: actor,
                 fallback: ProviderFallback {
+                    rate_limits: None,
                     role: ProviderRole::Primary,
                     call_index: 0,
                     from: primary,
@@ -1002,6 +1092,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: actor,
             retry: ProviderRetry {
+                rate_limits: None,
                 role: ProviderRole::Primary,
                 call_index: 0,
                 attempt,
@@ -1034,6 +1125,8 @@ mod goal_replay_tests {
         assert_eq!(view.goals[0].provider_calls, 4);
         assert!(view.goals[0].token_usage_unknown);
         assert_eq!(view.runs[0].provider_retries.len(), 3);
+        assert_eq!(view.usage.groups[0].input.unreported, 4);
+        assert!(view.usage.pending.is_empty());
         for (end, _) in valid
             .iter()
             .enumerate()
@@ -1044,6 +1137,7 @@ mod goal_replay_tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(open.goals[0].unobserved_provider_calls, [actor]);
+            assert_eq!(open.usage.pending, [(session, run, Some(actor))]);
             assert!(open.runs[0].primary().unwrap().provider_calls.is_empty());
         }
         let position = |events: &[Event], attempt: u8| {
@@ -1154,6 +1248,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: child,
             fallback: ProviderFallback {
+                rate_limits: None,
                 role: ProviderRole::Review,
                 call_index: 1,
                 from: primary,
@@ -1271,6 +1366,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: child,
             retry: ProviderRetry {
+                rate_limits: None,
                 role,
                 call_index: 1,
                 attempt,
@@ -1338,6 +1434,7 @@ mod goal_replay_tests {
         assert!(SessionView::replay_open(fork, &open).unwrap().is_some());
         events.push(Event::ContextCompacted {
             record: crate::session::events::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: source_run,
                 covered_sequence: 1,
                 source_digest: [0; 32],
@@ -1556,6 +1653,8 @@ mod goal_replay_tests {
             .expect("open reservation replays")
             .expect("Session exists");
         let intent = crate::tools::EffectIntent {
+            host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -2401,6 +2500,7 @@ mod goal_replay_tests {
         assert_eq!(goal.status, GoalStatus::Running);
         assert_eq!(goal.compaction_call_reserved, None);
         assert_eq!(goal.uncertain_compaction_calls, 1);
+        assert!(view.usage.pending.contains(&(session_id, run_id, None)));
         assert!(goal.token_usage_unknown);
     }
 
@@ -3345,6 +3445,7 @@ mod goal_replay_tests {
             },
         };
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -3355,6 +3456,7 @@ mod goal_replay_tests {
                 inode: 2,
             }),
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 0,
             last_sequence: 1,
             lineage: None,
@@ -3496,13 +3598,22 @@ mod goal_replay_tests {
                     .as_mut()
                     .unwrap()
                     .child_unguarded = parent;
+                let started = Event::RunStarted {
+                    run_id: view.runs[0].id,
+                    config: view.runs[0].config.clone().unwrap(),
+                    active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+                };
+                assert_eq!(started.validate().is_ok(), parent == Denied);
+                if parent != Denied {
+                    continue;
+                }
                 let result = apply_child_spawn(
                     &mut view,
                     ChildGrant::ReadOnly {
                         unguarded: requested,
                     },
                 );
-                assert_eq!(result.is_ok(), requested == Denied || parent == HumanOnly);
+                assert_eq!(result.is_ok(), requested == Denied);
             }
         }
         let mut no_tools = session_with_tools(false);
@@ -3552,6 +3663,8 @@ mod goal_replay_tests {
 
     fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
+            host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -4365,6 +4478,8 @@ mod goal_replay_tests {
 
     fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
         let intent = EffectIntent {
+            host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -4409,6 +4524,23 @@ mod goal_replay_tests {
                 }),
             })
             .unwrap()
+        } else if matches!(
+            intent.call,
+            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. }
+        ) {
+            let stdout = String::from_utf8(content.to_vec()).unwrap();
+            serde_json::to_string(&crate::tools::types::CommandResult {
+                exit_code: Some(0),
+                stdout_total: crate::tools::OutputTotal {
+                    bytes: stdout.len() as u64,
+                    lines: stdout.lines().count() as u64,
+                },
+                stdout,
+                stderr: String::new(),
+                stderr_total: Default::default(),
+                changeset: Default::default(),
+            })
+            .unwrap()
         } else {
             serde_json::json!({ "sha256": crate::tools::types::hex_digest(content) }).to_string()
         };
@@ -4444,6 +4576,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -4454,6 +4587,7 @@ mod goal_replay_tests {
                 inode: 2,
             }),
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 0,
             last_sequence: 1,
             lineage: None,
@@ -4615,6 +4749,7 @@ mod goal_replay_tests {
             budget: GoalBudget::default(),
         };
         let mut view = SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: session_id,
             title: "Goal".into(),
@@ -4625,6 +4760,7 @@ mod goal_replay_tests {
                 inode: 2,
             }),
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 0,
             last_sequence: 2,
             lineage: None,
@@ -5101,6 +5237,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: intent.digest(),
                     decision: Decision::Deny,
                     mode: Some(PermissionMode::Default),
@@ -5115,7 +5252,7 @@ mod goal_replay_tests {
             assert_eq!(
                 Event::decode(
                     "ToolPermissionDecided",
-                    5,
+                    crate::session::payload_version("ToolPermissionDecided").unwrap(),
                     &verdict.payload().unwrap(),
                     Some(run),
                     Some(agent)
@@ -5253,6 +5390,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: intent.digest(),
                     decision,
                     mode: Some(PermissionMode::Default),
@@ -5269,11 +5407,11 @@ mod goal_replay_tests {
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
             hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
-            for (event, version) in [
-                (started(intent.digest(), &hook_intent), 6),
-                (finished(hook_observation.clone(), deny.clone()), 11),
+            for event in [
+                started(intent.digest(), &hook_intent),
+                finished(hook_observation.clone(), deny.clone()),
             ] {
-                assert_eq!(event.version(), version);
+                let version = event.version();
                 let payload = event.payload().unwrap();
                 assert_eq!(
                     Event::decode(event.kind(), version, &payload, Some(run), Some(agent)).unwrap(),
@@ -5312,6 +5450,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: intent.digest(),
                     decision: Decision::Ask,
                     mode: Some(PermissionMode::Auto),
@@ -5540,6 +5679,7 @@ mod goal_replay_tests {
                     run_id: run,
                     agent_run_id: agent,
                     verdict: PermissionVerdict {
+                        host: None,
                         intent_digest: intent.digest(),
                         decision: Decision::Allow,
                         mode: Some(PermissionMode::Default),
@@ -5679,6 +5819,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: agent,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: first.digest(),
                     decision: Decision::Allow,
                     mode: Some(PermissionMode::Default),
@@ -5757,6 +5898,7 @@ mod goal_replay_tests {
             .unwrap();
         policy.permissions_digest = configured.then_some([3; 32]);
         policy.unguarded_rules_digest = rules_pinned.then_some([5; 32]);
+        policy.host_epoch = Some(uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501));
         apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
         apply(
             &mut view,
@@ -5846,243 +5988,6 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn hook_unguarded_replay_requires_exact_typed_failure_and_fresh_human_approval() {
-        use crate::tools::permissions::{
-            Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
-            PermissionMode, PermissionSource,
-        };
-        use crate::tools::{EnforcementCause, UnguardedGrant};
-        for cause in [
-            EnforcementCause::FilesystemDenied,
-            EnforcementCause::GuardBootstrap,
-        ] {
-            let (mut view, goal, run, agent) = primary_tool_session(true);
-            view.goals[0]
-                .plan_contract
-                .as_mut()
-                .unwrap()
-                .commands
-                .push("sh".into());
-            let policy = view.runs[0]
-                .config
-                .as_mut()
-                .unwrap()
-                .tool_policy
-                .as_mut()
-                .unwrap();
-            policy.permissions_digest = Some([3; 32]);
-            policy.unguarded_rules_digest = Some([5; 32]);
-            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
-            let intent = read_intent(run, agent, "src/lib.rs");
-            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
-            let hook = child_intent(
-                run,
-                agent,
-                ToolCall::Command {
-                    program: "sh".into(),
-                    args: vec!["-c".into(), "exit 7".into()],
-                    cwd: String::new(),
-                },
-            );
-            apply(
-                &mut view,
-                Event::HookStarted {
-                    run_id: run,
-                    agent_run_id: agent,
-                    hook: HookInvocation {
-                        active_ceiling_ms: None,
-                        event: HookEvent::PreToolUse,
-                        group: 0,
-                        handler: 0,
-                        subject_digest: intent.digest(),
-                        intent: hook.clone(),
-                        input_digest: [9; 32],
-                    },
-                },
-            )
-            .unwrap();
-            let mut observation = observation_for(hook, b"");
-            observation.enforcement_cause = Some(cause);
-            observation.disposition = if cause == EnforcementCause::GuardBootstrap {
-                observation.attestation = None;
-                ToolDisposition::Failed
-            } else {
-                ToolDisposition::Denied
-            };
-            let ignored = HookResult::Ignored {
-                why: HookIgnoreReason::NotCompleted,
-            };
-            apply(
-                &mut view,
-                Event::HookFinished {
-                    run_id: run,
-                    agent_run_id: agent,
-                    outcome: HookOutcome {
-                        boundary_active_ms: None,
-                        observation,
-                        result: ignored.clone(),
-                    },
-                },
-            )
-            .unwrap();
-            let mut verdict = verdict_event(
-                &intent,
-                Some(PermissionMode::Default),
-                Decision::Allow,
-                PermissionSource::Mode,
-                PermissionSource::Mode,
-                true,
-            );
-            if let Event::ToolPermissionDecided { verdict, .. } = &mut verdict {
-                verdict.hooks = 1;
-            }
-            apply(&mut view, verdict).unwrap();
-            apply(&mut view, tool_finished(run, agent, &intent, b"ok")).unwrap();
-            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
-            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
-            let host = child_intent(
-                run,
-                agent,
-                ToolCall::CommandUnguarded {
-                    program: "sh".into(),
-                    args: vec!["-c".into(), "exit 7".into()],
-                    cwd: String::new(),
-                    justification: "Run the exact hook".into(),
-                },
-            );
-            apply(&mut view, tool_started(run, agent, &host)).unwrap();
-            for source in [
-                PermissionSource::AiReview,
-                PermissionSource::ExactCommandRule,
-                PermissionSource::Mode,
-            ] {
-                assert!(rejected(
-                    &view,
-                    verdict_event(
-                        &host,
-                        Some(PermissionMode::Default),
-                        Decision::Ask,
-                        PermissionSource::Mode,
-                        source,
-                        true
-                    )
-                ));
-            }
-            let human = verdict_event(
-                &host,
-                Some(PermissionMode::Default),
-                Decision::Ask,
-                PermissionSource::Mode,
-                PermissionSource::Human,
-                true,
-            );
-            assert!(!rejected(&view, human.clone()));
-            let mut denied = view.clone();
-            apply(
-                &mut denied,
-                verdict_event(
-                    &host,
-                    Some(PermissionMode::Default),
-                    Decision::Ask,
-                    PermissionSource::Mode,
-                    PermissionSource::Human,
-                    false,
-                ),
-            )
-            .unwrap();
-            let mut ran = observation_for(host.clone(), b"ok");
-            ran.output =
-                r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
-            assert!(rejected(
-                &denied,
-                Event::ToolFinished {
-                    checkpoint: None,
-                    run_id: run,
-                    agent_run_id: agent,
-                    observation: ran.clone()
-                }
-            ));
-            for change in ["argv", "cwd", "program", "cause", "parent", "later"] {
-                let mut forged = view.clone();
-                let pending = &mut forged.runs[0].tools.last_mut().unwrap().intent;
-                if let ToolCall::CommandUnguarded {
-                    program, args, cwd, ..
-                } = &mut pending.call
-                {
-                    match change {
-                        "argv" => args.push("extra".into()),
-                        "cwd" => *cwd = "src".into(),
-                        "program" => *program = "other".into(),
-                        _ => {}
-                    }
-                }
-                if change == "cause" {
-                    forged.runs[0].tools[0].hooks[0]
-                        .outcome
-                        .as_mut()
-                        .unwrap()
-                        .observation
-                        .enforcement_cause = None;
-                }
-                if change == "later" {
-                    let mut later = forged.runs[0].tools[0].hooks[0].clone();
-                    later.sequence += 1;
-                    let observation = &mut later.outcome.as_mut().unwrap().observation;
-                    observation.enforcement_cause = None;
-                    observation.disposition = ToolDisposition::Succeeded;
-                    forged.runs[0].tools[0].hooks.push(later);
-                }
-                if change == "parent" {
-                    forged.runs[0]
-                        .config
-                        .as_mut()
-                        .unwrap()
-                        .tool_policy
-                        .as_mut()
-                        .unwrap()
-                        .unguarded = UnguardedGrant::Denied;
-                }
-                let pending = &forged.runs[0].tools.last().unwrap().intent;
-                assert!(
-                    rejected(
-                        &forged,
-                        verdict_event(
-                            pending,
-                            Some(PermissionMode::Default),
-                            Decision::Ask,
-                            PermissionSource::Mode,
-                            PermissionSource::Human,
-                            true
-                        )
-                    ),
-                    "{change}"
-                );
-            }
-            apply(&mut view, human).unwrap();
-            apply(
-                &mut view,
-                Event::ToolFinished {
-                    checkpoint: None,
-                    run_id: run,
-                    agent_run_id: agent,
-                    observation: ran,
-                },
-            )
-            .unwrap();
-            assert_eq!(
-                view.runs[0].tools[0].hooks[0]
-                    .outcome
-                    .as_ref()
-                    .unwrap()
-                    .result,
-                ignored
-            );
-            assert_eq!(view.runs[0].unguarded_tools(), 1);
-        }
-    }
-
-    #[test]
     fn an_approved_host_run_without_an_outcome_counts_as_unguarded() {
         use crate::tools::permissions::{Decision, PermissionSource};
         let mut scenario = unguarded_scenario(
@@ -6135,6 +6040,13 @@ mod goal_replay_tests {
             run_id: intent.run_id,
             agent_run_id: intent.agent_run_id,
             verdict: crate::tools::permissions::PermissionVerdict {
+                host: (approved && intent.call.is_unguarded()).then_some(
+                    crate::tools::permissions::HostApproval {
+                        epoch: uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501),
+                        session: false,
+                        source_intent: None,
+                    },
+                ),
                 intent_digest: intent.digest(),
                 decision,
                 mode,
@@ -6149,8 +6061,165 @@ mod goal_replay_tests {
     }
 
     #[test]
-    fn unguarded_replay_requires_prior_guard_failure_human_or_exact_rule_verdict_and_unguarded_attestation()
-     {
+    fn session_host_replay_checks_epoch_reference_scope_and_exact_pins() {
+        use crate::tools::permissions::{Decision, PermissionSource};
+        let mut scenario = unguarded_scenario(None, false, false);
+        let mut human = verdict_event(
+            &scenario.host,
+            None,
+            Decision::Ask,
+            PermissionSource::Mode,
+            PermissionSource::Human,
+            true,
+        );
+        let Event::ToolPermissionDecided { verdict, .. } = &mut human else {
+            unreachable!()
+        };
+        verdict.host.as_mut().unwrap().session = true;
+        let epoch = verdict.host.as_ref().unwrap().epoch;
+        for basis in [
+            PermissionSource::Mode,
+            PermissionSource::Rule,
+            PermissionSource::SessionApproval,
+        ] {
+            let mut candidate = human.clone();
+            let Event::ToolPermissionDecided { verdict, .. } = &mut candidate else {
+                unreachable!()
+            };
+            verdict.basis = basis;
+            assert_eq!(
+                rejected(&scenario.view, candidate),
+                basis == PermissionSource::SessionApproval
+            );
+        }
+        apply(&mut scenario.view, human).unwrap();
+        apply(
+            &mut scenario.view,
+            Event::ToolFinished {
+                checkpoint: None,
+                run_id: scenario.run,
+                agent_run_id: scenario.agent,
+                observation: observation_for(scenario.host.clone(), b"ok"),
+            },
+        )
+        .unwrap();
+        let goal = scenario.view.goals[0].id;
+        apply(
+            &mut scenario.view,
+            reserve_child_call(goal, scenario.run, scenario.agent),
+        )
+        .unwrap();
+        apply(
+            &mut scenario.view,
+            requesting_step(scenario.run, scenario.agent, 1),
+        )
+        .unwrap();
+        let mut next = scenario.host.clone();
+        next.id = uuid::Uuid::now_v7();
+        next.limits.runtime_ms /= 2;
+        apply(
+            &mut scenario.view,
+            tool_started(scenario.run, scenario.agent, &next),
+        )
+        .unwrap();
+        let mut reused = verdict_event(
+            &next,
+            None,
+            Decision::Allow,
+            PermissionSource::SessionApproval,
+            PermissionSource::SessionApproval,
+            true,
+        );
+        let Event::ToolPermissionDecided { verdict, .. } = &mut reused else {
+            unreachable!()
+        };
+        verdict.host.as_mut().unwrap().source_intent = Some(scenario.host.digest());
+        assert!(!rejected(&scenario.view, reused.clone()));
+        let mut gated = reused.clone();
+        let Event::ToolPermissionDecided { verdict, .. } = &mut gated else {
+            unreachable!()
+        };
+        verdict.approved = false;
+        assert!(
+            !rejected(&scenario.view, gated),
+            "a later gate can refuse a matched scope"
+        );
+        for case in [
+            "epoch",
+            "reference",
+            "source",
+            "scope",
+            "argv",
+            "environment",
+            "limit",
+            "revoked",
+            "state",
+            "decision",
+        ] {
+            let mut view = scenario.view.clone();
+            let mut event = reused.clone();
+            let Event::ToolPermissionDecided { verdict, .. } = &mut event else {
+                unreachable!()
+            };
+            match case {
+                "epoch" => verdict.host.as_mut().unwrap().epoch = uuid::Uuid::now_v7(),
+                "reference" => verdict.host.as_mut().unwrap().source_intent = Some([9; 32]),
+                "source" => {
+                    view.runs[0].tools[0]
+                        .permission_verdict
+                        .as_mut()
+                        .unwrap()
+                        .source = PermissionSource::Mode
+                }
+                "scope" => verdict.host.as_mut().unwrap().session = true,
+                "revoked" => view.host_epoch_floor = u64::MAX,
+                "decision" => verdict.decision = Decision::Ask,
+                "state" => {
+                    for tool in &mut view.runs[0].tools {
+                        let ToolCall::CommandUnguarded { args, .. } = &mut tool.intent.call else {
+                            unreachable!()
+                        };
+                        args.push("/state/settings.json".into());
+                        if let Some(permission) = &mut tool.permission_verdict {
+                            permission.intent_digest = tool.intent.digest();
+                        }
+                        if let Some(observation) = &mut tool.observation {
+                            observation.intent = tool.intent.clone();
+                            observation.attestation =
+                                Some(crate::tools::Attestation::for_site(&tool.intent));
+                        }
+                    }
+                    let intent = &view.runs[0].tools.last().unwrap().intent;
+                    verdict.intent_digest = intent.digest();
+                    let source = view.runs[0].tools[0].intent.digest();
+                    verdict.host.as_mut().unwrap().source_intent = Some(source);
+                    assert_eq!(view.host_approval(intent, epoch), Some(source));
+                }
+                _ => {
+                    let intent = &mut view.runs[0].tools.last_mut().unwrap().intent;
+                    match case {
+                        "argv" => {
+                            let ToolCall::CommandUnguarded { args, .. } = &mut intent.call else {
+                                unreachable!()
+                            };
+                            args.push("other".into());
+                        }
+                        "environment" => {
+                            intent.host_command.as_mut().unwrap().environment_digest = [9; 32]
+                        }
+                        "limit" => intent.limits.runtime_ms = scenario.host.limits.runtime_ms + 1,
+                        _ => unreachable!(),
+                    }
+                    verdict.intent_digest = intent.digest();
+                }
+            }
+            assert!(rejected(&view, event), "{case}");
+        }
+        assert_eq!(scenario.view.host_grants(epoch).count(), 1);
+    }
+
+    #[test]
+    fn host_replay_requires_primary_human_authority_and_pin_without_prior_failure() {
         use crate::tools::EnforcementCause;
         use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
         let failed = Some(("exit 7", ToolDisposition::Failed, None));
@@ -6186,7 +6255,7 @@ mod goal_replay_tests {
                 if !scenario.started {
                     continue;
                 }
-                assert!(rejected(&scenario.view, human(&scenario)), "{prior:?}");
+                assert!(!rejected(&scenario.view, human(&scenario)), "{prior:?}");
                 let mut denied = scenario.view.clone();
                 apply(
                     &mut denied,
@@ -6244,12 +6313,12 @@ mod goal_replay_tests {
                     &scenario.host,
                     mode,
                     Decision::Allow,
-                    PermissionSource::ExactCommandRule,
-                    PermissionSource::ExactCommandRule,
+                    PermissionSource::SessionApproval,
+                    PermissionSource::SessionApproval,
                     true,
                 )
             };
-            assert!(!rejected(&good.view, exact(&good)));
+            assert!(rejected(&good.view, exact(&good)));
             let unpinned = unguarded_scenario(failed, configured, false);
             assert!(rejected(&unpinned.view, exact(&unpinned)));
             let forged_decision = verdict_event(
@@ -6389,6 +6458,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: agent,
             verdict: PermissionVerdict {
+                host: None,
                 intent_digest: intent.digest(),
                 decision,
                 mode,
@@ -6404,8 +6474,8 @@ mod goal_replay_tests {
             verdict(
                 Some(PermissionMode::Default),
                 Decision::Allow,
-                PermissionSource::ExactCommandRule,
-                PermissionSource::ExactCommandRule,
+                PermissionSource::SessionApproval,
+                PermissionSource::SessionApproval,
                 approved,
             )
         };
@@ -6439,6 +6509,121 @@ mod goal_replay_tests {
         assert!(rejected(&pinned, exact(true)));
         assert!(!rejected(&view, ordinary.clone()));
         apply(&mut view, ordinary).expect("the ordinary verdict is admitted");
+    }
+
+    #[test]
+    fn host_git_reducer_requires_human_verdict_host_receipt_and_stops_unknown_remote() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        for call in [
+            ToolCall::GitPush {
+                remote: "https://github.com/o/r.git".into(),
+                branch: "topic".into(),
+            },
+            ToolCall::GhPrCreate {
+                repository: "github.com/o/r".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                title: "T".into(),
+                body: String::new(),
+                draft: true,
+            },
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let mut intent = child_intent(run, agent, call);
+            intent.host = Some(crate::tools::types::HostIntent {
+                source_oid: "1".repeat(40),
+                refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            });
+            intent.limits.network = crate::tools::types::NetworkGrant::Host;
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            for source in [
+                PermissionSource::Mode,
+                PermissionSource::Rule,
+                PermissionSource::TypedPrefixRule,
+                PermissionSource::AiReview,
+                PermissionSource::SessionApproval,
+            ] {
+                assert!(
+                    rejected(
+                        &view,
+                        verdict_event(
+                            &intent,
+                            Some(PermissionMode::Auto),
+                            Decision::Ask,
+                            PermissionSource::Mode,
+                            source,
+                            true
+                        )
+                    ),
+                    "{source:?}"
+                );
+            }
+            for mode in [PermissionMode::Plan, PermissionMode::DontAsk] {
+                assert!(rejected(
+                    &view,
+                    verdict_event(
+                        &intent,
+                        Some(mode),
+                        Decision::Ask,
+                        PermissionSource::Mode,
+                        PermissionSource::Human,
+                        true
+                    )
+                ));
+            }
+            let mut observed =
+                observation_for(intent.clone(), b"host: remote operation completed.");
+            let event = |observation| Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            };
+            assert!(rejected(&view, event(observed.clone())));
+            apply(
+                &mut view,
+                verdict_event(
+                    &intent,
+                    Some(PermissionMode::Auto),
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    true,
+                ),
+            )
+            .unwrap();
+            let host = observed.attestation.clone();
+            observed.attestation = Some(crate::tools::Attestation::Guard(
+                crate::tools::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                },
+            ));
+            assert!(rejected(&view, event(observed.clone())));
+            let Some(crate::tools::Attestation::Host(receipt)) = host.clone() else {
+                panic!("host receipt");
+            };
+            observed.attestation = Some(crate::tools::Attestation::Unguarded(receipt));
+            assert!(rejected(&view, event(observed.clone())));
+            observed.attestation = host;
+            assert!(!rejected(&view, event(observed.clone())));
+            observed.disposition = ToolDisposition::Uncertain;
+            observed.output = "host: remote outcome unknown; never retry automatically".into();
+            apply(&mut view, event(observed)).unwrap();
+            assert!(rejected(&view, tool_started(run, agent, &intent)));
+        }
     }
 
     #[test]
@@ -6593,7 +6778,7 @@ mod goal_replay_tests {
         ));
         for source in [
             PermissionSource::Rule,
-            PermissionSource::ExactCommandRule,
+            PermissionSource::SessionApproval,
             PermissionSource::Hook,
             typed,
         ] {
@@ -6977,6 +7162,7 @@ mod goal_replay_tests {
             run_id: run,
             covered_tool_count: count,
             record: crate::session::events::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: run,
                 covered_sequence: covered.finished_sequence.expect("observed Tool"),
                 source_digest: [0; 32],
@@ -7013,6 +7199,27 @@ mod goal_replay_tests {
         let mut replayed = view.clone();
         apply(&mut replayed, whole).expect("the whole step is covered");
         assert_eq!(replayed.goals[0].compaction_call_reserved, None);
+        assert_eq!(
+            replayed
+                .usage
+                .groups
+                .iter()
+                .map(|group| group.input.unreported)
+                .sum::<u64>(),
+            view.usage
+                .groups
+                .iter()
+                .map(|group| group.input.unreported)
+                .sum::<u64>()
+                + 1
+        );
+        assert!(
+            !replayed
+                .usage
+                .pending
+                .iter()
+                .any(|(_, id, actor)| *id == run && actor.is_none())
+        );
     }
 
     #[test]
@@ -7228,14 +7435,7 @@ mod goal_replay_tests {
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: "pinned guidance".into(),
-            attestation: Some(crate::tools::Attestation::Guard(
-                crate::tools::GuardReceipt {
-                    contract_version: 1,
-                    intent_digest: intent.digest(),
-                    enforcement_digest: intent.enforcement_digest,
-                    limits: intent.limits.clone(),
-                },
-            )),
+            attestation: Some(crate::tools::Attestation::for_site(&intent)),
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -7246,6 +7446,20 @@ mod goal_replay_tests {
             agent_run_id: actor,
             observation,
         };
+        let mut guarded = observation.clone();
+        guarded.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            },
+        ));
+        assert!(rejected(&view, finish(guarded.clone())));
+        guarded.attestation = None;
+        guarded.disposition = ToolDisposition::Failed;
+        guarded.enforcement_cause = Some(crate::tools::EnforcementCause::GuardBootstrap);
+        assert!(rejected(&view, finish(guarded)));
         let mut failed = view.clone();
         observation.disposition = ToolDisposition::Failed;
         apply(&mut failed, finish(observation.clone())).unwrap();

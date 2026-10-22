@@ -383,7 +383,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 "Notice: Model: model-1 \u{b7} default; /model changes are unavailable while a Run is active; Ctrl+C cancels\r\n"
                     .as_bytes(),
             );
-            patterns.push(b"Notice: Working \xc2\xb7 request ");
+            patterns.push(b"Request: ");
             patterns.push(b"\r\n");
         }
         if expect_help {
@@ -1075,7 +1075,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             .and_then(|config| config.context_usage.as_ref())
             .expect("current Run footprint");
         let status = format!(
-            "Notice: Working · request {}% of local limit · 1 agent. Includes chat, instructions, files and images; not model tokens. Details: /agents\r\n",
+            "Request: {}% of local request budget; not model tokens\r\nIncludes chat, instructions, files and images\r\n",
             usage.utilization_percent(),
         );
         assert_eq!(transcript.matches(&status).count(), 1);
@@ -1287,9 +1287,11 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
         .iter()
         .position(|row| row.starts_with("Quick actions"))
         .expect("quick actions header");
-    // As in Codex, the six-row dialog takes only its content height, right under history.
+    // The header, five actions and footer take only their content height, right under history.
     super::assert_history_above(&dialog, top, "open dialog");
-    assert_eq!(top + 6, 50, "no reserved rows below the dialog: {dialog:?}");
+    assert!(dialog[top + 5].contains("Usage · reported tokens"));
+    assert!(dialog[top + 6].contains("1-5 or Up/Down · Enter open · Esc return"));
+    assert_eq!(top + 7, 50, "no reserved rows below the dialog: {dialog:?}");
 
     let closed_at = transcript.len();
     input.write_all(b"\x1b").unwrap();

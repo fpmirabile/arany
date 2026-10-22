@@ -324,6 +324,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
     prefix.rewinds.checkpoints.pop();
     prefix.last_sequence = new_start - 2;
     let inherited = ForkInheritance {
+        usage: prefix.usage.clone(),
         workspace_identity: prefix.workspace_identity,
         runs: prefix.runs.clone(),
         compactions: Vec::new(),
@@ -685,6 +686,7 @@ fn rewind_compaction_binds_the_new_boundary_and_rejects_stale_prefixes() {
     events.push(envelope(&view, event.clone()));
     apply(&mut view, event);
     let record = crate::session::CompactionRecord {
+        rate_limits: None,
         covered_run_id: f.run,
         covered_sequence: view.last_sequence,
         source_digest: crate::session::prefix_digest(&events, view.last_sequence).unwrap(),

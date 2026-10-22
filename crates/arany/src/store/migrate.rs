@@ -152,6 +152,28 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         ),
         variant_step!("RunStarted", 20, crate::session::pre_multiedit_payload),
         variant_step!("AgentSpawned", 12, crate::session::pre_multiedit_payload),
+        variant_step!("ToolStarted", 16, crate::session::pre_host_git_payload),
+        variant_step!("ToolFinished", 22, crate::session::pre_host_git_payload),
+        variant_step!("HookStarted", 6, crate::session::pre_host_git_payload),
+        variant_step!("HookFinished", 11, crate::session::pre_host_git_payload),
+        variant_step!(
+            "GoalPlanContractRecorded",
+            9,
+            crate::session::pre_host_git_payload
+        ),
+        variant_step!(
+            "ProviderCallRecorded",
+            16,
+            crate::session::pre_host_git_payload
+        ),
+        variant_step!("RunStarted", 21, crate::session::pre_host_payload),
+        variant_step!("ToolStarted", 17, crate::session::pre_host_payload),
+        variant_step!("ToolFinished", 23, crate::session::pre_host_payload),
+        variant_step!("ToolPermissionDecided", 5, crate::session::pre_host_payload),
+        variant_step!("AgentSpawned", 13, crate::session::pre_host_payload),
+        variant_step!("HookStarted", 7, crate::session::pre_host_payload),
+        variant_step!("HookFinished", 12, crate::session::pre_host_payload),
+        variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),

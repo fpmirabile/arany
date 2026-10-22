@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 pub(crate) fn catalog() -> Value {
     json!({
         "write": true,
+        "host_commands": true,
         "commands": [{"name": "bash"}],
         "skills": [{"name": "example"}],
         "mcp_servers": [{"name": "example", "tools": ["echo"]}],
@@ -108,6 +109,8 @@ pub(crate) fn goal_plan_contract() -> GoalPlanContract {
 
 fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
     crate::tools::EffectIntent {
+        host: None,
+        host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: RunId::new(),

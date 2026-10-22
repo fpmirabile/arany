@@ -52,6 +52,8 @@ impl Fixture {
     }
     fn intent(&self, actor: AgentRunId, call: ToolCall, target: EffectTarget) -> EffectIntent {
         EffectIntent {
+            host: None,
+            host_command: None,
             target,
             id: uuid::Uuid::now_v7(),
             run_id: self.run,
@@ -144,6 +146,7 @@ impl Fixture {
             run_id: self.run,
             agent_run_id: actor,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation,
                 phase,
                 disposition,
@@ -461,6 +464,7 @@ impl Fixture {
             run_id: self.run,
             covered_tool_count: u32::try_from(run.tools.len()).unwrap(),
             record: crate::session::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: self.run,
                 covered_sequence: covered,
                 source_digest,
@@ -614,6 +618,7 @@ fn fixture_with_manifest(
         compaction_event_sequence: None,
         compaction_content_digest: None,
         tool_policy: Some(Box::new(crate::tools::ToolPolicyReceipt {
+            host_epoch: None,
             contract_version: 1,
             config_digest: [1; 32],
             permissions_digest: None,
@@ -1512,6 +1517,7 @@ fn worker_protocol_private_loss_is_local_and_c1_failure_remains_fatal() {
                     run_id: f.run,
                     agent_run_id: f.primary,
                     record: ProviderCallRecord {
+                        rate_limits: None,
                         delegation: None,
                         phase: AgentPhase::RootSynthesis,
                         disposition: ProviderCallDisposition::Finished,
@@ -1563,28 +1569,28 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 21),
-        ("AgentSpawned", 13),
-        ("ProviderCallRecorded", 16),
-        ("AgentFinished", 10),
-        ("ToolStarted", 16),
-        ("ToolFinished", 22),
-        ("WorkerStopObserved", 1),
-        ("WorkerHandoverDiscarded", 1),
-        ("WorkerDataChunk", 1),
-        ("WorkerDataSealed", 1),
-        ("WorkerHandoverRecorded", 2),
-        ("WorkerIntegrationRecorded", 1),
-        ("WorkerLeaseReleased", 1),
-        ("WorkerVerificationRecorded", 1),
+        "RunStarted",
+        "AgentSpawned",
+        "ProviderCallRecorded",
+        "AgentFinished",
+        "ToolStarted",
+        "ToolFinished",
+        "WorkerStopObserved",
+        "WorkerHandoverDiscarded",
+        "WorkerDataChunk",
+        "WorkerDataSealed",
+        "WorkerHandoverRecorded",
+        "WorkerIntegrationRecorded",
+        "WorkerLeaseReleased",
+        "WorkerVerificationRecorded",
     ];
-    for (kind, version) in expected {
+    for kind in expected {
         let e = f
             .envelopes()
             .into_iter()
             .find(|e| e.event.kind() == kind)
             .unwrap();
-        assert_eq!(e.event.version(), version, "{kind}");
+        let version = e.event.version();
         let payload = e.event.payload().unwrap();
         for v in [0, version - 1, version + 1] {
             assert!(matches!(
@@ -1738,6 +1744,93 @@ fn worker_protocol_bulk_file_content_and_serialized_bounds() {
         b"{\"files\":[],\"extra\":0}".as_slice(),
     ] {
         assert!(decode_data(raw, WorkerDataPurpose::Handover).is_err());
+    }
+}
+
+pub(crate) fn host_protocol_fixture() -> Fixture {
+    use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
+    let mut f = fixture();
+    let first = f
+        .events
+        .iter()
+        .position(|e| matches!(e, Event::ToolStarted { intent, .. } if matches!(intent.call, ToolCall::Read { .. })))
+        .unwrap();
+    f.events.truncate(first);
+    for event in &mut f.events {
+        if let Event::GoalPlanContractRecorded { contract, .. } = event {
+            contract.paths = vec![".".into()];
+        }
+    }
+    let mut intent = f.intent(
+        f.primary,
+        ToolCall::GitPush {
+            remote: "https://github.com/o/r.git".into(),
+            branch: "main".into(),
+        },
+        EffectTarget::Workspace,
+    );
+    intent.host = Some(crate::HostIntent {
+        source_oid: "1".repeat(40),
+        refspec: format!("{}:refs/heads/main", "1".repeat(40)),
+    });
+    intent.limits.network = crate::NetworkGrant::Host;
+    f.started(&intent);
+    f.push(Event::ToolPermissionDecided {
+        run_id: f.run,
+        agent_run_id: f.primary,
+        verdict: PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision: Decision::Ask,
+            mode: None,
+            basis: PermissionSource::Mode,
+            source: PermissionSource::Human,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        },
+    });
+    f
+}
+
+#[test]
+fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
+    for outcome in [
+        None,
+        Some(ToolDisposition::Succeeded),
+        Some(ToolDisposition::Uncertain),
+        Some(ToolDisposition::Denied),
+    ] {
+        let mut f = host_protocol_fixture();
+        let intent = match &f.events[f.events.len() - 2] {
+            Event::ToolStarted { intent, .. } => intent.clone(),
+            _ => unreachable!(),
+        };
+        if let Some(disposition) = outcome {
+            let receipt =
+                (disposition != ToolDisposition::Denied).then(|| Attestation::for_site(&intent));
+            f.observed(&intent, disposition, receipt, "host: synthetic outcome");
+        }
+        let view = f.view();
+        let expected = outcome != Some(ToolDisposition::Denied);
+        assert_eq!(
+            view.runs[0]
+                .tools
+                .iter()
+                .find(|t| t.intent.call.is_host())
+                .unwrap()
+                .ran_host(),
+            expected
+        );
+        assert_eq!(view.runs[0].host_tools(), usize::from(expected));
+        let plan = crate::session::rewind::plan(&view, &view.rewinds.checkpoints[0]).unwrap();
+        assert_eq!(
+            plan.non_rewindable
+                .iter()
+                .any(|(_, effect)| *effect == crate::session::rewind::NonRewindable::Host),
+            expected
+        );
     }
 }
 
@@ -2288,6 +2381,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
         run_id: f.run,
         agent_run_id: f.child,
         verdict: PermissionVerdict {
+            host: None,
             intent_digest: intent.digest(),
             decision: Decision::Allow,
             mode: Some(PermissionMode::AcceptEdits),
@@ -2632,6 +2726,7 @@ fn worker_protocol_background_workers_let_the_primary_continue_before_release() 
             run_id: f.run,
             agent_run_id: f.primary,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: AgentPhase::RootSynthesis,
                 disposition: ProviderCallDisposition::ToolRequested,
@@ -2700,6 +2795,7 @@ fn worker_protocol_lineage_accepts_only_released_children_of_the_goal() {
             run_id: f.run,
             agent_run_id: f.primary,
             record: ProviderCallRecord {
+                rate_limits: None,
                 delegation: Some(vec![ChildAssignment::Editor {
                     assignment: Box::new(request.clone()),
                 }]),
@@ -3129,6 +3225,7 @@ fn worker_protocol_stop_blocks_an_otherwise_admitted_provider_fallback() {
         run_id: f.run,
         agent_run_id: f.child,
         fallback: crate::provider::ProviderFallback {
+            rate_limits: None,
             role: crate::provider::ProviderRole::Child,
             call_index: 0,
             failure: ProviderCallDisposition::Unavailable,
@@ -3436,6 +3533,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                 run_id: f.run,
                 agent_run_id: actor,
                 verdict: PermissionVerdict {
+                    host: None,
                     intent_digest: pending.digest(),
                     mode: Some(PermissionMode::Default),
                     decision: Decision::Deny,
@@ -4472,7 +4570,7 @@ fn worker_child_unguarded_grant_can_only_narrow_explicit_parent_permission() {
             }
             assert_eq!(
                 SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
-                requested == Denied || parent == HumanOnly
+                requested == Denied && parent == Denied
             );
         }
     }

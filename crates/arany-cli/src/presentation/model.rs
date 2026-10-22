@@ -355,6 +355,7 @@ mod tests {
 
     fn session() -> SessionView {
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "work\u{1b}[31m\nSession: forged".into(),
@@ -362,6 +363,7 @@ mod tests {
             inherited_title: None,
             workspace_identity: None,
             defaults: Default::default(),
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,
@@ -518,6 +520,8 @@ mod tests {
         assert!(tool_capacity_notice(&view, Some(id)).is_none());
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
+            host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id,
             run_id,
@@ -735,6 +739,8 @@ mod tests {
         assert_eq!(model.activity_lines[3], "+3 more agents (use /agents)");
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
+            host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run.id,
@@ -881,6 +887,7 @@ mod tests {
                     | ProviderCallDisposition::InvalidResponse
             );
             ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: arany::AgentPhase::RootPlan,
                 disposition,

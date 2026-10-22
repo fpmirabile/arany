@@ -1817,6 +1817,7 @@ mod tests {
 
     fn session() -> SessionView {
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "History".into(),
@@ -1824,6 +1825,7 @@ mod tests {
             inherited_title: None,
             workspace_identity: None,
             defaults: SessionDefaults::default(),
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,

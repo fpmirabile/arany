@@ -1634,7 +1634,7 @@ mod tests {
         let (names, selected) = composer
             .completion_menu()
             .expect("edited prefix reopens choices");
-        assert_eq!(names, ["setup", "status", "settings"]);
+        assert_eq!(names, ["setup", "status", "storage", "settings"]);
         assert_eq!(selected, 0);
         composer.apply(TerminalInput::Left);
         assert!(composer.completion_menu().is_none());

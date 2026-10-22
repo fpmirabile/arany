@@ -234,10 +234,16 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
         ToolCall::GitBranch {
             name: Some("older".into()),
             start_point: Some("HEAD~2".into()),
+            scope: None,
+            base: None,
+            max_count: None,
         },
         ToolCall::GitBranch {
             name: None,
             start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
         },
         ToolCall::GitSwitch {
             branch: "older".into(),
@@ -401,6 +407,133 @@ fn verdict_of(view: &SessionView, run: usize) -> arany::permissions::PermissionV
 }
 
 #[tokio::test]
+async fn goal_continuations_readmit_saved_typed_rules_but_latch_external_drift() {
+    for drift in [false, true] {
+        let repo = Repo::new();
+        let path = repo.state.join("tools.json");
+        let mut config: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        let find = std::fs::canonicalize("/usr/bin/find").unwrap();
+        config["commands"] = json!([{
+            "name":"find", "executable":find,
+            "sha256":Sha256::digest(std::fs::read(&find).unwrap()).iter()
+                .map(|byte| format!("{byte:02x}")).collect::<String>(),
+            "interpreter":false, "inputs":[]
+        }]);
+        std::fs::write(path, serde_json::to_vec(&config).unwrap()).unwrap();
+        let engine = engine_support::open(
+            StateRoot::open_existing(&repo.state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut input = request(&repo.workspace, "Inspect after remembering a commit rule");
+        input.include_paths.clear();
+        let budget = arany::GoalBudget {
+            max_runs: 3,
+            ..Default::default()
+        };
+        input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+        let plan = arany::GoalPlanContract {
+            mission: input.objective.clone(),
+            resource_class: arany::ToolResourceClass::Default,
+            command_timeout_ms: None,
+            paths: vec![".".into()],
+            commands: vec!["find".into()],
+            skills: Vec::new(),
+            mcp_tools: Vec::new(),
+            success_criterion: arany::GoalSuccessCriterion::WorkspaceFileContent {
+                path: "src/a.txt".into(),
+                content: "unreached criterion".into(),
+            },
+            budget,
+        };
+        let settings = repo.state.join("permissions.json");
+        let provider = Arc::new(
+            ScriptedProvider::new(vec![
+                plan_outcome(plan),
+                answer(),
+                tool_outcome(commit("third")),
+                answer(),
+                tool_outcome(ToolCall::CommandUnguarded {
+                    program: "find".into(),
+                    args: vec![".".into()],
+                    cwd: String::new(),
+                    justification: "Inspect after saving the approved typed rule".into(),
+                }),
+                answer(),
+            ])
+            .with_before_call(3, move || {
+                if drift {
+                    let mut bytes = std::fs::read(&settings).unwrap();
+                    bytes.push(b' ');
+                    std::fs::write(&settings, bytes).unwrap();
+                }
+            }),
+        );
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompted = 0;
+        let outcome = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        prompted += 1;
+                        if approval.unguarded.is_some() {
+                            approval.decide(arany::ApprovalReply::AllowOnce);
+                        } else {
+                            assert_eq!(approval.remember_prefix, Some(arany::permissions::TypedGitPrefix::Commit));
+                            approval.decide(arany::ApprovalReply::AllowPrefixInFolder);
+                        }
+                    }
+                }
+            }
+        };
+        assert_eq!(provider.requests.lock().unwrap().len(), 6);
+        assert_eq!(prompted, if drift { 1 } else { 2 });
+        let (_, view) = repo.reopen(engine, outcome.session_id).await;
+        assert_eq!(view.runs.len(), 3);
+        let observation = view.runs[2].tools[0].observation.as_ref().unwrap();
+        if drift {
+            assert_eq!(observation.disposition, ToolDisposition::Denied);
+            assert!(observation.attestation.is_none());
+            assert!(
+                observation
+                    .output
+                    .contains("permission settings changed outside admission")
+            );
+        } else {
+            assert_eq!(observation.disposition, ToolDisposition::Succeeded);
+            assert!(matches!(
+                observation.attestation,
+                Some(arany::Attestation::Unguarded(_))
+            ));
+        }
+        let digest = |index: usize| {
+            view.runs[index]
+                .config
+                .as_ref()
+                .unwrap()
+                .tool_policy
+                .as_ref()
+                .unwrap()
+                .permissions_digest
+        };
+        assert_eq!(digest(0), digest(1));
+        assert_eq!(digest(1) == digest(2), drift);
+        assert_eq!(repo.saved_rules().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart() {
     use arany::permissions::{
         Decision, PermissionMode, PermissionSource, TypedGitPrefix, TypedPrefixEdit,
@@ -411,6 +544,12 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .run_replying(
             vec![
                 tool_outcome(commit("third")),
+                tool_outcome(ToolCall::CommandUnguarded {
+                    program: "find".into(),
+                    args: vec![".".into()],
+                    cwd: String::new(),
+                    justification: "Inspect after saving the approved typed rule".into(),
+                }),
                 tool_outcome(commit("again")),
                 answer(),
             ],
@@ -427,11 +566,75 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         .await;
     let first = outcome.unwrap();
     assert_eq!(asked, 2, "the saved rule applies only from the next Run");
+    let refused = first.run.tools[1].observation.as_ref().unwrap();
+    assert_eq!(refused.disposition, ToolDisposition::Denied);
+    assert!(
+        refused
+            .output
+            .contains("permission settings changed outside admission")
+    );
+    assert!(refused.attestation.is_none());
     assert_eq!(
         offered,
         [Some(TypedGitPrefix::Commit), Some(TypedGitPrefix::Commit)]
     );
+    for drift in [false, true] {
+        if drift {
+            let path = repo.state.join("permissions.json");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.push(b' ');
+            std::fs::write(path, bytes).unwrap();
+        }
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(ToolCall::CommandUnguarded {
+                program: "find".into(),
+                args: vec![
+                    repo.workspace.to_string_lossy().into_owned(),
+                    "-maxdepth".into(),
+                    "0".into(),
+                ],
+                cwd: String::new(),
+                justification: "Inspect the repository after saving the approved typed rule".into(),
+            }),
+            answer(),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let mut input = request(&repo.workspace, "Inspect the repository");
+        input.session_id = Some(first.session_id);
+        input.title = None;
+        input.include_paths.clear();
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompted = 0;
+        let next = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        assert!(approval.unguarded.is_some());
+                        prompted += 1;
+                        approval.decide(arany::ApprovalReply::Deny);
+                    }
+                }
+            }
+        };
+        assert_eq!(prompted, usize::from(!drift));
+        let observation = next.run.tools.last().unwrap().observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(observation.output.contains(if drift {
+            "permission settings changed outside admission"
+        } else {
+            "Approval was not granted"
+        }));
+        assert_eq!(next.run.unguarded_tools(), 0);
+    }
     let (_, view) = repo.reopen(engine, first.session_id).await;
+    assert_eq!(view.runs[0].tools[1].observation.as_ref(), Some(refused));
     let verdict = verdict_of(&view, 0);
     assert_eq!(
         (verdict.source, verdict.basis, verdict.approved),
@@ -711,4 +914,117 @@ async fn typed_prefix_rules_cannot_expand_git_authority() {
         assert!(!verdict_of(&view, 0).approved, "{label}");
     }
     assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "second\n");
+}
+
+#[test]
+fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human() {
+    use arany::test_support::process::BoundedOutput;
+    const TEST: &str = "git_writes::host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing_human";
+    const CHILD: &str = "ARANY_HOST_GIT_JOURNEY";
+    const CANARY: &str = "synthetic-host-credential-canary";
+    if std::env::var_os(CHILD).is_none() {
+        let auth = tempfile::tempdir().unwrap();
+        let home = auth.path().join("home");
+        let gh = home.join(".config/gh");
+        std::fs::create_dir_all(&gh).unwrap();
+        let hosts = gh.join("hosts.yml");
+        std::fs::write(&hosts, format!("github.com:\n    oauth_token: {CANARY}\n")).unwrap();
+        std::fs::set_permissions(hosts, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .env_clear()
+            .env(CHILD, "1")
+            .env("HOME", &home)
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("GH_CONFIG_DIR", gh)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env(
+                "TMPDIR",
+                std::fs::canonicalize(std::env::temp_dir()).unwrap(),
+            )
+            .args(["--exact", TEST, "--nocapture", "--test-threads=1"])
+            .bounded_output_for(Duration::from_secs(60), 64 * 1024)
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "isolated host journey: stdout={:?}; stderr={:?}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        process::assert_single_test_completed(&result.stdout, TEST);
+        return;
+    }
+    tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+        for scenario in ["success", "missing_human", "uncertain"] {
+            let human = scenario != "missing_human";
+            let success = scenario == "success";
+            let repo = Repo::new();
+            let tools_path = repo.state.join("tools.json");
+            let mut tools: Value = serde_json::from_slice(&std::fs::read(&tools_path).unwrap()).unwrap();
+            // This synthetic peer succeeds if accidentally dispatched, so missing-human refusal cannot pass on a peer error.
+            let executable = std::fs::canonicalize(if scenario == "uncertain" { "/usr/bin/false" } else { "/usr/bin/true" }).unwrap();
+            tools["commands"] = json!([{"name":"gh", "executable":executable, "sha256":Sha256::digest(std::fs::read(&executable).unwrap()).iter().map(|b| format!("{b:02x}")).collect::<String>(), "interpreter":false, "inputs":[]}]);
+            std::fs::write(tools_path, serde_json::to_vec(&tools).unwrap()).unwrap();
+            repo.settings(json!({"permissions":{"defaultMode":"auto", "typedPrefixes":[{"prefix":["gh","pr","create"],"decision":"allow","workspace":null}]}}));
+            let call = ToolCall::GhPrCreate { repository: "github.com/example/project".into(), base: "base".into(), head: "main".into(), title: "Synthetic PR".into(), body: "Synthetic body".into(), draft: true };
+            let mut outcomes = vec![tool_outcome(call)];
+            if success { outcomes.push(ProviderOutcome::Answer(Answer { text: "PR created".into() })); }
+            let provider = Arc::new(ScriptedProvider::new(outcomes));
+            let engine = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
+            let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Auto);
+            let mut input = request(&repo.workspace, "Create the explicitly approved PR");
+            input.include_paths.clear();
+            let controls = RunControls { tools: ToolGrant::Configured, approvals: human.then_some(approvals), ..Default::default() };
+            let mut asked = 0;
+            let outcome = {
+                let running = run_with(&engine, &provider, input, controls);
+                tokio::pin!(running);
+                loop {
+                    tokio::select! {
+                        result = &mut running => break result,
+                        Some(approval) = inbox.next() => {
+                            asked += 1;
+                            assert!(approval.intent.call.is_host() && approval.intent.host.is_some());
+                            assert!(approval.remember_prefix.is_none() && approval.unguarded.is_none());
+                            let contender = engine_support::open(StateRoot::open_existing(&repo.state).unwrap(), EngineConfig { guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()), ..Default::default() }).unwrap();
+                            let peer = Arc::new(ScriptedProvider::new(vec![answer()]));
+                            let mut competing = request(&repo.workspace, "A competing host write");
+                            competing.include_paths.clear();
+                            let refused = run_with(&contender, &peer, competing, RunControls { tools: ToolGrant::Configured, ..Default::default() }).await;
+                            assert!(matches!(refused, Err(arany::EngineError::WorkspaceBusy)));
+                            assert!(peer.requests.lock().unwrap().is_empty());
+                            contender.close().await.unwrap();
+                            approval.decide(arany::ApprovalReply::AllowOnce);
+                        }
+                    }
+                }
+            };
+            assert_eq!(asked, usize::from(human));
+            assert_eq!(provider.requests.lock().unwrap().len(), if success { 2 } else { 1 });
+            assert!(!format!("{:?}", provider.requests.lock().unwrap()).contains(CANARY));
+            let session = match outcome {
+                Ok(outcome) => outcome.session_id,
+                Err(arany::EngineError::Tool(arany::ToolError::Uncertain)) if scenario == "uncertain" => {
+                    list_sessions(StateRoot::open_existing(&repo.state).unwrap(), repo.workspace.clone()).await.unwrap()[0].id
+                }
+                Err(error) => panic!("{scenario}: {error:?}"),
+            };
+            let (events, view) = repo.reopen(engine, session).await;
+            for event in &events { assert!(!event.event.payload().unwrap().contains(CANARY)); }
+            let tool = view.runs[0].tools.iter().find(|tool| tool.intent.call.is_host()).unwrap();
+            let verdict = tool.permission_verdict.as_ref().unwrap();
+            let observation = tool.observation.as_ref().unwrap();
+            assert_eq!(verdict.approved, human);
+            assert_eq!(observation.disposition, if success { ToolDisposition::Succeeded } else if human { ToolDisposition::Uncertain } else { ToolDisposition::Denied });
+            assert_eq!(matches!(observation.attestation, Some(arany::Attestation::Host(_))), human);
+            if human { assert_eq!(verdict.source, PermissionSource::Human); }
+            assert_eq!(std::fs::read_dir(&repo.markers).unwrap().count(), 0);
+            let shown = observe_process(std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+                .env_clear().args(["show", "--state-dir"]).arg(&repo.state).args(["--output", "text"]).arg(session.to_string()), repo._temp.path(), 256 * 1024);
+            assert!(shown.status.success());
+            assert!(shown.stderr.is_empty());
+            let text = String::from_utf8(shown.stdout).unwrap();
+            assert!(text.contains("host") && !text.contains(CANARY));
+        }
+    });
 }

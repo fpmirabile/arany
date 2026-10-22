@@ -162,6 +162,7 @@ fn open_state(admission: &Admission) -> Result<StateRoot, LoopError> {
 
 #[derive(Clone, Copy)]
 enum Selector {
+    Usage,
     Models,
     Agents,
     Resume,
@@ -879,6 +880,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                     }
                     QuickChoice::Selected(selector) => {
                         notice = run_selector(
+                            &engine,
                             selector,
                             &mut terminal,
                             &mut admission,
@@ -1122,6 +1124,9 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
+                            engine
+                                .revoke_host_approvals()
+                                .map_err(|error| error.to_string())?;
                             match permissions::choose_area(&mut terminal).await? {
                                 None => {
                                     terminal
@@ -1142,6 +1147,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                         .restore_draft_input(composer.text().len())
                                         .map_err(|error| error.to_string())?;
                                     notice = Some(Feedback::History(summary));
+                                    readmit_host_permissions(&engine, &mut notice);
                                     continue;
                                 }
                                 Some(permissions::PermissionArea::FolderTrust) => {}
@@ -1207,6 +1213,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 "Read only · /permissions can enable guarded Tools".into()
                             }));
                             admission.workspace_permissions = Some(access);
+                            readmit_host_permissions(&engine, &mut notice);
                             admission.tools = false;
                             refresh_runtime_skills(
                                 &admission,
@@ -1225,6 +1232,23 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 )
                                 .await?,
                             );
+                        } else if matches!(
+                            command,
+                            InteractiveCommand::Usage | InteractiveCommand::Status
+                        ) {
+                            terminal
+                                .open_usage(&view, command == InteractiveCommand::Status, None)
+                                .await
+                                .map_err(|error| error.to_string())?;
+                        } else if command == InteractiveCommand::Storage {
+                            crate::cli::storage::attached(
+                                &mut terminal,
+                                admission.workspace.clone(),
+                                admission.state_dir.clone(),
+                                &view,
+                                &mut composer,
+                            )
+                            .await?;
                         } else if command == InteractiveCommand::Help {
                             terminal
                                 .open_help(&view)
@@ -1232,6 +1256,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .map_err(|error| error.to_string())?;
                         } else if command == InteractiveCommand::Resume && argument.is_none() {
                             notice = run_selector(
+                                &engine,
                                 Selector::Resume,
                                 &mut terminal,
                                 &mut admission,
@@ -1292,6 +1317,7 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 Selector::Models
                             };
                             notice = run_selector(
+                                &engine,
                                 selector,
                                 &mut terminal,
                                 &mut admission,
@@ -1304,6 +1330,16 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                             .map(feedback_or_end)
                             .transpose()?;
                         } else {
+                            if matches!(
+                                command,
+                                InteractiveCommand::Resume
+                                    | InteractiveCommand::New
+                                    | InteractiveCommand::Fork
+                            ) {
+                                engine
+                                    .revoke_host_approvals()
+                                    .map_err(|error| error.to_string())?;
+                            }
                             notice = Some(feedback_or_end(
                                 controls::handle_command(
                                     &admission,
@@ -1379,6 +1415,7 @@ async fn close_engine(engine: Engine) -> Result<(), String> {
 }
 
 async fn run_selector(
+    engine: &Engine,
     selector: Selector,
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
@@ -1387,6 +1424,13 @@ async fn run_selector(
     composer: &mut Composer,
 ) -> Result<Option<Feedback>, LoopError> {
     Ok(Some(match selector {
+        Selector::Usage => {
+            terminal
+                .open_usage(view, false, None)
+                .await
+                .map_err(|error| error.to_string())?;
+            return Ok(None);
+        }
         Selector::Setup => {
             configure_account(terminal, admission, *session_id, view, composer).await?
         }
@@ -1405,16 +1449,20 @@ async fn run_selector(
             Ok(None) if terminal.agent_chat_open() => return Ok(None),
             Ok(None) => Feedback::Transient("Agent inspection closed".into()),
         },
-        Selector::Resume => resume_selector(terminal, admission, session_id, view).await?,
+        Selector::Resume => resume_selector(engine, terminal, admission, session_id, view).await?,
     }))
 }
 
 async fn resume_selector(
+    engine: &Engine,
     terminal: &mut AttachedTerminal,
     admission: &mut Admission,
     session_id: &mut SessionId,
     view: &mut SessionView,
 ) -> Result<Feedback, LoopError> {
+    engine
+        .revoke_host_approvals()
+        .map_err(|error| error.to_string())?;
     let choice = pick_session(terminal, admission, Some(view)).await?;
     match choice {
         PickerChoice::Selected(id) => {
@@ -2102,6 +2150,15 @@ fn archive_notice_drawn(notice: Option<&Feedback>, archive: Option<&str>) -> boo
     )
 }
 
+fn readmit_host_permissions(engine: &Engine, notice: &mut Option<Feedback>) {
+    if let Err(error) = engine.readmit_host_permissions() {
+        append_notice(
+            notice,
+            &format!("Error: {error}; host approvals remain denied until /permissions succeeds"),
+        );
+    }
+}
+
 fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, message: &str) {
     *notice = Some(
         match notice.take() {
@@ -2114,6 +2171,7 @@ fn append_notice<N: From<String> + std::fmt::Display>(notice: &mut Option<N>, me
 
 fn new_conversation(defaults: SessionDefaults) -> SessionView {
     SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: SessionId::new(),
         title: "New Session".into(),
@@ -2121,6 +2179,7 @@ fn new_conversation(defaults: SessionDefaults) -> SessionView {
         inherited_title: None,
         workspace_identity: None,
         defaults,
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 0,
         lineage: None,
