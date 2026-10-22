@@ -1,20 +1,89 @@
 use super::*;
 
+#[derive(Clone, Copy)]
+struct RouteCase {
+    base_path: &'static str,
+    model: &'static str,
+    auth: Option<&'static str>,
+    credential_env: &'static str,
+    key: &'static str,
+}
+
+const RESPONSES: RouteCase = RouteCase {
+    base_path: "",
+    model: "model-1",
+    auth: None,
+    credential_env: "ARANY_PROVIDER_LOCAL_KEY",
+    key: "test-key",
+};
+const KIMI_ROUTES: [RouteCase; 2] = [
+    RouteCase {
+        base_path: "/anthropic",
+        model: "kimi-k3",
+        auth: Some("bearer"),
+        credential_env: "ARANY_PROVIDER_KIMI_API_KEY",
+        key: "kimi-api-canary",
+    },
+    RouteCase {
+        base_path: "/coding/",
+        model: "k3-256k",
+        auth: Some("x-api-key"),
+        credential_env: "ARANY_PROVIDER_KIMI_CODE_KEY",
+        key: "kimi-code-canary",
+    },
+];
+
+impl RouteCase {
+    fn keys(self, command: &mut Command, selected: Option<&str>) {
+        command
+            .env("ANTHROPIC_API_KEY", "omitted-native-key")
+            .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE");
+        for route in KIMI_ROUTES {
+            if route.credential_env != self.credential_env {
+                command.env(route.credential_env, route.key);
+            }
+        }
+        if let Some(key) = selected {
+            command.env(self.credential_env, key);
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum RecheckFailure {
+    SchemaRejected,
+    SchemaIgnored,
+    EffortRejected,
+    Unauthorized,
+    Redirect,
+    WrongModel,
+}
+
 #[test]
 fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    custom_profile_process_gate(None);
+    custom_profile_process_gate(RESPONSES, RecheckFailure::SchemaRejected);
 }
 
 #[test]
 fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    for auth in ["bearer", "x-api-key"] {
-        custom_profile_process_gate(Some(auth));
+    for case in KIMI_ROUTES {
+        for failure in [
+            RecheckFailure::SchemaRejected,
+            RecheckFailure::SchemaIgnored,
+            RecheckFailure::EffortRejected,
+            RecheckFailure::Unauthorized,
+            RecheckFailure::Redirect,
+            RecheckFailure::WrongModel,
+        ] {
+            custom_profile_process_gate(case, failure);
+        }
+        #[cfg(target_os = "linux")]
+        messages_attached_case(false, case);
     }
-    #[cfg(target_os = "linux")]
-    messages_attached_case(false);
 }
 
-fn custom_profile_process_gate(messages: Option<&'static str>) {
+fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
+    let messages = case.auth;
     use std::{
         io::{Read, Write},
         net::{SocketAddr, TcpListener},
@@ -31,12 +100,16 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         super::loopback::wait_product(command.spawn().expect("product process"))
     }
 
-    fn run_check(cwd: &Path, state: &Path, key: Option<&str>, proxy: Option<SocketAddr>) -> Output {
+    fn run_check(
+        case: RouteCase,
+        cwd: &Path,
+        state: &Path,
+        key: Option<&str>,
+        proxy: Option<SocketAddr>,
+    ) -> Output {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
-            .env("ANTHROPIC_API_KEY", "OMITTED_NATIVE_KEY")
-            .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE")
             .current_dir(cwd)
             .args([
                 "provider",
@@ -49,9 +122,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                 "--state-dir",
             ])
             .arg(state);
-        if let Some(key) = key {
-            command.env("ARANY_PROVIDER_LOCAL_KEY", key);
-        }
+        case.keys(&mut command, key);
         if let Some(proxy) = proxy {
             let proxy = format!("http://{proxy}");
             command
@@ -63,11 +134,18 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         run_product(&mut command)
     }
 
-    fn run_exec(cwd: &Path, state: &Path, key: Option<&str>, model: &str) -> Output {
-        run_exec_policy(cwd, state, key, model, "single", None)
+    fn run_exec(
+        case: RouteCase,
+        cwd: &Path,
+        state: &Path,
+        key: Option<&str>,
+        model: &str,
+    ) -> Output {
+        run_exec_policy(case, cwd, state, key, model, "single", None)
     }
 
     fn run_exec_policy(
+        case: RouteCase,
         cwd: &Path,
         state: &Path,
         key: Option<&str>,
@@ -78,8 +156,6 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
         command
             .env_clear()
-            .env("ANTHROPIC_API_KEY", "OMITTED_NATIVE_KEY")
-            .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE")
             .current_dir(cwd)
             .args(["exec", "--state-dir"])
             .arg(state)
@@ -97,9 +173,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         if collaboration == "team" {
             command.args(["--profile", "coding"]);
         }
-        if let Some(key) = key {
-            command.env("ARANY_PROVIDER_LOCAL_KEY", key);
-        }
+        case.keys(&mut command, key);
         if let Some(session_id) = session_id {
             command.arg("--session-id").arg(session_id.to_string());
         }
@@ -128,8 +202,8 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
             "name": "local",
             "protocol": "openai-responses",
             "endpoint": format!("http://127.0.0.1:{port}/v1/responses"),
-            "model": "model-1",
-            "credential_env": "ARANY_PROVIDER_LOCAL_KEY",
+            "model": case.model,
+            "credential_env": case.credential_env,
             "outcome_encoding": "json_schema",
             "privacy": "user_authorized",
             "max_output_tokens": 4096,
@@ -143,10 +217,13 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         entry.insert("protocol".into(), "anthropic-messages".into());
         entry.insert(
             "base_url".into(),
-            format!("http://127.0.0.1:{port}/anthropic").into(),
+            format!("http://127.0.0.1:{port}{}", case.base_path).into(),
         );
         entry.insert("auth".into(), auth.into());
         entry.insert("outcome_encoding".into(), "native_tools".into());
+        if matches!(failure, RecheckFailure::EffortRejected) {
+            entry.insert("efforts".into(), serde_json::json!(["low", "high"]));
+        }
     }
     let profile_path = state_path.join("provider-profiles.json");
     std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).expect("profile file");
@@ -156,7 +233,32 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     let mutation_path = state_path.join("provider-roster.json");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
-        for index in 0..if messages.is_some() { 12 } else { 10 } {
+        for wire_index in 0..if messages.is_some() {
+            if matches!(failure, RecheckFailure::EffortRejected) {
+                20
+            } else if matches!(
+                failure,
+                RecheckFailure::Unauthorized
+                    | RecheckFailure::Redirect
+                    | RecheckFailure::WrongModel
+            ) {
+                10
+            } else {
+                12
+            }
+        } else {
+            10
+        } {
+            let effort_case =
+                messages.is_some() && matches!(failure, RecheckFailure::EffortRejected);
+            let initial_effort = effort_case && (3..7).contains(&wire_index);
+            let index = if initial_effort {
+                wire_index + 9
+            } else if effort_case && wire_index >= 7 {
+                wire_index - 4
+            } else {
+                wire_index
+            };
             let deadline = Instant::now() + Duration::from_secs(10);
             let mut stream = loop {
                 match listener.accept() {
@@ -201,7 +303,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
             };
             let header = std::str::from_utf8(&request[..header_end]).expect("HTTP header");
             let path = if messages.is_some() {
-                "/anthropic/v1/messages"
+                &format!("{}/v1/messages", case.base_path.trim_end_matches('/'))
             } else {
                 "/v1/responses"
             };
@@ -210,10 +312,10 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
             assert!(header.contains(concat!("user-agent: arany/", env!("CARGO_PKG_VERSION"))));
             assert!(!header.contains("anthropic-workspace-id:"));
             if messages == Some("x-api-key") {
-                assert!(header.contains("x-api-key: test-key\r\n"));
+                assert!(header.contains(&format!("x-api-key: {}\r\n", case.key)));
                 assert!(!header.contains("authorization:"));
             } else {
-                assert!(header.contains("authorization: bearer test-key\r\n"));
+                assert!(header.contains(&format!("authorization: bearer {}\r\n", case.key)));
                 assert!(!header.contains("x-api-key:"));
             }
             assert_eq!(
@@ -223,10 +325,20 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
             let body: serde_json::Value =
                 serde_json::from_slice(&request[header_end..header_end + body_len])
                     .expect("synthetic JSON");
-            assert_eq!(body["model"], "model-1");
-            let compact = index == 2 || index == 11;
+            assert_eq!(body["model"], case.model);
+            let compact = matches!(index, 2 | 11 | 13 | 15);
             if messages.is_some() {
-                assert_eq!(body.get("output_config").is_some(), compact);
+                assert_eq!(body.get("output_config").is_some(), compact || index >= 12);
+                assert_eq!(
+                    body["output_config"]
+                        .get("effort")
+                        .and_then(|value| value.as_str()),
+                    match index {
+                        12 | 13 => Some("low"),
+                        14 | 15 => Some("high"),
+                        _ => None,
+                    }
+                );
                 assert!(body.get("thinking").is_none());
                 if compact {
                     assert_eq!(body["output_config"]["format"]["type"], "json_schema");
@@ -281,6 +393,27 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                     .windows(b"OMITTED_WORKSPACE_CANARY".len())
                     .any(|bytes| { bytes == b"OMITTED_WORKSPACE_CANARY" })
             );
+            for omitted in [KIMI_ROUTES[0].key, KIMI_ROUTES[1].key, "omitted-native-key"] {
+                if omitted != case.key {
+                    assert!(
+                        !request
+                            .windows(omitted.len())
+                            .any(|bytes| bytes == omitted.as_bytes()),
+                        "unselected key entered request"
+                    );
+                }
+            }
+            if index == 9 && messages.is_some() {
+                let status = match failure {
+                    RecheckFailure::Unauthorized => Some("401 Unauthorized"),
+                    RecheckFailure::Redirect => Some("302 Found"),
+                    _ => None,
+                };
+                if let Some(status) = status {
+                    write!(stream, "HTTP/1.1 {status}\r\nLocation: http://{proxy_addr}/coding/v1/messages\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
+                    continue;
+                }
+            }
             if index == 9 && messages.is_none() {
                 write!(
                     stream,
@@ -289,7 +422,9 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                 .expect("synthetic redirect");
                 continue;
             }
-            if index == 11 {
+            if (index == 11 && matches!(failure, RecheckFailure::SchemaRejected))
+                || (index == 15 && !initial_effort)
+            {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
                 continue;
             }
@@ -297,11 +432,11 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                 std::fs::write(&mutation_path, b"invalid roster after admission").unwrap();
             }
             let text = match index {
-                0 | 9 => serde_json::json!("ok"),
+                0 | 9 | 12 | 14 => serde_json::json!("ok"),
                 1 | 10 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 | 11 | 13 | 15 => serde_json::json!(r#"{"summary":"plausible summary"}"#),
                 3 => {
                     serde_json::json!("verified answer")
                 }
@@ -315,25 +450,43 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                     serde_json::json!("team answer")
                 }
                 7 => {
-                    serde_json::json!("test-key")
+                    serde_json::json!(case.key)
                 }
                 8 => {
                     serde_json::json!("roster answer")
                 }
                 _ => unreachable!(),
             };
-            let text = arany::semantic::compaction_probe_reply(&body, text);
+            let text = if index == 11 && matches!(failure, RecheckFailure::SchemaIgnored) {
+                let nonce =
+                    body["output_config"]["format"]["schema"]["properties"]["summary"]["enum"][0]
+                        .as_str()
+                        .unwrap();
+                assert_eq!(nonce.len(), 32);
+                let mut without_schema = body.clone();
+                without_schema["output_config"]["format"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("schema");
+                assert!(!without_schema.to_string().contains(nonce));
+                text
+            } else {
+                arany::semantic::compaction_probe_reply(&body, text)
+            };
             let mut response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
-                "model": "model-1",
+                "model": case.model,
                 "output": arany::semantic::responses_output(&text),
                 "usage": {"input_tokens":20,"output_tokens":10}
             });
             if messages.is_some() {
-                response = serde_json::json!({"id":format!("msg_{}",index+1),"type":"message","role":"assistant","model":"model-1",
+                response = serde_json::json!({"id":format!("msg_{}",index+1),"type":"message","role":"assistant","model":case.model,
                     "stop_reason":if text.is_object() { "tool_use" } else { "end_turn" },
                     "content":arany::semantic::messages_content(&text),"usage":{"input_tokens":20,"output_tokens":10}});
+            }
+            if index == 9 && matches!(failure, RecheckFailure::WrongModel) {
+                response["model"] = "mistyped-highspeed-fallback".into();
             }
             let (content_type, response) = if body["stream"] == true {
                 (
@@ -348,7 +501,14 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
                 ("application/json", response.to_string())
             };
             let response = if index == 7 {
-                response.replace("test-key", "\\u0074est-key")
+                response.replace(
+                    case.key,
+                    &format!(
+                        "\\u{:04x}{}",
+                        u32::from(case.key.as_bytes()[0]),
+                        &case.key[1..]
+                    ),
+                )
             } else {
                 response
             };
@@ -362,7 +522,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         listener
     });
 
-    let unverified = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let unverified = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(!unverified.status.success());
     assert_eq!(unverified.stdout, b"");
     assert_eq!(
@@ -376,7 +536,13 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         assert_eq!(current_profile["profiles"], profile["profiles"]);
         profile = current_profile;
     }
-    let checked = run_check(&workspace, &state_path, Some("test-key"), Some(proxy_addr));
+    let checked = run_check(
+        case,
+        &workspace,
+        &state_path,
+        Some(case.key),
+        Some(proxy_addr),
+    );
     assert!(checked.status.success());
     assert_eq!(
         checked.stdout,
@@ -401,7 +567,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     .into();
     std::fs::write(&profile_path, serde_json::to_vec(&changed_profile).unwrap())
         .expect("changed profile");
-    let changed = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let changed = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(!changed.status.success());
     assert_eq!(changed.stdout, b"");
     assert_eq!(
@@ -426,7 +592,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         )
         .expect("changed address evidence");
     drop(connection);
-    let changed_address = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let changed_address = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(!changed_address.status.success());
     assert_eq!(changed_address.stdout, b"");
     assert_eq!(
@@ -442,7 +608,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         )
         .expect("expired evidence");
     drop(connection);
-    let expired = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let expired = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(!expired.status.success());
     assert_eq!(expired.stdout, b"");
     assert_eq!(
@@ -471,7 +637,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         "openai-responses-goal-contract-conformance-effort-stream-v30",
         "local",
         &endpoint,
-        "model-1",
+        case.model,
         "ARANY_PROVIDER_LOCAL_KEY",
         "openai-responses",
         "json_schema",
@@ -499,7 +665,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         )
         .unwrap();
     drop(connection);
-    let stale_without_key = run_exec(&workspace, &state_path, None, "model-1");
+    let stale_without_key = run_exec(case, &workspace, &state_path, None, case.model);
     assert!(!stale_without_key.status.success());
     assert_eq!(stale_without_key.stdout, b"");
     assert_eq!(
@@ -515,14 +681,14 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         .unwrap();
     drop(connection);
 
-    let wrong_model = run_exec(&workspace, &state_path, Some("test-key"), "model-2");
+    let wrong_model = run_exec(case, &workspace, &state_path, Some(case.key), "model-2");
     assert!(!wrong_model.status.success());
     assert_eq!(wrong_model.stdout, b"");
     assert_eq!(
         wrong_model.stderr,
         b"error: selected custom Provider model does not match its profile\n"
     );
-    let no_key = run_exec(&workspace, &state_path, None, "model-1");
+    let no_key = run_exec(case, &workspace, &state_path, None, case.model);
     assert!(!no_key.status.success());
     assert_eq!(no_key.stdout, b"");
     assert_eq!(
@@ -530,7 +696,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         b"error: custom Provider credential unavailable\n"
     );
 
-    let success = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let success = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(success.status.success());
     let continued_session_id = SessionId::from_str(
         std::str::from_utf8(&success.stderr)
@@ -543,25 +709,27 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     )
     .expect("first Session ID format");
     let roster = serde_json::json!({"version":1,"profiles":[
-        {"name":"main","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]},
-        {"name":"inspect","routes":[{"provider":"custom:local","model":"model-1","effort":null,"account_id":null}]}
+        {"name":"main","routes":[{"provider":"custom:local","model":case.model,"effort":null,"account_id":null}]},
+        {"name":"inspect","routes":[{"provider":"custom:local","model":case.model,"effort":null,"account_id":null}]}
     ],"presets":[{"name":"coding","providers":{"primary":"main","child":"inspect","review":null,"compaction":null},"child_profiles":["inspect","main"]}]});
     let roster_path = state_path.join("provider-roster.json");
     std::fs::write(&roster_path, serde_json::to_vec(&roster).unwrap()).unwrap();
     std::fs::set_permissions(&roster_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let team = run_exec_policy(
+        case,
         &workspace,
         &state_path,
-        Some("test-key"),
-        "model-1",
+        Some(case.key),
+        case.model,
         "team",
         None,
     );
     let reflected = run_exec_policy(
+        case,
         &workspace,
         &state_path,
-        Some("test-key"),
-        "model-1",
+        Some(case.key),
+        case.model,
         "single",
         Some(continued_session_id),
     );
@@ -569,7 +737,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     let mut jsonl_command = Command::new(env!("CARGO_BIN_EXE_arany"));
     jsonl_command
         .env_clear()
-        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .env(case.credential_env, case.key)
         .current_dir(&workspace)
         .args([
             "exec",
@@ -613,7 +781,13 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         .expect("pre-recheck evidence count");
     assert_eq!(evidence_before_recheck, 1);
     drop(connection);
-    let redirected = run_check(&workspace, &state_path, Some("test-key"), Some(proxy_addr));
+    let redirected = run_check(
+        case,
+        &workspace,
+        &state_path,
+        Some(case.key),
+        Some(proxy_addr),
+    );
     let listener = server.join().expect("synthetic server completed");
     assert!(!redirected.status.success());
     assert_eq!(redirected.stdout, b"");
@@ -625,7 +799,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         hostile_proxy.accept(),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
     ));
-    let denied_after_recheck = run_exec(&workspace, &state_path, Some("test-key"), "model-1");
+    let denied_after_recheck = run_exec(case, &workspace, &state_path, Some(case.key), case.model);
     assert!(!denied_after_recheck.status.success());
     assert_eq!(denied_after_recheck.stdout, b"");
     assert_eq!(
@@ -638,6 +812,13 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         .query_row("SELECT COUNT(*) FROM events", [], |row| row.get(0))
         .expect("post-recheck Event count");
     assert_eq!(events_after_recheck, events_before_recheck);
+    let remaining: i64 = connection
+        .query_row("SELECT COUNT(*) FROM provider_evidence", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(remaining, 0);
+
     drop(connection);
     assert!(success.status.success());
     assert_eq!(success.stdout, b"Answer:\n  verified answer\n");
@@ -658,7 +839,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     );
     assert!(team.status.success());
     assert_eq!(team.stdout, b"Answer:\n  team answer\n");
-    let manifest = "Roster preset: coding\nRoles: primary=main, child=inspect, review=main, compaction=main\nEligible child profiles: inspect, main\n  inspect[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n";
+    let manifest = "Roster preset: coding\nRoles: primary=main, child=inspect, review=main, compaction=main\nEligible child profiles: inspect, main\n  inspect[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n  main[0]: custom:local/model-1 effort=default (exact custom; unknown pricing)\n".replace("model-1", case.model);
     assert_eq!(
         roster_jsonl.stderr,
         manifest.as_bytes(),
@@ -666,7 +847,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     );
     let team_receipt = std::str::from_utf8(&team.stderr)
         .expect("team receipt UTF-8")
-        .strip_prefix(manifest)
+        .strip_prefix(&manifest)
         .expect("complete manifest on stderr");
     let team_receipt: Vec<_> = team_receipt.lines().collect();
     assert_eq!(team_receipt.len(), 4);
@@ -699,12 +880,15 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         assert!(log.contains("provider phase=RootPlan disposition=InvalidResponse"));
         assert!(log.contains("run disposition=Failed"));
         for forbidden in [
-            "test-key",
+            case.key,
+            KIMI_ROUTES[0].key,
+            KIMI_ROUTES[1].key,
+            "omitted-native-key",
             "OMITTED_WORKSPACE_CANARY",
             "EXPECTED_WORKSPACE_GUIDANCE",
             "verified answer",
             "team answer",
-            "model-1",
+            case.model,
         ] {
             assert!(
                 !log.contains(forbidden),
@@ -741,7 +925,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     );
     let config = view.runs[0].config.as_ref().expect("Run config");
     assert_eq!(config.provider, "custom:local");
-    assert_eq!(config.model, "model-1");
+    assert_eq!(config.model, case.model);
     assert_eq!(config.provider_concurrency, 1);
     let provenance = config
         .custom_profile_provenance
@@ -750,7 +934,10 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
     assert_eq!(
         provenance.endpoint,
         if messages.is_some() {
-            format!("http://127.0.0.1:{port}/anthropic/v1/messages")
+            format!(
+                "http://127.0.0.1:{port}{}/v1/messages",
+                case.base_path.trim_end_matches('/')
+            )
         } else {
             format!("http://127.0.0.1:{port}/v1/responses")
         }
@@ -938,11 +1125,18 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         reflected.stderr.as_slice(),
         database_bytes.as_slice(),
     ] {
-        assert!(
-            !artifact
-                .windows(b"test-key".len())
-                .any(|part| part == b"test-key")
-        );
+        for key in [
+            case.key,
+            KIMI_ROUTES[0].key,
+            KIMI_ROUTES[1].key,
+            "omitted-native-key",
+        ] {
+            assert!(
+                !artifact
+                    .windows(key.len())
+                    .any(|part| part == key.as_bytes())
+            );
+        }
     }
 
     assert!(
@@ -952,7 +1146,7 @@ fn custom_profile_process_gate(messages: Option<&'static str>) {
         "replay must make no HTTP requests"
     );
     std::fs::write(&profile_path, serde_json::to_vec(&profile).unwrap()).unwrap();
-    let unavailable = run_check(&workspace, &state_path, None, None);
+    let unavailable = run_check(case, &workspace, &state_path, None, None);
     assert!(!unavailable.status.success());
     assert_eq!(unavailable.stdout, b"");
     assert_eq!(
@@ -1255,11 +1449,18 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
 #[cfg(target_os = "linux")]
 #[test]
 fn messages_preview_cancellation_discards_secret_tail() {
-    messages_attached_case(true);
+    messages_attached_case(
+        true,
+        RouteCase {
+            base_path: "/anthropic",
+            auth: Some("x-api-key"),
+            ..RESPONSES
+        },
+    );
 }
 
 #[cfg(target_os = "linux")]
-fn messages_attached_case(cancel: bool) {
+fn messages_attached_case(cancel: bool, case: RouteCase) {
     use super::active_terminal::{ProductGuard, product_child_of};
     use super::loopback::{ChildGuard, read_request_for, send_messages_response_for, wait_product};
     use super::session_picker::{PtyResponses, pump, wait_for_screen};
@@ -1283,13 +1484,13 @@ fn messages_attached_case(cancel: bool) {
     let port = listener.local_addr().unwrap().port();
     let path = state.join("provider-profiles.json");
     std::fs::write(&path, serde_json::to_vec(&serde_json::json!({"version":2,"profiles":[{
-        "name":"local","protocol":"anthropic-messages","base_url":format!("http://127.0.0.1:{port}/anthropic"),
-        "auth":"x-api-key","model":"model-1","credential_env":"ARANY_PROVIDER_LOCAL_KEY",
+        "name":"local","protocol":"anthropic-messages","base_url":format!("http://127.0.0.1:{port}{}", case.base_path),
+        "auth":case.auth.unwrap(),"model":case.model,"credential_env":case.credential_env,
         "outcome_encoding":"native_tools","privacy":"user_authorized","max_output_tokens":4096,"capability_evidence_version":2,"efforts":[]
     }]})).unwrap()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let peer = thread::spawn(move || {
-        for index in 0..if cancel { 4 } else { 5 } {
+        for index in 0..if cancel { 4 } else { 8 } {
             let mut stream = crate::process::accept_with_deadline(
                 &listener,
                 Duration::from_secs(10),
@@ -1297,20 +1498,28 @@ fn messages_attached_case(cancel: bool) {
             );
             let body: serde_json::Value = serde_json::from_slice(&read_request_for(
                 &mut stream,
-                "/anthropic/v1/messages",
-                "x-api-key: test-key",
+                &format!("{}/v1/messages", case.base_path.trim_end_matches('/')),
+                &format!(
+                    "{}{}",
+                    if case.auth == Some("x-api-key") {
+                        "x-api-key: "
+                    } else {
+                        "authorization: bearer "
+                    },
+                    case.key
+                ),
             ))
             .unwrap();
-            assert_eq!(body["model"], "model-1");
+            assert_eq!(body["model"], case.model);
             assert_eq!(
                 body.get("output_config").is_some(),
-                index == 2 || index == 4
+                index == 2 || index == 7
             );
             assert!(body.get("thinking").is_none());
             if index == 3 && cancel {
                 assert_eq!(body["stream"], true);
                 let events = [
-                    serde_json::json!({"type":"message_start","message":{"id":"msg_cancel","type":"message","role":"assistant","model":"model-1","content":[],"stop_reason":null,"usage":{"input_tokens":20,"output_tokens":0}}}),
+                    serde_json::json!({"type":"message_start","message":{"id":"msg_cancel","type":"message","role":"assistant","model":case.model,"content":[],"stop_reason":null,"usage":{"input_tokens":20,"output_tokens":0}}}),
                     serde_json::json!({"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}),
                     serde_json::json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"safe preview test-"}}),
                 ];
@@ -1334,26 +1543,50 @@ fn messages_attached_case(cancel: bool) {
                 );
             } else {
                 let text = match index {
-                    1 => {
+                    1 | 4 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"inspect","profile":null}]}})
                     }
-                    2 | 4 => serde_json::json!(r#"{"summary":"strict saved summary"}"#),
+                    2 | 7 => serde_json::json!(r#"{"summary":"strict saved summary"}"#),
+                    5 => serde_json::json!("child result"),
+                    6 => serde_json::json!("team answer"),
                     _ => serde_json::json!("verified answer"),
                 };
-                send_messages_response_for(&mut stream, index, text, body["stream"] == true);
+                send_messages_response_for(
+                    &mut stream,
+                    index,
+                    case.model,
+                    text,
+                    body["stream"] == true,
+                );
             }
         }
         listener
     });
-    super::loopback::check_profile(&workspace, &state);
+    let mut check = Command::new(env!("CARGO_BIN_EXE_arany"));
+    check
+        .env_clear()
+        .current_dir(&workspace)
+        .args(["provider", "check", "local", "--state-dir"])
+        .arg(&state)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    case.keys(&mut check, Some(case.key));
+    let checked = wait_product(check.spawn().unwrap());
+    assert!(checked.status.success());
+    assert_eq!(
+        checked.stdout,
+        b"Provider: local\nStatus: custom verified\n"
+    );
+    assert!(checked.stderr.is_empty());
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command.env_clear().env("ARANY_TEST_EXE",env!("CARGO_BIN_EXE_arany"))
         .env("ARANY_TEST_STATE",&state).env("ARANY_TEST_WORKSPACE",&workspace)
-        .env("ARANY_PROVIDER_LOCAL_KEY","test-key").env("TERM","xterm-256color")
+        .env(case.credential_env,case.key).env("ARANY_TEST_MODEL",case.model).env("TERM","xterm-256color")
         .current_dir(&workspace).args(["-q","-e","-c",
-            "trap ':' INT; stty rows 30 cols 100; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model model-1 answer",
+            "trap ':' INT; stty rows 30 cols 100; printf 'ARANY_TEST_SHELL_PID:%s\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider custom:local --model \"$ARANY_TEST_MODEL\" answer",
             "/dev/null"])
         .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    case.keys(&mut command, Some(case.key));
     let mut child = ChildGuard::new(command.spawn().unwrap());
     let mut input = child.child().stdin.take().unwrap();
     let mut output = child.child().stdout.take().unwrap();
@@ -1404,6 +1637,27 @@ fn messages_attached_case(cancel: bool) {
             thread::yield_now();
         }
     }
+    if !cancel {
+        let from = transcript.len();
+        input.write_all(b"delegate once\r").unwrap();
+        wait_for_screen(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (from, 100, 30),
+            "team answer",
+        );
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !super::screen_rows(&transcript, 100, 30)
+            .join(" ")
+            .contains("ready")
+        {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            assert!(Instant::now() < deadline, "team returns to ready composer");
+            thread::yield_now();
+        }
+    }
     let from = transcript.len();
     input
         .write_all(if cancel { b"\x03" } else { b"/compact\r" })
@@ -1445,11 +1699,7 @@ fn messages_attached_case(cancel: bool) {
             .accept()
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     );
-    for secret in [
-        b"test-key".as_slice(),
-        b"test-",
-        b"OMITTED_WORKSPACE_CANARY",
-    ] {
+    for secret in [case.key.as_bytes(), b"test-", b"OMITTED_WORKSPACE_CANARY"] {
         assert!(
             !transcript.windows(secret.len()).any(|part| part == secret),
             "sensitive tail reached the terminal"
@@ -1467,7 +1717,7 @@ fn messages_attached_case(cancel: bool) {
         let session = sessions[0].id;
         let events = store.load_session(session).await.unwrap();
         let view = SessionView::replay(session, &events).unwrap().unwrap();
-        assert_eq!(view.runs.len(), 1);
+        assert_eq!(view.runs.len(), if cancel { 1 } else { 2 });
         assert_eq!(
             view.runs[0].status,
             if cancel {
@@ -1481,6 +1731,16 @@ fn messages_attached_case(cancel: bool) {
             assert!(view.runs[0].assistant_message.is_none());
             assert_eq!(view.runs[0].agents[0].provider_calls[0].input_tokens, None);
         } else {
+            assert_eq!(view.runs[1].status, RunStatus::Finished);
+            assert_eq!(view.runs[1].agents.len(), 2);
+            assert_eq!(
+                view.runs[1]
+                    .agents
+                    .iter()
+                    .map(|agent| agent.provider_calls.len())
+                    .sum::<usize>(),
+                3
+            );
             assert_eq!(view.compactions.len(), 1);
             assert!(matches!(
                 view.compactions[0].record.status,
@@ -1491,8 +1751,8 @@ fn messages_attached_case(cancel: bool) {
         let database = std::fs::read(state.join("events.sqlite3")).unwrap();
         assert!(
             !database
-                .windows(b"test-key".len())
-                .any(|part| part == b"test-key")
+                .windows(case.key.len())
+                .any(|part| part == case.key.as_bytes())
         );
         std::fs::write(path, b"invalid historical config").unwrap();
         let mut show = Command::new(env!("CARGO_BIN_EXE_arany"));

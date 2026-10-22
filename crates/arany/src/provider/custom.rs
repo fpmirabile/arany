@@ -428,6 +428,55 @@ mod tests {
             parsed[0].endpoint(),
             "https://example.com/anthropic/v1/messages"
         );
+        let mut routes = serde_json::json!({"version":2,"profiles":[]});
+        for (name, base, endpoint, model, auth, credential) in [
+            (
+                "kimi-api",
+                "https://api.moonshot.ai/anthropic",
+                "https://api.moonshot.ai/anthropic/v1/messages",
+                "kimi-k3",
+                "bearer",
+                "ARANY_PROVIDER_KIMI_API_KEY",
+            ),
+            (
+                "kimi-code",
+                "https://api.kimi.com/coding/",
+                "https://api.kimi.com/coding/v1/messages",
+                "k3-256k",
+                "x-api-key",
+                "ARANY_PROVIDER_KIMI_CODE_KEY",
+            ),
+        ] {
+            let mut candidate: serde_json::Value = serde_json::from_str(&messages).unwrap();
+            let row = &mut candidate["profiles"][0];
+            row["name"] = name.into();
+            row["base_url"] = base.into();
+            row["model"] = model.into();
+            row["auth"] = auth.into();
+            row["credential_env"] = credential.into();
+            std::fs::write(
+                state.path().join("provider-profiles.json"),
+                serde_json::to_vec(&candidate).unwrap(),
+            )
+            .unwrap();
+            let parsed = CustomProfile::load_named(&state, name).unwrap();
+            assert_eq!(parsed.endpoint(), endpoint);
+            assert_eq!(parsed.model(), model);
+            assert_eq!(parsed.credential_env(), credential);
+            assert!(parsed.efforts().is_empty());
+            assert!(
+                matches!(&parsed.protocol, Protocol::AnthropicMessages { base_url, auth: selected }
+                if base_url == base.trim_end_matches('/') && *selected == if auth == "bearer" { MessagesAuth::Bearer } else { MessagesAuth::ApiKey })
+            );
+            routes["profiles"]
+                .as_array_mut()
+                .unwrap()
+                .push(candidate["profiles"][0].clone());
+        }
+        assert!(CustomProfile::parse_document(&serde_json::to_vec(&routes).unwrap()).is_ok());
+        routes["profiles"][1]["credential_env"] = "ARANY_PROVIDER_KIMI_API_KEY".into();
+        assert!(CustomProfile::parse_document(&serde_json::to_vec(&routes).unwrap()).is_err());
+        std::fs::write(state.path().join("provider-profiles.json"), VALID).unwrap();
         for base in [
             "https://example.com",
             "https://example.com/",

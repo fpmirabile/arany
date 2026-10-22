@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-21`
-- Next action: S2 after S1 review and CI; live/platform gaps remain in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
+- Next action: S3 after S2 review and CI; live/platform gaps remain in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
 
 ## Outcome and scope
 
@@ -14,8 +14,10 @@ One feature: a user-selected `custom:NAME` profile can declare protocol
 run through Arany's existing Anthropic Messages adapter. This extends the
 harness's admitted Provider destinations without changing execution policy.
 DeepSeek API profiles remain explicitly unavailable candidates because strict
-compaction evidence is missing. Remaining recipes cover Kimi platform API keys,
-Kimi Code subscription console keys and GLM standard API keys.
+compaction evidence is missing. S2 adds Kimi platform API keys conditionally on
+exact conformance and retains
+Kimi Code console keys as an unavailable candidate pending endpoint-specific
+strict-compaction evidence. The remaining recipe covers GLM standard API keys.
 
 Kimi Code is included with Arany's honest User-Agent. GLM Coding Plan benefits
 are excluded unless Z.ai approves Arany; DeepSeek has no documented subscription
@@ -173,7 +175,14 @@ the [setup guide](../../docs/setup.md#anthropic-compatible-custom-routes) keeps
 the explicitly **UNAVAILABLE** DeepSeek candidates. No JSON repair, skipped
 compaction or alternative schema representation is authorized.
 
-1. **S2 — Kimi API and Kimi Code recipes (one PR, after S1).** Separate profiles
+1. **S2 — Kimi API and Kimi Code recipes (implemented; review/CI pending).**
+   Platform is eligible after exact conformance: its OpenAPI documents the
+   existing `output_config.format` schema shape. Code stays **UNAVAILABLE**
+   pending endpoint-specific strict-compaction evidence; synthetic Code success
+   proves adapter mechanics only. The shared Messages decoder admits the
+   documented nested cache-creation total; native/custom check contract versions
+   invalidate older evidence. Transport and stored formats remain unchanged;
+   no migration is required. Separate profiles
    and keys: platform base `https://api.moonshot.ai/anthropic` with `kimi-k3`
    (other documented platform models only after exact checks); subscription base
    `https://api.kimi.com/coding/` with the plan console key and a tier-visible
@@ -186,7 +195,8 @@ compaction or alternative schema representation is authorized.
    Messages wire, strict compaction, optional versus required usage, and 429
    without a retry header. Out-of-tier 401 refuses without retry or API billing
    fallback. Offline fixtures establish the same path for both bases; owner
-   live-checks each with its own key. Any necessary typed Messages delta ships
+   checks each eligible route with its own key after the documented capability
+   gate. Any necessary typed Messages delta ships
    with these tests in this PR, preserving native Anthropic regression evidence.
 2. **S3 — GLM standard API-key recipe (one PR, after S2).** Base URL
    `https://api.z.ai/api/anthropic`; Standard API Key and exact `glm-5.3` /
@@ -204,6 +214,12 @@ compaction or alternative schema representation is authorized.
    billing route; failure leaves it unadmitted rather than using plan quota.
 
 ## Open questions
+
+- **Kimi Code strict compaction — owner: Fernando Mirabile.** Obtain Code-specific
+  strict-schema documentation or endpoint evidence before promoting the recipe.
+  Platform evidence cannot settle Code uncertainty. The owner confirms region,
+  exact tier-visible model and billing; remaining verification is owned only by
+  [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
 
 - **DeepSeek strict compaction — owner: Fernando Mirabile.**
   The documented Messages endpoint supports only `output_config.effort`, while
