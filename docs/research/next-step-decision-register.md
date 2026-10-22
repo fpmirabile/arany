@@ -84,6 +84,11 @@ Pinned handles and immutable bounded snapshots tie disclosure to admitted
 objects. Project text cannot select credentials or grant capabilities. Bounded, handle-relative
 instruction discovery keeps scope within the admitted Workspace. [Session spec](../specs/session.md)
 and [security rules](../../agents/security.md) own the admission contract.
+The instruction-organization source review (2026-10-12) found mixed evidence:
+[Gloaguen et al., v3](https://arxiv.org/abs/2602.11988v3) and
+[Lulla et al., v2](https://arxiv.org/abs/2601.20404v2) used different tasks and
+reported different cost/runtime effects. Neither establishes an optimal file
+layout or measured benefit for Arany; link checks establish consistency only.
 
 ### D-08 — Resource bounds
 
