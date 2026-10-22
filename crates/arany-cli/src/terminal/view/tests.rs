@@ -3504,7 +3504,7 @@ fn pausing_status_names_the_step_boundary_and_the_cancel_key() {
 
 #[test]
 fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices() {
-    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
     for width in [120, 80, 50, 16] {
         for (name, body, choices, focus) in [
             (
@@ -3520,6 +3520,16 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                     .collect(),
                 vec![Yes, AutoEdits, No],
                 0,
+            ),
+            (
+                "git-prefix",
+                vec!["Commit 1 path".to_owned()],
+                vec![
+                    Yes,
+                    GitPrefix(arany::permissions::TypedGitPrefix::Commit),
+                    No,
+                ],
+                1,
             ),
             (
                 "unguarded",
@@ -3598,6 +3608,12 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
             }
             if name == "unguarded" {
                 assert!(squashed.contains("this exact command"));
+            }
+            if name == "git-prefix" {
+                assert!(
+                    squashed.contains("allow git commit in this folder from the next Run"),
+                    "{width}: {squashed}"
+                );
             }
             let focused_rows = (0..50)
                 .map(|row| buffer_row(terminal.backend().buffer(), row))

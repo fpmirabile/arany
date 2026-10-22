@@ -2108,11 +2108,13 @@ mod escape_tests {
 #[cfg(test)]
 mod approval_reply_tests {
     use super::linear_approval_choice;
-    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, No, Yes};
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
 
     #[test]
     fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
+        let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
         for choices in [
+            vec![Yes, prefix, No],
             vec![Yes, No],
             vec![Yes, AutoEdits, No],
             vec![Yes, ExactCommand, No],
@@ -2141,5 +2143,6 @@ mod approval_reply_tests {
             arany::ApprovalReply::AllowAlwaysInProject
         );
         assert_eq!(No.reply(), arany::ApprovalReply::Deny);
+        assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
     }
 }

@@ -109,7 +109,7 @@ record_kinds!(
 );
 
 impl RecordKind {
-    // User-authored kinds are read-only to the harness; only a record migration replaces them.
+    // User-authored kinds are read-only to the harness; permissions.json changes only through the typed settings edit, and a record migration may replace any.
     const fn spec(self) -> (&'static str, &'static str, usize, bool) {
         match self {
             Self::ToolsConfig => ("tools.json", "tools.pending", 64 * 1024, false),
@@ -131,7 +131,7 @@ impl RecordKind {
                 16 * 1024,
                 false,
             ),
-            Self::Permissions => ("permissions.json", "permissions.pending", 64 * 1024, false),
+            Self::Permissions => ("permissions.json", "permissions.pending", 64 * 1024, true),
             Self::UnguardedCommands => (
                 "unguarded-commands.json",
                 "unguarded-commands.pending",
@@ -427,9 +427,17 @@ impl StateRoot {
             if record.is_some() {
                 self.dir.remove_file(name)?;
             }
+            // The unlink may already be durable, so a failed or faulted sync is unconfirmed, not unchanged.
+            let unconfirmed = |_| StoreError::ReplaceUnconfirmed;
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
+                return Err(StoreError::ReplaceUnconfirmed);
+            }
             self.dir
-                .open_with(".", OpenOptions::new().read(true))?
-                .sync_all()?;
+                .open_with(".", OpenOptions::new().read(true))
+                .map_err(unconfirmed)?
+                .sync_all()
+                .map_err(unconfirmed)?;
             Ok(())
         }
         #[cfg(not(unix))]
@@ -514,7 +522,11 @@ impl StateRoot {
             file.write_all(record)?;
             file.sync_all()?;
             rename(&self.dir, pending, &self.dir, name)?;
-            sync(&self.dir)
+            #[cfg(any(test, feature = "test-support"))]
+            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
+                return Err(StoreError::ReplaceUnconfirmed);
+            }
+            sync(&self.dir).map_err(|_| StoreError::ReplaceUnconfirmed)
         }
         #[cfg(not(unix))]
         {
@@ -850,7 +862,6 @@ mod tests {
             RecordKind::ProviderProfiles,
             RecordKind::ProviderRouting,
             RecordKind::ProviderRoster,
-            RecordKind::Permissions,
             RecordKind::UserInstructions,
         ] {
             assert!(matches!(
@@ -870,6 +881,24 @@ mod tests {
                 .extension()
                 .is_none_or(|e| e != "pending")
         }));
+    }
+
+    #[test]
+    fn a_record_removal_whose_directory_sync_fails_is_unconfirmed_not_unchanged() {
+        let temp = tempfile::tempdir().expect("test root");
+        let path = temp.path().join("state");
+        let state = StateRoot::admit(&path).expect("private state");
+        state
+            .record(RecordKind::Permissions)
+            .replace(br#"{"permissions":{}}"#)
+            .unwrap();
+        crate::fault::FaultPlan::fail_record_sync(path.clone(), "permissions.json");
+        assert!(matches!(
+            state.record(RecordKind::Permissions).remove(),
+            Err(StoreError::ReplaceUnconfirmed)
+        ));
+        assert!(!path.join("permissions.json").exists());
+        state.record(RecordKind::Permissions).remove().unwrap();
     }
 
     #[test]

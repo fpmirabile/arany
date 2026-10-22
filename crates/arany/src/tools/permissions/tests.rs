@@ -2032,3 +2032,303 @@ fn lifecycle_hook_inputs_and_results_are_bounded_and_fail_closed() {
     let feedback = stop_feedback(std::iter::repeat_n(&result, 9));
     assert!(feedback.len() <= MAX_STOP_FEEDBACK_BYTES);
 }
+
+fn commit_call() -> ToolCall {
+    ToolCall::GitCommit {
+        message: "m".into(),
+        paths: vec!["src/lib.rs".into()],
+        staged: false,
+    }
+}
+
+fn branch_call(name: Option<&str>) -> ToolCall {
+    ToolCall::GitBranch {
+        name: name.map(Into::into),
+        start_point: None,
+    }
+}
+
+fn typed(verb: &[&str], decision: &str, workspace: Value) -> Value {
+    json!({"prefix": verb, "decision": decision, "workspace": workspace})
+}
+
+fn typed_config(mode: &str, rules: Vec<Value>) -> Result<PermissionConfig, ConfigError> {
+    PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {"defaultMode": mode, "typedPrefixes": rules}}))
+            .unwrap(),
+    )
+}
+
+#[test]
+fn typed_prefix_rules_validate_tokens_scopes_and_shared_bounds() {
+    let folder = json!({"path": "/project", "device": 1, "inode": 2});
+    for verb in [
+        &["git", "commit"][..],
+        &["git", "branch"],
+        &["git", "switch"],
+        &["git", "push"],
+        &["gh", "pr", "create"],
+    ] {
+        typed_config("default", vec![typed(verb, "allow", Value::Null)]).unwrap();
+        typed_config("default", vec![typed(verb, "deny", folder.clone())]).unwrap();
+    }
+    for bad in [
+        typed(&["git"], "allow", Value::Null),
+        typed(&["git", "commit", "-a"], "allow", Value::Null),
+        typed(&["git", "commit", "extra", "more"], "allow", Value::Null),
+        typed(&["git", "comm"], "allow", Value::Null),
+        typed(&["git", "co*"], "allow", Value::Null),
+        typed(&["/usr/bin/git", "commit"], "allow", Value::Null),
+        typed(&["env", "git", "commit"], "allow", Value::Null),
+        typed(&["git commit"], "allow", Value::Null),
+        typed(&["git", "commit"], "maybe", Value::Null),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": "project", "device": 1, "inode": 2}),
+        ),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": "/a/../b", "device": 1, "inode": 2}),
+        ),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": "/a//b", "device": 1, "inode": 2}),
+        ),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": "/a\nb", "device": 1, "inode": 2}),
+        ),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": "/project", "device": 1, "inode": 0}),
+        ),
+        typed(
+            &["git", "commit"],
+            "allow",
+            json!({"path": format!("/{}", "a".repeat(4096)), "device": 1, "inode": 2}),
+        ),
+        json!({"prefix": ["git", "commit"], "decision": "allow"}),
+        json!({"prefix": ["git", "commit"], "decision": "allow", "workspace": null, "extra": 1}),
+    ] {
+        assert!(typed_config("default", vec![bad.clone()]).is_err(), "{bad}");
+    }
+    let same = typed(&["git", "commit"], "allow", Value::Null);
+    assert!(typed_config("default", vec![same.clone(), same]).is_err());
+    typed_config(
+        "default",
+        vec![
+            typed(&["git", "commit"], "allow", Value::Null),
+            typed(&["git", "commit"], "deny", Value::Null),
+        ],
+    )
+    .unwrap();
+
+    let ordinary = |count: usize| {
+        (0..count)
+            .map(|index| format!("Read(a{index})"))
+            .collect::<Vec<_>>()
+    };
+    let typed_rows = |count: usize| {
+        (0..count)
+            .map(|index| {
+                typed(
+                    &["git", "commit"],
+                    "allow",
+                    json!({"path": format!("/p{index}"), "device": 1, "inode": 2}),
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let parse = |ordinary_count: usize, typed_count: usize| {
+        PermissionConfig::parse(
+            &serde_json::to_vec(&json!({"permissions": {
+                "deny": ordinary(ordinary_count),
+                "typedPrefixes": typed_rows(typed_count),
+            }}))
+            .unwrap(),
+        )
+    };
+    parse(100, 28).unwrap();
+    assert!(matches!(parse(100, 29), Err(ConfigError::Limit(_))));
+    assert!(matches!(parse(0, 129), Err(ConfigError::Limit(_))));
+}
+
+#[test]
+fn typed_prefix_classification_ignores_raw_commands_and_branch_listing() {
+    let rules = vec![typed(&["git", "commit"], "deny", Value::Null)];
+    let parsed = typed_config("default", rules).unwrap();
+    assert_eq!(parsed.decision(&commit_call()), Decision::Deny);
+    assert_eq!(
+        parsed.decision(&command("git", &["commit", "-m", "m"])),
+        Decision::Ask
+    );
+    let rules = vec![typed(&["git", "branch"], "deny", Value::Null)];
+    let parsed = typed_config("default", rules).unwrap();
+    assert_eq!(parsed.decision(&branch_call(Some("topic"))), Decision::Deny);
+    assert_eq!(parsed.decision(&branch_call(None)), Decision::Allow);
+    let rules = vec![
+        typed(&["git", "push"], "allow", Value::Null),
+        typed(&["gh", "pr", "create"], "allow", Value::Null),
+    ];
+    let parsed = typed_config("default", rules).unwrap();
+    assert_eq!(parsed.decision(&commit_call()), Decision::Ask);
+    assert_eq!(parsed.decision(&command("git", &["push"])), Decision::Ask);
+}
+
+#[test]
+fn typed_prefix_scope_binds_folder_identity_and_ignores_unscoped_allows() {
+    let here = json!({"path": "/project", "device": 1, "inode": 2});
+    let elsewhere = json!({"path": "/other", "device": 1, "inode": 2});
+    let moved = json!({"path": "/project", "device": 1, "inode": 3});
+    let identity = crate::session::WorkspaceIdentity {
+        device: 1,
+        inode: 2,
+    };
+    let allow = |scope: &Value| typed(&["git", "commit"], "allow", scope.clone());
+    let deny = |scope: &Value| typed(&["git", "commit"], "deny", scope.clone());
+    for (scope, applies) in [(&here, true), (&elsewhere, false), (&moved, false)] {
+        let mut parsed = typed_config("default", vec![allow(scope)]).unwrap();
+        assert_eq!(parsed.decision(&commit_call()), Decision::Ask, "unscoped");
+        parsed.scope_to(Path::new("/project"), identity);
+        assert_eq!(
+            parsed.decision(&commit_call()),
+            if applies {
+                Decision::Allow
+            } else {
+                Decision::Ask
+            },
+            "{scope}"
+        );
+        let mut parsed = typed_config("default", vec![deny(scope)]).unwrap();
+        assert_eq!(parsed.decision(&commit_call()), Decision::Deny, "unscoped");
+        parsed.scope_to(Path::new("/project"), identity);
+        assert_eq!(
+            parsed.decision(&commit_call()),
+            if applies {
+                Decision::Deny
+            } else {
+                Decision::Ask
+            },
+            "{scope}"
+        );
+    }
+    let mut parsed = typed_config("default", vec![allow(&Value::Null)]).unwrap();
+    assert_eq!(parsed.decision(&commit_call()), Decision::Allow);
+    parsed.scope_to(Path::new("/project"), identity);
+    assert_eq!(parsed.decision(&commit_call()), Decision::Allow);
+}
+
+#[test]
+fn typed_prefix_rules_obey_modes_and_restrictive_precedence() {
+    use Decision::{Allow, Ask, Deny};
+    let call = commit_call();
+    // [no rule, allow, ask, deny] per mode.
+    for (mode, expected) in [
+        ("default", [Ask, Allow, Ask, Deny]),
+        ("acceptEdits", [Ask, Ask, Ask, Deny]),
+        ("auto", [Ask, Ask, Ask, Deny]),
+        ("plan", [Deny, Deny, Deny, Deny]),
+        ("dontAsk", [Deny, Allow, Deny, Deny]),
+    ] {
+        for (decision, want) in [None, Some("allow"), Some("ask"), Some("deny")]
+            .into_iter()
+            .zip(expected)
+        {
+            let rules = decision
+                .map(|decision| vec![typed(&["git", "commit"], decision, Value::Null)])
+                .unwrap_or_default();
+            let parsed = typed_config(mode, rules).unwrap();
+            assert_eq!(parsed.decision(&call), want, "{mode} {decision:?}");
+        }
+    }
+
+    let allow = typed(&["git", "commit"], "allow", Value::Null);
+    let ask = typed(&["git", "commit"], "ask", Value::Null);
+    let parsed = typed_config("default", vec![allow.clone()]).unwrap();
+    assert_eq!(
+        parsed.decision_with_source(&call),
+        (Allow, PermissionSource::TypedPrefixRule)
+    );
+    let parsed = typed_config("default", vec![ask.clone()]).unwrap();
+    let (decision, source, approval) = parsed.evaluate(&call);
+    assert_eq!(
+        (decision, source, approval),
+        (
+            Ask,
+            PermissionSource::TypedPrefixRule,
+            Some(ApprovalMode::Request)
+        )
+    );
+    let parsed = typed_config("auto", vec![ask]).unwrap();
+    assert_eq!(parsed.evaluate(&call).2, Some(ApprovalMode::Request));
+    let parsed = typed_config("auto", Vec::new()).unwrap();
+    assert_eq!(parsed.evaluate(&call).2, Some(ApprovalMode::Auto));
+
+    for restriction in ["Read(src/**)", "Edit(src/**)", "git_commit"] {
+        for list in ["deny", "ask"] {
+            let parsed = PermissionConfig::parse(
+                &serde_json::to_vec(&json!({"permissions": {
+                    list: [restriction],
+                    "typedPrefixes": [allow.clone()],
+                }}))
+                .unwrap(),
+            )
+            .unwrap();
+            let want = if list == "deny" { Deny } else { Ask };
+            assert_eq!(parsed.decision(&call), want, "{list} {restriction}");
+        }
+    }
+    let parsed = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {
+            "allow": ["git_commit"],
+            "typedPrefixes": [typed(&["git", "commit"], "deny", Value::Null)],
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.decision_with_source(&call),
+        (Deny, PermissionSource::TypedPrefixRule)
+    );
+    let parsed = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {
+            "deny": ["git_commit"],
+            "typedPrefixes": [allow],
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.decision_with_source(&call),
+        (Deny, PermissionSource::Rule)
+    );
+}
+
+#[test]
+fn a_typed_allow_keeps_its_provenance_when_an_ordinary_allow_also_matches() {
+    let parsed = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {
+            "allow": ["git_commit"],
+            "typedPrefixes": [typed(&["git", "commit"], "allow", Value::Null)],
+        }}))
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.decision_with_source(&commit_call()),
+        (Decision::Allow, PermissionSource::TypedPrefixRule)
+    );
+    let ordinary_only = PermissionConfig::parse(
+        &serde_json::to_vec(&json!({"permissions": {"allow": ["git_commit"]}})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        ordinary_only.decision_with_source(&commit_call()),
+        (Decision::Allow, PermissionSource::Rule)
+    );
+}

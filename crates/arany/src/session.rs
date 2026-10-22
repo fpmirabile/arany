@@ -54,8 +54,9 @@ pub(crate) use events::{
     MAX_GOAL_PLAN_CONTRACT_BYTES, MAX_STEP_TOOL_CALLS, STORE_ACTION_OVERHEAD_MS, payload_version,
 };
 pub(crate) use events::{
-    pre_git_write_payload, pre_glob_payload, run_started_fits, run_started_v18_payload,
-    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    pre_git_write_payload, pre_glob_payload, pre_typed_prefix_payload, run_started_fits,
+    run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]

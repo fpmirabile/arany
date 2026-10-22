@@ -5,7 +5,10 @@ use super::{
 };
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
-use crate::tools::permissions::{Decision, HookEvent, HookResult, MAX_HOOKS_PER_OCCURRENCE};
+use crate::tools::permissions::{
+    Decision, HookEvent, HookResult, MAX_HOOKS_PER_OCCURRENCE, PermissionMode, PermissionSource,
+    TypedGitPrefix,
+};
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -29,7 +32,10 @@ pub(super) fn apply(
         let definition_mode = super::definition_mode(run, *agent_run_id)?;
         let restrictions = super::mode_restrictions(run, *agent_run_id)?;
         let unguarded = observation.intent.call.is_unguarded();
-        if configured || definition_mode.is_some() || unguarded {
+        let git_write = observation.intent.call.is_git() && observation.intent.call.facts().mutates;
+        let first_use_verdict = git_write
+            && pending_tool(run, *agent_run_id).is_ok_and(|tool| tool.permission_verdict.is_some());
+        if configured || definition_mode.is_some() || unguarded || first_use_verdict {
             let tool = pending_tool(run, *agent_run_id)?;
             let verdict = tool
                 .permission_verdict
@@ -91,8 +97,51 @@ pub(super) fn apply(
             let rules_pinned = policy.is_some_and(|policy| policy.unguarded_rules_digest.is_some());
             let pending_call = pending_tool(run, *agent_run_id)?.intent.call.clone();
             let unguarded = pending_call.is_unguarded();
+            let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
+            let first_use = !permissions_pinned
+                && definition_mode.is_none()
+                && !unguarded
+                && pending_call.is_git()
+                && pending_call.facts().mutates;
+            if first_use
+                && !(primary
+                    && verdict.hook_restriction.is_none()
+                    && matches!(
+                        verdict.basis,
+                        PermissionSource::Mode | PermissionSource::PinnedGrant
+                    )
+                    && matches!(
+                        verdict.source,
+                        PermissionSource::Mode
+                            | PermissionSource::PinnedGrant
+                            | PermissionSource::Human
+                            | PermissionSource::AiReview
+                            | PermissionSource::UnavailableApproval
+                    ))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
+            let typed_basis = verdict.basis == PermissionSource::TypedPrefixRule;
+            let typed_source = verdict.source == PermissionSource::TypedPrefixRule;
+            if (typed_basis || typed_source)
+                && !(permissions_pinned
+                    && primary
+                    && typed_basis
+                    && TypedGitPrefix::of_call(&pending_call)
+                        .is_some_and(TypedGitPrefix::available)
+                    && (!typed_source
+                        // An allow whose dispatch a later plan, budget or pause gate refused is unapproved.
+                        || verdict.decision == Decision::Allow
+                            && matches!(
+                                verdict.mode,
+                                Some(PermissionMode::Default | PermissionMode::DontAsk)
+                            )
+                        || !verdict.approved && verdict.decision == Decision::Deny))
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             if verdict.mode.is_some() != (permissions_pinned || definition_mode.is_some())
-                || !(permissions_pinned || definition_mode.is_some() || unguarded)
+                || !(permissions_pinned || definition_mode.is_some() || unguarded || first_use)
                 || definition_mode == Some(crate::tools::permissions::PermissionMode::DontAsk)
                     && verdict.decision == crate::tools::permissions::Decision::Ask
             {
@@ -139,7 +188,6 @@ pub(super) fn apply(
                 .len()
                 .checked_sub(2)
                 .is_some_and(|index| run.tools[index].narrowed_call().is_some());
-            let primary = run.primary().is_some_and(|agent| agent.id == *agent_run_id);
             let tool = pending_tool(run, *agent_run_id)?;
             let narrowing_holds = !verdict.narrowed
                 || primary

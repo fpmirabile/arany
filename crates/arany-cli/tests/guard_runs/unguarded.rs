@@ -619,6 +619,89 @@ async fn always_allow_records_the_exact_rule_for_this_project_only_and_applies_n
 }
 
 #[tokio::test]
+async fn an_unconfirmed_exact_rule_save_is_uncertain_stops_the_run_and_never_dispatches() {
+    let host = Host::new(None);
+    let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));
+    arany::FaultPlan::fail_record_sync(host.state.clone(), "unguarded-commands.json");
+    let provider = Arc::new(ScriptedProvider::new(script(&first, &second, vec![])));
+    let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+    let controls = RunControls {
+        tools: ToolGrant::Configured,
+        approvals: Some(approvals),
+        ..Default::default()
+    };
+    let mut input = request(&host.workspace, "Run the failing command");
+    input.include_paths.clear();
+    input.goal.budget = Some(budget());
+    let mut prompts = 0;
+    let outcome = {
+        let running = run_with(&host.engine, &provider, input, controls);
+        tokio::pin!(running);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut running => break result,
+                Some(approval) = inbox.next() => {
+                    if approval.unguarded.is_some() {
+                        prompts += 1;
+                        approval.decide(ApprovalReply::AllowAlwaysInProject);
+                    } else {
+                        approval.decide(ApprovalReply::AllowOnce);
+                    }
+                }
+            }
+        }
+    };
+    assert!(
+        matches!(
+            outcome,
+            Err(arany::EngineError::Tool(arany::ToolError::Uncertain))
+        ),
+        "{:?}",
+        outcome.map(|outcome| outcome.run.status)
+    );
+    assert_eq!(prompts, 1);
+    assert!(
+        provider.requests.lock().unwrap().len() < 4,
+        "the stop ends the continuation"
+    );
+    assert!(!host.workspace.join("ran.txt").exists());
+    let session = list_sessions(
+        StateRoot::open_existing(&host.state).unwrap(),
+        host.workspace.clone(),
+    )
+    .await
+    .unwrap()[0]
+        .id;
+    let before = std::fs::read(host.state.join("unguarded-commands.json")).unwrap();
+    host.engine.close().await.unwrap();
+    let store = Store::open_read_only(StateRoot::open_existing(&host.state).unwrap()).unwrap();
+    let events = store.load_session(session).await.unwrap();
+    let view = SessionView::replay(session, &events).unwrap().unwrap();
+    store.close().await.unwrap();
+    let state = host.state.clone();
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    let tool = view.runs[0].tools.last().unwrap();
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
+    assert!(observation.output.contains("rule save not confirmed"));
+    assert!(observation.attestation.is_none());
+    assert!(tool.permission_verdict.as_ref().unwrap().approved);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.event, Event::ToolStarted { .. }))
+            .count(),
+        2
+    );
+    assert_eq!(
+        std::fs::read(state.join("unguarded-commands.json")).unwrap(),
+        before,
+        "replay never saves again"
+    );
+}
+
+#[tokio::test]
 async fn a_denied_prompt_dispatches_nothing() {
     let host = Host::new(None);
     let (first, second) = (guarded(SCRIPT), unguarded(SCRIPT));

@@ -389,28 +389,53 @@ fn decode_settings(record: &[u8]) -> Result<Preferences, &'static str> {
     Ok(record.preferences)
 }
 
-async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), String> {
+#[derive(Debug, Eq, PartialEq)]
+enum SaveError {
+    Unconfirmed,
+    Failed(&'static str),
+}
+
+impl std::fmt::Display for SaveError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Unconfirmed => "settings change not confirmed; check /settings",
+            Self::Failed(message) => message,
+        })
+    }
+}
+
+fn save_failure_notice(error: &SaveError) -> String {
+    match error {
+        SaveError::Unconfirmed => format!("Error: {error}"),
+        SaveError::Failed(_) => format!("Error: {error}; current settings kept"),
+    }
+}
+
+async fn save_settings(admission: &Admission, preferences: Preferences) -> Result<(), SaveError> {
     if preferences.goal_budget.validate().is_err() || !preferences.resources.valid() {
-        return Err("invalid settings".into());
+        return Err(SaveError::Failed("invalid settings"));
     }
     let path = admission.state_dir.clone();
     let workspace = admission.workspace.clone();
     tokio::task::spawn_blocking(move || {
-        let root = StateRoot::admit(&path).map_err(|_| "display settings unavailable or unsafe")?;
+        let root = StateRoot::admit(&path)
+            .map_err(|_| SaveError::Failed("display settings unavailable or unsafe"))?;
         let record = serde_json::to_vec(&UiPreferences {
             version: UI_PREFERENCES_VERSION,
             preferences,
         })
-        .map_err(|_| "display settings unavailable")?;
+        .map_err(|_| SaveError::Failed("display settings unavailable"))?;
         root.with_account_replacement_lock(&workspace, || {
             root.record(RecordKind::UiPreferences).replace(&record)
         })
-        .map_err(|_| "display settings busy or unsafe")?
-        .map_err(|_| "could not save display settings")
+        .map_err(|_| SaveError::Failed("display settings busy or unsafe"))?
+        .map_err(|error| match error {
+            arany::StoreError::ReplaceUnconfirmed => SaveError::Unconfirmed,
+            _ => SaveError::Failed("could not save display settings"),
+        })
     })
     .await
-    .map_err(|_| "display settings unavailable".to_owned())?
-    .map_err(str::to_owned)
+    .map_err(|_| SaveError::Failed("display settings unavailable"))?
 }
 
 async fn choose_settings(
@@ -535,7 +560,7 @@ pub(super) async fn settings(
                     },
                 )
             }
-            Err(error) => format!("Error: {error}; current settings kept"),
+            Err(error) => save_failure_notice(&error),
         },
     };
     terminal
@@ -1120,7 +1145,7 @@ pub(super) fn active_command_notice(
                 .and_then(|run| run.config.as_ref())
                 .is_some_and(|config| config.tool_policy.is_some())
             {
-                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
+                "Primary has pinned guarded Tool grants: at most 16 Tool calls with bounded Tool context. Commands/MCP use a private selected-project copy without network or account state; only the selected read-only toolchains and caches from home are mounted, and their file changes are discarded. Children remain read-only. /permissions edits typed Git rules only when no Run is active; saved changes apply from the next Run. Arany requests: selected Provider; OS TLS checks may connect separately.".into()
             } else {
                 "Read-only Workspace; Arany requests: selected Provider; OS TLS checks may connect separately; no Tools or sandbox".into()
             }
@@ -1886,6 +1911,41 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn an_unconfirmed_settings_replacement_is_not_reported_as_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let admission = Admission {
+            roster: None,
+            telemetry: arany::Telemetry::disabled(),
+            state_dir: temp.path().join("state"),
+            explicit_state_dir: false,
+            workspace,
+            include_paths: Vec::new(),
+            tools: false,
+            workspace_permissions: None,
+            defaults: SessionDefaults::default(),
+            screen_reader: false,
+            classic: false,
+            no_color: false,
+            setup_requested: false,
+            entry: EntryMode::New,
+            prompt: None,
+            resume_goal: None,
+        };
+        arany::FaultPlan::fail_record_sync(admission.state_dir.clone(), "ui-preferences.json");
+        let unconfirmed = save_settings(&admission, Preferences::default())
+            .await
+            .unwrap_err();
+        assert_eq!(unconfirmed, SaveError::Unconfirmed);
+        assert!(!save_failure_notice(&unconfirmed).contains("kept"));
+        assert!(
+            save_failure_notice(&SaveError::Failed("could not save display settings"))
+                .ends_with("current settings kept")
+        );
     }
 
     #[tokio::test]

@@ -346,6 +346,7 @@ impl Event {
                             | PermissionSource::PinnedGrant
                             | PermissionSource::ExactCommandRule
                             | PermissionSource::Hook
+                            | PermissionSource::TypedPrefixRule
                     )
                     && usize::from(verdict.hooks) <= MAX_HOOKS_PER_OCCURRENCE
                     && (verdict.basis != PermissionSource::Hook

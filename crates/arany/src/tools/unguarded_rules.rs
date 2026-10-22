@@ -183,7 +183,10 @@ impl ExactCommandRules {
                 state
                     .record(RecordKind::UnguardedCommands)
                     .replace(&bytes)
-                    .map_err(|_| ToolError::Configuration)
+                    .map_err(|error| match error {
+                        StoreError::ReplaceUnconfirmed => ToolError::Uncertain,
+                        _ => ToolError::Configuration,
+                    })
             })
             .map_err(|error| match error {
                 StoreError::AccountBusy => ToolError::AccountBusy,

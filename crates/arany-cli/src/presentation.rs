@@ -260,6 +260,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     {
         summary.push_str(match verdict.source {
             arany::permissions::PermissionSource::Rule => " · permission deny rule",
+            arany::permissions::PermissionSource::TypedPrefixRule => " · typed Git deny rule",
             arany::permissions::PermissionSource::PinnedGrant => " · pinned grant denial",
             arany::permissions::PermissionSource::Hook => " · hook denial",
             _ => " · permission mode denial",
@@ -714,6 +715,7 @@ pub enum ToolApprovalChoice {
     Yes,
     AutoEdits,
     ExactCommand,
+    GitPrefix(arany::permissions::TypedGitPrefix),
     No,
 }
 
@@ -725,6 +727,19 @@ impl ToolApprovalChoice {
             Self::ExactCommand => {
                 "Yes, and don't ask again for: this exact command in this project (unguarded)"
             }
+            Self::GitPrefix(prefix) => match prefix {
+                arany::permissions::TypedGitPrefix::Commit => {
+                    "Yes, and allow git commit in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Branch => {
+                    "Yes, and allow git branch in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Switch => {
+                    "Yes, and allow git switch in this folder from the next Run"
+                }
+                arany::permissions::TypedGitPrefix::Push
+                | arany::permissions::TypedGitPrefix::PrCreate => "No remembered rule offered",
+            },
             Self::No => "No",
         }
     }
@@ -733,6 +748,7 @@ impl ToolApprovalChoice {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
             Self::ExactCommand => arany::ApprovalReply::AllowAlwaysInProject,
+            Self::GitPrefix(_) => arany::ApprovalReply::AllowPrefixInFolder,
             Self::No => arany::ApprovalReply::Deny,
         }
     }
@@ -746,8 +762,13 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         .is_some_and(|prompt| prompt.remember)
     {
         choices.push(ToolApprovalChoice::ExactCommand);
-    } else if approval.unguarded.is_none() && approval.allow_auto_edits {
-        choices.push(ToolApprovalChoice::AutoEdits);
+    } else if approval.unguarded.is_none() {
+        if approval.allow_auto_edits {
+            choices.push(ToolApprovalChoice::AutoEdits);
+        }
+        if let Some(prefix) = approval.remember_prefix.filter(|prefix| prefix.available()) {
+            choices.push(ToolApprovalChoice::GitPrefix(prefix));
+        }
     }
     choices.push(ToolApprovalChoice::No);
     choices

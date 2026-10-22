@@ -163,7 +163,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 41] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 4),
+    ("ToolPermissionDecided", 5),
     ("HookStarted", 5),
     ("HookFinished", 10),
     ("ToolFinished", 21),
@@ -1426,6 +1426,16 @@ pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String>
         &["git_commit", "git_branch", "git_switch"],
         None,
     )
+}
+
+// The typed text a verdict had before the typed prefix rule source existed, or `None` when it
+// names that source (it did not exist) or does not parse.
+pub(crate) fn pre_typed_prefix_payload(payload: &str) -> Option<String> {
+    let verdict: crate::tools::permissions::PermissionVerdict = parse(payload).ok()?;
+    let forged = |source| source == crate::tools::permissions::PermissionSource::TypedPrefixRule;
+    (!forged(verdict.basis) && !forged(verdict.source))
+        .then(|| serialize(&verdict).ok())
+        .flatten()
 }
 
 fn before_operations(

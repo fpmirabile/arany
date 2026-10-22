@@ -1,4 +1,5 @@
 mod hooks;
+mod prefix;
 
 pub use hooks::{
     CommandHook, HOOK_RESULT_BYTES, HookConfig, HookEvent, HookGroup, HookIgnoreReason,
@@ -10,12 +11,16 @@ pub(crate) use hooks::{
     compact_subject, feedback_lines, lifecycle_input, post_tool_use_input, pre_tool_use_input,
     stop_feedback, stop_subject,
 };
+pub use prefix::{
+    PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit, TypedPrefixEntry,
+};
 
 use super::catalog::Family;
 use super::{ApprovalMode, ToolCall};
 use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
+use std::path::Path;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_RULES: usize = 128;
@@ -51,6 +56,7 @@ pub enum PermissionSource {
     PinnedGrant,
     ExactCommandRule,
     Hook,
+    TypedPrefixRule,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -97,10 +103,12 @@ pub enum ConfigError {
     Hook(&'static str),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct PermissionConfig {
     mode: PermissionMode,
     rules: Vec<(Decision, Rule)>,
+    typed: Vec<prefix::TypedRule>,
+    scoped: bool,
     hooks: HookConfig,
 }
 
@@ -124,6 +132,8 @@ struct Permissions {
     deny: Vec<String>,
     #[serde(default)]
     ask: Vec<String>,
+    #[serde(default)]
+    typed_prefixes: Vec<prefix::RawTypedRule>,
 }
 
 impl PermissionConfig {
@@ -131,7 +141,12 @@ impl PermissionConfig {
         let value = super::parse_json(bytes, MAX_CONFIG_BYTES).map_err(|_| ConfigError::Json)?;
         let settings: Settings = serde_json::from_value(value).map_err(|_| ConfigError::Schema)?;
         let permissions = settings.permissions;
-        if permissions.allow.len() + permissions.deny.len() + permissions.ask.len() > MAX_RULES {
+        if permissions.allow.len()
+            + permissions.deny.len()
+            + permissions.ask.len()
+            + permissions.typed_prefixes.len()
+            > MAX_RULES
+        {
             return Err(ConfigError::Limit("128 permission rules in total"));
         }
         let mut rules = Vec::new();
@@ -152,12 +167,30 @@ impl PermissionConfig {
         Ok(Self {
             mode: permissions.default_mode,
             rules,
+            typed: prefix::parse_rules(permissions.typed_prefixes)?,
+            scoped: false,
             hooks: HookConfig::validate(settings.hooks)?,
         })
     }
 
     pub fn mode(&self) -> PermissionMode {
         self.mode
+    }
+
+    // Folder rules of another Workspace never apply; the matching ones become ordinary rules.
+    pub(crate) fn scope_to(&mut self, path: &Path, identity: crate::session::WorkspaceIdentity) {
+        self.typed
+            .retain(|rule| rule.in_folder(path, identity.device, identity.inode));
+        self.scoped = true;
+    }
+
+    fn typed_decision(&self, call: &ToolCall) -> Option<Decision> {
+        let prefix = prefix::TypedGitPrefix::of_call(call)?;
+        self.typed
+            .iter()
+            .filter(|rule| rule.prefix() == prefix && rule.applies(self.scoped))
+            .map(prefix::TypedRule::decision)
+            .reduce(Decision::narrow)
     }
 
     pub fn hooks(&self) -> &HookConfig {
@@ -214,6 +247,8 @@ impl PermissionConfig {
         Self {
             mode,
             rules: Vec::new(),
+            typed: Vec::new(),
+            scoped: true,
             hooks: HookConfig::validate(Default::default()).expect("empty hooks"),
         }
         .evaluate(call)
@@ -234,7 +269,10 @@ impl PermissionConfig {
         let (decision, source) = self.decision_with_worker_paths(call, paths);
         let approval = (decision == Decision::Ask).then_some(
             if self.mode == PermissionMode::Auto
-                && source != PermissionSource::Rule
+                && !matches!(
+                    source,
+                    PermissionSource::Rule | PermissionSource::TypedPrefixRule
+                )
                 && !call.is_unguarded()
             {
                 ApprovalMode::Auto
@@ -343,6 +381,21 @@ impl PermissionConfig {
                     .then_some(*decision)
             }
         });
+        let typed = self
+            .typed_decision(call)
+            .filter(|decision| *decision != Decision::Allow || allow_skips_approval);
+        let (matched, typed_wins) = match (matched, typed) {
+            (Some(rule), Some(typed)) => {
+                let narrowed = rule.narrow(typed);
+                // On an allow tie the user-owned typed rule keeps the provenance and its prompt exemption.
+                (
+                    Some(narrowed),
+                    narrowed != rule || (rule == Decision::Allow && typed == Decision::Allow),
+                )
+            }
+            (None, Some(typed)) => (Some(typed), true),
+            (matched, None) => (matched, false),
+        };
         let decision = matched.unwrap_or_else(|| {
             if auto_review {
                 Decision::Ask
@@ -359,7 +412,9 @@ impl PermissionConfig {
         } else {
             (
                 decision,
-                if matched.is_some() {
+                if typed_wins {
+                    PermissionSource::TypedPrefixRule
+                } else if matched.is_some() {
                     PermissionSource::Rule
                 } else {
                     PermissionSource::Mode
@@ -541,14 +596,14 @@ impl std::io::Write for CallSize {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Rule {
     tool: Tool,
     pattern: Option<Regex>,
     commit_prefix: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Tool {
     Bash,
     Read,

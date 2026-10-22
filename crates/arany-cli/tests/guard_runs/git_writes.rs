@@ -126,6 +126,16 @@ impl Repo {
         outcomes: Vec<ProviderOutcome>,
         lose: bool,
     ) -> (Result<arany::RunOutcome, EngineError>, usize, usize, Engine) {
+        self.run_replying(outcomes, lose, |_| arany::ApprovalReply::AllowOnce)
+            .await
+    }
+
+    async fn run_replying(
+        &self,
+        outcomes: Vec<ProviderOutcome>,
+        lose: bool,
+        mut reply: impl FnMut(&arany::ToolApproval) -> arany::ApprovalReply,
+    ) -> (Result<arany::RunOutcome, EngineError>, usize, usize, Engine) {
         let engine = engine_support::open(
             StateRoot::open_existing(&self.state).unwrap(),
             EngineConfig {
@@ -156,13 +166,41 @@ impl Repo {
                         if lose {
                             arany::FaultPlan::lose_guard_receipt(approval.intent.id);
                         }
-                        approval.decide(true);
+                        let answer = reply(&approval);
+                        approval.decide(answer);
                     }
                 }
             }
         };
         let calls = provider.requests.lock().unwrap().len();
         (outcome, asked, calls, engine)
+    }
+
+    fn settings(&self, document: Value) {
+        let permissions = self.state.join("permissions.json");
+        std::fs::write(&permissions, serde_json::to_vec(&document).unwrap()).unwrap();
+        std::fs::set_permissions(&permissions, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    fn saved_rules(&self) -> Vec<arany::permissions::TypedPrefixEntry> {
+        arany::permissions::PermissionSettings::load(
+            &StateRoot::open_existing(&self.state).unwrap(),
+            &self.workspace,
+        )
+        .unwrap()
+        .typed_prefixes()
+    }
+
+    fn edit(&self, edit: arany::permissions::TypedPrefixEdit) {
+        let state = StateRoot::open_existing(&self.state).unwrap();
+        arany::permissions::PermissionSettings::load(&state, &self.workspace)
+            .unwrap()
+            .save_edit(&state, &self.workspace, edit)
+            .unwrap();
+    }
+
+    fn change(&self, text: &str) {
+        std::fs::write(self.workspace.join("src/a.txt"), text).unwrap();
     }
 
     async fn reopen(
@@ -339,4 +377,338 @@ async fn a_lost_git_publication_receipt_stays_uncertain_and_is_never_retried() {
         tool.observation.as_ref().unwrap().disposition,
         ToolDisposition::Uncertain
     );
+}
+
+fn commit(message: &str) -> ToolCall {
+    ToolCall::GitCommit {
+        message: message.into(),
+        paths: vec!["src/a.txt".into()],
+        staged: false,
+    }
+}
+
+fn answer() -> ProviderOutcome {
+    ProviderOutcome::Answer(Answer {
+        text: "Done".into(),
+    })
+}
+
+fn verdict_of(view: &SessionView, run: usize) -> arany::permissions::PermissionVerdict {
+    view.runs[run].tools[0]
+        .permission_verdict
+        .clone()
+        .expect("verdict")
+}
+
+#[tokio::test]
+async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart() {
+    use arany::permissions::{
+        Decision, PermissionMode, PermissionSource, TypedGitPrefix, TypedPrefixEdit,
+    };
+    let repo = Repo::new();
+    let mut offered = Vec::new();
+    let (outcome, asked, _, engine) = repo
+        .run_replying(
+            vec![
+                tool_outcome(commit("third")),
+                tool_outcome(commit("again")),
+                answer(),
+            ],
+            false,
+            |approval| {
+                offered.push(approval.remember_prefix);
+                if offered.len() == 1 {
+                    arany::ApprovalReply::AllowPrefixInFolder
+                } else {
+                    arany::ApprovalReply::AllowOnce
+                }
+            },
+        )
+        .await;
+    let first = outcome.unwrap();
+    assert_eq!(asked, 2, "the saved rule applies only from the next Run");
+    assert_eq!(
+        offered,
+        [Some(TypedGitPrefix::Commit), Some(TypedGitPrefix::Commit)]
+    );
+    let (_, view) = repo.reopen(engine, first.session_id).await;
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.source, verdict.basis, verdict.approved),
+        (PermissionSource::Human, PermissionSource::Mode, true)
+    );
+    let rules = repo.saved_rules();
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        (
+            rules[0].prefix,
+            rules[0].decision,
+            rules[0].folder.as_deref()
+        ),
+        (
+            TypedGitPrefix::Commit,
+            Decision::Allow,
+            repo.workspace.to_str()
+        )
+    );
+    assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "third\n");
+
+    repo.change("echo\n");
+    let (outcome, asked, _, engine) = repo
+        .run_replying(
+            vec![tool_outcome(commit("fourth")), answer()],
+            false,
+            |_| panic!("a remembered allow must not ask"),
+        )
+        .await;
+    let second = outcome.unwrap();
+    assert_eq!(asked, 0);
+    assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "fourth\n");
+    let after = tree_snapshot(&repo.workspace);
+    let (events, view) = repo.reopen(engine, second.session_id).await;
+    assert_eq!(tree_snapshot(&repo.workspace), after);
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (
+            verdict.source,
+            verdict.basis,
+            verdict.mode,
+            verdict.approved
+        ),
+        (
+            PermissionSource::TypedPrefixRule,
+            PermissionSource::TypedPrefixRule,
+            Some(PermissionMode::Default),
+            true
+        )
+    );
+    assert!(matches!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .attestation,
+        Some(arany::Attestation::Guard(_))
+    ));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+            .count(),
+        1
+    );
+
+    repo.edit(TypedPrefixEdit::Replace {
+        index: 0,
+        decision: Decision::Deny,
+    });
+    repo.change("foxtrot\n");
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let (outcome, asked, _, engine) = repo
+        .run_replying(vec![tool_outcome(commit("fifth")), answer()], false, |_| {
+            panic!("a deny rule must not ask")
+        })
+        .await;
+    let denied = outcome.unwrap();
+    assert_eq!(asked, 0);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head);
+    let (_, view) = repo.reopen(engine, denied.session_id).await;
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.decision, verdict.source, verdict.approved),
+        (Decision::Deny, PermissionSource::TypedPrefixRule, false)
+    );
+    assert_eq!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        ToolDisposition::Denied
+    );
+
+    repo.edit(TypedPrefixEdit::Remove { index: 0 });
+    assert!(repo.saved_rules().is_empty());
+    let (outcome, asked, _, engine) = repo
+        .run_replying(
+            vec![tool_outcome(commit("sixth")), answer()],
+            false,
+            |approval| {
+                assert_eq!(approval.remember_prefix, Some(TypedGitPrefix::Commit));
+                arany::ApprovalReply::AllowOnce
+            },
+        )
+        .await;
+    let revoked = outcome.unwrap();
+    assert_eq!(asked, 1, "revocation restores the prompt");
+    let (_, view) = repo.reopen(engine, revoked.session_id).await;
+    assert_eq!(verdict_of(&view, 0).source, PermissionSource::Human);
+    assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "sixth\n");
+}
+
+#[tokio::test]
+async fn remembering_is_not_offered_without_settings_and_never_activates_them() {
+    use arany::permissions::PermissionSource;
+    let repo = Repo::new();
+    std::fs::remove_file(repo.state.join("permissions.json")).unwrap();
+    let (outcome, asked, _, engine) = repo
+        .run_replying(
+            vec![tool_outcome(commit("third")), answer()],
+            false,
+            |approval| {
+                assert_eq!(approval.remember_prefix, None);
+                arany::ApprovalReply::AllowOnce
+            },
+        )
+        .await;
+    let first = outcome.unwrap();
+    assert_eq!(asked, 1);
+    let (_, view) = repo.reopen(engine, first.session_id).await;
+    assert!(
+        view.runs[0]
+            .config
+            .as_ref()
+            .unwrap()
+            .tool_policy
+            .as_ref()
+            .unwrap()
+            .permissions_digest
+            .is_none()
+    );
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.mode, verdict.source, verdict.approved),
+        (None, PermissionSource::Human, true)
+    );
+    assert!(!repo.state.join("permissions.json").exists());
+}
+
+#[tokio::test]
+async fn a_failed_rule_save_after_the_verdict_dispatches_nothing_and_replays() {
+    use arany::permissions::PermissionSource;
+    let repo = Repo::new();
+    let elsewhere = repo._temp.path().join("elsewhere");
+    std::fs::write(&elsewhere, b"keep").unwrap();
+    std::os::unix::fs::symlink(&elsewhere, repo.state.join("permissions.pending")).unwrap();
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    let (outcome, asked, _, engine) = repo
+        .run_replying(vec![tool_outcome(commit("third")), answer()], false, |_| {
+            arany::ApprovalReply::AllowPrefixInFolder
+        })
+        .await;
+    let outcome = outcome.unwrap();
+    assert_eq!(asked, 1);
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head, "nothing dispatched");
+    assert_eq!(std::fs::read(&elsewhere).unwrap(), b"keep");
+    assert!(repo.saved_rules().is_empty());
+    let (_, view) = repo.reopen(engine, outcome.session_id).await;
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.source, verdict.approved),
+        (PermissionSource::Human, true),
+        "the human decision is journaled before the save"
+    );
+    assert_eq!(
+        view.runs[0].tools[0]
+            .observation
+            .as_ref()
+            .unwrap()
+            .disposition,
+        ToolDisposition::Denied
+    );
+}
+
+#[tokio::test]
+async fn an_unconfirmed_rule_save_is_uncertain_stops_the_run_and_never_dispatches_or_resaves() {
+    use arany::permissions::PermissionSource;
+    let repo = Repo::new();
+    let head = repo.git(&["rev-parse", "HEAD"]);
+    arany::FaultPlan::fail_record_sync(repo.state.clone(), "permissions.json");
+    let (outcome, asked, provider_calls, engine) = repo
+        .run_replying(vec![tool_outcome(commit("third")), answer()], false, |_| {
+            arany::ApprovalReply::AllowPrefixInFolder
+        })
+        .await;
+    let status = outcome.map(|outcome| outcome.run.status);
+    assert_eq!(
+        (asked, provider_calls),
+        (1, 1),
+        "no continuation: {status:?}"
+    );
+    assert_eq!(repo.git(&["rev-parse", "HEAD"]), head, "nothing dispatched");
+    let session = list_sessions(
+        StateRoot::open_existing(&repo.state).unwrap(),
+        repo.workspace.clone(),
+    )
+    .await
+    .unwrap()[0]
+        .id;
+    let saved = std::fs::read(repo.state.join("permissions.json")).unwrap();
+    let (events, view) = repo.reopen(engine, session).await;
+    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+    let verdict = verdict_of(&view, 0);
+    assert_eq!(
+        (verdict.source, verdict.approved),
+        (PermissionSource::Human, true)
+    );
+    let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+    assert_eq!(observation.disposition, ToolDisposition::Uncertain);
+    assert!(observation.output.contains("rule save not confirmed"));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, Event::ToolStarted { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        std::fs::read(repo.state.join("permissions.json")).unwrap(),
+        saved,
+        "replay never saves again"
+    );
+}
+
+#[tokio::test]
+async fn typed_prefix_rules_cannot_expand_git_authority() {
+    let repo = Repo::new();
+    let allow = |workspace: Value| {
+        json!({"permissions": {"typedPrefixes": [
+            {"prefix": ["git", "commit"], "decision": "allow", "workspace": workspace}
+        ]}})
+    };
+    // Repository content never adds rules.
+    for name in ["permissions.json", ".arany-permissions.json"] {
+        std::fs::write(
+            repo.workspace.join(name),
+            serde_json::to_vec(&allow(Value::Null)).unwrap(),
+        )
+        .unwrap();
+    }
+    let metadata = std::fs::metadata(&repo.workspace).unwrap();
+    let wrong = |inode: u64| {
+        allow(json!({
+            "path": repo.workspace,
+            "device": std::os::unix::fs::MetadataExt::dev(&metadata),
+            "inode": inode,
+        }))
+    };
+    for (document, label) in [
+        (json!({"permissions": {}}), "repository files only"),
+        (
+            wrong(std::os::unix::fs::MetadataExt::ino(&metadata) + 1),
+            "another folder identity",
+        ),
+    ] {
+        repo.settings(document);
+        let (outcome, asked, _, engine) = repo
+            .run_replying(vec![tool_outcome(commit("third")), answer()], false, |_| {
+                arany::ApprovalReply::Deny
+            })
+            .await;
+        let outcome = outcome.unwrap();
+        assert_eq!(asked, 1, "{label}");
+        let (_, view) = repo.reopen(engine, outcome.session_id).await;
+        assert!(!verdict_of(&view, 0).approved, "{label}");
+    }
+    assert_eq!(repo.git(&["log", "-1", "--format=%s", "main"]), "second\n");
 }

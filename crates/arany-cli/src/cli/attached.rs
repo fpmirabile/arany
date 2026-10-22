@@ -1103,6 +1103,30 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 .await?,
                             ));
                         } else if command == InteractiveCommand::Permissions {
+                            match permissions::choose_area(&mut terminal).await? {
+                                None => {
+                                    terminal
+                                        .restore_draft_input(composer.text().len())
+                                        .map_err(|error| error.to_string())?;
+                                    notice =
+                                        Some(Feedback::History("Permissions unchanged".into()));
+                                    continue;
+                                }
+                                Some(permissions::PermissionArea::TypedGitRules) => {
+                                    let summary = permissions::manage_rules(
+                                        &mut terminal,
+                                        &admission.state_dir,
+                                        &admission.workspace,
+                                    )
+                                    .await?;
+                                    terminal
+                                        .restore_draft_input(composer.text().len())
+                                        .map_err(|error| error.to_string())?;
+                                    notice = Some(Feedback::History(summary));
+                                    continue;
+                                }
+                                Some(permissions::PermissionArea::FolderTrust) => {}
+                            }
                             let permissions = match permissions::open_or_recover(
                                 &mut terminal,
                                 &admission.workspace,

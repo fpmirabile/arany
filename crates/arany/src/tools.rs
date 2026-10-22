@@ -682,6 +682,12 @@ impl ToolRuntime {
             grant.reject_overlap(&[workspace, state.path(), account.as_path()])?;
         }
         let workspace_identity = fs::workspace_identity(&root)?;
+        let permissions = permissions.map(|mut snapshot| {
+            let mut config = (*snapshot.config).clone();
+            config.scope_to(workspace, workspace_identity);
+            snapshot.config = std::sync::Arc::new(config);
+            snapshot
+        });
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
         if fs::workspace_identity(&fs::open_directory(workspace)?)? != workspace_identity {
@@ -831,6 +837,28 @@ impl ToolRuntime {
             self.workspace_identity,
             call,
         )
+    }
+
+    pub(crate) fn record_typed_prefix_rule(
+        &self,
+        prefix: permissions::TypedGitPrefix,
+    ) -> Result<(), ToolError> {
+        fs::validate_workspace(self)?;
+        let state = self
+            .cache_state
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        permissions::PermissionSettings::remember(
+            state,
+            &self.workspace,
+            self.workspace_identity,
+            prefix,
+        )
+        .map_err(|error| match error {
+            permissions::SettingsError::Busy => ToolError::AccountBusy,
+            permissions::SettingsError::NotConfirmed => ToolError::Uncertain,
+            _ => ToolError::Configuration,
+        })
     }
 
     pub(crate) fn allows_skill(&self, name: &str) -> bool {
