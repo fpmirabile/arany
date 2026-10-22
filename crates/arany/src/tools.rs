@@ -1040,15 +1040,6 @@ impl ToolRuntime {
                                 self.permissions.as_ref().map(|snapshot| snapshot.digest);
                             pin
                         })
-                        .filter(|pin| {
-                            !unguarded::interpreter(program)
-                                && !unguarded::interpreter(&pin.executable)
-                                || self.config.commands.iter().any(|command| {
-                                    command.interpreter
-                                        && command.executable == pin.executable
-                                        && command.sha256 == pin.sha256
-                                })
-                        })
                 }
                 _ => None,
             },
@@ -1065,6 +1056,20 @@ impl ToolRuntime {
             expires_at_ms: now_ms().saturating_add(60_000),
             use_count: 1,
         }
+    }
+
+    pub(crate) fn host_interpreter_admitted(&self, intent: &EffectIntent) -> bool {
+        let ToolCall::CommandUnguarded { program, .. } = &intent.call else {
+            return false;
+        };
+        intent.host.as_ref().is_some_and(|pin| {
+            !unguarded::interpreter(program) && !unguarded::interpreter(&pin.executable)
+                || self.config.commands.iter().any(|command| {
+                    command.interpreter
+                        && command.executable == pin.executable
+                        && command.sha256 == pin.sha256
+                })
+        })
     }
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
@@ -1182,6 +1187,9 @@ impl ToolRuntime {
         let Some(pin) = &intent.host else {
             return unstarted_observation(intent, ToolError::Configuration);
         };
+        if !self.host_interpreter_admitted(&intent) {
+            return unstarted_observation(intent, ToolError::Configuration);
+        }
         let settings_match = self.cache_state.as_ref().is_some_and(|state| {
             Self::load_permissions(state)
                 .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)

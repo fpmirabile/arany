@@ -3873,6 +3873,23 @@ async fn unavailable_guard_hides_guarded_commands_and_refuses_before_spawn() {
     )
     .await;
     assert!(result.attestation.is_none());
-    assert_ne!(result.disposition, ToolDisposition::Succeeded);
+    assert_eq!(result.disposition, ToolDisposition::Failed);
+    assert_eq!(
+        result.output,
+        "Guard native protection unavailable before dispatch; no operation was dispatched."
+    );
     assert!(!temp.path().join("canary").exists());
+}
+
+#[test]
+fn host_pin_requires_explicit_nullable_permissions_digest() {
+    let pin = super::types::test_host_pin();
+    let mut value = serde_json::to_value(&pin).unwrap();
+    assert!(value["permissions_digest"].is_null());
+    assert_eq!(
+        serde_json::from_value::<super::types::HostCommandPin>(value.clone()).unwrap(),
+        pin
+    );
+    value.as_object_mut().unwrap().remove("permissions_digest");
+    assert!(serde_json::from_value::<super::types::HostCommandPin>(value).is_err());
 }

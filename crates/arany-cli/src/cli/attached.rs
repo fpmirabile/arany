@@ -1325,7 +1325,6 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 InteractiveCommand::Resume
                                     | InteractiveCommand::New
                                     | InteractiveCommand::Fork
-                                    | InteractiveCommand::Permissions
                             ) {
                                 engine
                                     .revoke_host_approvals()

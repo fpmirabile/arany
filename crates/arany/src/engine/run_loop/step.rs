@@ -133,6 +133,7 @@ struct HostPermission {
     permission: Permission,
     epoch: Option<uuid::Uuid>,
     source: Option<[u8; 32]>,
+    remember: bool,
 }
 
 impl HostPermission {
@@ -150,6 +151,59 @@ impl HostPermission {
                 session: approved && matches!(save, Some(RuleSave::Session)),
                 source_intent: self.source,
             })
+    }
+}
+
+#[derive(Clone, Copy)]
+struct HostReuseFacts {
+    host: bool,
+    settings_admitted: bool,
+    mode: Option<crate::tools::permissions::PermissionMode>,
+    terminal_mode: Option<ApprovalMode>,
+    session_scope: bool,
+    permission: Permission,
+    hook_restriction: Option<Decision>,
+    state_target: Option<bool>,
+    epoch: Option<uuid::Uuid>,
+    source: Option<[u8; 32]>,
+    grants: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum HostReuse {
+    OnceOnly,
+    OfferSession,
+    Reuse([u8; 32]),
+}
+
+fn decide_host_reuse(facts: &HostReuseFacts) -> HostReuse {
+    use crate::tools::permissions::PermissionMode;
+    if !facts.host
+        || !facts.settings_admitted
+        || !matches!(
+            facts.mode,
+            None | Some(PermissionMode::Default | PermissionMode::DontAsk)
+        )
+        || facts.terminal_mode != Some(ApprovalMode::Request)
+        || !facts.session_scope
+        || facts.permission.basis == PermissionSource::Rule
+        || facts.hook_restriction.is_some()
+        || facts.state_target != Some(false)
+        || facts.epoch.is_none()
+        || facts.permission.decision == Decision::Deny
+            && !(facts.permission.basis == PermissionSource::Mode
+                && facts.mode == Some(PermissionMode::DontAsk))
+    {
+        return HostReuse::OnceOnly;
+    }
+    match facts.source {
+        Some(source) => HostReuse::Reuse(source),
+        None if facts.grants < 128
+            && matches!(facts.mode, None | Some(PermissionMode::Default)) =>
+        {
+            HostReuse::OfferSession
+        }
+        None => HostReuse::OnceOnly,
     }
 }
 
@@ -1101,59 +1155,56 @@ impl RunLoop<'_> {
         permission: Permission,
         hooks: &HookFold,
     ) -> Result<HostPermission, EngineError> {
-        let config = runtime.permissions();
-        let host_epoch = self.ledger().view(|view| {
-            view.runs
+        let (epoch, source, grants) = self.ledger().view(|view| {
+            let epoch = view
+                .runs
                 .last()
                 .and_then(|run| run.config.as_ref())
                 .and_then(|config| config.tool_policy.as_ref())
-                .and_then(|policy| policy.host_epoch)
-        })?;
-        let reusable_mode = matches!(
-            config.map(|config| config.mode()),
-            None | Some(
-                crate::tools::permissions::PermissionMode::Default
-                    | crate::tools::permissions::PermissionMode::DontAsk
+                .and_then(|policy| policy.host_epoch);
+            (
+                epoch,
+                epoch.and_then(|epoch| view.host_approval(intent, epoch)),
+                epoch.map_or(0, |epoch| view.host_grants(epoch).count()),
             )
-        );
-        let host_source = if intent.call.is_unguarded()
-            && runtime.host_settings_admitted
-            && reusable_mode
-            && (permission.decision != Decision::Deny
-                || permission.basis == PermissionSource::Mode
-                    && config.is_some_and(|config| {
-                        config.mode() == crate::tools::permissions::PermissionMode::DontAsk
-                    }))
-            && permission.basis != PermissionSource::Rule
-            && self.terminal_mode() == Some(ApprovalMode::Request)
-            && hooks.restriction.is_none()
-            && intent
-                .host
-                .as_ref()
-                .is_some_and(|pin| !crate::tools::unguarded::state_target(&intent.call, pin))
-            && self
+        })?;
+        let facts = HostReuseFacts {
+            host: intent.call.is_unguarded(),
+            settings_admitted: runtime.host_settings_admitted,
+            mode: runtime.permissions().map(|config| config.mode()),
+            terminal_mode: self.terminal_mode(),
+            session_scope: self
                 .controls
                 .approvals
-                .is_some_and(|approvals| approvals.admits_session_scope())
-        {
-            self.ledger()
-                .view(|view| host_epoch.and_then(|epoch| view.host_approval(intent, epoch)))?
-        } else {
-            None
+                .is_some_and(|approvals| approvals.admits_session_scope()),
+            permission,
+            hook_restriction: hooks.restriction,
+            state_target: intent
+                .host
+                .as_ref()
+                .map(|pin| crate::tools::unguarded::state_target(&intent.call, pin)),
+            epoch,
+            source,
+            grants,
         };
-        let permission = if host_source.is_some() {
-            Permission {
-                decision: Decision::Allow,
-                basis: PermissionSource::SessionApproval,
-                approval: None,
-            }
-        } else {
-            permission
+        let (permission, source, remember) = match decide_host_reuse(&facts) {
+            HostReuse::OnceOnly => (permission, None, false),
+            HostReuse::OfferSession => (permission, None, true),
+            HostReuse::Reuse(source) => (
+                Permission {
+                    decision: Decision::Allow,
+                    basis: PermissionSource::SessionApproval,
+                    approval: None,
+                },
+                Some(source),
+                false,
+            ),
         };
         Ok(HostPermission {
             permission,
-            epoch: host_epoch,
-            source: host_source,
+            epoch,
+            source,
+            remember,
         })
     }
 
@@ -1212,9 +1263,12 @@ impl RunLoop<'_> {
                 !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
             }),
             unguarded: match grant {
-                Grant::Primary { request, .. } if intent.call.is_unguarded() => {
-                    Some(self.unguarded(runtime, request, &intent)?)
-                }
+                Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
+                    gate: unguarded_gate(runtime, &intent).map(|mut prompt| {
+                        prompt.remember = host_permission.remember;
+                        prompt
+                    }),
+                }),
                 Grant::Primary { .. } | Grant::Researcher { .. } => None,
             },
             goal_allows,
@@ -1366,35 +1420,6 @@ impl RunLoop<'_> {
             }
             (verdict, _) => verdict,
         })
-    }
-
-    fn unguarded(
-        &self,
-        runtime: &ToolRuntime,
-        _request: &ProviderRequest,
-        intent: &EffectIntent,
-    ) -> Result<Unguarded, EngineError> {
-        let mut gate = unguarded_gate(runtime, intent);
-        if let Ok(prompt) = &mut gate {
-            prompt.remember = self
-                .controls
-                .approvals
-                .is_some_and(|approvals| approvals.admits_session_scope())
-                && self.terminal_mode() == Some(ApprovalMode::Request)
-                && matches!(
-                    runtime.permissions().map(|config| config.mode()),
-                    None | Some(crate::tools::permissions::PermissionMode::Default)
-                )
-                && self.ledger().view(|view| {
-                    view.runs
-                        .last()
-                        .and_then(|run| run.config.as_ref())
-                        .and_then(|config| config.tool_policy.as_ref())
-                        .and_then(|policy| policy.host_epoch)
-                        .is_some_and(|epoch| view.host_grants(epoch).count() < 128)
-                })?;
-        }
-        Ok(Unguarded { gate })
     }
 
     async fn ask(
@@ -2195,6 +2220,7 @@ pub(super) enum HookDenial {
 pub(super) enum UnguardedRefusal {
     SettingsChanged,
     UnavailableProgram,
+    InterpreterNotAdmitted,
     PrivilegeTool,
     GuardAlias,
 }
@@ -2616,6 +2642,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
             ToolDisposition::Denied,
             "Host program could not be pinned through an absolute PATH outside the Workspace; nothing ran".into(),
         ),
+        NotDispatched::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted) => (
+            ToolDisposition::Denied,
+            "Host interpreter requires a matching tools.json command with interpreter: true, executable path and digest; nothing ran".into(),
+        ),
         NotDispatched::UnguardedNotOffered(UnguardedRefusal::GuardAlias) => (
             ToolDisposition::Denied,
             "Guard path aliases such as /workspace do not exist on the host; an unguarded re-run is not offered; no operation was dispatched".into(),
@@ -2717,6 +2747,9 @@ fn unguarded_gate(
         .host
         .as_ref()
         .ok_or(UnguardedRefusal::UnavailableProgram)?;
+    if !runtime.host_interpreter_admitted(intent) {
+        return Err(UnguardedRefusal::InterpreterNotAdmitted);
+    }
     if crate::tools::types::uses_guard_alias(args) {
         return Err(UnguardedRefusal::GuardAlias);
     }
@@ -3226,6 +3259,168 @@ mod tests {
     }
 
     #[test]
+    fn host_reuse_and_session_offers_share_eligibility() {
+        use crate::tools::permissions::PermissionMode as M;
+        let baseline = HostReuseFacts {
+            host: true,
+            settings_admitted: true,
+            mode: Some(M::Default),
+            terminal_mode: Some(ApprovalMode::Request),
+            session_scope: true,
+            permission: Permission {
+                basis: PermissionSource::Mode,
+                ..asks(ApprovalMode::Request)
+            },
+            hook_restriction: None,
+            state_target: Some(false),
+            epoch: Some(uuid::Uuid::now_v7()),
+            source: None,
+            grants: 0,
+        };
+        for (facts, expected) in [
+            (baseline, HostReuse::OfferSession),
+            (
+                HostReuseFacts {
+                    mode: None,
+                    ..baseline
+                },
+                HostReuse::OfferSession,
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    source: Some([1; 32]),
+                    grants: 128,
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    grants: 128,
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    source: Some([1; 32]),
+                    ..baseline
+                },
+                HostReuse::Reuse([1; 32]),
+            ),
+            (
+                HostReuseFacts {
+                    mode: Some(M::DontAsk),
+                    permission: deny(PermissionSource::Mode),
+                    ..baseline
+                },
+                HostReuse::OnceOnly,
+            ),
+        ] {
+            assert_eq!(decide_host_reuse(&facts), expected);
+        }
+        for ineligible in [
+            HostReuseFacts {
+                host: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                settings_admitted: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::AcceptEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                mode: Some(M::Plan),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::Auto),
+                ..baseline
+            },
+            HostReuseFacts {
+                terminal_mode: Some(ApprovalMode::AutoEdits),
+                ..baseline
+            },
+            HostReuseFacts {
+                session_scope: false,
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: allow(PermissionSource::Rule),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: asks(ApprovalMode::Request),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Rule),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::Mode),
+                ..baseline
+            },
+            HostReuseFacts {
+                permission: deny(PermissionSource::PinnedGrant),
+                mode: Some(M::DontAsk),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Ask),
+                ..baseline
+            },
+            HostReuseFacts {
+                hook_restriction: Some(Decision::Deny),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: Some(true),
+                ..baseline
+            },
+            HostReuseFacts {
+                state_target: None,
+                ..baseline
+            },
+            HostReuseFacts {
+                epoch: None,
+                ..baseline
+            },
+        ] {
+            for source in [None, Some([1; 32])] {
+                assert_eq!(
+                    decide_host_reuse(&HostReuseFacts {
+                        source,
+                        ..ineligible
+                    }),
+                    HostReuse::OnceOnly
+                );
+            }
+        }
+    }
+
+    #[test]
     fn remembering_is_offered_only_where_a_typed_allow_takes_effect() {
         use crate::tools::permissions::PermissionMode as M;
         assert!(typed_allow_takes_effect(Some(M::Default)));
@@ -3338,6 +3533,10 @@ mod tests {
         Timeout,
         HumanOnly,
         NotOffered,
+        PrivilegeTool,
+        SettingsChanged,
+        UnavailableProgram,
+        InterpreterNotAdmitted,
         Offered,
         OutsidePlan,
         Blocked,
@@ -3358,7 +3557,15 @@ mod tests {
         approval: Option<Resolution>,
     ) -> (Option<ApprovalMode>, DispatchDecision<'a>) {
         let has = |fact| facts.contains(&fact);
-        let gate = if has(Fact::NotOffered) {
+        let gate = if has(Fact::PrivilegeTool) {
+            Some(Err(UnguardedRefusal::PrivilegeTool))
+        } else if has(Fact::SettingsChanged) {
+            Some(Err(UnguardedRefusal::SettingsChanged))
+        } else if has(Fact::UnavailableProgram) {
+            Some(Err(UnguardedRefusal::UnavailableProgram))
+        } else if has(Fact::InterpreterNotAdmitted) {
+            Some(Err(UnguardedRefusal::InterpreterNotAdmitted))
+        } else if has(Fact::NotOffered) {
             Some(Err(UnguardedRefusal::GuardAlias))
         } else if has(Fact::Offered) {
             Some(prompt())
@@ -3428,6 +3635,11 @@ mod tests {
         #[rustfmt::skip]
         let rows = [
             // Gate refusals, decided before any Ask.
+            (decide(Primary, asks(Request), &none, &[PrivilegeTool, Timeout], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::PrivilegeTool), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[SettingsChanged], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::SettingsChanged), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[UnavailableProgram], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::UnavailableProgram), None), ask_, S::UnavailableApproval),
+            (decide(Primary, asks(Request), &none, &[InterpreterNotAdmitted], None), None, no(N::UnguardedNotOffered(UnguardedRefusal::InterpreterNotAdmitted), None), ask_, S::UnavailableApproval),
+            (decide(Primary, allow(S::SessionApproval), &none, &[Offered, InProcess], None), None, Ok(Dispatch::Direct), allow_, S::SessionApproval),
             (decide(Primary, allow(S::Rule), &none, &[Timeout], None), None, no(timeout(), None), allow_, S::Rule),
             (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
             (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),

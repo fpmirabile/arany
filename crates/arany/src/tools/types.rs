@@ -597,6 +597,7 @@ impl ToolPolicyReceipt {
 #[serde(deny_unknown_fields)]
 pub struct HostCommandPin {
     pub state_roots: [String; 2],
+    #[serde(deserialize_with = "Option::deserialize")]
     pub permissions_digest: Option<[u8; 32]>,
     pub workspace: String,
     pub executable: String,

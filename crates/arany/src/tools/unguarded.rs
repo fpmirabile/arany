@@ -900,20 +900,41 @@ mod tests {
     }
 
     #[test]
-    fn interpreter_table_matches_the_closed_plan_without_name_heuristics() {
-        let plan = include_str!("../../../../planning/primary-host-commands/README.md");
-        let row = plan
-            .lines()
-            .find(|line| line.starts_with("| Shells, interpreters"))
-            .unwrap();
-        let names: Vec<_> = row
-            .split('|')
-            .nth(2)
-            .unwrap()
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .collect();
+    fn interpreter_table_matches_the_closed_policy_without_name_heuristics() {
+        let names = [
+            "awk",
+            "gawk",
+            "mawk",
+            "nawk",
+            "sed",
+            "sh",
+            "bash",
+            "dash",
+            "zsh",
+            "ksh",
+            "mksh",
+            "fish",
+            "csh",
+            "tcsh",
+            "python",
+            "python2",
+            "python3",
+            "pypy",
+            "pypy3",
+            "node",
+            "nodejs",
+            "deno",
+            "bun",
+            "perl",
+            "ruby",
+            "php",
+            "lua",
+            "luajit",
+            "tclsh",
+            "wish",
+            "pwsh",
+            "powershell",
+        ];
         assert_eq!(INTERPRETERS, names);
         for program in names.into_iter().chain(["busybox", "toybox"]) {
             assert!(interpreter(program), "{program}");
@@ -933,19 +954,37 @@ mod tests {
 
     #[test]
     fn wrappers_never_admit_literal_privilege_tools() {
-        let plan = include_str!("../../../../planning/primary-host-commands/README.md");
-        let row = plan
-            .lines()
-            .find(|line| line.starts_with("| Wrappers and command launchers |"))
-            .unwrap();
-        let names: Vec<_> = row
-            .split('|')
-            .nth(2)
-            .unwrap()
-            .split('`')
-            .skip(1)
-            .step_by(2)
-            .collect();
+        let names = [
+            "env",
+            "xargs",
+            "find",
+            "nice",
+            "ionice",
+            "timeout",
+            "nohup",
+            "setsid",
+            "time",
+            "busybox",
+            "toybox",
+            "stdbuf",
+            "chrt",
+            "taskset",
+            "flock",
+            "command",
+            "exec",
+            "strace",
+            "ltrace",
+            "nsenter",
+            "unshare",
+            "setpriv",
+            "script",
+            "watch",
+            "eatmydata",
+            "runcon",
+            "capsh",
+            "firejail",
+            "bwrap",
+        ];
         assert_eq!(WRAPPERS, names);
         for wrapper in WRAPPERS {
             for privilege in PRIVILEGE_TOOLS {

@@ -563,6 +563,79 @@ async fn live_session_approval_reuses_identical_intents_without_writing_old_rule
 }
 
 #[tokio::test]
+async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
+    for configured in [false, true] {
+        let host = Host::new(None);
+        let config_path = host.state.join("tools.json");
+        let mut config: Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        if configured {
+            config["commands"][0]["interpreter"] = json!(false);
+        } else {
+            config["commands"] = json!([]);
+        }
+        private_file(&config_path, &serde_json::to_vec(&config).unwrap());
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![
+                    tool_outcome(unguarded("printf inspected")),
+                    finish("refused"),
+                ],
+                Some(ApprovalMode::Request),
+                vec![],
+            )
+            .await;
+        assert!(seen.prompts.is_empty());
+        assert!(last_tool(&seen).intent.host.is_some());
+        denied(
+            &seen,
+            "Host interpreter requires a matching tools.json command with interpreter: true",
+        );
+        let (_, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(view.runs[0].unguarded_tools(), 0);
+        let tool = view.runs[0].tools.last().unwrap();
+        assert!(tool.intent.host.is_some());
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+        assert!(!tool.permission_verdict.as_ref().unwrap().approved);
+    }
+}
+
+#[tokio::test]
+async fn non_reusable_host_requests_offer_once_only() {
+    for rule in [false, true] {
+        let host = Host::new(rule.then_some(&json!({"permissions":{"ask":["command_unguarded"]}})));
+        let call = if rule {
+            unguarded("printf inspected")
+        } else {
+            ToolCall::CommandUnguarded {
+                program: "sh".into(),
+                args: vec![
+                    "-c".into(),
+                    "printf inspected".into(),
+                    host.state.to_string_lossy().into_owned(),
+                ],
+                cwd: String::new(),
+                justification: "Inspect a user-requested state target".into(),
+            }
+        };
+        let seen = host
+            .run(
+                &host.workspace,
+                vec![tool_outcome(call), finish("refused")],
+                Some(ApprovalMode::Request),
+                vec![ApprovalReply::Deny],
+            )
+            .await;
+        assert_eq!(seen.prompts.len(), 1);
+        assert!(!seen.prompts[0].remember);
+        denied(&seen, "Approval was not granted");
+        let (_, view) = host.reopen(seen.outcome.session_id).await;
+        assert_eq!(view.runs[0].unguarded_tools(), 0);
+    }
+}
+
+#[tokio::test]
 async fn primary_inspects_an_absolute_host_target_without_guarded_programs_or_failure() {
     let host = Host::new(None);
     let outside = host._temp.path().join("outside");
