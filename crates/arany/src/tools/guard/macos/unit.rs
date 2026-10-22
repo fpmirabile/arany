@@ -817,27 +817,22 @@ impl Drop for Unit {
     }
 }
 
-#[expect(clippy::too_many_lines, reason = "frozen until C2")]
-pub(super) async fn execute(
-    runtime: &ToolRuntime,
+fn action_deadlines(
+    active_window: Option<crate::tools::ActiveToolWindow>,
     intent: &EffectIntent,
-    mut cancellation: Cancellation,
-    dispatched: &AtomicBool,
-) -> Result<ToolObservation, ToolError> {
-    let (mut unit, active_window) = tokio::select! {
-        biased;
-        () = cancellation.cancelled() => return Err(ToolError::Operation),
-        unit = Unit::admit(runtime, intent) => unit?,
+    fallback_started: tokio::time::Instant,
+) -> (
+    tokio::time::Instant,
+    tokio::time::Instant,
+    tokio::time::Instant,
+) {
+    let selection_time = if primary_command(intent) {
+        crate::tools::selection::PHASE_TIME
+    } else {
+        Duration::ZERO
     };
-    crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
-    let mut cache = super::super::build_cache_session(runtime, intent)?;
-    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
-    if let Some(private) = &runtime.worker {
-        private.contained.store(false, Ordering::Release);
-    }
-    let fallback_started = tokio::time::Instant::now();
     let preparation_deadline = active_window.map_or(
-        fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE,
+        fallback_started + CONNECT_DEADLINE + PREPARATION_DEADLINE + selection_time,
         |window| window.preparation_deadline,
     );
     let go_deadline = active_window.map_or(
@@ -856,6 +851,7 @@ pub(super) async fn execute(
             fallback_started
                 + CONNECT_DEADLINE
                 + PREPARATION_DEADLINE
+                + selection_time
                 + Duration::from_millis(
                     u64::from(intent.limits.cache_transfer_ms).saturating_mul(2),
                 )
@@ -865,6 +861,29 @@ pub(super) async fn execute(
         },
         |window| window.completion_deadline,
     );
+    (preparation_deadline, go_deadline, completion_deadline)
+}
+
+#[expect(clippy::too_many_lines, reason = "frozen until C2")]
+pub(super) async fn execute(
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    mut cancellation: Cancellation,
+    dispatched: &AtomicBool,
+) -> Result<ToolObservation, ToolError> {
+    let (mut unit, active_window) = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => return Err(ToolError::Operation),
+        unit = Unit::admit(runtime, intent) => unit?,
+    };
+    crate::tools::fs::reject_overlap(&unit.root, &runtime.workspace)?;
+    let mut cache = super::super::build_cache_session(runtime, intent)?;
+    let cache_transfer = cache.as_ref().map(|session| session.transfer.clone());
+    if let Some(private) = &runtime.worker {
+        private.contained.store(false, Ordering::Release);
+    }
+    let (preparation_deadline, go_deadline, completion_deadline) =
+        action_deadlines(active_window, intent, tokio::time::Instant::now());
     let go_cancellation = cancellation.clone();
     let execution = async {
         let capture = FixtureSpan::begin(FixtureStage::Connect);
@@ -915,12 +934,9 @@ pub(super) async fn execute(
                     super::super::selection_phase::receive(&mut stream, deadline),
                 )
                 .await?;
-                bytes = tokio::time::timeout_at(
-                    preparation_deadline,
-                    read_line_capped(&mut stream, 2048),
-                )
-                .await
-                .map_err(|_| ToolError::Limit)??;
+                bytes = tokio::time::timeout_at(go_deadline, read_line_capped(&mut stream, 2048))
+                    .await
+                    .map_err(|_| ToolError::Limit)??;
             }
             let mut cache_sent = false;
             let mut image_sent = false;
@@ -1005,22 +1021,24 @@ pub(super) async fn execute(
                             return Err(ToolError::Operation);
                         }
                         payload_phase.store(false, Ordering::Release);
+                        let (deadline, report_deadline) =
+                            super::super::selection_phase::capture_deadlines(completion_deadline)?;
                         stream
                             .get_mut()
                             .write_all(b"CAPTURE\n")
                             .await
                             .map_err(|_| ToolError::Operation)?;
-                        let deadline = completion_deadline
-                            .min(tokio::time::Instant::now() + crate::tools::selection::PHASE_TIME);
                         stream
                             .get_mut()
                             .write_all(&super::super::selection_phase::encode_deadline(deadline)?)
                             .await
                             .map_err(|_| ToolError::Operation)?;
-                        let done =
-                            tokio::time::timeout_at(deadline, read_line_capped(&mut stream, 64))
-                                .await
-                                .map_err(|_| ToolError::Timeout(String::new()))??;
+                        let done = tokio::time::timeout_at(
+                            report_deadline,
+                            read_line_capped(&mut stream, 64),
+                        )
+                        .await
+                        .map_err(|_| ToolError::Timeout(String::new()))??;
                         if done != b"CAPTURE_DONE\n" {
                             return Err(ToolError::Operation);
                         }
@@ -1737,6 +1755,67 @@ mod tests {
     use crate::tools::ToolCall;
     use crate::tools::guard::read_capped;
     use std::io::Read;
+
+    #[test]
+    fn fallback_command_deadlines_reserve_selection_without_widening_active_windows() {
+        let mut intent = EffectIntent {
+            target: crate::session::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::session::RunId::default(),
+            agent_run_id: crate::session::AgentRunId::default(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: 1,
+            workspace_inode: 2,
+            call: ToolCall::Command {
+                program: "shell".into(),
+                args: Vec::new(),
+                cwd: ".".into(),
+            },
+            limits: ToolLimits {
+                cache_transfer_ms: 1_000,
+                ..ToolLimits::default()
+            },
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        let start = tokio::time::Instant::now();
+        let (preparation, go, completion) = action_deadlines(None, &intent, start);
+        let old_preparation = start + CONNECT_DEADLINE + PREPARATION_DEADLINE;
+        assert_eq!(
+            preparation - old_preparation,
+            crate::tools::selection::PHASE_TIME
+        );
+        assert_eq!(go - preparation, Duration::from_secs(1));
+        let window = crate::tools::ActiveToolWindow {
+            preparation_deadline: start + Duration::from_secs(1),
+            go_deadline: start + Duration::from_secs(2),
+            payload_deadline: start + Duration::from_secs(3),
+            completion_deadline: start + Duration::from_secs(4),
+        };
+        assert_eq!(
+            action_deadlines(Some(window), &intent, start),
+            (
+                window.preparation_deadline,
+                window.go_deadline,
+                window.completion_deadline
+            )
+        );
+        intent.call = ToolCall::Read {
+            path: "src/main.rs".into(),
+            offset: None,
+            limit: None,
+        };
+        let (other_preparation, other_go, other_completion) =
+            action_deadlines(None, &intent, start);
+        for (command, other) in [
+            (preparation, other_preparation),
+            (go, other_go),
+            (completion, other_completion),
+        ] {
+            assert_eq!(command - other, crate::tools::selection::PHASE_TIME);
+        }
+    }
 
     #[tokio::test]
     async fn native_manager_failures_keep_their_boundary() {

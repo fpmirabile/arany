@@ -1095,7 +1095,7 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
         ("ToolFinished", 21, COMMAND_TOOLFINISHED),
         ("HookFinished", 10, GLOB_HOOKFINISHED),
     ] {
-        for truncated in [false, true] {
+        for shape in ["full", "balanced", "asymmetric"] {
             let mut value: Value = serde_json::from_str(input).unwrap();
             let observation = if kind == "HookFinished" {
                 &mut value["observation"]
@@ -1112,9 +1112,9 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
             let mut old = String::new();
             while low <= high {
                 let count = low + (high - low) / 2;
-                let (stdout, total) = if truncated {
+                let (stdout, total) = if shape != "full" {
                     let head = "prefix".repeat(count);
-                    let tail = "suffix".repeat(count);
+                    let tail = "suffix".repeat(if shape == "asymmetric" { 1 } else { count });
                     let total = crate::tools::OutputTotal {
                         bytes: (head.len() + tail.len() + 1024) as u64,
                         lines: 1,
@@ -1177,6 +1177,9 @@ fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceil
                 );
             }
             assert!(result.stdout.contains("lines omitted;"));
+            if shape == "asymmetric" {
+                assert_eq!(result.stdout.split_once("]…\n").unwrap().1, "suffix");
+            }
             let (run, agent) = intent_scope(&migrated).unwrap();
             Event::decode(
                 kind,

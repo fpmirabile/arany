@@ -17,6 +17,20 @@ pub(super) fn selection_limits(limits: &ToolLimits) -> ToolLimits {
     limits
 }
 
+const CAPTURE_REPORT_TIME: Duration = Duration::from_secs(1);
+
+pub(super) fn capture_deadlines(
+    completion: tokio::time::Instant,
+) -> Result<(tokio::time::Instant, tokio::time::Instant), ToolError> {
+    let now = tokio::time::Instant::now();
+    let capture = completion
+        .checked_sub(CAPTURE_REPORT_TIME)
+        .filter(|deadline| *deadline > now)
+        .ok_or_else(|| ToolError::Timeout(String::new()))?
+        .min(now + PHASE_TIME);
+    Ok((capture, capture + CAPTURE_REPORT_TIME))
+}
+
 fn monotonic_nanos() -> Result<u64, ToolError> {
     #[cfg(target_os = "linux")]
     let (seconds, nanos) = {
@@ -115,6 +129,39 @@ pub(in crate::tools::guard) mod tests {
     use super::*;
     use crate::tools::selection::Selector;
     use tokio::io::AsyncWriteExt;
+
+    #[tokio::test(start_paused = true)]
+    async fn capture_reserves_bounded_report_time_inside_the_action() {
+        for remaining in [Duration::from_secs(30), Duration::from_secs(3)] {
+            let now = tokio::time::Instant::now();
+            let completion = now + remaining;
+            let (capture, report) = capture_deadlines(completion).unwrap();
+            assert_eq!(
+                capture,
+                (completion - CAPTURE_REPORT_TIME).min(now + PHASE_TIME)
+            );
+            assert_eq!(report - capture, CAPTURE_REPORT_TIME);
+            assert!(report <= completion);
+            tokio::time::advance(capture - now).await;
+            let (mut peer, stream) = tokio::io::duplex(64);
+            let mut stream = tokio::io::BufReader::new(stream);
+            let delivery = async {
+                tokio::time::sleep(CAPTURE_REPORT_TIME / 2).await;
+                peer.write_all(b"CAPTURE_DONE\n").await.unwrap();
+            };
+            let (result, ()) = tokio::join!(
+                tokio::time::timeout_at(report, read_line_capped(&mut stream, 64)),
+                delivery
+            );
+            assert_eq!(result.unwrap().unwrap(), b"CAPTURE_DONE\n");
+        }
+        for remaining in [Duration::ZERO, CAPTURE_REPORT_TIME / 2, CAPTURE_REPORT_TIME] {
+            assert!(matches!(
+                capture_deadlines(tokio::time::Instant::now() + remaining),
+                Err(ToolError::Timeout(_))
+            ));
+        }
+    }
 
     #[test]
     fn transported_deadline_never_restarts_the_action_budget() {

@@ -81,7 +81,7 @@ impl Window {
             return String::from_utf8_lossy(&stored).into_owned();
         }
         let head_len = keep.div_ceil(2).min(self.head.len());
-        let tail_len = (keep / 2).min(stored.len() - head_len);
+        let tail_len = (keep / 2).min(self.tail.len());
         let mut head = &stored[..head_len];
         let mut tail = &stored[stored.len() - tail_len..];
         // Drop only the incomplete character at a window edge, before lossy decoding.

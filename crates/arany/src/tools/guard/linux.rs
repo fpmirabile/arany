@@ -63,7 +63,7 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-oversize-omission-full-output-validation");
+    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-oversize-omission-full-output-validation");
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -1066,9 +1066,11 @@ pub(super) async fn execute_inner(
             .write_all(b"GO\n")
             .await
             .map_err(|_| ToolError::Operation)?;
-        if primary_command(intent) {
-            capture_phase(&mut unit, intent, &mut stdin, &mut stdout, deadline).await?;
-        }
+        let report_deadline = if primary_command(intent) {
+            capture_phase(&mut unit, intent, &mut stdin, &mut stdout, deadline).await?
+        } else {
+            None
+        };
         drop(stdin);
         let capture = async {
             let (observation, candidate) = receive_result(
@@ -1077,6 +1079,7 @@ pub(super) async fn execute_inner(
                 intent,
                 cache.as_ref(),
                 active_window.map(|window| window.completion_deadline),
+                report_deadline,
             )
             .await?;
             if candidate == super::CacheCandidate::Uncertain {
@@ -1653,7 +1656,7 @@ async fn capture_phase(
     stdin: &mut (impl tokio::io::AsyncWrite + Unpin),
     stdout: &mut (impl tokio::io::AsyncBufRead + Unpin),
     deadline: tokio::time::Instant,
-) -> Result<(), ToolError> {
+) -> Result<Option<tokio::time::Instant>, ToolError> {
     use tokio::io::AsyncBufReadExt;
     let handshake = async {
         if stdout
@@ -1668,16 +1671,19 @@ async fn capture_phase(
             }
             unit.set_limits(unit.capture_limits(&intent.limits)?)
                 .await?;
+            let (capture_deadline, report_deadline) =
+                super::selection_phase::capture_deadlines(deadline)?;
             stdin
                 .write_all(b"CAPTURE\n")
                 .await
                 .map_err(|_| ToolError::Operation)?;
             stdin
-                .write_all(&super::selection_phase::encode_deadline(deadline)?)
+                .write_all(&super::selection_phase::encode_deadline(capture_deadline)?)
                 .await
                 .map_err(|_| ToolError::Operation)?;
+            return Ok(Some(report_deadline));
         }
-        Ok(())
+        Ok(None)
     };
     tokio::time::timeout(
         Duration::from_millis(u64::from(intent.limits.runtime_ms)) + Duration::from_secs(3),
@@ -1693,11 +1699,12 @@ async fn receive_result(
     intent: &EffectIntent,
     cache: Option<&super::BuildCacheSession>,
     deadline: Option<tokio::time::Instant>,
+    report_deadline: Option<tokio::time::Instant>,
 ) -> Result<(ToolObservation, super::CacheCandidate), ToolError> {
     if let Some(session) = cache.filter(|_| runtime.worker.is_none()) {
         let read = super::read_observation_line(stdout, intent);
-        let observation = if primary_command(intent) {
-            tokio::time::timeout(crate::tools::selection::PHASE_TIME, read)
+        let observation = if let Some(report_deadline) = report_deadline {
+            tokio::time::timeout_at(report_deadline, read)
                 .await
                 .map_err(|_| ToolError::Timeout(String::new()))??
         } else {
@@ -1715,8 +1722,8 @@ async fn receive_result(
         Ok((observation, candidate))
     } else {
         let read = read_effect_observation(stdout, runtime, intent);
-        let observation = if primary_command(intent) {
-            tokio::time::timeout(crate::tools::selection::PHASE_TIME, read)
+        let observation = if let Some(report_deadline) = report_deadline {
+            tokio::time::timeout_at(report_deadline, read)
                 .await
                 .map_err(|_| ToolError::Timeout(String::new()))??
         } else {
