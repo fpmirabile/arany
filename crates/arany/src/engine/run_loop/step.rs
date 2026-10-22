@@ -1150,6 +1150,7 @@ impl RunLoop<'_> {
             hooks: &hooks,
             timeout_limit,
             host: intent.call.is_host(),
+            host_unpinned: intent.call.is_host() && intent.host.is_none(),
             human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
                 || self.controls.approvals.is_some_and(|approvals| {
                     !approvals
@@ -1269,8 +1270,7 @@ impl RunLoop<'_> {
             })
             .await?;
         }
-        let verdict = self.save_remembered_rule(runtime, site, verdict, save)?;
-        Ok(verdict)
+        self.save_remembered_rule(runtime, site, verdict, save)
     }
 
     // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
@@ -2141,6 +2141,7 @@ pub(super) enum NotDispatched {
     DelegationDeadline,
     DenyRule,
     OutsideGrant,
+    HostSourceUnavailable,
     ModeDenied,
     HumanOnlyUnavailable,
     HookFailureAfterClassify,
@@ -2188,6 +2189,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => ActiveTimeEffect::Untouched,
         }
@@ -2211,6 +2213,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => false,
         }
@@ -2251,6 +2254,7 @@ struct DispatchFacts<'a> {
     timeout_limit: Option<(u32, u32)>,
     human_only_unavailable: bool,
     host: bool,
+    host_unpinned: bool,
     unguarded: Option<Unguarded>,
     goal_allows: bool,
     runtime_allows: bool,
@@ -2316,6 +2320,9 @@ impl<'a> DispatchFacts<'a> {
                 let reason = match basis {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
                         NotDispatched::DenyRule
+                    }
+                    PermissionSource::PinnedGrant if self.host_unpinned => {
+                        NotDispatched::HostSourceUnavailable
                     }
                     PermissionSource::PinnedGrant => NotDispatched::OutsideGrant,
                     PermissionSource::Mode
@@ -2389,6 +2396,7 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             | NotDispatched::DelegationDeadline
             | NotDispatched::DenyRule
             | NotDispatched::OutsideGrant
+            | NotDispatched::HostSourceUnavailable
             | NotDispatched::ModeDenied
             | NotDispatched::HookFailureAfterClassify
             | NotDispatched::UnguardedNotOffered(_)
@@ -2504,6 +2512,7 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         NotDispatched::HookDenied(_)
         | NotDispatched::DenyRule
         | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
         | NotDispatched::ModeDenied
         | NotDispatched::HumanOnlyUnavailable
         | NotDispatched::HookFailureAfterClassify
@@ -2540,6 +2549,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         NotDispatched::OutsideGrant => (
             ToolDisposition::Denied,
             "Tool operation is outside the pinned grant".into(),
+        ),
+        NotDispatched::HostSourceUnavailable => (
+            ToolDisposition::Denied,
+            "Host source data is unavailable; no operation was dispatched".into(),
         ),
         NotDispatched::ModeDenied => (
             ToolDisposition::Denied,
@@ -3292,6 +3305,7 @@ mod tests {
     #[derive(Clone, Copy, PartialEq)]
     enum Fact {
         Host,
+        HostUnpinned,
         Timeout,
         HumanOnly,
         LateHookFailure,
@@ -3328,7 +3342,8 @@ mod tests {
             permission,
             hooks,
             timeout_limit: has(Fact::Timeout).then_some((9_000, 5_000)),
-            host: has(Fact::Host),
+            host: has(Fact::Host) || has(Fact::HostUnpinned),
+            host_unpinned: has(Fact::HostUnpinned),
             human_only_unavailable: has(Fact::HumanOnly),
             unguarded: gate.map(|gate| Unguarded {
                 late_hook_failure: has(Fact::LateHookFailure),
@@ -3453,6 +3468,9 @@ mod tests {
             (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
             (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),
             (decide(Researcher, deny(S::PinnedGrant), &none, &[], None), None, no(N::OutsideGrant, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::PinnedGrant), &none, &[HostUnpinned], None), None, no(N::HostSourceUnavailable, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::Hook), &denied, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
+            (decide(Primary, deny(S::PinnedGrant), &exhausted, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), deny_, S::PinnedGrant),
             (decide(Primary, deny(S::Mode), &none, &[], None), None, no(N::ModeDenied, None), deny_, S::Mode),
             (decide(Primary, deny(S::Hook), &denied, &[], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
             (decide(Primary, deny(S::Hook), &narrowing, &[], None), None, narrow(N::HookDenied(HookDenial::Narrowed("Read".into()))), deny_, S::Hook),

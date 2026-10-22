@@ -683,7 +683,7 @@ fn preparation_refusal(error: &ToolError) -> &'static str {
             "host: no admitted credential-helper search directory (requires root/user ownership and no group/other write permission); nothing dispatched."
         }
         ToolError::Limit => {
-            "host: preparation limit (refs 128 B; HEAD 256 B; config 64 KiB; index, packed refs or shallow 32 MiB; executable 256 MiB; credential query 128 KiB/256 entries/5 seconds); nothing dispatched."
+            "host: preparation limit (refs 128 B; HEAD 256 B; config 64 KiB; packed refs or shallow 32 MiB; executable 256 MiB; credential query 128 KiB/256 entries/5 seconds); nothing dispatched."
         }
         ToolError::Configuration => {
             "host: unsupported destination or authentication; configure a resolvable Git credential helper or ssh-agent and a pinned gh with existing auth; nothing dispatched."
