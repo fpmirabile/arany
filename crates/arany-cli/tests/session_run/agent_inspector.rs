@@ -1154,6 +1154,61 @@ fn agent_chats_follow_a_running_child_from_committed_events_only() {
 }
 
 #[test]
+fn exit_is_refused_while_a_run_is_active_and_succeeds_once_it_ends() {
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace directory");
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback listener");
+    write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let (requests, requested) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let server = gated_team_server(listener, 1, false, requests, released);
+    check_profile(&workspace, &state);
+    let prior = wait_product(
+        Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace)
+            .args(["exec", "--state-dir"])
+            .arg(&state)
+            .arg("--workspace")
+            .arg(&workspace)
+            .args(["--provider", "custom:local", "--model", "model-1", "prior"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn the prior Run"),
+    );
+    assert!(prior.status.success());
+    let id = String::from_utf8(prior.stderr)
+        .expect("prior stderr is UTF-8")
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("Session: ")
+                .and_then(|id| id.parse::<SessionId>().ok())
+        })
+        .expect("prior Run reports its Session");
+    let gates = Gates { requested, release };
+    let (mut attached, mut pty) = live_pty(&workspace, &state, id, false);
+    pty.await_request(&gates, "first");
+    pty.frame(0, &["Alt+Left/Right agents"], &[]);
+    gates.release.send(()).expect("release the first child");
+    pty.await_request(&gates, "second");
+    gates.release.send(()).expect("release the second child");
+    pty.await_request(&gates, "synthesis");
+    // The synthesis is held, so the Run is active: `/exit` is refused until it is released.
+    let release = gates.release.clone();
+    exit_live_after_refusal(&mut attached, &mut pty, move || {
+        release.send(()).expect("release the synthesis");
+    });
+    server.join().expect("server thread finishes");
+}
+
+#[test]
 fn selected_child_messaging_journey() {
     let temp = tempfile::tempdir().expect("private test root");
     let workspace = temp.path().join("workspace");
@@ -1471,10 +1526,23 @@ fn live_pty(
 
 // Exits through `/exit` and checks that the terminal settings were restored.
 fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
+    exit_live_after_refusal(attached, pty, || {});
+}
+
+// `on_refused` runs once a refusal of `/exit` is on screen, before the retry.
+fn exit_live_after_refusal(
+    attached: &mut ChildGuard,
+    pty: &mut LivePty,
+    mut on_refused: impl FnMut(),
+) {
     let refused = "unavailable while a Run is active";
+    let count = |screen: &str, text: &str| {
+        crate::process::pty_text_matches(screen.as_bytes(), text.as_bytes()).count()
+    };
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut from = pty.capture_from;
-    // A settling Run refuses `/exit`; resend only after a frame without that notice.
+    // A settling Run refuses `/exit` with a History notice that stays; resend once a newer
+    // refusal is followed by the idle status.
     'exit: loop {
         from = checkpoint_screen(
             &mut pty.transcript,
@@ -1484,6 +1552,7 @@ fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
             from,
         );
         pty.capture_from = from;
+        let earlier = count(&pty.screen(pty.transcript.len()), refused);
         pty.input.write_all(b"/exit\r").expect("exit attached mode");
         let mut was_refused = false;
         let mut inspected = 0;
@@ -1495,12 +1564,11 @@ fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
             for end in pty.frame_ends(from).into_iter().skip(inspected) {
                 inspected += 1;
                 let screen = pty.screen(end);
-                let shown = crate::process::pty_text_matches(screen.as_bytes(), refused.as_bytes())
-                    .next()
-                    .is_some();
-                if shown {
+                if count(&screen, refused) > earlier && !was_refused {
                     was_refused = true;
-                } else if was_refused {
+                    on_refused();
+                }
+                if was_refused && count(&screen, "ready ·") > 0 {
                     continue 'exit;
                 }
             }
