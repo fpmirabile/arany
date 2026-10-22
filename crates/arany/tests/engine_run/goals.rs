@@ -3467,46 +3467,89 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
 }
 
 #[tokio::test]
-async fn active_time_left_below_one_second_stops_the_tool_step_without_a_context_cause() {
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = facts_workspace(temp.path(), "v1");
-    let state_path = temp.path().join("state");
-    let budget = arany::GoalBudget {
-        max_active_ms: Some(6_000),
-        ..arany::GoalBudget::default()
-    };
-    let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget;
-    let provider = ScriptedProvider::new(vec![
-        arany::test_support::scenario::plan_outcome(plan),
-        crate::tool_outcome(facts_read()),
-    ]);
-    let provider = Arc::new(provider);
-    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
-    let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
-    input.include_paths.clear();
-    input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
-    let outcome = run_with(
-        &engine,
-        &provider,
-        input,
-        RunControls {
-            tools: ToolGrant::Configured,
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("budget-stopped Run");
-    engine.close().await.expect("engine shutdown");
+async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
+    for after_read in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "v1");
+        let state_path = temp.path().join("state");
+        let budget = arany::GoalBudget {
+            max_active_ms: Some(if after_read { 120_000 } else { 6_000 }),
+            ..arany::GoalBudget::default()
+        };
+        let mut plan = facts_plan(facts_digest("v2"));
+        plan.budget = budget;
+        let provider = ScriptedProvider::new(vec![
+            arany::test_support::scenario::plan_outcome(plan),
+            crate::tool_outcome(facts_read()),
+            finish_with("unexpected continuation"),
+        ]);
+        let provider = Arc::new(provider);
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let session = engine
+            .create_session(workspace.clone(), None)
+            .await
+            .expect("Session");
+        let gate = after_read.then(|| {
+            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
+                matches!(event, Event::ToolFinished { .. })
+            })
+        });
+        let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        input.goal = arany::GoalRequest::autonomous(budget, arany::GoalPhase::Implementation);
+        let outcome = {
+            let running = run_with(
+                &engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            if let Some((entered, release)) = gate {
+                tokio::select! {
+                    result = &mut running => panic!("Run ended before the Read committed: {:?}", result.map(|outcome| outcome.run.status)),
+                    entered = entered => entered.expect("Read reached its acknowledgment"),
+                }
+                tokio::time::pause();
+                tokio::time::advance(Duration::from_secs(121)).await;
+                release.send(()).expect("release the Read acknowledgment");
+                tokio::time::resume();
+            }
+            running.await.expect("budget-stopped Run")
+        };
+        engine.close().await.expect("engine shutdown");
 
-    let (_, view) = replayed(&state_path, outcome.session_id).await;
-    let run = &view.runs[0];
-    assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
-    assert_eq!(
-        provider.requests.lock().expect("requests").len(),
-        2,
-        "the plan call and the stopped Read call; no third call"
-    );
+        let (_, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+        let refusal = view.goals[0].budget_refusal.expect("Tool refusal receipt");
+        assert_eq!(refusal.action, arany::BudgetAction::Tool);
+        assert_eq!(refusal.dimension, arany::GoalLimit::ActiveTime);
+        assert_eq!(refusal.run_id, Some(run.id));
+        assert_eq!(refusal.agent_run_id, Some(run.agents[0].id));
+        if after_read {
+            assert_eq!(run.tools.len(), 1);
+            assert_eq!(
+                run.tools[0]
+                    .observation
+                    .as_ref()
+                    .expect("Read outcome")
+                    .disposition,
+                arany::ToolDisposition::Succeeded
+            );
+            assert_eq!(refusal.cause, arany::BudgetRefusalCause::Exhausted);
+        }
+        assert_eq!(
+            provider.requests.lock().expect("requests").len(),
+            2,
+            "the plan call and the stopped Read call; no third call"
+        );
+    }
 }
 
 // A cancellation or active-time expiry that lands while the call record commits still stops that call.

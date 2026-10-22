@@ -537,6 +537,12 @@ impl<'a> RunLoop<'a> {
                         .primary_tools(root_request, requests, turn, phase == AgentPhase::RootPlan)
                         .await?
                     {
+                        if let PrimaryEnd::Stopped(cause) = &end
+                            && matches!(cause, StopCause::Budget | StopCause::ActiveTime)
+                        {
+                            self.ledger()
+                                .capture_budget_refusal(budget_action, Some(self.primary_id))?;
+                        }
                         break end;
                     }
                 }
