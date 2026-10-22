@@ -485,7 +485,7 @@ pub(super) fn upgrade(root: &StateRoot, registry: &Registry<'_>) -> Result<bool,
         id,
         source,
         from_schema,
-        to_schema: SCHEMA_VERSION,
+        to_schema: registry.schema.current,
         phase: Phase::Preparing,
     };
     if identity_of(&dir, &marker.backup)?.is_some() {
@@ -570,7 +570,7 @@ fn stage(
             return Err(StoreError::InvalidHistory);
         }
         let transaction = staged.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for from in marker.from_schema..SCHEMA_VERSION {
+        for from in marker.from_schema..registry.schema.current {
             let schema_step = registry
                 .schema
                 .step(from)
@@ -595,7 +595,7 @@ fn stage(
                 .unwrap_or(i64::MAX),
             ],
         )?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        transaction.pragma_update(None, "user_version", registry.schema.current)?;
         step()?;
         transaction.commit()?;
     }
@@ -811,13 +811,13 @@ fn migratable(connection: &Connection, registry: &Registry<'_>) -> Result<Option
         [],
         |row| row.get(0),
     )?;
-    if !(registry.schema.floor..=SCHEMA_VERSION).contains(&schema)
+    if !(registry.schema.floor..=registry.schema.current).contains(&schema)
         || has_events != 1
         || !exact_schema(connection, &registry.schema, schema)?
     {
         return Ok(None);
     }
-    let mut needed = schema != SCHEMA_VERSION;
+    let mut needed = schema != registry.schema.current;
     let mut statement = connection.prepare("SELECT DISTINCT kind, event_version FROM events")?;
     let mut rows = statement.query([])?;
     while let Some(row) = rows.next()? {

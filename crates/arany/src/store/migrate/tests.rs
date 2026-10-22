@@ -1299,6 +1299,24 @@ fn checkpoint_below_floor_archives_history_intact_under_existing_locks() {
 }
 
 #[test]
+fn checkpoint_hot_journal_fails_read_only_eligibility_without_mutation() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, .. } = forked_history(&path);
+    checkpoint_fixture(&root);
+    create_private(&root.dir, checkpoints::FILES[1]).unwrap();
+    std::fs::write(path.join(checkpoints::FILES[1]), vec![0xA5; 512]).unwrap();
+    let originals: Vec<_> = [checkpoints::FILES[0], checkpoints::FILES[1]]
+        .into_iter()
+        .map(|name| (name, std::fs::read(path.join(name)).unwrap()))
+        .collect();
+    assert!(checkpoint_below_floor(&root).is_err());
+    for (name, original) in originals {
+        assert_eq!(std::fs::read(path.join(name)).unwrap(), original, "{name}");
+    }
+}
+
+#[test]
 fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
     for case in ["newer", "malformed", "extra_trigger", "busy", "unsafe"] {
         let temp = tempfile::tempdir().unwrap();
@@ -1336,6 +1354,15 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
             ),
             "unsafe" => assert!(result.is_err()),
             _ => assert!(result.unwrap().is_none()),
+        }
+        if matches!(case, "newer" | "extra_trigger") {
+            assert!(
+                matches!(
+                    checkpoints::load(&root, [0; 32], &mut None),
+                    Err(StoreError::CheckpointUnavailable)
+                ),
+                "{case}"
+            );
         }
         assert_eq!(
             std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
