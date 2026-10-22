@@ -42,7 +42,7 @@ pub(super) struct PermissionFrameProgress {
 const PROFILE_HANGING_INDENT: usize = 6;
 
 // Wraps at spaces; a token wider than the row hard-breaks at the row edge.
-fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
+pub(super) fn wrap_cells(text: &str, width: usize, indent: usize) -> Vec<String> {
     let indent = indent.min(width.saturating_sub(1));
     let mut rows = Vec::new();
     let mut row = String::new();
