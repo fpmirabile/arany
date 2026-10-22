@@ -859,8 +859,13 @@ fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
 
 #[tokio::test]
 async fn primary_clears_during_a_gated_background_worker_and_after_an_editor_wave() {
-    worker_case("clear_background").await;
-    worker_case("clear_after_wave").await;
+    // Fail instead of hanging if a fixture notification is ever missed.
+    tokio::time::timeout(std::time::Duration::from_secs(180), async {
+        worker_case("clear_background").await;
+        worker_case("clear_after_wave").await;
+    })
+    .await
+    .expect("clearing journey finished");
 }
 
 #[tokio::test]

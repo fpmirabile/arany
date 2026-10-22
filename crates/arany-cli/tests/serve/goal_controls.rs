@@ -215,10 +215,10 @@ async fn serve_defaults_complete_past_64_calls_and_30_active_minutes() {
         std::fs::write(&config, br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#).unwrap();
         std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o600)).unwrap();
         if finite {
-            let preferences = json!({"version":4,"preferences":{
+            let preferences = json!({"version":5,"preferences":{
                 "completion":"tabs","view":"fullscreen",
                 "goal_budget":arany::GoalBudget { max_provider_calls:Some(1), ..Default::default() },
-                "resources":arany::ToolResourceSettings::default(),"mouse":"wheel_and_clicks","copy_on_select":true
+                "resources":arany::ToolResourceSettings::default(),"mouse":"wheel_and_clicks","copy_on_select":true,"newline":"shift_enter"
             }});
             admitted
                 .record(arany::RecordKind::UiPreferences)
@@ -609,13 +609,13 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
     let state = root.path().join("state");
-    let preferences = json!({"version":4,"preferences":{
+    let preferences = json!({"version":5,"preferences":{
         "completion":"tabs",
         "view":"classic",
         "goal_budget":arany::GoalBudget{max_provider_calls:Some(1),..Default::default()},
         "resources":arany::ToolResourceSettings::default(),
         "mouse":"wheel_and_clicks",
-        "copy_on_select":true,
+        "copy_on_select":true,"newline":"shift_enter",
     }});
     arany::StateRoot::admit(&state)
         .unwrap()

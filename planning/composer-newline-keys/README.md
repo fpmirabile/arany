@@ -2,7 +2,8 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
+- Next action: implement slice 2.
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-22`
 - Basis: owner usability request and planning decisions, 2026-10-22.
@@ -102,7 +103,6 @@ Keep the existing 1-KiB preference record, draft/note caps, 64-byte key-sequence
 
 ## Vertical slices
 
-1. **One PR: compose portable newlines with a saved shortcut in every attached chat mode.** Cross raw/canonical input → composer edit versus submission → existing idle/active/child routing → `/settings` private save/restore → guidance. Implement backslash semantics, decoded Shift+Enter and selected Alt/Ctrl+Enter, retained aliases, canonical continuation and framed-paste rejection/drain. No keyboard negotiation yet: the fresh-session default is Enter to submit and setup-free backslash-Enter to add a newline, with Shift+Enter saved as the preferred modifier shortcut; hints recommend backslash-Enter unless a distinct shortcut has been received. Update Terminal and extend the composer, decoder, settings, linear/frame and attached submission owners above, including failure/uncertainty and no-dispatch observations. This slice is usable on legacy terminals and with manual modifier mappings.
 2. **One PR: make negotiated modifier newlines discoverable and restore the terminal reliably.** Build on slice 1: acquisition/query → bounded reply routing → scoped disambiguation → existing newline action → capability-aware settings/help/footer → release/reacquisition. Update Terminal's capability/restoration contract; extend decoder and Linux/macOS PTY/tmux owners for supported, unsupported and malformed paths, interleaved paste/typeahead, mode switching and fault cleanup. Keep slice 1's fallback when the end-to-end path is unavailable. No external terminal-setup process or config writer.
 
 Each slice ships behavior with its spec and evidence in the same PR. Implementation runs formatting, Clippy and targeted existing owners; required CI covers the full workspace. Follow [fixture procedures](../../agents/references/testing-details.md#terminal-process-fixtures). Build only in this worktree's `./target`; never set `CARGO_TARGET_DIR` or write build output under `/tmp`.
@@ -110,7 +110,7 @@ Each slice ships behavior with its spec and evidence in the same PR. Implementat
 ## Exit criteria
 
 - **Research gate passed:** current composer, saved settings, reader/mode lifecycle, evidence owners and peer behavior have primary citations; closed-source details and native support are not inferred.
-- **Plan gate passed:** the seven decisions resolve the requested behavior and real platform constraints. No material open question or new dependency remains; status is `Ready`.
+- **Plan gate passed:** the seven decisions resolve the requested behavior and real platform constraints. No material open question or new dependency remains.
 - **Implement gate:** land slices in order, proving exact newline/submission content, no paste submission, failure retention, confirmed settings application, bounded negotiation and restoration. If implementation contradicts a researched fact, return to Research before continuing.
 - Move accepted behavior to Terminal as it lands; keep missing native/assistive evidence in the existing NEXT_STEPS owners. Close the completed plan and index row under the [planning lifecycle](../README.md#lifecycle).
 
