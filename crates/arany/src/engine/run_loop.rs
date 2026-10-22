@@ -1083,10 +1083,12 @@ impl<'a> RunLoop<'a> {
             ),
             Settlement::Fail { failure, exhausted } => {
                 if exhausted {
-                    self.ledger().capture_budget_refusal(
-                        crate::session::BudgetAction::Provider,
-                        Some(self.primary_id),
-                    )?;
+                    if failure != RunFailure::CriterionUnmet {
+                        self.ledger().capture_budget_refusal(
+                            crate::session::BudgetAction::Provider,
+                            Some(self.primary_id),
+                        )?;
+                    }
                     self.ledger().mark_budget_stopped();
                 }
                 (

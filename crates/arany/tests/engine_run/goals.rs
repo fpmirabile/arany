@@ -1398,6 +1398,10 @@ async fn refused_answer_on_the_last_allowed_call_is_a_budget_close() {
     let goal = view.goal(outcome.goal_id).expect("Goal");
     assert_eq!(goal.status, arany::GoalStatus::Failed);
     assert_eq!(goal.provider_calls, 1);
+    let refusal = goal.budget_refusal.expect("Provider refusal receipt");
+    assert_eq!(refusal.action, arany::BudgetAction::Provider);
+    assert_eq!(refusal.run_id, Some(outcome.run.id));
+    assert_eq!(refusal.agent_run_id, Some(outcome.run.agents[0].id));
     assert!(goal.budget_closed);
     assert_eq!(
         view.continuable_goal().map(|source| source.id),
@@ -2518,6 +2522,10 @@ async fn autonomous_goal_stops_at_its_run_budget_and_fails_with_a_report() {
         goal.budget_refusal.map(|refusal| refusal.dimension),
         Some(arany::GoalLimit::Runs)
     );
+    let refusal = goal.budget_refusal.expect("next-Run refusal receipt");
+    assert_eq!(refusal.action, arany::BudgetAction::Run);
+    assert_eq!((refusal.run_id, refusal.agent_run_id), (None, None));
+    assert_eq!((refusal.used, refusal.limit), (2, 2));
     assert!(
         goal.budget_closed,
         "a budget close is journaled as exhausted"
