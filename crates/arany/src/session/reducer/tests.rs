@@ -4631,7 +4631,7 @@ mod goal_replay_tests {
         ) {
             let stdout = String::from_utf8(content.to_vec()).unwrap();
             serde_json::to_string(&crate::tools::types::CommandResult {
-                selection: Default::default(),
+                selection: Some(Default::default()),
                 exit_code: Some(0),
                 stdout_total: crate::tools::OutputTotal {
                     bytes: stdout.len() as u64,

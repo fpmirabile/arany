@@ -2985,7 +2985,7 @@ fn worker_protocol_command_criterion_requires_both_command_and_its_publication()
         ToolDisposition::Succeeded,
         Some(Attestation::for_site(&command)),
         &serde_json::to_string(&crate::tools::types::CommandResult {
-            selection: Default::default(),
+            selection: Some(Default::default()),
             exit_code: Some(0),
             stdout: String::new(),
             stderr: String::new(),

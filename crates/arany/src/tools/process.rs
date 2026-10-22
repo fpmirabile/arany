@@ -319,7 +319,7 @@ pub(super) fn fit_selected_command(
     }
     let render = |out: &str, err: &str| {
         serde_json::to_string(&CommandResult {
-            selection,
+            selection: Some(selection),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),
@@ -375,6 +375,7 @@ mod tests {
         )
         .unwrap();
         let result: CommandResult = serde_json::from_str(&text).unwrap();
+        assert_eq!(result.selection, Some(Default::default()));
         assert_eq!(result.changeset, changeset);
         assert!(matches!(
             fit_command(

@@ -428,30 +428,34 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
     let lines = stdout.lines.saturating_add(stderr.lines);
     let count = grouped_count(lines);
     let selection = result.get("selection")?;
-    let selection_count = |key: &str| selection[key].as_u64();
-    let counts = [
-        selection_count("ignored_entries")?,
-        selection_count("pruned_directories")?,
-        selection_count("oversized_inputs")?,
-        selection_count("discarded_outputs")?,
-    ];
-    let noun = |count: u64, singular: &str, plural: &str| {
-        format!(
-            "{} {}",
-            grouped_count(count),
-            if count == 1 { singular } else { plural }
-        )
-    };
-    let omissions = if counts.iter().any(|count| *count > 0) {
-        format!(
-            " · {} ({}), {}, {}",
-            noun(counts[0], "ignored entry", "ignored entries"),
-            noun(counts[1], "pruned root", "pruned roots"),
-            noun(counts[2], "oversized input", "oversized inputs"),
-            noun(counts[3], "discarded output", "discarded outputs")
-        )
+    let omissions = if selection.is_null() {
+        " · selection counts unavailable".into()
     } else {
-        String::new()
+        let selection_count = |key: &str| selection[key].as_u64();
+        let counts = [
+            selection_count("ignored_entries")?,
+            selection_count("pruned_directories")?,
+            selection_count("oversized_inputs")?,
+            selection_count("discarded_outputs")?,
+        ];
+        let noun = |count: u64, singular: &str, plural: &str| {
+            format!(
+                "{} {}",
+                grouped_count(count),
+                if count == 1 { singular } else { plural }
+            )
+        };
+        if counts.iter().any(|count| *count > 0) {
+            format!(
+                " · {} ({}), {}, {}",
+                noun(counts[0], "ignored entry", "ignored entries"),
+                noun(counts[1], "pruned root", "pruned roots"),
+                noun(counts[2], "oversized input", "oversized inputs"),
+                noun(counts[3], "discarded output", "discarded outputs")
+            )
+        } else {
+            String::new()
+        }
     };
     let diagnostic = if observation.disposition == arany::ToolDisposition::Failed
         && !stderr_text.trim().is_empty()
@@ -3056,10 +3060,16 @@ mod peer_row_tests {
         );
         let observation = tool.observation.as_mut().unwrap();
         let mut result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        result["selection"] = serde_json::Value::Null;
+        observation.output = result.to_string();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 1 line · selection counts unavailable"
+        );
         result["selection"] = serde_json::json!({
             "ignored_entries":7,"pruned_directories":2,"oversized_inputs":1,"discarded_outputs":3
         });
-        observation.output = result.to_string();
+        tool.observation.as_mut().unwrap().output = result.to_string();
         assert_eq!(
             plain_tool_summary(&tool_summary(&tool)),
             "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized input, 3 discarded outputs"

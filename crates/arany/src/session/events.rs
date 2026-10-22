@@ -1776,10 +1776,9 @@ pub(crate) fn add_command_selection(
         return Some(value);
     };
     if result.get("changeset").is_some() {
-        result.as_object_mut()?.insert(
-            "selection".into(),
-            serde_json::to_value(crate::tools::types::CommandSelectionSummary::default()).ok()?,
-        );
+        result
+            .as_object_mut()?
+            .insert("selection".into(), serde_json::Value::Null);
         let result: crate::tools::types::CommandResult = serde_json::from_value(result).ok()?;
         let mut text = serde_json::to_string(&result).ok()?;
         if text.len() > budget {

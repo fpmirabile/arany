@@ -148,7 +148,8 @@ pub struct CommandResult {
     pub stdout_total: OutputTotal,
     pub stderr_total: OutputTotal,
     pub changeset: CommandChangeset,
-    pub selection: CommandSelectionSummary,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub selection: Option<CommandSelectionSummary>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
@@ -186,7 +187,7 @@ pub enum CacheUpdate {
 
 impl CommandResult {
     pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
-        if !self.changeset.valid() || !self.selection.valid() {
+        if !self.changeset.valid() || !self.selection.is_none_or(CommandSelectionSummary::valid) {
             return None;
         }
         let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
@@ -204,7 +205,7 @@ impl CommandResult {
 
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
-            && self.selection.valid()
+            && self.selection.is_none_or(CommandSelectionSummary::valid)
             && self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
@@ -1871,7 +1872,7 @@ mod unguarded_vocabulary_tests {
             enforcement_cause: None,
             limit_cause: None,
             output: serde_json::to_string(&CommandResult {
-                selection: Default::default(),
+                selection: Some(Default::default()),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),
