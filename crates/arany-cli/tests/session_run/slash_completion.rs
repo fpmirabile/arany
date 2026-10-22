@@ -304,20 +304,27 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
           Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
           Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
-          Choice 5: Goal active time: unlimited (number or unlimited) (input in milliseconds)\r\n\
-          Choice 6: Default command timeout: 2 min (input in milliseconds)\r\n\
-          Choice 7: Maximum command timeout: 10 min (input in milliseconds)\r\n\
-          Choice 8: Build memory: 4.0 GB (input in bytes)\r\n\
-          Choice 9: Build processes/threads: 256\r\n\
-          Choice 10: Build writable project: 1.0 GB (input in bytes)\r\n\
-          Choice 11: Build cache: 8.0 GB (input in bytes)\r\n\
+          Choice 5: Goal active time: unlimited (duration or unlimited)\r\n\
+          Choice 6: Default command timeout: 2 min (duration, e.g. 30s)\r\n\
+          Choice 7: Maximum command timeout: 10 min (duration, e.g. 5m)\r\n\
+          Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)\r\n\
+          Choice 9: Build processes/threads: 256 (number)\r\n\
+          Choice 10: Build writable project: 1.0 GB (size, e.g. 1GB)\r\n\
+          Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)\r\n\
           Choice 12: Mouse: wheel and clicks (wheel and clicks|wheel only|off)\r\n\
           Choice 13: Copy on select: on (on|off)\r\n\
           Choice 14: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
           Notice: Modified newline shortcuts apply only to visual sessions; use backslash then Enter here\r\n\
           Input:\r\n",
     );
-    for rejected in [&b"combined\r"[..], b"12 combined\r", b"1 classic\r"] {
+    for rejected in [
+        &b"combined\r"[..],
+        b"12 combined\r",
+        b"1 classic\r",
+        b"6 30000\r",
+        b"8 512\r",
+        b"5 2h\r",
+    ] {
         let invalid_at = transcript.len();
         input
             .write_all(rejected)
@@ -329,6 +336,52 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             &mut answered,
             invalid_at,
             b"Notice: Type NUMBER VALUE from the list; q cancels\r\nInput:\r\n",
+        );
+    }
+    for (value, row) in [
+        (
+            "5 5m",
+            "Choice 5: Goal active time: 5 min (duration or unlimited)",
+        ),
+        (
+            "5 unlimited",
+            "Choice 5: Goal active time: unlimited (duration or unlimited)",
+        ),
+        (
+            "6 30s",
+            "Choice 6: Default command timeout: 30 s (duration, e.g. 30s)",
+        ),
+        (
+            "6 2min",
+            "Choice 6: Default command timeout: 2 min (duration, e.g. 30s)",
+        ),
+        (
+            "8 512MB",
+            "Choice 8: Build memory: 512.0 MB (size, e.g. 512MB)",
+        ),
+        ("8 4GB", "Choice 8: Build memory: 4.0 GB (size, e.g. 512MB)"),
+        ("11 0B", "Choice 11: Build cache: 0 B (size, e.g. 8GB)"),
+        ("11 8GB", "Choice 11: Build cache: 8.0 GB (size, e.g. 8GB)"),
+    ] {
+        let changed_at = transcript.len();
+        input
+            .write_all(format!("{value}\r").as_bytes())
+            .expect("human-unit setting");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            changed_at,
+            format!("{row}\r\n").as_bytes(),
+        );
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            changed_at,
+            b"Input:\r\n",
         );
     }
     let selected_at = transcript.len();
