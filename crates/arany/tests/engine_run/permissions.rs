@@ -84,16 +84,18 @@ async fn permission_dispatch_invalid_or_unsafe_settings_refuse_before_provider()
 }
 
 #[tokio::test]
-async fn exact_command_rules_reject_unsafe_or_invalid_records_before_provider_usage() {
-    for case in [
-        "group-readable",
-        "symlink",
-        "hardlink",
-        "oversized",
-        "129-entries",
-        "unknown",
-        "duplicate",
-        "version",
+async fn inactive_host_rules_enforce_file_admission_but_ignore_contents() {
+    for (case, admitted) in [
+        ("group-readable", false),
+        ("symlink", false),
+        ("hardlink", false),
+        ("oversized", false),
+        ("valid", true),
+        ("malformed", true),
+        ("129-entries", true),
+        ("unknown", true),
+        ("duplicate", true),
+        ("version", true),
     ] {
         let temp = tempfile::tempdir().unwrap();
         let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
@@ -134,8 +136,10 @@ async fn exact_command_rules_reject_unsafe_or_invalid_records_before_provider_us
             }
             "hardlink" => std::fs::hard_link(&path, state.join("rules-link.json")).unwrap(),
             "oversized" => private_file(&path, &vec![b' '; 64 * 1024 + 1]),
+            "malformed" => private_file(&path, b"{"),
             _ => (),
         }
+        let original = std::fs::read(&path).unwrap();
         let engine = engine_support::open(
             root,
             EngineConfig {
@@ -159,15 +163,23 @@ async fn exact_command_rules_reject_unsafe_or_invalid_records_before_provider_us
             },
         )
         .await;
-        assert!(
-            matches!(
-                result,
-                Err(EngineError::Tool(arany::ToolError::Configuration))
-            ),
-            "{case}"
-        );
-        assert!(provider.requests.lock().unwrap().is_empty(), "{case}");
+        if admitted {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.run.status, RunStatus::Finished, "{case}");
+            assert!(outcome.run.tools.is_empty(), "{case}");
+            assert_eq!(provider.requests.lock().unwrap().len(), 1, "{case}");
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(EngineError::Tool(arany::ToolError::Configuration))
+                ),
+                "{case}"
+            );
+            assert!(provider.requests.lock().unwrap().is_empty(), "{case}");
+        }
         engine.close().await.unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original, "{case}");
         let connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
         let started: i64 = connection
             .query_row(
@@ -176,12 +188,12 @@ async fn exact_command_rules_reject_unsafe_or_invalid_records_before_provider_us
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(started, 0, "{case}");
+        assert_eq!(started, i64::from(admitted), "{case}");
     }
 }
 
 #[tokio::test]
-async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_admitted_run() {
+async fn run_started_does_not_pin_inactive_rules_before_or_after_edits() {
     let temp = tempfile::tempdir().unwrap();
     let workspace = arany::test_support::goals::facts_workspace(temp.path(), "Fact");
     let state = temp.path().join("state");
@@ -189,7 +201,7 @@ async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_
     private_file(&state.join("tools.json"), br#"{"version":1,"workspace_paths":["notes"],"write":false,"commands":[],"skills":[],"mcp":[]}"#);
     let path = state.join("unguarded-commands.json");
     let original = br#"{"version":1,"commands":[]}"#;
-    let edited = br#"{ "version": 1, "commands": [] }"#;
+    let edited = b"malformed inactive rules";
     private_file(&path, original);
     let engine = engine_support::open(
         root,
@@ -233,7 +245,8 @@ async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_
     assert_eq!(provider.requests.lock().unwrap().len(), 2);
     engine.close().await.unwrap();
     let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-    for (outcome, bytes) in [(&first, original.as_slice()), (&second, edited.as_slice())] {
+    assert_eq!(std::fs::read(&path).unwrap(), edited);
+    for outcome in [&first, &second] {
         let events = store.load_session(outcome.session_id).await.unwrap();
         let view = SessionView::replay(outcome.session_id, &events)
             .unwrap()
@@ -244,17 +257,12 @@ async fn run_started_pins_the_rules_digest_and_a_later_edit_does_not_change_the_
             .find(|run| run.id == outcome.run.id)
             .unwrap();
         assert_eq!(run, &outcome.run);
-        let policy =
-            serde_json::to_value(run.config.as_ref().unwrap().tool_policy.as_ref().unwrap())
-                .unwrap();
-        let expected: [u8; 32] = Sha256::digest(bytes).into();
-        assert_eq!(
-            policy["unguarded_rules_digest"],
-            serde_json::json!(expected)
-        );
+        assert_eq!(run.status, RunStatus::Finished);
+        let policy = run.config.as_ref().unwrap().tool_policy.as_ref().unwrap();
+        assert_eq!(policy.unguarded_rules_digest, None);
         assert!(events.iter().any(|event| matches!(&event.event,
             Event::RunStarted { config, .. }
-                if serde_json::to_value(config.tool_policy.as_ref().unwrap()).unwrap()["unguarded_rules_digest"] == serde_json::json!(expected)
+                if config.tool_policy.as_ref().unwrap().unguarded_rules_digest.is_none()
         )));
     }
     store.close().await.unwrap();

@@ -337,18 +337,19 @@ fn budget_tool_fact(
         let cause = match source {
             Some(PermissionSource::Human) => "permission_denied; human approval not granted",
             Some(PermissionSource::Hook) => "hook_denied",
-            Some(
-                PermissionSource::Rule
-                | PermissionSource::ExactCommandRule
-                | PermissionSource::TypedPrefixRule,
-            ) => "permission_rule_denied",
+            Some(PermissionSource::Rule | PermissionSource::TypedPrefixRule) => {
+                "permission_rule_denied"
+            }
             Some(PermissionSource::Mode) => "permission_mode_denied",
             Some(PermissionSource::UnavailableApproval) => {
                 "permission_denied; approval unavailable"
             }
-            Some(PermissionSource::AiReview | PermissionSource::PinnedGrant) | None => {
-                "permission_denied"
-            }
+            Some(
+                PermissionSource::AiReview
+                | PermissionSource::PinnedGrant
+                | PermissionSource::SessionApproval,
+            )
+            | None => "permission_denied",
         };
         fact.push_str(&format!("; {cause}"));
     }

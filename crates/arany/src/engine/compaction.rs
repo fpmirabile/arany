@@ -257,6 +257,7 @@ impl Engine {
                 primary_id,
             },
             super::run_loop::LoopControls {
+                host_settings: &self.host_permissions,
                 policy: run
                     .config
                     .as_ref()

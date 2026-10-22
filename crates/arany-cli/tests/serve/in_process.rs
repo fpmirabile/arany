@@ -1278,6 +1278,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
     use arany::{CacheUpdate, ToolCall, ToolDisposition, ToolObservation};
     let intent = arany::EffectIntent {
         host: None,
+        host_command: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),

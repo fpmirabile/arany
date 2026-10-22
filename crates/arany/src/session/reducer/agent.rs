@@ -466,13 +466,8 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             if !valid_profile {
                 return Err(ReplayError::InvalidTransition);
             }
-            let parent_unguarded = config
-                .tool_policy
-                .as_ref()
-                .map_or(crate::tools::UnguardedGrant::Denied, |policy| {
-                    policy.child_unguarded
-                });
-            if grant.is_some_and(|grant| !grant.unguarded().narrows(parent_unguarded)) {
+            if grant.is_some_and(|grant| grant.unguarded() != crate::tools::UnguardedGrant::Denied)
+            {
                 return Err(ReplayError::InvalidTransition);
             }
             let child_grant = if config.tool_policy.is_some() {

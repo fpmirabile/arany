@@ -24,6 +24,7 @@ mod goal_success_tests {
     ) -> ToolObservation {
         let intent = EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
@@ -1652,6 +1653,7 @@ mod payload_version_tests {
     fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
         let intent = crate::tools::EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: run,
@@ -1836,11 +1838,12 @@ mod payload_version_tests {
             run_id: run,
             agent_run_id: agent,
             verdict: crate::tools::permissions::PermissionVerdict {
+                host: None,
                 intent_digest: [3; 32],
                 decision: crate::tools::permissions::Decision::Allow,
                 mode: None,
-                basis: crate::tools::permissions::PermissionSource::ExactCommandRule,
-                source: crate::tools::permissions::PermissionSource::ExactCommandRule,
+                basis: crate::tools::permissions::PermissionSource::SessionApproval,
+                source: crate::tools::permissions::PermissionSource::SessionApproval,
                 approved: true,
                 hook_restriction: None,
                 hooks: 0,
@@ -2352,11 +2355,11 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
 
 #[test]
 fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings() {
+    let run_version = crate::test_support::payload_version("RunFinished");
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
 
-    let run_version = payload_version("RunFinished").expect("payload version");
     let record = ProviderCallRecord {
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,

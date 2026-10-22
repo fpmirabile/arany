@@ -771,6 +771,7 @@ mod tests {
                 limit_cause: None,
                 intent: crate::tools::EffectIntent {
                     host: None,
+                    host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: Default::default(),

@@ -94,6 +94,7 @@ pub use tools::{
     ToolStep, TrustRecordError, TrustReset, UnguardedGrant, UnguardedPrompt, UnguardedReceipt,
     WorkspacePermissions, configured_skill_names, list_workspace_entries, mention_paths,
     native_protection_supported, now_ms, project_skills, runtime_skill_names, tool_guard_main,
+    tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

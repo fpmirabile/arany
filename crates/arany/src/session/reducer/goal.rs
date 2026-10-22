@@ -763,6 +763,7 @@ pub(super) fn apply(
         }
         Event::GoalResumed { goal_id } => {
             current.resume_goal(goal_id)?;
+            current.host_epoch_floor = prior;
         }
         Event::GoalPlanContractRecorded {
             goal_id,
@@ -858,14 +859,7 @@ pub(super) fn apply(
                     .observation
                     .as_ref()
                     .ok_or(ReplayError::InvalidTransition)?;
-                let mut feedback = tool.hook_feedback();
-                for proposal in run.hook_rerun_proposals(Some(tool.intent.digest())) {
-                    if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
-                        <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
-                    {
-                        feedback.push(proposal);
-                    }
-                }
+                let feedback = tool.hook_feedback();
                 before += crate::tools::types::model_result(observation, &feedback)
                     .to_string()
                     .len();

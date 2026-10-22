@@ -418,6 +418,7 @@ pub(in crate::cli) async fn run_configured(
                                 let goal = input.goal(loaded, &view)?;
                                 let submitted_goal = goal.id;
                                 let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
+                                let approvals = approvals.once_only();
                                 let approvals =
                                     if threads.approval_channel == ApprovalChannel::Restricted {
                                         approvals.without_human_only()

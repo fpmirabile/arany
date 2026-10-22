@@ -146,9 +146,9 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 13),
+    ("AgentSpawned", 14),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 17),
+    ("ProviderCallRecorded", 18),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -165,15 +165,15 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("WorkspaceRewindFinished", 1),
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
-    ("ToolPermissionDecided", 5),
-    ("HookStarted", 7),
-    ("HookFinished", 12),
-    ("ToolFinished", 23),
-    ("RunStarted", 21),
+    ("ToolPermissionDecided", 6),
+    ("HookStarted", 8),
+    ("HookFinished", 13),
+    ("ToolFinished", 24),
+    ("RunStarted", 22),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 17),
+    ("ToolStarted", 18),
     ("ContextCompacted", 7),
 ];
 
@@ -1447,6 +1447,81 @@ impl Event {
 // when it names them (they did not exist) or does not parse.
 pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
     before_operations(kind, payload, &["glob"], Some("glob"))
+}
+
+pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
+    use crate::tools::permissions::{HookResult, PermissionSource};
+    fn again<T: Serialize + for<'de> Deserialize<'de>>(
+        payload: &str,
+        allowed: impl FnOnce(&T) -> bool,
+    ) -> Option<String> {
+        let value = parse::<T>(payload).ok()?;
+        allowed(&value).then(|| serialize(&value).ok()).flatten()
+    }
+    fn intent_allowed(intent: &crate::tools::EffectIntent) -> bool {
+        intent.host_command.is_none() && !intent.call.is_unguarded()
+    }
+    fn observation_allowed(observation: &crate::tools::ToolObservation) -> bool {
+        intent_allowed(&observation.intent)
+            && !matches!(
+                observation.attestation,
+                Some(crate::tools::Attestation::Unguarded(_))
+            )
+    }
+    fn criterion_allowed(criterion: &GoalSuccessCriterion) -> bool {
+        !matches!(criterion, GoalSuccessCriterion::ToolCallSucceeded { call } if call.is_unguarded())
+    }
+    match kind {
+        "RunStarted" => again::<RunStartedPayload>(payload, |data| {
+            data.config.tool_policy.as_ref().is_none_or(|policy| {
+                policy.host_epoch.is_none()
+                    && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
+            })
+        }),
+        "ToolStarted" => again::<ToolStartedPayload>(payload, |data| intent_allowed(&data.intent)),
+        "ToolFinished" => {
+            again::<ToolFinishedPayload>(payload, |data| observation_allowed(&data.observation))
+        }
+        "ToolPermissionDecided" => {
+            again::<crate::tools::permissions::PermissionVerdict>(payload, |verdict| {
+                verdict.host.is_none()
+                    && verdict.basis != PermissionSource::SessionApproval
+                    && verdict.source != PermissionSource::SessionApproval
+            })
+        }
+        "AgentSpawned" => again::<SpawnPayload>(payload, |data| {
+            data.grant
+                .is_none_or(|grant| grant.unguarded() == crate::tools::UnguardedGrant::Denied)
+                && data
+                    .assignment
+                    .as_ref()
+                    .is_none_or(|assignment| criterion_allowed(&assignment.request.criterion))
+        }),
+        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload, |hook| {
+            intent_allowed(&hook.intent)
+        }),
+        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload, |outcome| {
+            observation_allowed(&outcome.observation)
+                && !matches!(&outcome.result, HookResult::Narrowed { call } if call.is_unguarded())
+        }),
+        "ProviderCallRecorded" => again::<ProviderCallRecord>(payload, |record| {
+            record
+                .refusal
+                .as_ref()
+                .is_none_or(|refusal| refusal.operation != "arany_command_unguarded")
+                && record
+                    .delegation
+                    .iter()
+                    .flatten()
+                    .all(|assignment| match assignment {
+                        ChildAssignment::Researcher { .. } => true,
+                        ChildAssignment::Editor { assignment } => {
+                            criterion_allowed(&assignment.criterion)
+                        }
+                    })
+        }),
+        _ => None,
+    }
 }
 
 // The same for the typed Git write variants, which a later payload version added.
