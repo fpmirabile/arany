@@ -3324,7 +3324,7 @@ async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
         ScriptedProvider::new(script)
             .with_chatgpt_account(Uuid::now_v7(), [7; 32])
             .with_context_window(32_768)
-            .with_max_output_tokens(16_384)
+            .with_max_output_tokens(4096)
             .with_input_tokens_at(4, 30_000),
     );
     let mut input = request(&workspace, "Read four times, then request the write");
@@ -3475,6 +3475,7 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
     ]));
     let mut next = request(&workspace, "Inspect the facts and answer this new message");
     next.session_id = Some(outcome.session_id);
+    next.title = None;
     next.include_paths.clear();
     let recovered = run_with(
         &engine,
@@ -7536,6 +7537,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         for _ in 0..6 {
             let mut input = request(&workspace, &"x".repeat(60 * 1024));
             input.session_id = session;
+            input.title = None;
             input.include_paths.clear();
             session = Some(
                 run_with(&engine, &seed, input, RunControls::default())
@@ -7544,6 +7546,7 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
                     .session_id,
             );
         }
+        let compaction_expected = window == Some(32_768) && line_repeats == 96;
         let mut provider = ScriptedProvider::new(vec![
             crate::tool_outcome(facts_read()),
             crate::tool_outcome(arany::ToolCall::List {
@@ -7554,13 +7557,26 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
         .with_chatgpt_account(Uuid::now_v7(), [7; 32])
         .with_profile("chatgpt", "gpt-6-luna")
         .with_effort(arany::Effort::Medium)
-        .with_max_output_tokens(16_384);
+        .with_max_output_tokens(4096);
         if let Some(window) = window {
             provider = provider.with_context_window(window);
+        }
+        if compaction_expected {
+            provider = provider.with_compactions(vec![Ok(CompactionResponse {
+                summary: "Read 83 lines from notes/facts.txt.".into(),
+                response_id: None,
+                usage: arany::Usage {
+                    input_tokens: Some(12),
+                    output_tokens: Some(8),
+                    ..Default::default()
+                },
+                wire_provenance: None,
+            })]);
         }
         let provider = Arc::new(provider);
         let mut input = request(&workspace, "Inspect the directory and answer");
         input.session_id = session;
+        input.title = None;
         input.include_paths.clear();
         if line_repeats == 24 {
             input.goal = arany::GoalRequest::new(
@@ -7598,22 +7614,24 @@ async fn catalog_windows_leave_continuation_room_in_a_crowded_session() {
                 >= if window == Some(32_768) {
                     72 * 1024
                 } else {
-                    280 * 1024
+                    192 * 1024
                 },
             "optional history cannot consume continuation room: {allowance}"
         );
         assert_eq!(run.tools.len(), 2);
         assert_eq!(provider.requests.lock().expect("requests").len(), 3);
-        if line_repeats == 24 {
-            assert!(
-                provider
-                    .compact_requests
-                    .lock()
-                    .expect("compactions")
-                    .is_empty(),
-                "an impossible future-turn reserve must not consume the three-call Goal budget"
-            );
-        }
+        assert_eq!(
+            provider.compact_requests.lock().expect("compactions").len(),
+            usize::from(compaction_expected),
+            "only the large read in the small window needs compaction"
+        );
+        assert!(
+            provider
+                .compact_responses
+                .lock()
+                .expect("summaries")
+                .is_empty()
+        );
         if window != Some(272_000) {
             assert!(
                 config.excluded_history_runs > 0,
