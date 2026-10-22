@@ -208,6 +208,11 @@ mod tests {
 
     #[test]
     fn retained_matchers_and_all_admission_budgets_are_bounded() {
+        let mut rules = Selector::new(0, Instant::now() + PHASE_TIME);
+        rules.add("", "x\n".repeat(504).as_bytes()).unwrap();
+        assert_eq!(rules.rules, 504);
+        assert!(matches!(rules.add("nested", b"x"), Err(ToolError::Limit)));
+
         let mut selector = Selector::new(0, Instant::now() + PHASE_TIME);
         for index in 0..CONTROL_FILES {
             let directory = format!("branch{}/nested{}", index / 16, index % 16);

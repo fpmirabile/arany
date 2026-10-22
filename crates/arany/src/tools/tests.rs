@@ -4014,7 +4014,18 @@ fn command_selection_freezes_rules_and_validates_ignored_output() {
             assert_eq!(changes.files.len(), 1);
             assert_eq!(changes.files[0].path, "source.txt");
         } else {
-            assert!(captured.is_err(), "{case}");
+            assert!(
+                match case {
+                    "collision" => matches!(captured, Err(super::ToolError::Conflict)),
+                    "ignored-link" | "ignored-hardlink" | "ignored-fifo" =>
+                        matches!(captured, Err(super::ToolError::Path)),
+                    "ignored-setid" => matches!(captured, Err(super::ToolError::FilesystemDenied)),
+                    "output-overflow" | "baseline-overflow" =>
+                        matches!(captured, Err(super::ToolError::Limit)),
+                    _ => unreachable!(),
+                },
+                "{case}"
+            );
         }
         assert_eq!(std::fs::read(source.join("source.txt")).unwrap(), b"before");
     }
@@ -4083,7 +4094,7 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
         "recursive",
         "braces",
         "expansion",
-        "rules",
+        "aggregate-expansion",
     ] {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("source");
@@ -4107,7 +4118,7 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
             "recursive" => std::fs::write(&control, "**/".repeat(5)).unwrap(),
             "braces" => std::fs::write(&control, "{a,b}".repeat(5)).unwrap(),
             "expansion" => std::fs::write(&control, "x".repeat(1985)).unwrap(),
-            "rules" => std::fs::write(&control, "x\n".repeat(4097)).unwrap(),
+            "aggregate-expansion" => std::fs::write(&control, "x\n".repeat(505)).unwrap(),
             _ => unreachable!(),
         }
         std::fs::write(source.join("visible"), b"source").unwrap();
@@ -4121,11 +4132,21 @@ fn command_selection_rejects_unsafe_or_unbounded_controls_before_copy() {
             &config,
             std::time::Instant::now() + super::selection::PHASE_TIME,
         );
-        match case {
-            "file-bytes" => assert!(matches!(result, Err(super::ToolError::Limit))),
-            "encoding" => assert!(matches!(result, Err(super::ToolError::Path))),
-            _ => assert!(result.is_err(), "{case}"),
-        }
+        assert!(
+            match case {
+                "link" | "hardlink" | "directory" | "encoding" =>
+                    matches!(result, Err(super::ToolError::Path)),
+                "file-bytes"
+                | "line"
+                | "stars"
+                | "recursive"
+                | "braces"
+                | "expansion"
+                | "aggregate-expansion" => matches!(result, Err(super::ToolError::Limit)),
+                _ => unreachable!(),
+            },
+            "{case}"
+        );
         assert_eq!(
             std::fs::read_dir(&target).unwrap().count(),
             0,

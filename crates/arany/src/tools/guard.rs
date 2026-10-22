@@ -1811,7 +1811,10 @@ pub(super) fn helper_main() -> ExitCode {
             }
         }
         #[cfg(target_os = "linux")]
-        let command_before = prepare_command_baseline(&task, workspace, &mut stdin)?;
+        let command_before = {
+            stage = BootstrapStage::Workspace;
+            prepare_command_baseline(&task, workspace, &mut stdin)?
+        };
         stage = BootstrapStage::Handshake;
         let ready = Ready {
             digest: task.intent.digest(),
