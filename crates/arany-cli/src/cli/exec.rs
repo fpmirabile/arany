@@ -1436,7 +1436,7 @@ mod tests {
                 Some("RunStarted") => 20,
                 Some("AgentSpawned") => 12,
                 Some("AgentFinished") => 10,
-                Some("ProviderCallRecorded") => 15,
+                Some("ProviderCallRecorded") => 16,
                 Some("RunFinished") => 9,
                 Some("GoalProviderCallReserved") => 7,
                 Some("MessageAccepted") => 7,
