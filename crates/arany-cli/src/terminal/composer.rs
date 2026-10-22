@@ -449,6 +449,10 @@ impl Composer {
         self.completion_layout
     }
 
+    pub(super) fn completion_tabs(&self) -> bool {
+        self.completion_layout == CompletionLayout::Tabs && self.text == "/"
+    }
+
     pub fn set_completion_layout(&mut self, layout: CompletionLayout) {
         self.completion_layout = layout;
         self.skills_tab = false;
@@ -458,10 +462,10 @@ impl Composer {
 
     pub(super) fn completion_header(&self) -> Option<&'static str> {
         self.completion_menu()?;
-        Some(match (self.completion_layout, self.skills_tab) {
-            (CompletionLayout::Combined, _) => "Commands + Skills",
-            (CompletionLayout::Tabs, false) => "[Commands]  Skills · Left/Right",
-            (CompletionLayout::Tabs, true) => "Commands  [Skills] · Left/Right",
+        Some(match (self.completion_tabs(), self.skills_tab) {
+            (false, _) => "Commands + Skills",
+            (true, false) => "[Commands]  Skills · Left/Right",
+            (true, true) => "Commands  [Skills] · Left/Right",
         })
     }
 
@@ -470,7 +474,7 @@ impl Composer {
     }
 
     pub(super) fn completion_description(&self, row: &str) -> String {
-        if let Some(name) = row.strip_prefix("Skill /") {
+        if let Some(name) = row.strip_prefix("(skill) /") {
             return format!("Invoke /{name}");
         }
         let name = row.strip_prefix("Cmd /").unwrap_or(row);
@@ -493,10 +497,11 @@ impl Composer {
     }
 
     pub fn set_runtime_skills(&mut self, names: &[String]) {
+        let commands = command_completions("/");
         self.skills = names
             .iter()
             .take(arany::MAX_SKILLS)
-            .filter(|name| arany::valid_tool_name(name))
+            .filter(|name| arany::valid_tool_name(name) && !commands.contains(&name.as_str()))
             .cloned()
             .collect();
         self.skills.sort();
@@ -565,14 +570,12 @@ impl Composer {
             ));
         }
         self.completion_menu().map(|(names, selected)| {
-            let commands = command_completions("/");
             (
                 names
                     .iter()
                     .map(|name| {
-                        if self.skills.iter().any(|skill| skill == name) && !commands.contains(name)
-                        {
-                            format!("Skill /{name}")
+                        if self.skills.iter().any(|skill| skill == name) {
+                            format!("(skill) /{name}")
                         } else {
                             format!("Cmd /{name}")
                         }
@@ -584,6 +587,13 @@ impl Composer {
     }
     pub fn text(&self) -> &str {
         &self.text
+    }
+
+    pub(super) fn slash_token(&self) -> Option<super::commands::SlashToken<'_>> {
+        if self.text_only {
+            return None;
+        }
+        super::commands::slash_token(&self.text, self.skills.iter().map(String::as_str))
     }
 
     pub fn character_count(&self) -> usize {
@@ -799,7 +809,7 @@ impl Composer {
         self.choices.cached_catalog()
     }
 
-    pub(super) fn command_preview(&self) -> Option<CommandPreview> {
+    pub(super) fn command_preview(&self, run_active: bool) -> Option<CommandPreview> {
         if self.text_only || !self.pastes.is_empty() {
             return None;
         }
@@ -829,9 +839,33 @@ impl Composer {
             return Some(CommandPreview {
                 ghost: String::new(),
                 ghost_is_placeholder: false,
+                status: if run_active && self.skills.iter().any(|skill| skill == names[selected]) {
+                    format!(
+                        "Skill /{} · unavailable during a Run · Tab completes · Esc close",
+                        names[selected]
+                    )
+                } else {
+                    format!(
+                        "Tab completes · Enter invokes /{} · Up/Down choose · Esc close",
+                        names[selected]
+                    )
+                },
+            });
+        }
+        if let Some(token) = self.slash_token()
+            && token.kind == "skill"
+        {
+            return Some(CommandPreview {
+                ghost: String::new(),
+                ghost_is_placeholder: false,
                 status: format!(
-                    "Tab completes · Enter invokes /{} · Up/Down choose · Esc close",
-                    names[selected]
+                    "Skill {} · {}",
+                    token.text,
+                    if run_active {
+                        "unavailable during a Run"
+                    } else {
+                        "Enter submits this Skill"
+                    }
                 ),
             });
         }
@@ -854,11 +888,10 @@ impl Composer {
     }
 
     fn skill_matches<'a>(&'a self, prefix: &'a str) -> impl Iterator<Item = &'a str> + 'a {
-        let commands = command_completions("/");
         self.skills
             .iter()
             .map(String::as_str)
-            .filter(move |name| name.starts_with(prefix) && !commands.contains(name))
+            .filter(move |name| name.starts_with(prefix))
     }
 
     pub(super) fn completion_menu(&self) -> Option<(Vec<&str>, usize)> {
@@ -876,13 +909,13 @@ impl Composer {
         if !prefix.is_empty() && !arany::valid_tool_name(prefix) {
             return None;
         }
-        if self.completion_layout == CompletionLayout::Tabs && self.skills_tab {
+        if self.completion_tabs() && self.skills_tab {
             names.clear();
         }
-        if self.completion_layout == CompletionLayout::Combined || self.skills_tab {
+        if !self.completion_tabs() || self.skills_tab {
             names.extend(self.skill_matches(prefix));
         }
-        if names.is_empty() && self.completion_layout == CompletionLayout::Combined {
+        if names.is_empty() && !self.completion_tabs() {
             return None;
         }
         let selected = self.completion_index.min(names.len().saturating_sub(1));
@@ -954,8 +987,7 @@ impl Composer {
             }
         }
         if let Some((names, selected)) = self.completion_menu() {
-            if matches!(input, TerminalInput::Left | TerminalInput::Right)
-                && self.completion_layout == CompletionLayout::Tabs
+            if matches!(input, TerminalInput::Left | TerminalInput::Right) && self.completion_tabs()
             {
                 self.skills_tab = !self.skills_tab;
                 self.completion_index = 0;
@@ -970,27 +1002,7 @@ impl Composer {
                         | TerminalInput::Down
                 )
             {
-                let submit = input == TerminalInput::Submit && !self.skills_tab && self.text != "/";
-                if submit {
-                    let skill = {
-                        let mut matches = self.skill_matches(&self.text[1..]);
-                        match (matches.next(), matches.next()) {
-                            (Some(name), None) => Some(name.to_owned()),
-                            _ => None,
-                        }
-                    };
-                    if let Some(name) = skill {
-                        self.text = format!("/{name}");
-                        self.cursor = self.text.len();
-                        self.completion_index = 0;
-                        self.completion_hidden = true;
-                    }
-                }
-                return if submit {
-                    ComposerEdit::Unchanged
-                } else {
-                    ComposerEdit::Changed
-                };
+                return ComposerEdit::Changed;
             }
             match input {
                 TerminalInput::Up => {
@@ -2119,6 +2131,71 @@ mod tests {
     }
 
     #[test]
+    fn slash_highlight_resolves_only_exact_admitted_leading_tokens() {
+        let mut composer = Composer::default();
+        composer.set_runtime_skills(&["ask-matt".into(), "help".into()]);
+        assert_eq!(composer.skills, ["ask-matt"]);
+        for (text, expected) in [
+            ("/ask-matt", Some(("/ask-matt", "skill"))),
+            ("/ask-matt   task\nnext", Some(("/ask-matt", "skill"))),
+            ("/help", Some(("/help", "command"))),
+            ("/help\t", Some(("/help", "command"))),
+            ("/help\tbad", None),
+            ("/new\nfoo", None),
+            ("/ask-matt\ttask", Some(("/ask-matt", "skill"))),
+            ("/ask-matt\ntask", Some(("/ask-matt", "skill"))),
+            ("/model value", Some(("/model", "command"))),
+            ("/clear", Some(("/clear", "command"))),
+            ("/ask", None),
+            ("/unknown", None),
+            ("//ask-matt", None),
+            (" /ask-matt", None),
+            ("/ ask-matt", None),
+            ("task /ask-matt", None),
+        ] {
+            composer.clear();
+            composer.insert_paste(text).unwrap();
+            assert_eq!(
+                composer.slash_token().map(|token| (token.text, token.kind)),
+                expected,
+                "{text}"
+            );
+            assert_eq!(composer.text(), text);
+        }
+        composer.clear();
+        composer.insert_paste("/ask-matt task").unwrap();
+        assert!(
+            composer
+                .command_preview(false)
+                .unwrap()
+                .status
+                .starts_with("Skill /ask-matt")
+        );
+        for draft in ["/ask", "/ask-matt", "/ask-matt task"] {
+            composer.clear();
+            composer.insert_paste(draft).unwrap();
+            let active = composer.command_preview(true).unwrap().status;
+            assert!(
+                active.contains("unavailable during a Run"),
+                "{draft}: {active}"
+            );
+            assert!(!active.contains("Enter"), "{draft}: {active}");
+            assert!(
+                composer
+                    .command_preview(false)
+                    .unwrap()
+                    .status
+                    .contains("Enter")
+            );
+        }
+        composer.set_runtime_skills(&[]);
+        assert!(composer.slash_token().is_none());
+        let mut child = Composer::text_only();
+        child.insert_paste("/help").unwrap();
+        assert!(child.slash_token().is_none());
+    }
+
+    #[test]
     fn slash_skills_are_distinct_bounded_invocations_with_command_precedence() {
         let mut composer = Composer::default();
         composer.insert_paste("/").unwrap();
@@ -2133,7 +2210,7 @@ mod tests {
         assert_eq!(composer.completion_rows().unwrap().0, Vec::<String>::new());
         assert!(
             composer
-                .command_preview()
+                .command_preview(false)
                 .unwrap()
                 .status
                 .starts_with("No Skills")
@@ -2141,22 +2218,46 @@ mod tests {
         composer.apply(TerminalInput::Submit);
         assert_eq!(composer.text(), "/");
         assert_eq!(composer.cursor_byte_offset(), cursor);
-        composer.set_runtime_skills(&["review".into()]);
+        composer.set_runtime_skills(&["review".into(), "react".into()]);
         composer.apply(TerminalInput::Character('r'));
-        assert_eq!(composer.completion_rows().unwrap().0, ["Skill /review"]);
-        composer.apply(TerminalInput::Left);
-        assert_eq!(composer.text(), "/r");
+        assert_eq!(composer.completion_header(), Some("Commands + Skills"));
         assert_eq!(
             composer.completion_rows().unwrap().0,
-            ["Cmd /rewind", "Cmd /resume", "Cmd /rename"]
+            [
+                "Cmd /rewind",
+                "Cmd /resume",
+                "Cmd /rename",
+                "(skill) /react",
+                "(skill) /review"
+            ]
         );
-        composer.apply(TerminalInput::Right);
+        assert_eq!(
+            composer.completion_description("(skill) /review"),
+            "Invoke /review"
+        );
+        composer.apply(TerminalInput::Backspace);
+        assert!(composer.completion_tabs());
+        assert!(composer.completion_skills_selected());
+        assert_eq!(
+            composer.completion_rows().unwrap().0,
+            ["(skill) /react", "(skill) /review"]
+        );
+        composer.apply(TerminalInput::Left);
+        composer.apply(TerminalInput::Character('r'));
+        assert_eq!(composer.completion_header(), Some("Commands + Skills"));
+        assert_eq!(
+            composer.completion_menu().unwrap().0,
+            ["rewind", "resume", "rename", "react", "review"]
+        );
+        assert_eq!(composer.completion_layout(), CompletionLayout::Tabs);
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.completion_menu().unwrap().1, 4);
+        assert_eq!(composer.text(), "/r");
         composer.apply(TerminalInput::Escape);
         composer.apply(TerminalInput::Left);
         assert_eq!(composer.cursor_byte_offset(), 1);
         assert!(composer.completion_menu().is_none());
         composer.clear();
-        composer.set_completion_layout(CompletionLayout::Combined);
         composer.set_runtime_skills(&[
             "review".into(),
             "help".into(),
@@ -2169,7 +2270,7 @@ mod tests {
             composer.insert_paste("/rev").unwrap();
             assert_eq!(
                 composer.completion_rows().unwrap(),
-                (vec!["Skill /review".into()], 0)
+                (vec!["(skill) /review".into()], 0)
             );
             assert_eq!(
                 composer.apply(accept),
@@ -2479,7 +2580,7 @@ mod tests {
                 assert_eq!(composer.cursor_byte_offset(), caret);
                 assert!(
                     composer
-                        .command_preview()
+                        .command_preview(false)
                         .expect("model preview")
                         .status
                         .contains("run /model")

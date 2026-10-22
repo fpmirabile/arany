@@ -740,6 +740,7 @@ mod tests {
             run_id: Default::default(),
             agent_run_id: Default::default(),
             record: crate::session::ProviderCallRecord {
+                rate_limits: None,
                 delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,
                 disposition: crate::session::ProviderCallDisposition::InvalidResponse,

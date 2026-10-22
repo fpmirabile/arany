@@ -643,6 +643,18 @@ fn accent_lead(line: String, palette: Palette) -> Line<'static> {
     }
 }
 
+fn slash_spans(text: String, cells: usize, style: Style, palette: Palette) -> Vec<Span<'static>> {
+    // Recognized slash tokens are ASCII, so their byte lengths equal character counts.
+    let split = text
+        .char_indices()
+        .nth(cells)
+        .map_or(text.len(), |(byte, _)| byte);
+    vec![
+        Span::styled(text[..split].to_owned(), style.patch(palette.selection())),
+        Span::styled(text[split..].to_owned(), style),
+    ]
+}
+
 pub(super) fn screen_terminal(
     mode: TerminalMode,
     cursor: Option<CursorQuery>,
@@ -1130,10 +1142,14 @@ pub(super) fn draw_history_rows(
             } else {
                 line.text.strip_prefix("  ").unwrap_or(&line.text)
             };
-            vec![
-                Span::styled(safe_truncate(marker, width), palette.accent()),
-                Span::styled(safe_truncate(text, width.saturating_sub(2)), style),
-            ]
+            let mut spans = vec![Span::styled(safe_truncate(marker, width), palette.accent())];
+            spans.extend(slash_spans(
+                safe_truncate(text, width.saturating_sub(2)),
+                line.slash_cells,
+                style,
+                palette,
+            ));
+            spans
         } else {
             vec![Span::styled(line.text.as_str(), style)]
         };
@@ -1297,7 +1313,7 @@ pub(super) fn draw_frame_with_history(
             } else {
                 String::new()
             };
-            let header_line = if composer.completion_layout() == super::CompletionLayout::Tabs {
+            let header_line = if composer.completion_tabs() {
                 let commands = if area.width < 40 { "Cmd" } else { "Commands" };
                 let selected = palette.selection().add_modifier(Modifier::REVERSED);
                 let skills_selected = composer.completion_skills_selected();
@@ -1389,7 +1405,7 @@ pub(super) fn draw_frame_with_history(
         false,
     );
     let preview = (!composer.text().contains('\n'))
-        .then(|| composer.command_preview())
+        .then(|| composer.command_preview(model.draft_action == DraftAction::InspectRun))
         .flatten();
     let status_y = area.bottom() - 1;
     if status_y < area.bottom() {
@@ -1443,17 +1459,18 @@ pub(super) fn native_line(row: &HistoryRow, width: u16, palette: Palette) -> Lin
     } else {
         &row.text
     };
-    Line::from(vec![
-        Span::styled(marker, palette.accent()),
-        Span::styled(
-            safe_truncate(text, usize::from(width).saturating_sub(marker.width())),
-            if row.heading {
-                palette.selection()
-            } else {
-                Style::default()
-            },
-        ),
-    ])
+    let mut spans = vec![Span::styled(marker, palette.accent())];
+    spans.extend(slash_spans(
+        safe_truncate(text, usize::from(width).saturating_sub(marker.width())),
+        row.slash_cells,
+        if row.heading {
+            palette.selection()
+        } else {
+            Style::default()
+        },
+        palette,
+    ));
+    Line::from(spans)
 }
 
 pub(super) fn draw_session_picker_frame(
@@ -1561,10 +1578,14 @@ fn draw_composer(
         .saturating_sub(visible_lines / 2)
         .min(draft_rows.lines.len().saturating_sub(visible_lines));
     let preview = (!picker_focused && !draft.contains('\n'))
-        .then(|| composer.command_preview())
+        .then(|| composer.command_preview(model.draft_action == DraftAction::InspectRun))
         .flatten();
     let inner_width = usize::from(area.width.saturating_sub(2));
     let mut rendered_lines = Vec::with_capacity(visible_lines);
+    let mut slash_cells = composer
+        .slash_token()
+        .map_or(0, |token| token.text.len())
+        .saturating_sub(draft_rows.lines[..first_line].iter().map(String::len).sum());
     for (index, line) in draft_rows
         .lines
         .iter()
@@ -1572,6 +1593,13 @@ fn draw_composer(
         .skip(first_line)
         .take(visible_lines)
     {
+        let mut spans = slash_spans(
+            line.clone(),
+            slash_cells.min(line.len()),
+            Style::default(),
+            palette,
+        );
+        slash_cells = slash_cells.saturating_sub(line.len());
         if index == draft_rows.cursor_row {
             let available = inner_width.saturating_sub(UnicodeWidthStr::width(line.as_str()));
             let ghost = preview.as_ref().map_or(String::new(), |preview| {
@@ -1583,20 +1611,16 @@ fn draw_composer(
                     String::new()
                 }
             });
-            rendered_lines.push(Line::from(vec![
-                Span::raw(line.clone()),
-                Span::styled(
-                    ghost,
-                    if palette.color {
-                        Style::default().add_modifier(Modifier::DIM)
-                    } else {
-                        Style::default()
-                    },
-                ),
-            ]));
-        } else {
-            rendered_lines.push(Line::raw(line.clone()));
+            spans.push(Span::styled(
+                ghost,
+                if palette.color {
+                    Style::default().add_modifier(Modifier::DIM)
+                } else {
+                    Style::default()
+                },
+            ));
         }
+        rendered_lines.push(Line::from(spans));
     }
     let mut position = if visible_lines > 0 && draft_rows.lines.len() > visible_lines {
         if composer_area.width >= 40 {
