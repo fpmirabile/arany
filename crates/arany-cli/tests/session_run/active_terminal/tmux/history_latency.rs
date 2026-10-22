@@ -43,7 +43,7 @@ fn resumed_tail_layout(screen: &[u8]) -> bool {
             .is_some_and(|row| row.starts_with("─ Ask Arany "))
         && rows
             .get(rows.len().saturating_sub(2))
-            .is_some_and(|row| row.contains("Enter sends") && row.contains("Ctrl+J newline"))
+            .is_some_and(|row| row.contains("Enter sends") && row.contains("\\ then Enter newline"))
         && rows.last().is_some_and(|row| {
             row.trim().starts_with("ready · custom:local/model-1")
                 && row.trim_end().ends_with("More history · arany show")

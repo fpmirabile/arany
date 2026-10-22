@@ -285,6 +285,9 @@ impl AttachedTerminal {
             .target()
             .is_some_and(|target| editable_child(view, target));
         if refreshed.is_some() && was_editable != chat.editable {
+            if let Some(draft) = self.selected_child_draft_mut() {
+                draft.composer.disarm_continuation();
+            }
             self.cancel_clipboard_paste();
             self.admit_agent_chat(view).await?;
             return Ok(AgentChatFollow::Redraw);
@@ -321,6 +324,9 @@ impl AttachedTerminal {
                 && !self.scrollback_dump;
             return self.navigate(view, input, admitted).await;
         }
+        if let Some(draft) = self.selected_child_draft_mut() {
+            draft.composer.observe_input(input);
+        }
         if self.linear.is_some() {
             return self.linear_agent_input(view, input).await;
         }
@@ -336,9 +342,10 @@ impl AttachedTerminal {
                 self.rearm_agent_chat(view).await
             }
             TerminalInput::Resize => self.rearm_agent_chat(view).await,
-            TerminalInput::Paste | TerminalInput::ClipboardPaste | TerminalInput::Submit => {
-                self.edit_child(view, input).await
-            }
+            TerminalInput::Paste
+            | TerminalInput::ClipboardPaste
+            | TerminalInput::Submit
+            | TerminalInput::ModifiedEnter(_) => self.edit_child(view, input).await,
             TerminalInput::AgentNext | TerminalInput::AgentPrevious | TerminalInput::Escape => {
                 let empty = self
                     .selected_child_draft()
@@ -383,6 +390,7 @@ impl AttachedTerminal {
             TerminalInput::PageUp
             | TerminalInput::PageDown
             | TerminalInput::HalfPageUp
+            | TerminalInput::IgnoredKey
             | TerminalInput::Tab
             | TerminalInput::CycleApprovalMode
             | TerminalInput::QuickActions
@@ -502,6 +510,9 @@ impl AttachedTerminal {
             agent_run_id: target.id,
         };
         let editable = selected != 0 && editable_child(view, target);
+        for draft in &mut self.child_drafts {
+            draft.composer.disarm_continuation();
+        }
         if editable && !self.open_child_draft(view, target) {
             return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
         }
@@ -558,6 +569,9 @@ impl AttachedTerminal {
 
     // Closes the view without input admission, as when Tool approval preempts it.
     pub(super) fn end_agent_chat(&mut self) -> Result<(), TerminalError> {
+        if let Some(draft) = self.selected_child_draft_mut() {
+            draft.composer.disarm_continuation();
+        }
         self.cancel_clipboard_paste();
         let Some(chat) = self.agent_chat.take() else {
             return Ok(());
@@ -751,11 +765,28 @@ impl AttachedTerminal {
         if !self.open_child_draft(view, target) {
             return Ok(AgentChatInput::Notice(DRAFT_CAP_NOTICE));
         }
+        let shortcut = self.newline_shortcut;
+        let input = self.selected_child_draft_mut().map_or(input, |draft| {
+            draft.composer.set_newline_shortcut(shortcut);
+            draft.composer.chat_input(input)
+        });
         if input == TerminalInput::ClipboardPaste {
             return Ok(match self.request_clipboard_paste() {
                 Ok(()) => AgentChatInput::Handled,
                 Err(text) => AgentChatInput::Notice(text),
             });
+        }
+        if input == TerminalInput::Submit
+            && self
+                .selected_child_draft_mut()
+                .is_some_and(|draft| draft.composer.apply(input) == ComposerEdit::Changed)
+        {
+            let bytes = self
+                .selected_child_draft()
+                .map_or(0, |draft| draft.composer.text().len());
+            self.restore_draft_input(bytes)?;
+            self.draw_agent_chat(view, None)?;
+            return Ok(AgentChatInput::ChildEdited(target));
         }
         if input == TerminalInput::Submit {
             let Some(draft) = self.selected_child_draft() else {
@@ -831,6 +862,14 @@ impl AttachedTerminal {
                         }
                 {
                     chat.choice.push(character);
+                } else {
+                    chat.invalid = true;
+                }
+                Ok(AgentChatInput::Handled)
+            }
+            TerminalInput::Newline if chat.choice.starts_with("/message ") => {
+                if chat.choice.len() < super::composer::MAX_DRAFT_BYTES + 9 {
+                    chat.choice.push('\n');
                 } else {
                     chat.invalid = true;
                 }
@@ -919,6 +958,12 @@ impl AttachedTerminal {
                 let targets = chat.targets.clone();
                 self.show_agent(view, run, targets, index, false).await
             }
+            TerminalInput::LineContinued if chat.choice.starts_with("/message ") => {
+                Ok(AgentChatInput::Handled)
+            }
+            TerminalInput::LineRejected if chat.choice.starts_with("/message ") => Ok(
+                AgentChatInput::Notice("Invalid or overlong child message segment; draft retained"),
+            ),
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
                 chat.choice.clear();
                 chat.invalid = false;
@@ -1139,6 +1184,7 @@ impl AttachedTerminal {
 
 #[cfg(test)]
 mod tests {
+    use super::super::NewlineShortcut;
     use super::*;
 
     fn active_child_view() -> SessionView {
@@ -1258,6 +1304,53 @@ mod tests {
             AgentChatInput::Notice(_)
         ));
         assert_eq!(terminal.agent_chat.as_ref().unwrap().selected, 2);
+        for character in "/message a".chars() {
+            terminal
+                .linear_agent_input(&view, TerminalInput::Character(character))
+                .await
+                .unwrap();
+        }
+        terminal
+            .linear_agent_input(&view, TerminalInput::Newline)
+            .await
+            .unwrap();
+        terminal
+            .linear_agent_input(&view, TerminalInput::LineContinued)
+            .await
+            .unwrap();
+        assert!(matches!(
+            terminal
+                .linear_agent_input(&view, TerminalInput::LineRejected)
+                .await
+                .unwrap(),
+            AgentChatInput::Notice(_)
+        ));
+        assert_eq!(terminal.agent_chat.as_ref().unwrap().choice, "/message a\n");
+        terminal
+            .linear_agent_input(&view, TerminalInput::Character('b'))
+            .await
+            .unwrap();
+        assert!(
+            matches!(terminal.linear_agent_input(&view, TerminalInput::Submit).await.unwrap(),
+            AgentChatInput::ChildMessage { target: id, text } if id == target && text == "a\nb")
+        );
+        terminal.child_drafts[0].clear(true);
+        for input in [
+            TerminalInput::Character('a'),
+            TerminalInput::Character('\\'),
+            TerminalInput::Submit,
+        ] {
+            assert_eq!(
+                terminal.child_drafts[0].composer.apply(input),
+                ComposerEdit::Changed
+            );
+        }
+        assert_eq!(terminal.child_drafts[0].composer.text(), "a\n");
+        assert!(
+            matches!(terminal.edit_child(&view, TerminalInput::Submit).await.unwrap(),
+            AgentChatInput::ChildMessage { target: id, text } if id == target && text == "a\n")
+        );
+        terminal.child_drafts[0].clear(true);
         let action = line(&mut terminal, &view, "/message /literal").await;
         assert!(
             matches!(action, AgentChatInput::ChildMessage { target: id, text } if id == target && text == "/literal")
@@ -1516,15 +1609,19 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn child_drafts_and_primary_bytes_survive_a_released_terminal() {
-        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
-        terminal.child_drafts = vec![filled_draft(RunId::new())];
-        terminal.primary_draft_bytes = 7;
-        terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
-            None,
-        ));
-        assert_eq!(terminal.child_drafts.len(), 1);
-        assert_eq!(terminal.primary_draft_bytes, 7);
+    async fn child_drafts_primary_bytes_and_shortcut_survive_a_released_terminal() {
+        for shortcut in [NewlineShortcut::AltEnter, NewlineShortcut::CtrlEnter] {
+            let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+            terminal.set_newline_shortcut(shortcut);
+            terminal.child_drafts = vec![filled_draft(RunId::new())];
+            terminal.primary_draft_bytes = 7;
+            terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
+                None,
+            ));
+            assert_eq!(terminal.child_drafts.len(), 1);
+            assert_eq!(terminal.primary_draft_bytes, 7);
+            assert_eq!(terminal.newline_shortcut, shortcut);
+        }
     }
 
     #[cfg(unix)]
