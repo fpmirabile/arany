@@ -57,6 +57,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         provider_concurrency: 1,
         workspace_device: 1,
         workspace_inode: 2,
+        user_instruction_digest: None,
         instruction_sources: Vec::new(),
         launch_directory: String::new(),
         include_digests: Vec::new(),
@@ -65,7 +66,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         context_usage: None,
         compaction_event_sequence: None,
         compaction_content_digest: None,
-        tool_policy: Some(policy),
+        tool_policy: Some(Box::new(policy)),
     };
     let call = ToolCall::Command {
         program: "shell".into(),

@@ -9,7 +9,7 @@ use std::path::Path;
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 15] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 16] = [
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -39,6 +39,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 15] = [
     ("AgentSpawned", 11, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("RunStarted", 17, GLOB_RUNSTARTED, GLOB_RUNSTARTED),
     ("RunStarted", 18, ROOT_RUNSTARTED, NESTED_RUNSTARTED),
+    ("RunStarted", 19, NESTED_RUNSTARTED, GLOBAL_RUNSTARTED),
     (
         "ProviderCallRecorded",
         13,
@@ -56,6 +57,8 @@ const GLOB_AGENTSPAWNED: &str = r#"{"profile":null,"assignment":null,"definition
 const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":null,"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 // Version 18 pinned only the root file's digest; version 19 names it as the root's source.
 const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
+// Version 20 adds the explicit null user-instruction digest.
+const GLOBAL_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
 // Synthetic test-only edge: a version-5 SessionStarted stored `name` where version 6 stores `title`.
@@ -253,9 +256,7 @@ fn decode_row(row: &RawRow) -> Event {
 // stored bytes. With canonical text this is what a version-5 build wrote; noncanonical text pins
 // digests that version-5 replay rejected.
 fn downgrade_started(connection: &Connection, canonical: bool) {
-    let mut lanes = HashMap::<String, PrefixHasher>::new();
-    let mut points = HashMap::<(String, u64), [u8; 32]>::new();
-    for mut row in rows(connection) {
+    repin(connection, |row| {
         if row.kind == "SessionStarted" {
             let current: Value = serde_json::from_str(&row.payload).unwrap();
             let (name, device, inode) = (
@@ -274,6 +275,25 @@ fn downgrade_started(connection: &Connection, canonical: bool) {
             };
             row.version = 5;
         }
+    });
+}
+
+fn downgrade_run_started(connection: &Connection) {
+    repin(connection, |row| {
+        if row.kind == "RunStarted" {
+            row.payload = row
+                .payload
+                .replacen(r#""user_instruction_digest":null,"#, "", 1);
+            row.version = 19;
+        }
+    });
+}
+
+fn repin(connection: &Connection, rewrite: impl Fn(&mut RawRow)) {
+    let mut lanes = HashMap::<String, PrefixHasher>::new();
+    let mut points = HashMap::<(String, u64), [u8; 32]>::new();
+    for mut row in rows(connection) {
+        rewrite(&mut row);
         let lane = lanes.entry(row.session_id.clone()).or_default();
         if matches!(
             row.kind.as_str(),
@@ -486,6 +506,47 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
         "{}",
         started.payload
     );
+}
+
+#[test]
+fn run_started_v19_migrates_without_reading_user_instructions() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("state");
+    let History { root, sessions } = history(&path, true, 0);
+    std::fs::write(path.join("AGENTS.md"), "canary").unwrap();
+    std::fs::set_permissions(
+        path.join("AGENTS.md"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let connection = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    let current = stored_rows(&connection);
+    let digests = fork_digests(&connection);
+    downgrade_run_started(&connection);
+    let downgraded = stored_rows(&connection);
+    assert_ne!(downgraded, current);
+    assert_ne!(fork_digests(&connection), digests);
+    drop(connection);
+
+    assert!(
+        root.upgrade_or_archive_history(&REGISTRY)
+            .unwrap()
+            .is_none()
+    );
+
+    assert!(!path.join("archive").exists());
+    replays(&root, &sessions);
+    let upgraded = Connection::open(path.join(DATABASE_FILE)).unwrap();
+    assert_eq!(stored_rows(&upgraded), current);
+    assert_eq!(fork_digests(&upgraded), digests);
+    let started = first_of(&upgraded, "RunStarted");
+    assert_eq!(started.version, 20);
+    assert!(
+        started
+            .payload
+            .contains(r#""user_instruction_digest":null"#)
+    );
+    assert!(!started.payload.contains("canary"));
 }
 
 #[test]
@@ -1003,6 +1064,14 @@ fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     );
     assert!((step.canonical)(&forged).is_none());
     assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let step = REGISTRY.event_step("RunStarted", 19).unwrap();
+    let forged = NESTED_RUNSTARTED.replace(
+        r#""instruction_sources""#,
+        r#""user_instruction_digest":null,"instruction_sources""#,
+    );
+    assert!((step.canonical)(&forged).is_none());
+    assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    let step = REGISTRY.event_step("RunStarted", 18).unwrap();
     let upgraded = (step.transform)(serde_json::from_str(GLOB_RUNSTARTED).unwrap()).unwrap();
     assert_eq!(
         upgraded["config"]["instruction_sources"],

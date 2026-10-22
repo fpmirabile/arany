@@ -203,6 +203,13 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .expect("Workspace guidance");
     let state_path = temp.path().join("state");
     StateRoot::admit(&state_path).expect("state root");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let user_file = state_path.join("AGENTS.md");
+        std::fs::write(&user_file, b"EXPECTED_USER_GUIDANCE").expect("user guidance");
+        std::fs::set_permissions(&user_file, std::fs::Permissions::from_mode(0o600))
+            .expect("user guidance mode");
+    }
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback endpoint");
     let port = listener.local_addr().expect("listener address").port();
     let hostile_proxy = TcpListener::bind("127.0.0.1:0").expect("hostile proxy");
@@ -384,7 +391,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 );
                 assert_eq!(
                     input["workspace_guidance"],
-                    serde_json::json!([{"path": "AGENTS.md", "text": "EXPECTED_WORKSPACE_GUIDANCE"}])
+                    serde_json::json!([{"path": "user AGENTS.md", "text": "EXPECTED_USER_GUIDANCE"}, {"path": "AGENTS.md", "text": "EXPECTED_WORKSPACE_GUIDANCE"}])
                 );
                 if matches!(index, 3 | 4 | 6 | 8) {
                     assert_eq!(input["objective"], "answer");
@@ -784,7 +791,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .iter()
             .find(|line| line["kind"] == "RunStarted")
             .unwrap()["event_version"],
-        19
+        20
     );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
@@ -905,6 +912,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             "omitted-native-key",
             "OMITTED_WORKSPACE_CANARY",
             "EXPECTED_WORKSPACE_GUIDANCE",
+            "EXPECTED_USER_GUIDANCE",
             "verified answer",
             "team answer",
             case.model,

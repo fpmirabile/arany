@@ -368,6 +368,172 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
 
 #[test]
 #[cfg(target_os = "linux")]
+fn state_instructions_precede_project_rules_and_replay_only_digests() {
+    use sha2::{Digest, Sha256};
+    use std::os::unix::fs::PermissionsExt;
+    const OMITTED: &[u8] = b"PARENT_INSTRUCTION_CANARY";
+    let temp = tempfile::tempdir().expect("private test root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    std::fs::write(workspace.join("AGENTS.md"), "ROOT_RULE").expect("root guidance");
+    std::fs::write(temp.path().join("AGENTS.md"), OMITTED).expect("parent guidance");
+    let other_state = temp.path().join("other-state");
+    std::fs::create_dir(&other_state).expect("alternate State");
+    std::fs::write(other_state.join("AGENTS.md"), "OTHER_STATE_CANARY").expect("alternate file");
+    let state = temp.path().join("state");
+    let listener = TcpListener::bind("127.0.0.1:0").expect("loopback Provider");
+    loopback::write_profile(
+        &state,
+        listener.local_addr().expect("listener address").port(),
+    );
+    let global = state.join("AGENTS.md");
+    let write_global = |text: &str| {
+        std::fs::write(&global, text).expect("user guidance");
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600))
+            .expect("user guidance mode");
+    };
+    write_global("USER_RULE");
+    let server = thread::spawn(move || {
+        listener.set_nonblocking(true).expect("bounded accept");
+        for (index, user_rule) in ["", "", "", "USER_RULE", "NEWER_USER_RULE"]
+            .into_iter()
+            .enumerate()
+        {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "request {index} missing");
+                        thread::yield_now();
+                    }
+                    Err(error) => panic!("loopback accept failed: {error}"),
+                }
+            };
+            let request = loopback::read_request(&mut stream);
+            for canary in [OMITTED, b"OTHER_STATE_CANARY"] {
+                assert!(
+                    !request.windows(canary.len()).any(|part| part == canary),
+                    "omitted input disclosed in request {index}"
+                );
+            }
+            if index < 3 {
+                let text = match index {
+                    0 => serde_json::json!("ok"),
+                    1 => {
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
+                    }
+                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                };
+                loopback::send_response(&mut stream, index, text);
+                continue;
+            }
+            let body: serde_json::Value =
+                serde_json::from_slice(&request).expect("bounded request JSON");
+            assert_eq!(body["input"][0]["role"], "user");
+            assert_eq!(
+                body["input"][0]["content"],
+                serde_json::json!([
+                    {"type": "input_text", "text": format!("# AGENTS.md instructions for user AGENTS.md\n\n<INSTRUCTIONS>\n{user_rule}\n</INSTRUCTIONS>")},
+                    {"type": "input_text", "text": "# AGENTS.md instructions for AGENTS.md\n\n<INSTRUCTIONS>\nROOT_RULE\n</INSTRUCTIONS>"},
+                ]),
+                "user block first, then the project block"
+            );
+            let rule = body["instructions"].as_str().expect("system prompt");
+            assert!(rule.contains("repository files win over the user file"));
+            loopback::send_response(&mut stream, index, serde_json::json!("ok"));
+        }
+    });
+
+    loopback::check_profile(&workspace, &state);
+    let run = |select: &dyn Fn(&mut Command)| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+        command
+            .env_clear()
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .current_dir(&workspace);
+        command.arg("exec");
+        select(&mut command);
+        command
+            .arg("--workspace")
+            .arg(&workspace)
+            .args([
+                "--provider",
+                "custom:local",
+                "--model",
+                "model-1",
+                "--collaboration",
+                "single",
+                "answer",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = loopback::wait_product(command.spawn().expect("product exec process"));
+        assert!(
+            output.status.success(),
+            "instruction exit: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(output.stdout, b"Answer:\n  ok\n");
+        SessionId::from_str(
+            std::str::from_utf8(&output.stderr)
+                .expect("receipt UTF-8")
+                .lines()
+                .next()
+                .and_then(|line| line.strip_prefix("Session: "))
+                .expect("Session line"),
+        )
+        .expect("Session ID")
+    };
+    let first = run(&|command| {
+        command.arg("--state-dir").arg(&state);
+    });
+    // Replay reads only the pin; a later Run snapshots the changed file again.
+    write_global("NEWER_USER_RULE");
+    let second = run(&|command| {
+        command.env("ARANY_STATE_DIR", &state);
+    });
+    server.join().expect("loopback server completed");
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .expect("replay runtime");
+    let store = Store::open_read_only(StateRoot::open_existing(&state).expect("existing State"))
+        .expect("read-only State");
+    for (session_id, text) in [(first, "USER_RULE"), (second, "NEWER_USER_RULE")] {
+        let events = runtime
+            .block_on(store.load_session(session_id))
+            .expect("canonical Events");
+        let view = SessionView::replay(session_id, &events)
+            .expect("strict replay")
+            .expect("Session");
+        let config = view.runs[0].config.as_ref().expect("pinned config");
+        assert_eq!(
+            config.user_instruction_digest,
+            Some(Sha256::digest(text.as_bytes()).into())
+        );
+        assert_eq!(config.instruction_sources.len(), 1);
+    }
+    runtime
+        .block_on(store.close())
+        .expect("close read-only State");
+    let database = std::fs::read(state.join("events.sqlite3")).expect("database bytes");
+    for canary in [
+        &b"USER_RULE"[..],
+        b"ROOT_RULE",
+        OMITTED,
+        b"OTHER_STATE_CANARY",
+    ] {
+        assert!(
+            !database.windows(canary.len()).any(|part| part == canary),
+            "instruction text stays out of the journal"
+        );
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
 #[ignore = "native Linux PTY workspace consent and restoration gate"]
 fn workspace_consent_exits_without_an_implicit_choice_and_remembers_explicit_trust() {
     use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};

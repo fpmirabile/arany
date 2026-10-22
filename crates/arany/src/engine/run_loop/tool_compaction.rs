@@ -129,6 +129,27 @@ struct Summary {
     source_bytes: u32,
 }
 
+// Paths alone past half the input bound; the primary request still carries every block.
+fn project_instructions(request: &ProviderRequest) -> Vec<serde_json::Value> {
+    let full: Vec<_> = request
+        .input
+        .workspace_guidance
+        .iter()
+        .map(|guidance| serde_json::json!({"path": guidance.path, "text": guidance.text}))
+        .collect();
+    let escaped =
+        serde_json::to_string(&full).map_or(usize::MAX, |json| json.len().saturating_mul(2));
+    if escaped <= crate::session::MAX_COMPACTION_INPUT_BYTES / 2 {
+        return full;
+    }
+    request
+        .input
+        .workspace_guidance
+        .iter()
+        .map(|guidance| serde_json::json!({"path": guidance.path}))
+        .collect()
+}
+
 fn compaction_context_input(
     request: &ProviderRequest,
     budget: GoalBudget,
@@ -139,12 +160,7 @@ fn compaction_context_input(
     serde_json::json!({
         "pinned_goal": {
             "objective": &request.input.objective,
-            "project_instructions": request
-                .input
-                .workspace_guidance
-                .iter()
-                .map(|guidance| serde_json::json!({"path": guidance.path, "text": guidance.text}))
-                .collect::<Vec<_>>(),
+            "project_instructions": project_instructions(request),
             "includes": &request.input.includes,
             "budget": budget,
             "plan_contract": plan_contract,
