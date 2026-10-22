@@ -421,6 +421,82 @@ The cache result is separate from command success. Text receipts surface rejecte
 
 Archives capture regular files by content regardless of link count, so Cargo hard links restore as independent files. Competing operations return busy rather than wait. Publication builds the candidate beside the committed archive, syncs it, durably records rollback intent before renaming, and treats the committed marker with parent-directory sync as the commit point. A marker write or sync failure returns the error, skips Drop-time recovery and retains both archives and transaction records. Task transport carries only the checked Workspace identity and the exact read-only exclusions, never a `StateRoot` path or handle.
 
+## Local storage inventory
+
+`arany storage` and idle `/storage` expose a user-local metadata report. The
+[terminal contract](./terminal.md#storage-report) owns invocation and channels;
+[credentials](./credentials.md#metadata-only-storage-inspection) owns account-root
+admission. This operation is not a model Tool or a generic private-file read grant.
+It creates no Session, Run, Event, directory, database, lock file, cache or log;
+it invokes no Provider, credential helper, recovery, cleanup or telemetry export.
+
+Coverage includes the selected Session StateRoot, the default Session StateRoot
+and the fixed OS-user account root. `--state-dir` and `ARANY_STATE_DIR` select
+Session storage only. Authenticate each existing root with private no-follow
+component admission, independently of history/database or account payload validity.
+Missing roots remain absent without creation. Report paths only for admitted
+owned locations; suppress individual private-file and directory names. The main
+Workspace is excluded by opened identity, including when inside a storage root;
+a root inside the Workspace is unavailable. Nested roots and regular-file
+identities are counted once. Private build-cache totals are separate from their
+parent's other private records and are not added twice.
+
+Aggregate regular-file and directory counts, logical metadata lengths and
+allocated bytes (`blocks × 512`, checked for overflow). Secret-containing regular
+files contribute metadata only; never read payloads. Metadata-only descriptors
+use Linux `O_PATH` or macOS `O_EVTONLY`; only admitted directories open for
+listing. Require private ownership, permissions and existing ACL admission;
+unexpected multiple-link files, symlinks, special objects, foreign owners and
+unowned mount crossings are excluded and make coverage partial. Never follow a
+linked target. Linux uses `openat2` with no-cross-mount resolution; macOS uses
+no-follow handles and device checks. Unsupported enforcement fails closed.
+
+Build-cache inventory reuses the owner's closed record-name classification. It
+counts committed/previous archives, candidate/staging files, lock files and
+reservation/transaction record bytes without parsing their contents, acquiring
+leases or performing recovery. Pending/candidate/reservation records label the
+category busy/retained and keep the report partial. A capacity reservation's
+promised capacity is not allocated disk usage. An unknown/unsafe cache object is
+excluded with a partial reason. Complete metadata does not prove inactivity or
+safe reclamation; active shared readers need not create pending records.
+
+Each category is complete, partial, absent, busy or unavailable. Metadata or root
+identity changes during collection make the affected category partial. Only
+attributed observations enter the known subtotal. Allocated bytes are not a
+promise of reclaimable space, especially with sparse files, compression, clones
+or snapshots. The observation is point-in-time and is not an atomic host total.
+
+One inventory runs at a time, with no queue, retry or refresh. A shared 30-second
+cooperative deadline, 16,384 scanned entries, depth 32, 4 KiB paths, 8 MiB
+identity/path index and 128 cache identities bound work before allocation.
+Exhaustion or arithmetic overflow stops the affected scan and marks a partial
+known subtotal, never an exact complete zero. Cancellation publishes no complete
+report, closes handles and performs no cleanup; blocking work remains owned
+until it stops. A deadline cannot interrupt a stalled kernel syscall. Output is
+at most 64 KiB with at most 128 detail rows; summaries and a partial/overflow
+marker have reserved space.
+
+Guard backing storage/scratch is explicitly not yet included, pending
+[the remaining storage slice](../../planning/arany-storage/README.md). No owned
+worktree registry exists in this version; this is not a zero-size worktree claim.
+Coverage also excludes unregistered StateRoots, developer checkouts, external
+worktrees, shared Cargo/npm caches, installed binaries and OS-keyring allocation.
+No ambient host search or prefix-based attribution occurs.
+
+Cleanup guidance names existing `/cache clear` (current Workspace) and
+`/cache clear all` (selected StateRoot's caches), including their busy behavior,
+and the [historical Guard maintenance procedure](../tools.md#historical-linux-seed-maintenance).
+It never generates deletion/detach commands or recommends automatic removal of
+history, credentials or live/uncertain Guard storage.
+
+| Scenario | Required observation | Evidence owner |
+|---|---|---|
+| Known, nested or duplicate storage; Workspace overlap | Disjoint category/subtotal accounting and Workspace exclusion; allocation and logical sizes remain separate | [Storage/private-fs corpus](../../crates/arany/src/store/state/inventory.rs) |
+| Missing state or damaged database | Absence or independently measurable metadata; no creation or repair | [Fresh-process journey](../../crates/arany-cli/tests/session_run/storage.rs) |
+| Private secrets, hostile names, hard links, symlinks and special objects | Metadata aggregation only, no individual names/content, no linked target counted, unsafe objects make report partial | [Storage corpus](../../crates/arany/src/store/state/inventory.rs), [process canaries](../../crates/arany-cli/tests/session_run/storage.rs) |
+| Pending cache and exhausted bounds/cancellation | Retained pending bytes, partial known subtotal or cancellation without complete output; no recovery/mutation | [Inventory owner](../../crates/arany/src/store/state/inventory.rs) |
+| Local output under caps | Escaped admitted paths, preserved summaries and explicit partial overflow | [Storage renderer](../../crates/arany-cli/src/presentation/storage.rs) |
+
 ## Command changesets
 
 After command completion and positive descendant termination, Guard compares the private snapshot with its admitted input and returns a sorted changeset of created, modified and deleted regular files with digest-bound before and after bytes and executable bits; binary content uses canonical base64. A nonzero exit may still return changes, since exit status and publication are separate outcomes. A failed capture, timeout, cancellation or unconfirmed cleanup publishes nothing.

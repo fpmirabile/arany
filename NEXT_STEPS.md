@@ -86,6 +86,19 @@ CI stays green; no new features, spec sections or evidence gates for: terminal v
 
 Child messaging needs native macOS Option-key/PTY and human assistive-technology evidence: open a running child, offer literal text, observe waiting then committed recording, return with the primary draft intact, and verify final-call non-delivery retains the child draft without another call. The [terminal](./docs/specs/terminal.md#agent-chats) and [Goal](./docs/specs/goals.md#steering-notes-and-pause) contracts own the expected behavior.
 
+## Storage report native and live evidence
+
+Before claiming native storage-report support, run `arany storage` and idle
+`/storage` with synthetic private Session/account roots on Linux and macOS; check
+allocated blocks versus sparse logical length, private ACL/foreign-owner refusal,
+mount exclusion (including Linux same-device bind mounts), concurrent cache
+activity and directory replacement, cancellation without mutation, and pager
+navigation at narrow widths in Classic, Fullscreen and a real screen reader.
+On macOS verify metadata-only `O_EVTONLY` descriptors with ACL admission under a
+physical `/private/tmp` fixture. Record native/live results separately from
+synthetic CI evidence. Guard backing/image inventory remains the next
+[storage slice](./planning/arany-storage/README.md), not current coverage.
+
 ## Account recovery and native Guard follow-ups
 
 - **Affected 2026-10-08 macOS account fixture.** Reauthorize with fresh `/setup`

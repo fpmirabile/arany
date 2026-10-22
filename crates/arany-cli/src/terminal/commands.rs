@@ -26,6 +26,7 @@ pub enum InteractiveCommand {
     Model,
     Permissions,
     Cache,
+    Storage,
     Exit,
 }
 
@@ -60,6 +61,7 @@ impl InteractiveCommand {
             | Self::Copy
             | Self::Settings
             | Self::Cache
+            | Self::Storage
             | Self::New
             | Self::Resume
             | Self::Rewind
@@ -117,7 +119,7 @@ const fn spec(
     }
 }
 
-const COMMANDS: [CommandSpec; 21] = [
+const COMMANDS: [CommandSpec; 22] = [
     spec("help", InteractiveCommand::Help, None, &[]),
     spec("setup", InteractiveCommand::Setup, None, &[]),
     spec("paste", InteractiveCommand::Paste, None, &[]),
@@ -166,6 +168,7 @@ const COMMANDS: [CommandSpec; 21] = [
         Some("clear [all]"),
         &["clear"],
     ),
+    spec("storage", InteractiveCommand::Storage, None, &[]),
     spec("settings", InteractiveCommand::Settings, None, &[]),
     spec(
         "transcript",
@@ -229,6 +232,7 @@ pub(super) fn help_entry(index: usize) -> Option<HelpEntry> {
         InteractiveCommand::Model => "Choose model",
         InteractiveCommand::Permissions => "Folder trust and approval settings",
         InteractiveCommand::Cache => "Clear private build caches",
+        InteractiveCommand::Storage => "Report owned storage metadata",
         InteractiveCommand::Exit => "Exit Session",
     };
     Some(HelpEntry {
@@ -733,7 +737,7 @@ mod tests {
 
     #[test]
     fn closed_registry_aliases_completion_and_lifecycle_are_exact() {
-        assert_eq!(COMMANDS.len(), 21);
+        assert_eq!(COMMANDS.len(), 22);
         assert_eq!(completion_suffix("/c", &CommandChoices::default()), None);
         assert_eq!(
             completion_suffix("/ca", &CommandChoices::default()),

@@ -867,3 +867,8 @@ impl Drop for Store {
         let _ = self.join();
     }
 }
+
+#[cfg(unix)]
+pub use state::{
+    StorageCategory, StorageError, StorageReport, StorageStatus, StorageUsage, collect_storage,
+};

@@ -102,3 +102,8 @@ pub use tools::catalog::Site;
 pub fn reduce_into(view: &mut SessionView, envelope: &EventEnvelope) -> Result<(), ReplayError> {
     view.apply_committed(envelope)
 }
+
+#[cfg(unix)]
+pub use store::{
+    StorageCategory, StorageError, StorageReport, StorageStatus, StorageUsage, collect_storage,
+};

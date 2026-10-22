@@ -18,13 +18,22 @@ use std::{
 };
 
 #[test]
-fn rewind_registry_has_twenty_one_commands_and_refuses_arguments_without_state_access() {
+fn local_registry_has_twenty_two_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
     };
     let names = command_completions("/");
-    assert_eq!(names.len(), 21);
+    assert_eq!(names.len(), 22);
     assert!(names.contains(&"rewind"));
+    assert!(names.contains(&"storage"));
+    assert_eq!(
+        InteractiveCommand::Storage.availability(true),
+        arany_cli::terminal::CommandAvailability::Locked
+    );
+    assert!(matches!(
+        parse_submission("/storage extra"),
+        Err(CommandParseError::UnexpectedArgument { command: "storage" })
+    ));
     assert_eq!(
         parse_submission("/rewind"),
         Ok(Submission::Command {
@@ -584,6 +593,28 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             b"Notice: Provider: anthropic\r\nInput:\r\n",
         );
     }
+    let storage_at = transcript.len();
+    input
+        .write_all(b"/storage\r")
+        .expect("local storage report");
+    wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, storage_at,
+        b"History, credentials and live/uncertain Guard storage have no automatic-removal hint.\r\nInput:\r\n");
+    let storage_text = String::from_utf8_lossy(&transcript[storage_at..]);
+    assert!(storage_text.contains("Known owned subtotal:"));
+    assert!(storage_text.contains("Guard backing storage/scratch: not yet included"));
+    assert!(!storage_text.contains("account-credentials.json"));
+    runtime.block_on(async {
+        let store =
+            Store::open_read_only(StateRoot::open_existing(&state).expect("State")).expect("Store");
+        assert_eq!(
+            store
+                .load_session(current_id)
+                .await
+                .expect("unchanged storage history"),
+            source_prefix
+        );
+        store.close().await.expect("close Store");
+    });
     let (current_cache, current_lock) = seed_empty_build_cache(&state, &workspace);
     let (other_cache, _) = seed_empty_build_cache(&state, &other_workspace);
     let held_cache = std::fs::OpenOptions::new()
@@ -869,6 +900,31 @@ fn narrow_help_signal_restores_terminal_without_starting_a_run() {
     });
 }
 
+fn inspect_storage_pager(
+    output: &mut impl Read,
+    input: &mut impl Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut crate::session_picker::PtyResponses,
+) {
+    let from = transcript.len();
+    input.write_all(b"/storage\r").expect("open storage pager");
+    wait_for_screen(output, input, transcript, answered, (from, 40, 24), "Esc |");
+    assert!(screen_contains(transcript, 40, 24, "Arany storage:"));
+    let from = transcript.len();
+    input.write_all(b"\x1b[F").expect("last storage page");
+    wait_for_screen(
+        output,
+        input,
+        transcript,
+        answered,
+        (from, 40, 24),
+        "History, credentials",
+    );
+    let from = transcript.len();
+    input.write_all(b"\x1b").expect("close storage pager");
+    wait_for_caret(output, input, transcript, answered, from, 3);
+}
+
 #[test]
 fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_terminal() {
     let temp = tempfile::tempdir().expect("private test root");
@@ -935,6 +991,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         "TTY_BEFORE:",
     )
     .to_owned();
+    inspect_storage_pager(&mut output, &mut input, &mut transcript, &mut answered);
     let paste_at = transcript.len();
     input
         .write_all(b"\x1b[200~first\r\nsecond\x1b[201~")
@@ -1665,6 +1722,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
             .unwrap(),
         record("fullscreen")
     );
+    inspect_storage_pager(&mut output, &mut input, &mut transcript, &mut answered);
     let draft_at = transcript.len();
     input
         .write_all(b"abc")
