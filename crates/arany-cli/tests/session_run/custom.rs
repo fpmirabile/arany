@@ -791,7 +791,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .iter()
             .find(|line| line["kind"] == "RunStarted")
             .unwrap()["event_version"],
-        20
+        21
     );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))

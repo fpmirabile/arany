@@ -32,6 +32,18 @@ fn write(path: &str) -> ToolCall {
     }
 }
 
+fn multiedit(path: &str) -> ToolCall {
+    ToolCall::MultiEdit {
+        file_path: path.into(),
+        expected_digest: "0".repeat(64),
+        edits: vec![crate::LiteralEdit {
+            old_string: "a".into(),
+            new_string: "b".into(),
+            replace_all: false,
+        }],
+    }
+}
+
 fn command(program: &str, args: &[&str]) -> ToolCall {
     ToolCall::Command {
         program: program.into(),
@@ -67,6 +79,11 @@ fn permission_modes_map_existing_approval_and_narrow_plan_and_dont_ask() {
         ("dontAsk", [Allow, Deny, Deny, Deny]),
     ] {
         let parsed = config(json!({"defaultMode": mode}));
+        assert_eq!(
+            parsed.decision(&multiedit("src/lib.rs")),
+            decisions[1],
+            "{mode}"
+        );
         for (call, expected) in [&reads, &edits, &process, &git_write]
             .into_iter()
             .zip(decisions)
@@ -371,6 +388,7 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
     for call in [
         read("private/a"),
         write("private/a"),
+        multiedit("private/a"),
         ToolCall::Mkdir {
             path: "private/a".into(),
         },
@@ -392,6 +410,9 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
     }
     for (rule, call) in [
         ("Edit(./src/**)", write("src/a")),
+        ("Edit(./src/**)", multiedit("src/a")),
+        ("MultiEdit(./src/**)", multiedit("src/a")),
+        ("multiedit(./src/**)", multiedit("src/a")),
         ("Write", write("src/a")),
         ("read(./src/**)", read("src/a")),
         (
@@ -442,6 +463,18 @@ fn tool_mappings_cover_typed_operations_and_read_denials_cover_writes() {
     assert_eq!(
         config(json!({"ask":["glob"]})).decision(&glob("src")),
         Decision::Ask
+    );
+    assert_eq!(
+        config(json!({"allow":["Edit(./src/**)"]})).decision(&multiedit("src/a")),
+        Decision::Allow
+    );
+    assert_eq!(
+        config(json!({"ask":["Edit(./src/**)"]})).decision(&multiedit("src/a")),
+        Decision::Ask
+    );
+    assert_eq!(
+        config(json!({"deny":["Read(./src/**)"],"allow":["Edit"]})).decision(&multiedit("src/a")),
+        Decision::Deny
     );
     assert_eq!(
         config(json!({"deny":["Read(./private/**)"]})).decision(&glob("src")),
@@ -708,6 +741,7 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
         ("Edit, Write", "Edit", "NotebookEdit"),
         ("Edit.*", "NotebookEdit", "Read"),
         ("^Edit$", "Edit", "NotebookEdit"),
+        ("MultiEdit", "MultiEdit", "Edit"),
     ] {
         let parsed = hooks(
             "PreToolUse",
@@ -738,6 +772,17 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
             .unwrap()
     );
     assert!(!group.matches_tool(&read("a")).unwrap());
+    let peer = hooks(
+        "PreToolUse",
+        json!("MultiEdit"),
+        json!({"type":"command","command":"x"}),
+    )
+    .unwrap();
+    assert!(
+        peer.hooks().groups(HookEvent::PreToolUse)[0]
+            .matches_tool(&multiedit("a"))
+            .unwrap()
+    );
     for matcher in ["", "*"] {
         let parsed = hooks(
             "PreCompact",
@@ -1769,6 +1814,8 @@ fn updated_input_accepts_only_provable_narrowing() {
         limit: None,
     };
     let cases = [
+        (multiedit("a"), multiedit("a/b"), false),
+        (multiedit("a"), write("a"), false),
         (default.clone(), window("a", 1, 2000), true),
         (window("a", 1, 2000), default.clone(), true),
         (window("a", 1, 32), default, false),

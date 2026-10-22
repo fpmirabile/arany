@@ -125,7 +125,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             (
                 "edits",
                 json!({
-                    "type":"array", "minItems":1, "maxItems":MAX_MULTI_EDITS,
+                    "type":"array",
                     "description":"Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
                     "items":{
                         "type":"object", "additionalProperties":false,

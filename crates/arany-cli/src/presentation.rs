@@ -2440,6 +2440,53 @@ mod peer_row_tests {
     }
 
     #[test]
+    fn multiedit_summary_and_approval_keep_one_outcome_and_every_ordered_replacement() {
+        let tool = tool_fixture(
+            ToolCall::MultiEdit {
+                file_path: "src/a".into(),
+                expected_digest: "0".repeat(64),
+                edits: vec![
+                    arany::LiteralEdit {
+                        old_string: "old\nline".into(),
+                        new_string: "middle".into(),
+                        replace_all: true,
+                    },
+                    arany::LiteralEdit {
+                        old_string: "middle".into(),
+                        new_string: "\u{1b}[2J".into(),
+                        replace_all: false,
+                    },
+                ],
+            },
+            "{}",
+        );
+        assert_eq!(
+            tool_summary(&tool),
+            "⏺ MultiEdit(src/a, 2 edits)\n  ⎿ applied"
+        );
+        assert_eq!(
+            tool_approval_lines(&tool.intent),
+            [
+                "Proposed action",
+                "MultiEdit src/a · only if the file is unchanged",
+                "Edit 1 · all matches",
+                "Remove:",
+                "- old",
+                "- line",
+                "Insert:",
+                "+ middle",
+                "Edit 2 · one match",
+                "Remove:",
+                "- middle",
+                "Insert:",
+                "+ \\u{001b}[2J",
+                "",
+                "Allow once for this exact action · expires within one minute",
+            ]
+        );
+    }
+
+    #[test]
     fn timeout_rows_use_operation_caps_and_only_offer_settings_for_commands() {
         for (call, operation, cap, guidance) in [
             (

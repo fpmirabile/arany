@@ -95,6 +95,12 @@ fn multiedit_orders_and_bounds_the_whole_publication() {
             "{name}: one fresh inode publication"
         );
     }
+    let ordered: Vec<_> = (0..MAX_MULTI_EDITS)
+        .map(|index| edit(&index.to_string(), &(index + 1).to_string(), false))
+        .collect();
+    std::fs::write(&file, "0").unwrap();
+    super::fs::native(temp.path(), &call(b"0", ordered), &config).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"64");
     let original = "a".repeat(MAX_FILE_BYTES);
     std::fs::write(&file, &original).unwrap();
     for (edits, accepted) in [
@@ -1523,10 +1529,19 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             content: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES),
         },
         ToolCall::Edit {
-            path: escaped_path,
+            path: escaped_path.clone(),
             expected_digest: "0".repeat(64),
             old: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
             new: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+        },
+        ToolCall::MultiEdit {
+            file_path: escaped_path,
+            expected_digest: "0".repeat(64),
+            edits: vec![LiteralEdit {
+                old_string: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                new_string: "\u{2}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                replace_all: false,
+            }],
         },
     ] {
         assert!(call.valid());

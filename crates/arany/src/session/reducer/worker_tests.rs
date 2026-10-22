@@ -1563,12 +1563,12 @@ fn worker_protocol_exact_versions_required_nulls_and_closed_records() {
         },
     });
     let expected = [
-        ("RunStarted", 20),
-        ("AgentSpawned", 12),
-        ("ProviderCallRecorded", 15),
+        ("RunStarted", 21),
+        ("AgentSpawned", 13),
+        ("ProviderCallRecorded", 16),
         ("AgentFinished", 10),
-        ("ToolStarted", 15),
-        ("ToolFinished", 21),
+        ("ToolStarted", 16),
+        ("ToolFinished", 22),
         ("WorkerStopObserved", 1),
         ("WorkerHandoverDiscarded", 1),
         ("WorkerDataChunk", 1),

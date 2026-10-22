@@ -712,6 +712,29 @@ mod tests {
     }
 
     #[test]
+    fn agent_definition_multiedit_requires_an_editor_and_never_expands_its_grant() {
+        let call = ToolCall::MultiEdit {
+            file_path: "owned/a".into(),
+            expected_digest: "0".repeat(64),
+            edits: vec![crate::LiteralEdit {
+                old_string: "a".into(),
+                new_string: "b".into(),
+                replace_all: false,
+            }],
+        };
+        for name in ["Edit", "MultiEdit", "multiedit"] {
+            let editor = definition(&format!("tools: [{name}]\n"));
+            assert!(editor.editor() && editor.allows_worker(&call));
+            assert!(!editor.allows(&call));
+            assert!(
+                !definition(&format!("tools: [{name}]\ndisallowedTools: [Edit]\n"))
+                    .allows_worker(&call)
+            );
+        }
+        assert!(!definition("tools: [Read]\n").allows_worker(&call));
+    }
+
+    #[test]
     fn agent_definition_parser_accepts_peer_subset_and_rejects_executable_yaml() {
         for fields in [
             "",

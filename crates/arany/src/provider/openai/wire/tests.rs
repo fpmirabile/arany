@@ -462,7 +462,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 20);
 }
 
 #[test]
@@ -1166,6 +1166,10 @@ fn native_tool_argument_limits_include_outer_whitespace() {
             "edit",
             json!({"path":"README.md","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
         ),
+        (
+            "multiedit",
+            json!({"file_path":"README.md","expected_digest":"0".repeat(64),"edits":[{"old_string":"x","new_string":"y"}]}),
+        ),
     ] {
         let limit = argument_limit(operation);
         let text = input.to_string();
@@ -1323,17 +1327,6 @@ fn multiedit_defaults_bounds_and_availability_hold_on_both_response_routes() {
         );
         assert!(decode(&request, &fixture).is_err(), "{pointer}");
         assert!(decode_streamed(&request, &fixture).is_err(), "{pointer}");
-    }
-    for len in [400 * 1024, 400 * 1024 + 1] {
-        let mut call = function_call("arany_multiedit", &input(None));
-        let text = input(None).to_string();
-        call["arguments"] = json!(format!("{text}{}", " ".repeat(len - text.len())));
-        let fixture = response("completed", json!([call]));
-        assert_eq!(decode(&request, &fixture).is_ok(), len == 400 * 1024);
-        assert_eq!(
-            decode_streamed(&request, &fixture).is_ok(),
-            len == 400 * 1024
-        );
     }
 }
 

@@ -67,9 +67,7 @@ pub(super) struct Registry<'a> {
     pub(super) event_steps: &'a [EventStep],
 }
 
-// The glob Tool and the typed Git writes only added call variants (glob also a worker Tool
-// label), so older payloads keep their bytes; one naming a variant its version lacked is forged
-// and refuses.
+// Enum-only steps preserve canonical bytes and refuse variants their source version lacked.
 macro_rules! variant_step {
     ($kind:literal, $from:literal, $before:path) => {
         EventStep {

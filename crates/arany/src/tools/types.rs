@@ -10,12 +10,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use uuid::Uuid;
 
-// Write content or combined Edit strings, in decoded UTF-8 bytes.
+// Write content or combined Edit/MultiEdit strings, in decoded UTF-8 bytes.
 pub(crate) const MAX_EDIT_CONTENT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_MULTI_EDITS: usize = 64;
 // Six escaped bytes per content byte plus room for the path, digest and keys.
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
-// Every operation other than Write and Edit keeps this serialized bound.
+// Every operation other than Write, Edit and MultiEdit keeps this serialized bound.
 pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
@@ -1613,6 +1613,15 @@ mod model_call_tests {
                 expected_digest: hex_digest(b"old"),
                 old: "old".into(),
                 new: "new".into(),
+            },
+            ToolCall::MultiEdit {
+                file_path: "file".into(),
+                expected_digest: hex_digest(b"old"),
+                edits: vec![LiteralEdit {
+                    old_string: "old".into(),
+                    new_string: "new".into(),
+                    replace_all: false,
+                }],
             },
         ] {
             let intent = EffectIntent {

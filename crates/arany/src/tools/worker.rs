@@ -1755,6 +1755,19 @@ mod tests {
                 ],
             },
         );
+        let mut late_failure = edit.call.clone();
+        if let ToolCall::MultiEdit { edits, .. } = &mut late_failure {
+            edits[1].old_string = "missing".into();
+        }
+        assert!(matches!(
+            edited_image(&view.current, &late_failure),
+            Err(ToolError::Conflict)
+        ));
+        assert_eq!(view.current.entries, sibling.current.entries);
+        assert!(validate_edit(&view.current, &view.current, &edit.call).is_err());
+        let mut narrowed = grant();
+        narrowed.tools.retain(|tool| *tool != WorkerTool::MultiEdit);
+        assert!(narrowed.within(&grant()) && !narrowed.allows(&edit.call));
         let candidate = captured(&mut view, edit);
         assert!(
             view.handover().is_err(),
