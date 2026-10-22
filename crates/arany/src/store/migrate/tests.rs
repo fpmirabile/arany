@@ -1323,16 +1323,29 @@ fn checkpoint_hot_journal_recovers_before_eligibility() {
     let path = temp.path().join("state");
     let History { root, sessions } = forked_history(&path);
     checkpoint_fixture(&root);
-    create_private(&root.dir, checkpoints::FILES[1]).unwrap();
-    std::fs::write(path.join(checkpoints::FILES[1]), vec![0xA5; 512]).unwrap();
-    let original = std::fs::read(path.join(checkpoints::FILES[0])).unwrap();
+    let database = path.join(checkpoints::FILES[0]);
+    let journal_path = path.join(checkpoints::FILES[1]);
+    let original = std::fs::read(&database).unwrap();
     let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+    let scratch = temp.path().join("scratch");
+    std::fs::create_dir(&scratch).unwrap();
+    let writer = Connection::open(&database).unwrap();
+    writer.execute_batch("PRAGMA cache_size=1; BEGIN;").unwrap();
+    writer.execute_batch("CREATE TABLE junk(x BLOB);").unwrap();
+    for _ in 0..300 {
+        writer
+            .execute("INSERT INTO junk VALUES (randomblob(4000))", [])
+            .unwrap();
+    }
+    std::fs::copy(&database, scratch.join("db")).unwrap();
+    std::fs::copy(&journal_path, scratch.join("journal")).unwrap();
+    drop(writer);
+    std::fs::copy(scratch.join("db"), &database).unwrap();
+    std::fs::copy(scratch.join("journal"), &journal_path).unwrap();
+    assert_ne!(std::fs::read(&database).unwrap(), original);
     assert!(!checkpoint_below_floor(&root).unwrap());
-    assert!(!path.join(checkpoints::FILES[1]).exists());
-    assert_eq!(
-        std::fs::read(path.join(checkpoints::FILES[0])).unwrap(),
-        original
-    );
+    assert!(!journal_path.exists());
+    assert_eq!(std::fs::read(&database).unwrap(), original);
     assert!(root.archive_incompatible_history().unwrap().is_none());
     assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
     assert!(!path.join("archive").exists());
