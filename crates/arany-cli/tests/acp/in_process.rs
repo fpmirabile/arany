@@ -1295,7 +1295,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
             "busy Session never reaches serve"
         );
     }
-    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":1,"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
+    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted").unwrap(),"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
     let recovered = output.recv().await.unwrap();
     validate(&recovered);
     assert_eq!(
@@ -1801,7 +1801,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             });
         }
         let event = json!({"sequence":10,"session_id":adapter.session,"run_id":adapter.run,
-            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":1,
+            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":arany::test_support::payload_version("GoalPlanContractRecorded").unwrap(),
             "payload":{"goal_id":goal,"run_id":adapter.run,"contract":contract},"created_at_ms":0});
         let mut preview = event.clone();
         preview["kind"] = json!("AssistantDisplayRecorded");
@@ -1881,7 +1881,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
         adapter.events.send(Message::Response(Response {
             jsonrpc:Default::default(),id:request.id,
             result:json!({"events":[event, {"sequence":11,"session_id":adapter.session,
-                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":1,
+                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted").unwrap(),
                 "payload":{"run_id":adapter.run,"text":"Committed answer"},"created_at_ms":0}],"nextSince":null}),
         })).await.unwrap();
         let answer = adapter.next().await;
@@ -2344,38 +2344,47 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
             .try_send(wire::response(RequestId::Integer(99), json!({})))
             .unwrap();
     }
-    adapter.permission(&intent, 21).await;
-    drop(adapter.events.reserve_many(256).await.unwrap());
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(3600)).await;
-    tokio::time::resume();
-    for _ in 0..256 {
-        adapter.output.recv().await.unwrap();
-    }
-    let delayed = adapter.next().await;
-    assert_eq!(
-        delayed["params"]["toolCall"]["rawInput"]["id"],
-        intent.id.to_string()
-    );
-    adapter
-        .events
-        .send(Message::Notification(Notification {
-            jsonrpc: Default::default(),
-            method: "$/cancel_request".into(),
-            params: Some(json!({"requestId":21})),
-        }))
+    let blocked = adapter.intent(intent.call.clone());
+    adapter.item(&blocked, None).await;
+    adapter.permission(&blocked, 21).await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), adapter.input.recv())
         .await
+        .unwrap()
         .unwrap();
-    let withdrawal = adapter.next().await;
-    assert_eq!(withdrawal["method"], "$/cancel_request");
-    assert_eq!(withdrawal["params"]["requestId"], delayed["id"]);
+    let serve::server::ClientMessage::Message(Message::Error(error)) = reply else {
+        panic!("unsent approval must be unavailable");
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(21)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    assert_eq!(adapter.outbound.capacity(), 0);
+    let late = json!({"jsonrpc":"2.0","id":permission["id"].as_i64().unwrap()+1,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
+    for _ in 0..256 {
+        assert_eq!(adapter.output.recv().await.unwrap()["id"], 99);
+    }
+    let update = adapter.next().await;
+    assert_eq!(update["params"]["update"]["sessionUpdate"], "tool_call");
+    assert_eq!(
+        update["params"]["update"]["toolCallId"],
+        blocked.id.to_string()
+    );
+    assert!(adapter.output.try_recv().is_err());
     let fresh = adapter.intent(intent.call.clone());
     adapter.permission(&fresh, 22).await;
     let permission = adapter.next().await;
     assert_eq!(
         permission["params"]["toolCall"]["rawInput"]["id"],
         fresh.id.to_string(),
-        "a withdrawn request must free the permission slot"
+        "an unavailable request must free the permission slot"
     );
     let error = json!({"jsonrpc":"2.0","id":permission["id"],"error":{"code":-32603,"message":"Client refused"}});
     translate::input(
@@ -2426,7 +2435,7 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind).unwrap(),"payload":payload,"created_at_ms":0
     })).collect();
     adapter
         .respond(json!({"events":events,"nextSince":null}))
@@ -2437,6 +2446,80 @@ async fn tools_permissions_wait_and_withdraw_without_private_state() {
         "reconciliation must suppress duplicate Tool phases and preserve uncertainty"
     );
     adapter.close().await;
+}
+
+#[tokio::test]
+async fn closed_permission_output_reports_unavailable_without_a_client_reply() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    adapter.output.close();
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.permission(&intent, 1).await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), adapter.input.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let serve::server::ClientMessage::Message(Message::Error(error)) = reply else {
+        panic!("unavailable permission")
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(1)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    let late = json!({"jsonrpc":"2.0","id":1,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn blocked_projection_refuses_deferred_event_overflow() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        adapter
+            .outbound
+            .try_send(wire::response(RequestId::Integer(99), json!({})))
+            .unwrap();
+    }
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.item(&intent, None).await;
+    for _ in 0..=serve::OUTBOUND_CAPACITY {
+        adapter
+            .events
+            .send(Message::Notification(Notification {
+                jsonrpc: Default::default(),
+                method: "events/resync".into(),
+                params: None,
+            }))
+            .await
+            .unwrap();
+    }
+    assert!(
+        adapter
+            .worker
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("ACP projection queue full")
+    );
+    assert_eq!(adapter.outbound.capacity(), 0);
 }
 
 #[tokio::test]
@@ -3558,7 +3641,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind).unwrap(),"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;
     assert_eq!(
@@ -3795,7 +3878,7 @@ async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted").unwrap(),"payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await
@@ -3870,7 +3953,7 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted").unwrap(),"payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await

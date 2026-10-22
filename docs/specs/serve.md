@@ -266,11 +266,13 @@ one-use intent cannot become a remembered permission rule.
 Unanswered primary requests remain pending without a wall-clock deadline while
 the owning connection and Run remain live. EOF, turn interruption, pause,
 completion and output closure withdraw outstanding requests. Failed or unsent
-delivery is unavailable approval, not human decline. Approval delivery and
-withdrawal run independently of outbound notification progress: a full output
+delivery is unavailable approval, not human decline. Enqueue is attempted once;
+a full or closed outbound queue resolves the unsent request as unavailable
+immediately, removes its pending ID and never retries delivery. Approval
+delivery and withdrawal run independently of outbound notification progress: a full output
 queue cannot hold Journal appends or prevent cancellation. A connected slow
-client alone does not expire a request. Replies to withdrawn requests cannot
-authorize an effect, even if the request was already queued to the client.
+client alone does not expire an already enqueued request. Replies to withdrawn
+requests cannot authorize an effect, even if the request was already queued to the client.
 At most one approval is pending per connection; the Engine inbox has one
 bounded ingress slot. The Engine can abandon a child ask at its temporary
 issue-time/delegation deadline, clearing its request. An excess ask refuses
@@ -290,7 +292,7 @@ admission still apply. Hook execution remains owned by the Tools contract.
 | `initialize.clientInfo` strings | 256 UTF-8 bytes each; invalid params. |
 | Notification opt-outs | At most 32; invalid params. |
 | Turn input | At least one input item, at most one text of 64 KiB; base64-encoded images follow the [terminal image contract](./terminal.md#paste-and-attachments), including its image count and aggregate decoded-byte limit; invalid params. Text or images must be nonempty. |
-| Pending inbound requests | 64; reader awaits capacity, applying pipe backpressure; reader buffer 64 KiB. |
+| Pending inbound requests | 64 at the reader plus at most 64 deferred messages while sending output; reader buffer 64 KiB. Output waits still accept EOF, matching interruption/unsubscribe and approval replies. Deferred-input overflow cancels the Run and fails the connection. Cancellation or shutdown with output still full drops the blocked presentation operation, settles the Engine and exits with Session-history recovery guidance; ready output still drains normally. |
 | Outbound queue | 256; follower waits and Journal lag is reported through `events/resync`. |
 | Loaded threads / active submissions / pending approval requests | 64 / 1 / 1; `threadLimit` / `busy` / deny excess approvals; loaded threads are never evicted. Reloading a known thread consumes no extra slot; unsubscribe frees one after cancellation settles. |
 | Session list page / cursor | 1–100 entries (default 50) / 128 UTF-8 bytes; invalid limits/cursors refuse with invalidParams. The whole response must fit 1 MiB. |

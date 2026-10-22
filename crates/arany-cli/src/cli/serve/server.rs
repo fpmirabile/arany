@@ -12,7 +12,7 @@ use arany_cli::protocol::{methods::*, rpc::*};
 use base64::Engine as _;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::{future::Future, path::PathBuf, sync::Arc, task::Poll};
+use std::{collections::VecDeque, future::Future, path::PathBuf, sync::Arc, task::Poll};
 use tokio::sync::{mpsc, watch};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -93,7 +93,7 @@ struct ActiveTurn {
     result: tokio::task::AbortHandle,
     events: arany::Subscription,
     cancel: RunCancellation,
-    approvals: super::approvals::Approvals,
+    approvals: Arc<super::approvals::Approvals>,
     approval_mode: ToolApprovals,
     steering: RunSteering,
     pending_start: Option<RequestId>,
@@ -106,6 +106,139 @@ impl Drop for ActiveTurn {
     fn drop(&mut self) {
         self.cancel.cancel();
         self.result.abort();
+    }
+}
+
+#[derive(Clone)]
+struct OutputControl {
+    thread_id: SessionId,
+    run_id: Option<arany::RunId>,
+    pending_completion: bool,
+    result: tokio::task::AbortHandle,
+    cancel: RunCancellation,
+    approvals: Arc<super::approvals::Approvals>,
+}
+
+impl From<&ActiveTurn> for OutputControl {
+    fn from(turn: &ActiveTurn) -> Self {
+        Self {
+            thread_id: turn.thread_id,
+            run_id: turn.state.run_id,
+            pending_completion: turn.state.pending_completion,
+            result: turn.result.clone(),
+            cancel: turn.cancel.clone(),
+            approvals: turn.approvals.clone(),
+        }
+    }
+}
+
+impl OutputControl {
+    fn interrupt(&self, request: &Request) -> bool {
+        match request.method.as_str() {
+            "turn/interrupt" => {
+                params::<TurnInterruptParams>(request.params.clone()).is_ok_and(|p| {
+                    p.thread_id == self.thread_id
+                        && Some(p.turn_id) == self.run_id
+                        && !self.pending_completion
+                        && !self.result.is_finished()
+                })
+            }
+            "thread/unsubscribe" => params::<ThreadUnsubscribeParams>(request.params.clone())
+                .is_ok_and(|p| p.thread_id == self.thread_id),
+            _ => false,
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancel.cancel();
+        self.approvals.close();
+    }
+}
+
+struct Inbound {
+    receiver: mpsc::Receiver<ClientMessage>,
+    pending: VecDeque<ClientMessage>,
+    stopping: watch::Sender<bool>,
+    ended: bool,
+}
+
+impl Inbound {
+    async fn next(&mut self) -> Option<ClientMessage> {
+        if let Some(message) = self.pending.pop_front() {
+            return Some(message);
+        }
+        if self.ended {
+            return None;
+        }
+        self.receiver.recv().await
+    }
+
+    async fn wait<T, E: From<String>>(
+        &mut self,
+        control: Option<OutputControl>,
+        outbound: &mpsc::Sender<Message>,
+        action: impl Future<Output = Result<T, E>>,
+    ) -> Result<T, E> {
+        tokio::pin!(action);
+        let mut cancellation = control.as_ref().map(|c| c.cancel.clone());
+        let mut stopping = self.stopping.subscribe();
+        let mut stopped = false;
+        loop {
+            let reason = tokio::select! { biased;
+                result = std::future::poll_fn(|cx| {
+                    match action.as_mut().poll(cx) {
+                        Poll::Pending if stopped && outbound.capacity() == 0 => Poll::Ready(Err("output blocked after cancellation; Run may be interrupted; check Session history".to_owned().into())),
+                        result => result,
+                    }
+                }) => return result,
+                () = outbound.closed() => "protocol writer closed",
+                () = async { cancellation.as_mut().expect("active cancellation").cancelled().await }, if cancellation.is_some() && !stopped => {
+                    stopped = true;
+                    continue;
+                },
+                _ = stopping.wait_for(|stopping| *stopping), if !stopped => {
+                    if let Some(control) = &control { control.cancel(); }
+                    stopped = true;
+                    continue;
+                },
+                message = self.receiver.recv(), if !self.ended => match message {
+                    None | Some(ClientMessage::Eof) => {
+                        self.ended = true;
+                        if let Some(control) = &control { control.cancel(); }
+                        self.stopping.send_replace(true);
+                        stopped = true;
+                        continue;
+                    }
+                    Some(ClientMessage::Message(Message::Request(ref request)))
+                        if outbound.capacity() == 0 && control.as_ref().is_some_and(|c| c.interrupt(request)) => "output blocked at cancellation",
+                    Some(ClientMessage::Message(Message::Response(reply))) if control.is_some() => {
+                        control.as_ref().expect("active control").approvals.respond(reply.id, Some(reply.result));
+                        continue;
+                    }
+                    Some(ClientMessage::Message(Message::Error(reply))) if control.is_some() => {
+                        if let Some(id) = reply.id {
+                            control.as_ref().expect("active control").approvals.respond(id, None);
+                        }
+                        continue;
+                    }
+                    Some(message) if self.pending.len() < super::INBOUND_CAPACITY => {
+                        self.pending.push_back(message);
+                        continue;
+                    }
+                    Some(_) => "pending input bound exceeded while output blocked",
+                },
+            };
+            if let Some(control) = &control {
+                control.cancel();
+            }
+            return Err(format!("{reason}; Run may be interrupted; check Session history").into());
+        }
+    }
+}
+
+impl From<String> for Fault {
+    fn from(message: String) -> Self {
+        internal(message)
     }
 }
 
@@ -146,11 +279,17 @@ pub(in crate::cli) async fn run_with_threads(
 pub(in crate::cli) async fn run_configured(
     engine: Engine,
     state: PathBuf,
-    mut inbound: mpsc::Receiver<ClientMessage>,
+    inbound: mpsc::Receiver<ClientMessage>,
     outbound: mpsc::Sender<ServerMessage>,
     mut threads: Threads,
     stopping: watch::Sender<bool>,
 ) -> Result<(), String> {
+    let mut inbound = Inbound {
+        receiver: inbound,
+        pending: VecDeque::new(),
+        stopping: stopping.clone(),
+        ended: false,
+    };
     let engine = Arc::new(engine);
     let mut committed = engine.subscribe();
     let mut history = super::history::History::default();
@@ -165,13 +304,15 @@ pub(in crate::cli) async fn run_configured(
         loop {
             enum Next {
                 Input(Option<ClientMessage>),
+                OutputClosed,
                 Event(Option<Tapped>),
                 Committed(Option<Tapped>),
                 Done(Result<Option<Refused>, EngineError>),
             }
             let next = if let Some(turn) = active.as_mut() {
                 tokio::select! { biased;
-                    input = inbound.recv(), if !shutdown => Next::Input(input),
+                    () = outbound.closed() => Next::OutputClosed,
+                    input = inbound.next(), if !shutdown => Next::Input(input),
                     event = turn.events.next() => Next::Event(event),
                     event = committed.next() => Next::Committed(event),
                     result = workers.join_next() => Next::Done(result.and_then(Result::ok).unwrap_or(Err(EngineError::CoordinatorFailed)).map(Refused::from_result)),
@@ -182,11 +323,27 @@ pub(in crate::cli) async fn run_configured(
                     break;
                 }
                 tokio::select! { biased;
-                    input = inbound.recv() => Next::Input(input),
+                    () = outbound.closed() => Next::OutputClosed,
+                    input = inbound.next() => Next::Input(input),
                     event = committed.next() => Next::Committed(event),
                 }
             };
+            let mut control = active.as_ref().map(OutputControl::from);
+            if let (Some(control), Next::Event(Some(Tapped::Committed(event)))) =
+                (&mut control, &next)
+                && event.session_id == control.thread_id
+                && let Event::MessageAccepted { run_id, .. } = event.event
+            {
+                control.run_id = Some(run_id);
+                control.pending_completion = false;
+            }
             match next {
+                Next::OutputClosed => {
+                    return Err(
+                        "protocol writer closed; Run may be interrupted; check Session history"
+                            .into(),
+                    );
+                }
                 Next::Input(None | Some(ClientMessage::Eof)) => {
                     if let Some(turn) = &active {
                         turn.approvals.close();
@@ -259,7 +416,7 @@ pub(in crate::cli) async fn run_configured(
                                 let result = loop {
                                     tokio::select! {
                                         result = restoration.as_mut() => break result,
-                                        message = inbound.recv(), if !shutdown => match message {
+                                        message = inbound.next(), if !shutdown => match message {
                                             None | Some(ClientMessage::Eof) => {
                                                 cancellation.cancel();
                                                 shutdown = true;
@@ -282,33 +439,32 @@ pub(in crate::cli) async fn run_configured(
                                     }
                                 };
                                 for reply in busy {
-                                    send(&outbound, reply).await.map_err(internal)?;
+                                    inbound.wait(control.clone(), &outbound, send(&outbound, reply)).await.map_err(internal)?;
                                 }
                                 let result = result?;
-                                send(&outbound, response(id.clone(), &result))
+                                inbound.wait(control.clone(), &outbound, send(&outbound, response(id.clone(), &result)))
                                     .await
                                     .map_err(internal)?;
                                 if let Some(thread) = result.thread {
-                                    emit(
+                                    inbound.wait(control.clone(), &outbound, emit(
                                         &outbound,
                                         &opt_out,
                                         notification("thread/started", ThreadResult { thread }),
-                                    )
+                                    ))
                                     .await
                                     .map_err(internal)?;
                                 }
                                 Ok(None)
                             }
                             "events/subscribe" | "receipt/get" | "thread/fork" => {
-                                history
-                                    .dispatch(
+                                inbound.wait(control.clone(), &outbound, history.dispatch(
                                         &engine,
                                         &state,
                                         &mut threads,
                                         request,
                                         &outbound,
                                         &opt_out,
-                                    )
+                                    ))
                                     .await
                             }
                             "thread/start" => {
@@ -319,10 +475,10 @@ pub(in crate::cli) async fn run_configured(
                                     params(request.params)?,
                                 )
                                 .await?;
-                                send(&outbound, response(id.clone(), &result))
+                                inbound.wait(control.clone(), &outbound, send(&outbound, response(id.clone(), &result)))
                                     .await
                                     .map_err(internal)?;
-                                emit(&outbound, &opt_out, notification("thread/started", result))
+                                inbound.wait(control.clone(), &outbound, emit(&outbound, &opt_out, notification("thread/started", result)))
                                     .await
                                     .map_err(internal)?;
                                 Ok(None)
@@ -332,7 +488,7 @@ pub(in crate::cli) async fn run_configured(
                                 let reply = response(id.clone(), result);
                                 encode_line(&reply)
                                     .map_err(|_| Fault::engine(EngineError::ContextTooLarge))?;
-                                send(&outbound, reply).await.map_err(internal)?;
+                                inbound.wait(control.clone(), &outbound, send(&outbound, reply)).await.map_err(internal)?;
                                 Ok(None)
                             }
                             "thread/unsubscribe" => {
@@ -399,7 +555,7 @@ pub(in crate::cli) async fn run_configured(
                                     return Err(Fault::engine(EngineError::ContextTooLarge));
                                 }
                                 threads.map.insert(thread_id, loaded);
-                                send(&outbound, response).await.map_err(internal)?;
+                                inbound.wait(control.clone(), &outbound, send(&outbound, response)).await.map_err(internal)?;
                                 Ok(None)
                             }
                             "turn/start" | "goal/resume" => {
@@ -508,7 +664,7 @@ pub(in crate::cli) async fn run_configured(
                                     result,
                                     events,
                                     cancel,
-                                    approvals,
+                                    approvals: Arc::new(approvals),
                                     approval_mode,
                                     steering,
                                     pending_start: Some(id.clone()),
@@ -551,9 +707,25 @@ pub(in crate::cli) async fn run_configured(
                     }
                     .await;
                     match outcome {
-                        Ok(Some(value)) => send(&outbound, response(id, value)).await?,
+                        Ok(Some(value)) => {
+                            inbound
+                                .wait(
+                                    control.clone(),
+                                    &outbound,
+                                    send(&outbound, response(id, value)),
+                                )
+                                .await?
+                        }
                         Ok(None) => {}
-                        Err(error) => send(&outbound, error.message(Some(id))).await?,
+                        Err(error) => {
+                            inbound
+                                .wait(
+                                    control.clone(),
+                                    &outbound,
+                                    send(&outbound, error.message(Some(id))),
+                                )
+                                .await?
+                        }
                     }
                 }
                 Next::Input(Some(ClientMessage::Message(Message::Notification(_)))) => {}
@@ -570,78 +742,96 @@ pub(in crate::cli) async fn run_configured(
                     }
                 }
                 Next::Event(Some(event)) => {
-                    observe(
-                        active.as_mut().expect("active turn"),
-                        event,
-                        &state,
-                        &outbound,
-                        &opt_out,
-                    )
-                    .await?
-                }
-                Next::Event(None) => return Err("Event stream closed during a Run".into()),
-                Next::Committed(Some(event)) => history.observe(event, &outbound, &opt_out).await?,
-                Next::Committed(None) => return Err("committed Event stream closed".into()),
-                Next::Done(result) => {
-                    let turn = active.as_mut().expect("active turn");
-                    turn.result_done = true;
-                    turn.approvals.close();
-                    loop {
-                        let event = {
-                            let mut next = std::pin::pin!(turn.events.next());
-                            std::future::poll_fn(|cx| {
-                                Poll::Ready(match next.as_mut().poll(cx) {
-                                    Poll::Ready(event) => event,
-                                    Poll::Pending => None,
-                                })
-                            })
-                            .await
-                        };
-                        let Some(event) = event else {
-                            break;
-                        };
-                        observe(turn, event, &state, &outbound, &opt_out).await?;
-                    }
-                    let failure = if turn.pending_start.is_none() {
-                        result.as_ref().err().map(ToString::to_string)
-                    } else {
-                        None
-                    };
-                    let (result, refused) = match result {
-                        Ok(refused) => (Ok(()), refused),
-                        Err(error) => (Err(error), None),
-                    };
-                    let ending = Completion::Final {
-                        settled: result.is_ok(),
-                        refused,
-                    };
-                    if result.is_err()
-                        && let Some(id) = turn.pending_start.take()
-                    {
-                        let error = result.expect_err("failed Run");
-                        send(&outbound, Fault::engine(error).message(Some(id))).await?;
-                    }
-                    complete(turn, &state, &outbound, &opt_out, &ending).await?;
-                    if let Some(id) = turn.pending_close.take() {
-                        history.unsubscribe(turn.thread_id);
-                        threads.map.remove(&turn.thread_id);
-                        send(
+                    inbound
+                        .wait(
+                            control,
                             &outbound,
-                            response(
-                                id,
-                                ThreadUnsubscribeResult {
-                                    status: ThreadUnsubscribeStatus::Unsubscribed,
-                                },
+                            observe(
+                                active.as_mut().expect("active turn"),
+                                event,
+                                &state,
+                                &outbound,
+                                &opt_out,
                             ),
                         )
+                        .await?
+                }
+                Next::Event(None) => return Err("Event stream closed during a Run".into()),
+                Next::Committed(Some(event)) => {
+                    inbound
+                        .wait(
+                            control,
+                            &outbound,
+                            history.observe(event, &outbound, &opt_out),
+                        )
+                        .await?
+                }
+                Next::Committed(None) => return Err("committed Event stream closed".into()),
+                Next::Done(result) => {
+                    inbound
+                        .wait(control, &outbound, async {
+                            let turn = active.as_mut().expect("active turn");
+                            turn.result_done = true;
+                            turn.approvals.close();
+                            loop {
+                                let event = {
+                                    let mut next = std::pin::pin!(turn.events.next());
+                                    std::future::poll_fn(|cx| {
+                                        Poll::Ready(match next.as_mut().poll(cx) {
+                                            Poll::Ready(event) => event,
+                                            Poll::Pending => None,
+                                        })
+                                    })
+                                    .await
+                                };
+                                let Some(event) = event else {
+                                    break;
+                                };
+                                observe(turn, event, &state, &outbound, &opt_out).await?;
+                            }
+                            let failure = if turn.pending_start.is_none() {
+                                result.as_ref().err().map(ToString::to_string)
+                            } else {
+                                None
+                            };
+                            let (result, refused) = match result {
+                                Ok(refused) => (Ok(()), refused),
+                                Err(error) => (Err(error), None),
+                            };
+                            let ending = Completion::Final {
+                                settled: result.is_ok(),
+                                refused,
+                            };
+                            if result.is_err()
+                                && let Some(id) = turn.pending_start.take()
+                            {
+                                let error = result.expect_err("failed Run");
+                                send(&outbound, Fault::engine(error).message(Some(id))).await?;
+                            }
+                            complete(turn, &state, &outbound, &opt_out, &ending).await?;
+                            if let Some(id) = turn.pending_close.take() {
+                                history.unsubscribe(turn.thread_id);
+                                threads.map.remove(&turn.thread_id);
+                                send(
+                                    &outbound,
+                                    response(
+                                        id,
+                                        ThreadUnsubscribeResult {
+                                            status: ThreadUnsubscribeStatus::Unsubscribed,
+                                        },
+                                    ),
+                                )
+                                .await?;
+                            }
+                            active = None;
+                            if let Some(failure) = failure {
+                                return Err(format!(
+                                    "{failure}; Run may be interrupted; check Session history"
+                                ));
+                            }
+                            Ok(())
+                        })
                         .await?;
-                    }
-                    active = None;
-                    if let Some(failure) = failure {
-                        return Err(format!(
-                            "{failure}; Run may be interrupted; check Session history"
-                        ));
-                    }
                 }
             }
         }
@@ -936,6 +1126,58 @@ mod tests {
     use arany::test_support::scenario::{ScriptedProvider, request};
 
     #[tokio::test]
+    async fn blocked_output_bounds_deferred_input_without_dropping_the_queued_message() {
+        let _deadline = super::super::tests::deadline();
+        let (sender, receiver) = mpsc::channel(super::super::INBOUND_CAPACITY);
+        let (stopping, _) = watch::channel(false);
+        let mut inbound = Inbound {
+            receiver,
+            pending: VecDeque::new(),
+            stopping,
+            ended: false,
+        };
+        let (outbound, mut output) = mpsc::channel(1);
+        outbound
+            .try_send(response(RequestId::Integer(1), json!({})))
+            .unwrap();
+        let fill = async {
+            for id in 0..=super::super::INBOUND_CAPACITY {
+                sender
+                    .send(ClientMessage::Message(Message::Request(Request {
+                        jsonrpc: Default::default(),
+                        id: RequestId::Integer(i64::try_from(id).unwrap()),
+                        method: "thread/list".into(),
+                        params: Some(json!({})),
+                    })))
+                    .await
+                    .unwrap();
+            }
+        };
+        let (result, ()) = tokio::join!(
+            inbound.wait(
+                None,
+                &outbound,
+                send(&outbound, response(RequestId::Integer(2), json!({})))
+            ),
+            fill,
+        );
+        assert!(result.unwrap_err().contains("pending input bound exceeded"));
+        assert_eq!(inbound.pending.len(), super::super::INBOUND_CAPACITY);
+        for id in 0..super::super::INBOUND_CAPACITY {
+            let Some(ClientMessage::Message(Message::Request(request))) = inbound.next().await
+            else {
+                panic!("deferred request")
+            };
+            assert_eq!(request.id, RequestId::Integer(i64::try_from(id).unwrap()));
+        }
+        let Message::Response(reply) = output.try_recv().unwrap() else {
+            panic!("queued reply")
+        };
+        assert_eq!(reply.id, RequestId::Integer(1));
+        assert!(output.try_recv().is_err());
+    }
+
+    #[tokio::test]
     async fn lost_message_accepted_tap_answers_from_the_first_new_committed_run() {
         let _deadline = super::super::tests::deadline();
         let temp = tempfile::tempdir().unwrap();
@@ -992,7 +1234,7 @@ mod tests {
             result: worker.abort_handle(),
             events,
             cancel,
-            approvals: super::super::approvals::Approvals::empty_for_test(),
+            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
             approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
             steering: RunSteering::new(),
             pending_start: Some(RequestId::Integer(3)),
@@ -1091,7 +1333,7 @@ mod tests {
             result: worker.abort_handle(),
             events: engine.subscribe(),
             cancel: RunCancellation::new(),
-            approvals: super::super::approvals::Approvals::empty_for_test(),
+            approvals: Arc::new(super::super::approvals::Approvals::empty_for_test()),
             approval_mode: ToolApprovals::new(arany::ApprovalMode::Request).0,
             steering: RunSteering::new(),
             pending_start: None,

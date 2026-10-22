@@ -676,8 +676,9 @@ pub(super) async fn submit_objective(
                             let _ = super::permissions::cycle(composer);
                             approvals.set_mode(composer.approval_mode().unwrap_or_default());
                         }
-                        input if interrupt_approval_input(&input, &cancellation) => {
+                        input if interrupt_approval_input(&input, &cancellation, &mut stop) => {
                             pending.take();
+                            terminal.settle_child_notes(view, &steering, true);
                             terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
                         }
                         TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % choices.len(),
@@ -1414,8 +1415,13 @@ async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result
     Ok(())
 }
 
-fn interrupt_approval_input(input: &TerminalInput, cancellation: &arany::RunCancellation) -> bool {
+fn interrupt_approval_input(
+    input: &TerminalInput,
+    cancellation: &arany::RunCancellation,
+    stop: &mut ActiveStop,
+) -> bool {
     if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
+        *stop = ActiveStop::Cancelling;
         cancellation.cancel();
         true
     } else {
@@ -1431,17 +1437,22 @@ mod tests {
     fn approval_end_of_input_and_escape_cancel_without_a_decline() {
         for input in [TerminalInput::EndOfInput, TerminalInput::Escape] {
             let cancellation = arany::RunCancellation::new();
-            assert!(interrupt_approval_input(&input, &cancellation));
+            let mut stop = ActiveStop::Running;
+            assert!(interrupt_approval_input(&input, &cancellation, &mut stop));
+            assert!(stop == ActiveStop::Cancelling);
             assert!(
                 !cancellation.cancel(),
                 "interruption already cancelled the Run"
             );
         }
         let cancellation = arany::RunCancellation::new();
+        let mut stop = ActiveStop::Running;
         assert!(!interrupt_approval_input(
             &TerminalInput::Submit,
-            &cancellation
+            &cancellation,
+            &mut stop
         ));
+        assert!(stop == ActiveStop::Running);
         assert!(
             cancellation.cancel(),
             "ordinary approval input did not cancel"

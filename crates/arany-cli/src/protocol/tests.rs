@@ -24,7 +24,7 @@ fn supervisor_event_projects_canonical_jsonl_and_validates_against_exported_sche
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "SupervisorVerdictRecorded");
-    assert_eq!(line["event_version"], 1);
+    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(
         line["payload"],
         serde_json::from_str::<Value>(&envelope.event.payload().unwrap()).unwrap()
@@ -65,7 +65,7 @@ fn child_steering_projects_as_an_actor_scoped_committed_event() {
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "AgentSteeringNoteRecorded");
-    assert_eq!(line["event_version"], 1);
+    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(line["payload"], json!({"goal_id":goal,"text":"note"}));
     let schema = protocol_schema();
     validate(

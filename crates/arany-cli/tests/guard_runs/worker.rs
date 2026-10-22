@@ -808,10 +808,7 @@ pub(super) async fn worker_case(case: &'static str) {
                 let tool = run.tools.last().unwrap();
                 assert_eq!(tool.hooks.len(), 1);
                 assert!(tool.observation.as_ref().unwrap().attestation.is_none());
-                assert_eq!(
-                    tool.observation.as_ref().unwrap().approval_cause,
-                    Some(arany::ApprovalCause::ChildTimeout)
-                );
+                assert_eq!(tool.observation.as_ref().unwrap().approval_cause, None);
             }
             if case == "private_loss" {
                 assert!(injected, "{case}");
@@ -960,10 +957,14 @@ async fn foreground_worker_guard_journey_active_time_budget_closes_the_goal() {
 fn pad_worker_session(state: &Path, id: SessionId, through: i64) {
     let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
-    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)").unwrap();
+    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)").unwrap();
     for sequence in 2..=through {
         insert
-            .execute(rusqlite::params![sequence, id.to_string()])
+            .execute(rusqlite::params![
+                sequence,
+                id.to_string(),
+                arany::test_support::payload_version("SessionRenamed").unwrap()
+            ])
             .unwrap();
     }
     drop(insert);

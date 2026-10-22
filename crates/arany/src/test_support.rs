@@ -13,6 +13,10 @@ pub mod worker_teams;
 pub use crate::provider::test_image;
 pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
+pub fn payload_version(kind: &str) -> Option<i64> {
+    crate::session::payload_version(kind)
+}
+
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }

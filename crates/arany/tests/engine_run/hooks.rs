@@ -176,7 +176,10 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(
+            version,
+            arany::test_support::payload_version("HookFinished").unwrap()
+        );
         assert_eq!(
             connection
                 .execute(

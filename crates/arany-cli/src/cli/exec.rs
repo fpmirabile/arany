@@ -1565,17 +1565,8 @@ mod tests {
         for (line, event) in run_lines.into_iter().zip(run_events) {
             assert_eq!(line["sequence"], event.sequence);
             assert_eq!(line["created_at_ms"], event.created_at_ms);
-            let version = match line["kind"].as_str() {
-                Some("RunStarted") => 20,
-                Some("AgentSpawned") => 12,
-                Some("AgentFinished") => 10,
-                Some("ProviderCallRecorded") => 15,
-                Some("RunFinished") => 9,
-                Some("GoalProviderCallReserved") => 7,
-                Some("MessageAccepted") => 7,
-                _ => 6,
-            };
-            assert_eq!(line["event_version"], version);
+            assert_eq!(line["kind"], event.event.kind());
+            assert_eq!(line["event_version"], event.event.version());
         }
         store.close().await.expect("closed store");
 

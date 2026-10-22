@@ -16,7 +16,6 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 struct Pending {
     id: RequestId,
-    sent: bool,
     decide: oneshot::Sender<ApprovalReply>,
 }
 
@@ -68,7 +67,6 @@ impl Approvals {
         owner.worker = Some(tokio::spawn(async move {
             let mut current: Option<ToolApproval> = None;
             let mut answer: Option<oneshot::Receiver<ApprovalReply>> = None;
-            let mut outgoing = None;
             loop {
                 tokio::select! { biased;
                     () = cancel.cancelled() => break,
@@ -82,13 +80,11 @@ impl Approvals {
                             approval.decide(allow.unwrap_or(ApprovalReply::Unavailable));
                         }
                         answer = None;
-                        outgoing = None;
                     }
                     () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
                         withdraw(&state, &outbound, withdrawals);
                         current = None;
                         answer = None;
-                        outgoing = None;
                     }
                     approval = inbox.next() => {
                         let Some(mut approval) = approval else { break };
@@ -110,29 +106,17 @@ impl Approvals {
                         let (decide, decision) = oneshot::channel();
                         let mut state = state.lock().expect("approval state");
                         if state.closed { approval.decide(ApprovalReply::Unavailable); break; }
+                        let Ok(permit) = outbound.try_reserve() else {
+                            approval.decide(ApprovalReply::Unavailable);
+                            continue;
+                        };
                         state.pending = Some(Pending {
                             id: message.id.clone(),
-                            sent: false,
                             decide,
                         });
                         current = Some(approval);
                         answer = Some(decision);
-                        outgoing = Some(Message::Request(message));
-                    }
-                    permit = outbound.reserve(), if outgoing.is_some() => {
-                        let Ok(permit) = permit else { break };
-                        let mut state = state.lock().expect("approval state");
-                        match (&mut state.pending, outgoing.take()) {
-                            (Some(pending), Some(message)) => {
-                                pending.sent = true;
-                                permit.send(message);
-                            }
-                            _ => {
-                                state.pending = None;
-                                current = None;
-                                answer = None;
-                            }
-                        }
+                        permit.send(Message::Request(message));
                     }
                 }
             }
@@ -148,10 +132,7 @@ impl Approvals {
     pub fn respond(&self, id: RequestId, result: Option<Value>) {
         let mut state = self.state.lock().expect("approval state");
         let closed = state.closed;
-        let Some(pending) = state
-            .pending
-            .take_if(|pending| !closed && pending.id == id && pending.sent)
-        else {
+        let Some(pending) = state.pending.take_if(|pending| !closed && pending.id == id) else {
             return;
         };
         let decision = result
@@ -200,7 +181,7 @@ fn withdraw(state: &Mutex<State>, output: &mpsc::Sender<Message>, enabled: bool)
 }
 
 fn notify_withdrawal(pending: Option<Pending>, output: &mpsc::Sender<Message>, enabled: bool) {
-    if enabled && let Some(pending) = pending.filter(|pending| pending.sent) {
+    if enabled && let Some(pending) = pending {
         let _ = output.try_send(Message::Notification(super::items::notification(
             "$/cancel_request",
             serde_json::json!({"requestId": pending.id}),
@@ -385,6 +366,53 @@ mod tests {
         };
         assert!(!arany::test_support::approval::ask(&approvals, &intent(big)).await);
         assert!(output.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn full_or_closed_output_refuses_an_unsent_request_and_forgets_its_id() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        for closed in [false, true] {
+            let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let (outbound, mut output) = mpsc::channel(1);
+            if closed {
+                output.close();
+            } else {
+                outbound
+                    .try_send(super::super::server::response(
+                        RequestId::Integer(99),
+                        serde_json::json!({}),
+                    ))
+                    .unwrap();
+            }
+            let owner = Approvals::start(
+                inbox,
+                RunCancellation::new(),
+                SessionId::new(),
+                Channel {
+                    outbound,
+                    next_id: Arc::new(AtomicI64::new(1)),
+                    withdrawals: false,
+                },
+                RunCancellation::new(),
+                |_| async { Some(1) },
+            );
+            assert!(
+                !tokio::time::timeout(
+                    Duration::from_secs(5),
+                    arany::test_support::approval::ask(&approvals, &intent(read()))
+                )
+                .await
+                .unwrap()
+            );
+            owner.respond(
+                RequestId::Integer(1),
+                Some(serde_json::json!({"decision":"accept"})),
+            );
+            if !closed {
+                assert!(matches!(output.try_recv().unwrap(), Message::Response(_)));
+            }
+            assert!(output.try_recv().is_err());
+        }
     }
 
     #[tokio::test]

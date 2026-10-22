@@ -145,8 +145,9 @@ Serve validates the entire resume result against its 1 MiB line bound before
 loading the thread or returning history. Overflow maps to `-32603 contextTooLarge`
 with no partial replay or newly loaded Session. The translator retains that one
 bounded result and projects at most two updates per item through the existing
-bounded output queue; it keeps no second history buffer. Existing per-update
-Tool/text truncation applies. Reloading a loaded Session consumes no extra slot.
+bounded output queue. Ordinary serve messages arriving during a blocked
+projection use the bounded deferred queue in the limits below. Existing
+per-update Tool/text truncation applies. Reloading a loaded Session consumes no extra slot.
 
 Text blocks concatenate in order without separators. A `resource_link` becomes
 `[@name](uri)`. An embedded `resource` must contain `uri` and `text`; blob resources
@@ -206,11 +207,15 @@ one-use grant, journal and Guard checks still apply.
 Cancellation, Tool completion or serve withdrawal retire the pending
 permission and queue `$/cancel_request` for its ACP ID if it was sent. Serve
 owns withdrawal independently of outbound capacity. A primary permission has no
-wall-clock expiry; a still-connected slow client remains answerable. A client
-may receive an already withdrawn request or delayed withdrawal, and cannot
+wall-clock expiry once enqueued; a still-connected slow client remains
+answerable. A client may receive an already withdrawn request or delayed withdrawal, and cannot
 authorize it. Child requests retain their temporary Engine timer. An oversized
-permission records unavailable approval without sending or truncating its intent
-or approval lines; invalid results and client errors are also unavailable, not
+permission or a full/closed ACP output queue records unavailable approval
+without sending or truncating its intent
+or approval lines. Enqueue is attempted once, with no retry, and its ID is
+retired before reporting unavailable to serve; later replies are ignored.
+Permission requests are processed even while an earlier Tool update waits for
+output capacity. Invalid results and client errors are also unavailable, not
 human decline. No transport configuration widens the private grant.
 
 A committed serve `item/completed` agentMessage produces exactly one
@@ -308,7 +313,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 |---|---|
 | Incoming/outgoing line including newline | Serve's 1 MiB. Incoming overflow is discarded through newline, then null-ID `-32600 messageTooLarge`; malformed JSON gets `-32700`. The next line remains usable. |
 | Reader buffer / serve inbound | 64 KiB / 64 messages with backpressure. JSON depth uses serde_json's recursion bound. |
-| Serve outbound / ACP outbound | 256 messages each. Projection waits for ACP capacity independently of input/cancel. If immediate replies fill ACP output, input fails closed and starts shutdown rather than holding cancellation behind stdout. |
+| Serve outbound / ACP outbound | 256 messages each, plus at most 256 deferred serve messages while a projection waits. Deferred-message overflow fails the connection with Session-history recovery guidance. Permission requests bypass that deferred queue and immediately resolve unavailable if ACP output is full or closed. Projection waits for ACP capacity independently of input/cancel. If immediate replies fill ACP output, input fails closed and starts shutdown rather than holding cancellation behind stdout. |
 | Pending translations | 64, with 61 available to client requests and three reserved for control, plan subscription and reconciliation; excess requests fail `busy`. Integer internal IDs are checked and never reused. |
 | Sessions / active prompt | Serve's 64 / 1, with `threadLimit` / `busy`, no eviction. Close frees a slot after cancellation settles. |
 | Prompt blocks / aggregate text after rich-content conversion | 64 / 64 KiB UTF-8, including mention/context syntax; excess or empty/whitespace-only text without images fails `invalidParams`. |
@@ -317,7 +322,7 @@ Shared bounds and their Engine behavior belong to [serve limits](./serve.md#limi
 | Mode selectors | One config selector and exactly three mode values; no client-supplied selector list is retained. Setters share the 61 client-request slots, 64 Sessions and line cap; invalid values refuse without changing state. |
 | Tool content / title | 64 KiB / 256 bytes of escaped text plus a Session-history truncation marker. Fences are longer than every contained backtick run. If the full line still exceeds the cap, optional raw input/output and locations are omitted and content becomes a history marker. |
 | Goal plan | Two entries and one retained revision per active prompt; each entry has 2,048 UTF-8 bytes of escaped content plus a history marker; overflow truncates at a UTF-8 boundary. Event paging and live forwarding reuse serve bounds. |
-| Pending permissions | One, with serve's immutable intent deadline; oversize denies unsent. |
+| Pending permissions | One; no primary wall-clock expiry. Oversize or full/closed output resolves unavailable without sending. |
 | Oversized answer projection | Cut at a UTF-8 boundary to at most 128 KiB text plus `[truncated; see arany show SESSION_ID]`; worst-case JSON escaping still fits the line cap. Other oversized projections fail closed. |
 | Reconciliation | Serve's bounded Event pages and Session Event cap; no retained history beyond the current page, one active answer, at most 10,000 deduplication entries for Tool phases per prompt, and one cursor plus original cwd per Session; deduplication overflow suppresses further Tool projections and marks incompleteUpdates. |
 | Load/resume history | [Stored history and continuation](#stored-history-and-continuation) and [serve's Session Event cap](./serve.md#limits-and-compatibility). |

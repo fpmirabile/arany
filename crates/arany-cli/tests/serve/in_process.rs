@@ -1483,6 +1483,8 @@ enum ApprovalCase {
     Invalid,
     ClientError,
     Backpressure,
+    BackpressureInterrupt,
+    Undelivered,
 }
 
 #[cfg(unix)]
@@ -1536,7 +1538,19 @@ async fn approval_duplicate_and_unknown_responses_cannot_resolve_another_intent(
 #[tokio::test]
 async fn approval_cancel_journals_while_outbound_is_full() {
     let _deadline = deadline();
-    approval_scenario(ApprovalCase::Backpressure).await;
+    for case in [
+        ApprovalCase::Backpressure,
+        ApprovalCase::BackpressureInterrupt,
+    ] {
+        approval_scenario(case).await;
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn approval_never_delivered_is_unavailable_and_rejects_late_acceptance() {
+    let _deadline = deadline();
+    approval_scenario(ApprovalCase::Undelivered).await;
 }
 
 fn decision(id: Value, result: Value) -> ClientMessage {
@@ -1593,7 +1607,7 @@ async fn approval_scenario(case: ApprovalCase) {
         ScriptedProvider::new(outcomes)
             .with_profile("openai", "gpt-5.4")
             .with_before_call(0, move || {
-                if case == ApprovalCase::Backpressure {
+                if case == ApprovalCase::Undelivered {
                     for _ in 0..fill_output.capacity() {
                         fill_output
                             .try_send(server::response(RequestId::Integer(99), json!({})))
@@ -1629,32 +1643,38 @@ async fn approval_scenario(case: ApprovalCase) {
             .unwrap();
         let mut wire_approval = None;
         let mut approval_count = 0;
-        if case == ApprovalCase::Backpressure {
-            loop {
-                if let Some(arany::Tapped::Committed(event)) = events.next().await
-                    && matches!(event.event, Event::ToolStarted { .. })
-                {
-                    break;
-                }
-            }
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_secs(3600)).await;
-            tokio::time::resume();
-            input.send(ClientMessage::Eof).await.unwrap();
-            let mut denied = false;
-            loop {
-                if let Some(arany::Tapped::Committed(event)) = events.next().await {
-                    if let Event::ToolPermissionDecided { verdict, .. } = &event.event {
-                        assert!(!verdict.approved);
-                        denied = true;
-                    }
-                    if matches!(event.event, Event::RunFinished { .. }) {
-                        assert!(denied);
-                        break;
+        if case == ApprovalCase::Undelivered {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                let mut unavailable = false;
+                loop {
+                    if let Some(arany::Tapped::Committed(event)) = events.next().await {
+                        if let Event::ToolFinished { observation, .. } = &event.event {
+                            assert_eq!(
+                                observation.approval_cause,
+                                Some(arany::ApprovalCause::ChannelUnavailable)
+                            );
+                            assert!(observation.attestation.is_none());
+                            unavailable = true;
+                        }
+                        if matches!(event.event, Event::RunFinished { .. }) {
+                            assert!(unavailable);
+                            break;
+                        }
                     }
                 }
-            }
+            })
+            .await
+            .expect("undelivered approval must settle without draining output");
             assert_eq!(stalled.capacity(), 0);
+            input
+                .send(decision(json!(1), json!({"decision":"accept"})))
+                .await
+                .unwrap();
+            for _ in 0..OUTBOUND_CAPACITY {
+                let message = serde_json::to_value(output.try_recv().unwrap()).unwrap();
+                assert_ne!(message["method"], "item/tool/requestApproval");
+                assert_ne!(message["method"], "turn/completed");
+            }
         } else {
             let mut approval = None;
             let mut started = false;
@@ -1776,7 +1796,45 @@ async fn approval_scenario(case: ApprovalCase) {
                     })))
                     .await
                     .unwrap(),
-                ApprovalCase::Backpressure => unreachable!(),
+                ApprovalCase::Backpressure | ApprovalCase::BackpressureInterrupt => {
+                    for _ in 0..stalled.capacity() {
+                        stalled
+                            .try_send(server::response(RequestId::Integer(99), json!({})))
+                            .unwrap();
+                    }
+                    input
+                        .send(request(8, "thread/list", json!({})))
+                        .await
+                        .unwrap();
+                    drop(input.reserve_many(INBOUND_CAPACITY).await.unwrap());
+                    if case == ApprovalCase::Backpressure {
+                        input.send(ClientMessage::Eof).await.unwrap();
+                    } else {
+                        input
+                            .send(request(
+                                9,
+                                "turn/interrupt",
+                                json!({"threadId":thread,"turnId":params["turnId"]}),
+                            ))
+                            .await
+                            .unwrap();
+                    }
+                    tokio::time::timeout(Duration::from_secs(10), async {
+                        loop {
+                            if let Some(arany::Tapped::Committed(event)) = events.next().await
+                                && let Event::RunFinished { disposition, .. } = event.event
+                            {
+                                assert_eq!(disposition, arany::RunDisposition::Cancelled);
+                                break;
+                            }
+                        }
+                    })
+                    .await
+                    .expect("cancellation must commit while output is full");
+                    assert_eq!(stalled.capacity(), 0);
+                    return (serde_json::from_value(thread).unwrap(), wire_approval);
+                }
+                ApprovalCase::Undelivered => unreachable!(),
             }
         }
         let mut completed = false;
@@ -1820,7 +1878,7 @@ async fn approval_scenario(case: ApprovalCase) {
             if case == ApprovalCase::Duplicate {
                 2
             } else {
-                usize::from(case != ApprovalCase::Backpressure)
+                usize::from(case != ApprovalCase::Undelivered)
             }
         );
         if case == ApprovalCase::Duplicate {
@@ -1838,7 +1896,14 @@ async fn approval_scenario(case: ApprovalCase) {
         server::run_with_threads(engine, state.clone(), inbound, outbound, threads),
         client
     );
-    result.unwrap();
+    if matches!(
+        case,
+        ApprovalCase::Backpressure | ApprovalCase::BackpressureInterrupt
+    ) {
+        assert!(result.unwrap_err().contains("output blocked"));
+    } else {
+        result.unwrap();
+    }
     while let Ok(message) = output.try_recv() {
         assert!(
             serde_json::to_value(&message)
@@ -1891,8 +1956,9 @@ async fn approval_scenario(case: ApprovalCase) {
                 ApprovalCase::Cancel
                 | ApprovalCase::Interrupt
                 | ApprovalCase::Eof
-                | ApprovalCase::Backpressure => Some(arany::ApprovalCause::Cancelled),
-                ApprovalCase::Invalid | ApprovalCase::ClientError =>
+                | ApprovalCase::Backpressure
+                | ApprovalCase::BackpressureInterrupt => Some(arany::ApprovalCause::Cancelled),
+                ApprovalCase::Invalid | ApprovalCase::ClientError | ApprovalCase::Undelivered =>
                     Some(arany::ApprovalCause::ChannelUnavailable),
                 ApprovalCase::Accept | ApprovalCase::LateAccept | ApprovalCase::Duplicate => None,
             }
