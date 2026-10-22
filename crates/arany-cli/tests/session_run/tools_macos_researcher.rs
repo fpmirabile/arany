@@ -470,7 +470,16 @@ done
                     workspace_device,
                     workspace_inode,
                 } => {
-                    assert!(index < 3, "Skill and MCP require Guard receipts");
+                    assert!(
+                        matches!(
+                            calls[index],
+                            ToolCall::List { .. }
+                                | ToolCall::Read { .. }
+                                | ToolCall::Search { .. }
+                                | ToolCall::Skill { .. }
+                        ),
+                        "file and Skill reads require in-process attestation"
+                    );
                     assert_eq!(*policy_digest, observation.intent.policy_digest);
                     assert_eq!(
                         (*workspace_device, *workspace_inode),
@@ -482,8 +491,8 @@ done
                 }
                 Attestation::Guard(receipt) => {
                     assert!(
-                        index >= 3,
-                        "List/Read/Search require in-process attestation"
+                        matches!(calls[index], ToolCall::McpList { .. }),
+                        "only MCP catalog listing requires a Guard receipt"
                     );
                     assert_eq!(receipt.contract_version, 1);
                     let digest: [u8; 32] =

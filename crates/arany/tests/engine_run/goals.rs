@@ -3442,16 +3442,19 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
         max_provider_calls: Some(30),
         ..arany::GoalBudget::default()
     };
-    let mut plan = facts_plan(facts_digest("v2"));
-    plan.budget = budget;
-    let mut script = vec![
-        arany::test_support::scenario::plan_outcome(plan),
+    let provider = Arc::new(ScriptedProvider::new(vec![
         crate::tool_outcome(facts_read()),
-    ];
-    script.extend((0..11).map(|_| crate::tool_outcome(facts_read())));
-    script.push(finish_with("done"));
-    let provider = Arc::new(ScriptedProvider::new(script));
+        crate::tool_outcome(arany::ToolCall::Write {
+            path: "notes/facts.txt".into(),
+            expected_digest: Some(facts_digest(&"f".repeat(40 * 1024))),
+            content: "x".repeat(64 * 1024),
+        }),
+        finish_with("Unexpected continuation after context refusal"),
+    ]));
     let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    std::fs::write(state_path.join("tools.json"),
+        br#"{"version":1,"workspace_paths":["notes"],"write":true,"commands":[],"skills":[],"mcp":[]}"#
+    ).expect("write grant");
     let mut input = request(&workspace, &"x".repeat(60 * 1024));
     input.include_paths = vec!["big1.txt".into(), "big2.txt".into()];
     input.goal = arany::GoalRequest::new(budget, arany::GoalPhase::Implementation);
@@ -3491,9 +3494,46 @@ async fn tool_context_overflow_fails_with_the_context_cause() {
     assert_eq!(recovered.run.status, RunStatus::Finished);
     engine.close().await.expect("engine shutdown");
 
-    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
     let run = &view.runs[0];
     assert_eq!(run.failure, Some(arany::RunFailure::ToolContextFull));
+    assert!(run.assistant_message.is_none());
+    assert_eq!(run.tools.len(), 1, "only the bounded Read was dispatched");
+    let read = run.tools[0].observation.as_ref().expect("Read receipt");
+    assert_eq!(read.disposition, arany::ToolDisposition::Succeeded);
+    let output: serde_json::Value = serde_json::from_str(&read.output).expect("Read result");
+    assert_eq!(output["truncated"], true);
+    assert!(
+        run.config
+            .as_ref()
+            .expect("config")
+            .tool_policy
+            .as_ref()
+            .expect("Tools")
+            .max_context_bytes
+            < 64 * 1024
+    );
+    assert!(events.iter().all(|event| !matches!(&event.event,
+        Event::ToolStarted { intent, .. } if matches!(intent.call, arany::ToolCall::Write { .. })
+    )));
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes/facts.txt")).expect("original facts"),
+        "f".repeat(40 * 1024)
+    );
+    assert_eq!(provider.requests.lock().expect("requests").len(), 2);
+    assert_eq!(
+        provider.responses.lock().expect("responses").len(),
+        1,
+        "the healthy refusal sentinel was never called"
+    );
+    assert!(
+        provider
+            .compact_requests
+            .lock()
+            .expect("compactions")
+            .is_empty()
+    );
+    assert!(recovery.responses.lock().expect("responses").is_empty());
     assert_eq!(view.runs.len(), 2);
     assert_eq!(
         view.runs[1].assistant_message.as_deref(),
