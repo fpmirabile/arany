@@ -257,9 +257,8 @@ separate choice. [Next steps](../../NEXT_STEPS.md) owns current delivery and gap
 A repeated explicit billing choice avoids inferring intent from timestamps,
 Session history or whichever credential is found first. Checked record presence
 is a routing hint, not authorization. This costs one interaction and avoids
-another secret-adjacent preference record. [The credential contract](../specs/credentials.md)
-owns the selection and validation behavior; [the scoped finding](../security/findings/ambiguous-saved-access-selection.md)
-retains the failure context.
+another secret-adjacent preference record. [The credential contract](../specs/credentials.md#backend-selection-and-startup)
+owns the selection and validation behavior.
 
 ### D-21 — Checkpoint storage
 
