@@ -60,7 +60,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 | [Git branch reads](./git-branch-reads/README.md) | Ready; S1 local/remote-tracking branch metadata and divergence, S2 bounded range history and endpoint diffs |
-| [GitHub PR reads](./github-pr-reads/README.md) | Draft (owner: host-read exception); depends on Git-write S3; S1 human-approved host PR listing, S2 bounded PR discussion and checks |
+| [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 | [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
 | [Guarded Cargo tests](./guarded-cargo-test/README.md) | Ready: selected offline Rust environment, Guard-only IPC test ignores, bounded multicore Build profile and exact repository measurement; owner decisions accepted |
