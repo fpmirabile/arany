@@ -1620,6 +1620,7 @@ mod decision_tests {
         Delegate,
         ToolStep,
         Refused(ProposalRefusalCause),
+        RefusedTool(ProposalRefusalCause),
         CorrectOutcome,
         Defer,
         Stop(StopCause),
@@ -1642,9 +1643,8 @@ mod decision_tests {
             PrimaryDecision::Finish(..) => Kind::Finish,
             PrimaryDecision::Delegate(..) => Kind::Delegate,
             PrimaryDecision::ToolStep(..) => Kind::ToolStep,
-            PrimaryDecision::Refused(cause) | PrimaryDecision::RefusedTool(cause, ..) => {
-                Kind::Refused(*cause)
-            }
+            PrimaryDecision::Refused(cause) => Kind::Refused(*cause),
+            PrimaryDecision::RefusedTool(cause, ..) => Kind::RefusedTool(*cause),
             PrimaryDecision::CorrectOutcome => Kind::CorrectOutcome,
             PrimaryDecision::Defer => Kind::Defer,
             PrimaryDecision::Stop(cause) => Kind::Stop(*cause),
@@ -1877,6 +1877,14 @@ mod decision_tests {
                 false,
             ),
             (loop_, tools(1), ok, open, Kind::ToolStep, true),
+            (
+                loop_,
+                tools(1),
+                Err(ProposalRefusalCause::InvalidPath),
+                open,
+                Kind::RefusedTool(ProposalRefusalCause::InvalidPath),
+                false,
+            ),
             (
                 loop_,
                 tools(0),
