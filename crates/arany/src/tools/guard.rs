@@ -1898,8 +1898,11 @@ pub(super) fn helper_main() -> ExitCode {
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
+        // Capture handshakes acquire stdout from a blocking worker during dispatch.
+        drop(stdout);
         let result = runtime.block_on(super::dispatch::run(&site));
         stage = BootstrapStage::Receipt;
+        let mut stdout = std::io::stdout().lock();
         send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
         Ok(())
     })();
