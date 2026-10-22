@@ -209,6 +209,18 @@ impl Permission {
         self
     }
 
+    fn narrow_for_intent(self, mode: Option<ApprovalMode>, intent: &EffectIntent) -> Self {
+        if intent.call.is_host() && intent.host.is_none() {
+            Self {
+                decision: Decision::Deny,
+                basis: PermissionSource::PinnedGrant,
+                approval: None,
+            }
+        } else {
+            self.narrow_terminal(mode, &intent.call)
+        }
+    }
+
     fn narrow_terminal(mut self, mode: Option<ApprovalMode>, call: &ToolCall) -> Self {
         if self.decision != Decision::Deny
             && self.basis != PermissionSource::ExactCommandRule
@@ -1070,6 +1082,10 @@ impl RunLoop<'_> {
             basis = PermissionSource::PinnedGrant;
             approval = None;
         }
+        if call.is_host() && decision != Decision::Deny {
+            decision = Decision::Ask;
+            approval = Some(ApprovalMode::Request);
+        }
         if unguarded && decision != Decision::Deny {
             // Only a human or an exact project rule approves a host run; no mode or review does.
             decision = Decision::Ask;
@@ -1108,7 +1124,7 @@ impl RunLoop<'_> {
         let allow_auto_edits = permission.decision == Decision::Allow
             && self.terminal_mode() == Some(ApprovalMode::Request)
             && intent.call.facts().mutates;
-        let permission = permission.narrow_terminal(self.terminal_mode(), &intent.call);
+        let permission = permission.narrow_for_intent(self.terminal_mode(), &intent);
         let timeout_limit = self.ledger().command_timeout_limit(&intent.call)?;
         let hooks = match config {
             Some(config)
@@ -1133,9 +1149,13 @@ impl RunLoop<'_> {
             permission,
             hooks: &hooks,
             timeout_limit,
-            human_only_unavailable: self.controls.approvals.is_some_and(|approvals| {
-                !approvals.admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
-            }),
+            host: intent.call.is_host(),
+            host_unpinned: intent.call.is_host() && intent.host.is_none(),
+            human_only_unavailable: (intent.call.is_host() && self.controls.approvals.is_none())
+                || self.controls.approvals.is_some_and(|approvals| {
+                    !approvals
+                        .admits_human_only(&intent.call, hooks.restriction == Some(Decision::Ask))
+                }),
             unguarded: match grant {
                 Grant::Primary { request, .. } if intent.call.is_unguarded() => {
                     Some(self.unguarded(runtime, request, &intent)?)
@@ -1225,8 +1245,7 @@ impl RunLoop<'_> {
             }
         };
         let mode = effective_permission_mode(config, grant);
-        let local_git_write = matches!(grant, Grant::Primary { .. }) && git_write;
-        if mode.is_some() || unguarded || local_git_write {
+        if mode.is_some() || unguarded || matches!(grant, Grant::Primary { .. }) && git_write {
             let approved = matches!(&verdict, Verdict::Dispatch { .. });
             // An approving review that did not lead to dispatch is not an AI approval.
             let source = if !approved && decided.source == PermissionSource::AiReview {
@@ -1251,8 +1270,7 @@ impl RunLoop<'_> {
             })
             .await?;
         }
-        let verdict = self.save_remembered_rule(runtime, site, verdict, save)?;
-        Ok(verdict)
+        self.save_remembered_rule(runtime, site, verdict, save)
     }
 
     // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
@@ -2136,6 +2154,7 @@ pub(super) enum NotDispatched {
     DelegationDeadline,
     DenyRule,
     OutsideGrant,
+    HostSourceUnavailable,
     ModeDenied,
     HumanOnlyUnavailable,
     HookFailureAfterClassify,
@@ -2183,6 +2202,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => ActiveTimeEffect::Untouched,
         }
@@ -2206,6 +2226,7 @@ impl NotDispatched {
             | Self::DelegationDeadline
             | Self::DenyRule
             | Self::OutsideGrant
+            | Self::HostSourceUnavailable
             | Self::ModeDenied
             | Self::HumanOnlyUnavailable => false,
         }
@@ -2245,6 +2266,8 @@ struct DispatchFacts<'a> {
     hooks: &'a HookFold,
     timeout_limit: Option<(u32, u32)>,
     human_only_unavailable: bool,
+    host: bool,
+    host_unpinned: bool,
     unguarded: Option<Unguarded>,
     goal_allows: bool,
     runtime_allows: bool,
@@ -2275,6 +2298,7 @@ fn remember_candidate(
     call: &ToolCall,
 ) -> Option<crate::tools::permissions::TypedGitPrefix> {
     (matches!(grant, Grant::Primary { .. })
+        && !call.is_host()
         && typed_allow_takes_effect(mode)
         && permission.decision == Decision::Ask
         && permission.basis == PermissionSource::Mode
@@ -2309,6 +2333,9 @@ impl<'a> DispatchFacts<'a> {
                 let reason = match basis {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
                         NotDispatched::DenyRule
+                    }
+                    PermissionSource::PinnedGrant if self.host_unpinned => {
+                        NotDispatched::HostSourceUnavailable
                     }
                     PermissionSource::PinnedGrant => NotDispatched::OutsideGrant,
                     PermissionSource::Mode
@@ -2382,6 +2409,7 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             | NotDispatched::DelegationDeadline
             | NotDispatched::DenyRule
             | NotDispatched::OutsideGrant
+            | NotDispatched::HostSourceUnavailable
             | NotDispatched::ModeDenied
             | NotDispatched::HookFailureAfterClassify
             | NotDispatched::UnguardedNotOffered(_)
@@ -2402,7 +2430,7 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
             source,
         };
     }
-    let (approved, source, active_time_exhausted) = match (&after.approval, facts.site) {
+    let (mut approved, mut source, active_time_exhausted) = match (&after.approval, facts.site) {
         (Some(resolution), _) => (
             resolution.approved,
             resolution.source,
@@ -2414,6 +2442,10 @@ fn decide_dispatch<'a>(facts: &DispatchFacts<'a>, after: &AfterAsk) -> DispatchD
         }
         (None, DispatchSite::Researcher) => (true, facts.permission.basis, false),
     };
+    if facts.host && (source != PermissionSource::Human || after.approval.is_none()) {
+        approved = false;
+        source = PermissionSource::UnavailableApproval;
+    }
     let refused = |reason| {
         Err(refuse(
             reason,
@@ -2493,6 +2525,7 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         NotDispatched::HookDenied(_)
         | NotDispatched::DenyRule
         | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
         | NotDispatched::ModeDenied
         | NotDispatched::HumanOnlyUnavailable
         | NotDispatched::HookFailureAfterClassify
@@ -2529,6 +2562,10 @@ fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> ToolObservati
         NotDispatched::OutsideGrant => (
             ToolDisposition::Denied,
             "Tool operation is outside the pinned grant".into(),
+        ),
+        NotDispatched::HostSourceUnavailable => (
+            ToolDisposition::Denied,
+            "Host source data is unavailable; no operation was dispatched".into(),
         ),
         NotDispatched::ModeDenied => (
             ToolDisposition::Denied,
@@ -3280,6 +3317,8 @@ mod tests {
 
     #[derive(Clone, Copy, PartialEq)]
     enum Fact {
+        Host,
+        HostUnpinned,
         Timeout,
         HumanOnly,
         LateHookFailure,
@@ -3316,6 +3355,8 @@ mod tests {
             permission,
             hooks,
             timeout_limit: has(Fact::Timeout).then_some((9_000, 5_000)),
+            host: has(Fact::Host) || has(Fact::HostUnpinned),
+            host_unpinned: has(Fact::HostUnpinned),
             human_only_unavailable: has(Fact::HumanOnly),
             unguarded: gate.map(|gate| Unguarded {
                 late_hook_failure: has(Fact::LateHookFailure),
@@ -3335,6 +3376,65 @@ mod tests {
             deadline_reached: has(Fact::Deadline),
         };
         (facts.ask(), decide_dispatch(&facts, &after))
+    }
+
+    #[test]
+    fn host_dispatch_requires_an_explicit_human_resolution() {
+        let permission = Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Mode,
+            approval: Some(ApprovalMode::Request),
+        };
+        let hooks = HookFold::none();
+        for source in [
+            None,
+            Some(PermissionSource::Mode),
+            Some(PermissionSource::Rule),
+            Some(PermissionSource::AiReview),
+            Some(PermissionSource::Human),
+        ] {
+            let resolution = source.map(|source| Resolution {
+                approved: true,
+                source,
+                active_time_exhausted: false,
+                save: None,
+            });
+            let (_, decision) = decide(
+                DispatchSite::Primary,
+                permission,
+                &hooks,
+                &[Fact::Host, Fact::InProcess],
+                resolution,
+            );
+            assert_eq!(
+                decision.outcome.is_ok(),
+                source == Some(PermissionSource::Human)
+            );
+        }
+    }
+
+    #[test]
+    fn host_dispatch_preserves_explicit_human_denial() {
+        let permission = Permission {
+            decision: Decision::Ask,
+            basis: PermissionSource::Mode,
+            approval: Some(ApprovalMode::Request),
+        };
+        let hooks = HookFold::none();
+        let (_, decision) = decide(
+            DispatchSite::Primary,
+            permission,
+            &hooks,
+            &[Fact::Host, Fact::InProcess],
+            Some(Resolution {
+                approved: false,
+                source: PermissionSource::Human,
+                active_time_exhausted: false,
+                save: None,
+            }),
+        );
+        assert!(decision.outcome.is_err());
+        assert_eq!(decision.source, PermissionSource::Human);
     }
 
     #[test]
@@ -3381,6 +3481,9 @@ mod tests {
             (decide(Researcher, asks(Request), &none, &[Timeout], None), None, no(timeout(), None), ask_, S::UnavailableApproval),
             (decide(Primary, deny(S::Rule), &none, &[], None), None, no(N::DenyRule, None), deny_, S::Rule),
             (decide(Researcher, deny(S::PinnedGrant), &none, &[], None), None, no(N::OutsideGrant, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::PinnedGrant), &none, &[HostUnpinned], None), None, no(N::HostSourceUnavailable, None), deny_, S::PinnedGrant),
+            (decide(Primary, deny(S::Hook), &denied, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
+            (decide(Primary, deny(S::PinnedGrant), &exhausted, &[HostUnpinned], None), None, no(N::HookDenied(HookDenial::ActiveTime), None), deny_, S::PinnedGrant),
             (decide(Primary, deny(S::Mode), &none, &[], None), None, no(N::ModeDenied, None), deny_, S::Mode),
             (decide(Primary, deny(S::Hook), &denied, &[], None), None, no(N::HookDenied(HookDenial::Denied("no".into())), None), deny_, S::Hook),
             (decide(Primary, deny(S::Hook), &narrowing, &[], None), None, narrow(N::HookDenied(HookDenial::Narrowed("Read".into()))), deny_, S::Hook),

@@ -1091,6 +1091,7 @@ impl Engine {
             return Err(EngineError::InvalidRequest);
         }
         let journal = Journal::new(Store::open(state.try_clone()?)?);
+        crate::tools::sweep_host_scratch(&state);
         Ok(Self {
             state,
             journal,

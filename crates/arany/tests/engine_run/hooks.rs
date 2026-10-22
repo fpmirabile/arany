@@ -53,6 +53,7 @@ async fn stopped_hook_reopens_and_requires_explicit_goal_resume_without_model_re
         let actor = result.run.agents[0].id;
         let config = result.run.config.as_ref().unwrap();
         let intent = arany::EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: result.run.id,

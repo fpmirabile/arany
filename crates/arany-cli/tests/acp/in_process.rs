@@ -1685,6 +1685,7 @@ impl Adapter {
 
     fn intent(&self, call: arany::ToolCall) -> arany::EffectIntent {
         arany::EffectIntent {
+            host: None,
             id: uuid::Uuid::now_v7(),
             run_id: self.run,
             agent_run_id: arany::AgentRunId::new(),

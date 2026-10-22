@@ -10,6 +10,7 @@ mod goal_recovery_tests {
         let goal_id = GoalId::new();
         let run_id = RunId::new();
         let intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -1559,6 +1560,7 @@ mod goal_replay_tests {
             .expect("open reservation replays")
             .expect("Session exists");
         let intent = crate::tools::EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -3652,6 +3654,7 @@ mod goal_replay_tests {
 
     fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
         EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id,
@@ -4466,6 +4469,7 @@ mod goal_replay_tests {
 
     fn file_observation(call: ToolCall, content: &[u8]) -> ToolObservation {
         let intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -6544,6 +6548,121 @@ mod goal_replay_tests {
         assert!(rejected(&pinned, exact(true)));
         assert!(!rejected(&view, ordinary.clone()));
         apply(&mut view, ordinary).expect("the ordinary verdict is admitted");
+    }
+
+    #[test]
+    fn host_git_reducer_requires_human_verdict_host_receipt_and_stops_unknown_remote() {
+        use crate::tools::permissions::{Decision, PermissionMode, PermissionSource};
+        for call in [
+            ToolCall::GitPush {
+                remote: "https://github.com/o/r.git".into(),
+                branch: "topic".into(),
+            },
+            ToolCall::GhPrCreate {
+                repository: "github.com/o/r".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                title: "T".into(),
+                body: String::new(),
+                draft: true,
+            },
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(false);
+            view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap()
+                .permissions_digest = Some([3; 32]);
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let mut intent = child_intent(run, agent, call);
+            intent.host = Some(crate::tools::types::HostIntent {
+                source_oid: "1".repeat(40),
+                refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            });
+            intent.limits.network = crate::tools::types::NetworkGrant::Host;
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            for source in [
+                PermissionSource::Mode,
+                PermissionSource::Rule,
+                PermissionSource::TypedPrefixRule,
+                PermissionSource::AiReview,
+                PermissionSource::ExactCommandRule,
+            ] {
+                assert!(
+                    rejected(
+                        &view,
+                        verdict_event(
+                            &intent,
+                            Some(PermissionMode::Auto),
+                            Decision::Ask,
+                            PermissionSource::Mode,
+                            source,
+                            true
+                        )
+                    ),
+                    "{source:?}"
+                );
+            }
+            for mode in [PermissionMode::Plan, PermissionMode::DontAsk] {
+                assert!(rejected(
+                    &view,
+                    verdict_event(
+                        &intent,
+                        Some(mode),
+                        Decision::Ask,
+                        PermissionSource::Mode,
+                        PermissionSource::Human,
+                        true
+                    )
+                ));
+            }
+            let mut observed =
+                observation_for(intent.clone(), b"host: remote operation completed.");
+            let event = |observation| Event::ToolFinished {
+                checkpoint: None,
+                run_id: run,
+                agent_run_id: agent,
+                observation,
+            };
+            assert!(rejected(&view, event(observed.clone())));
+            apply(
+                &mut view,
+                verdict_event(
+                    &intent,
+                    Some(PermissionMode::Auto),
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    true,
+                ),
+            )
+            .unwrap();
+            let host = observed.attestation.clone();
+            observed.attestation = Some(crate::tools::Attestation::Guard(
+                crate::tools::GuardReceipt {
+                    contract_version: 1,
+                    intent_digest: intent.digest(),
+                    enforcement_digest: intent.enforcement_digest,
+                    limits: intent.limits.clone(),
+                },
+            ));
+            assert!(rejected(&view, event(observed.clone())));
+            let Some(crate::tools::Attestation::Host(receipt)) = host.clone() else {
+                panic!("host receipt");
+            };
+            observed.attestation = Some(crate::tools::Attestation::Unguarded(receipt));
+            assert!(rejected(&view, event(observed.clone())));
+            observed.attestation = host;
+            assert!(!rejected(&view, event(observed.clone())));
+            observed.disposition = ToolDisposition::Uncertain;
+            observed.output = "host: remote outcome unknown; never retry automatically".into();
+            apply(&mut view, event(observed)).unwrap();
+            assert!(rejected(&view, tool_started(run, agent, &intent)));
+        }
     }
 
     #[test]
