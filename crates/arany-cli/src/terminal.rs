@@ -42,7 +42,7 @@ use clipboard::{ClipboardContent, ClipboardRead};
 use commands::help_len;
 pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
-    invoked_objective, parse_submission, skill_invocation, transcript_agents,
+    parse_submission, skill_invocation, transcript_agents,
 };
 pub use composer::{CompletionLayout, Composer, ComposerEdit, NewlineShortcut};
 use history::History;
@@ -939,12 +939,13 @@ impl AttachedTerminal {
         &mut self,
         kind: history::MessageKind,
         text: &str,
+        skill: Option<&str>,
     ) -> Result<(), TerminalError> {
         self.history_adjacent = true;
         let palette = self.palette();
         let terminal = self.terminal.as_mut().expect("owned terminal");
         let width = terminal.get_frame().area().width;
-        let rows = history::display_rows(kind, text, usize::from(width));
+        let rows = history::display_rows(kind, text, usize::from(width), skill);
         let viewport = terminal.get_frame().area();
         let screen = terminal.size()?.height;
         // Ratatui would need a one-row scroll region here, which DECSTBM terminals such as tmux reject.
@@ -1020,12 +1021,13 @@ impl AttachedTerminal {
                 self.insert_native(
                     history::MessageKind::User,
                     &crate::presentation::image_message_text(&run.objective, &run.images),
+                    run.skill.as_deref(),
                 )?;
                 self.native.objectives.insert(run.id);
             }
             for (range, summary) in crate::presentation::settled_tool_groups(run) {
                 if !self.native.tools.contains(&(run.id, range.start)) {
-                    self.insert_native(history::MessageKind::Tool, &summary)?;
+                    self.insert_native(history::MessageKind::Tool, &summary, None)?;
                     for index in range {
                         self.native.tools.insert((run.id, index));
                     }
@@ -1038,14 +1040,14 @@ impl AttachedTerminal {
                 && !self.native.answers.contains(&run.id)
                 && let Some(text) = crate::presentation::display_answer(run)
             {
-                self.insert_native(history::MessageKind::Incomplete, &text)?;
+                self.insert_native(history::MessageKind::Incomplete, &text, None)?;
                 self.native.answers.insert(run.id);
             }
             if self.active_run != Some(run.id)
                 && let Some(answer) = &run.assistant_message
                 && !self.native.answers.contains(&run.id)
             {
-                self.insert_native(history::MessageKind::Assistant, answer)?;
+                self.insert_native(history::MessageKind::Assistant, answer, None)?;
                 self.native.answers.insert(run.id);
             }
         }
@@ -1062,7 +1064,7 @@ impl AttachedTerminal {
         if self.mode == TerminalMode::Classic {
             let text = bounded_transcript(view)?;
             self.prepare_frame()?;
-            return self.insert_native(history::MessageKind::ToolDetails, &text);
+            return self.insert_native(history::MessageKind::ToolDetails, &text, None);
         }
         self.transcript_open = !self.transcript_open;
         // Details change the rows a selection anchors to.
@@ -1165,6 +1167,7 @@ impl AttachedTerminal {
             self.insert_native(
                 history::MessageKind::Notice,
                 "Use your terminal's find; Ctrl+T writes details to scrollback",
+                None,
             )?;
             return Ok(true);
         }
@@ -1763,7 +1766,7 @@ impl AttachedTerminal {
                 .is_none_or(|(sequence, prior)| *sequence != view.last_sequence || prior != &text)
             {
                 let (kind, body) = history::notice_kind(&text);
-                self.insert_native(kind, body)?;
+                self.insert_native(kind, body, None)?;
                 self.native.last_notice = Some((view.last_sequence, text));
             }
         }
@@ -1898,7 +1901,7 @@ impl AttachedTerminal {
     pub fn record_user_message(&mut self, objective: &str) -> Result<(), TerminalError> {
         if let Some(linear) = &mut self.linear {
             return linear
-                .write_user_message(&mut io::stderr(), objective)
+                .write_user_message(&mut io::stderr(), objective, None)
                 .map_err(TerminalError::Io);
         }
         Ok(())
@@ -1906,9 +1909,9 @@ impl AttachedTerminal {
 
     pub fn record_user_run(&mut self, run: &arany::RunView) -> Result<(), TerminalError> {
         self.active_run = Some(run.id);
-        self.record_user_message(&run.objective)?;
-        if self.linear.is_some() {
+        if let Some(linear) = &mut self.linear {
             let mut writer = io::stderr();
+            linear.write_user_message(&mut writer, &run.objective, run.skill.as_deref())?;
             for line in image_message_lines(&run.images, 80) {
                 writeln!(writer, "{line}")?;
             }
@@ -1934,9 +1937,13 @@ impl AttachedTerminal {
     }
 
     pub fn print_user_run(run: &arany::RunView, inline: bool) -> Result<(), TerminalError> {
+        let heading = commands::invoked_skill_token(&run.objective, run.skill.as_deref())
+            .map(|token| format!("{}You ({}):", if inline { "\n› " } else { "" }, token.kind));
         Self::print_user_message_with_heading(
             &run.objective,
-            if inline { "\n› You:" } else { "You:" },
+            heading
+                .as_deref()
+                .unwrap_or(if inline { "\n› You:" } else { "You:" }),
         )?;
         let mut writer = io::stderr();
         for line in image_message_lines(&run.images, 80) {

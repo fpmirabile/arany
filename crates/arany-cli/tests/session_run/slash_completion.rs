@@ -993,6 +993,13 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     let guidance =
         b"---\nname: review\ndescription: Synthetic review\n---\nReview only the selected task.\n";
     std::fs::write(skill.join("SKILL.md"), guidance).unwrap();
+    let ask_skill = workspace.join(".agents/skills/ask-matt");
+    std::fs::create_dir(&ask_skill).unwrap();
+    std::fs::write(
+        ask_skill.join("SKILL.md"),
+        b"---\nname: ask-matt\ndescription: Synthetic guidance\n---\nGuide the selected task.\n",
+    )
+    .unwrap();
     let config = serde_json::json!({"version":1,"workspace_paths":["."],"write":false,
         "commands":[],"mcp":[],"skills":[]});
     std::fs::write(
@@ -1139,7 +1146,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         skill_at,
-        b"> Skill /review",
+        b"> (skill) /ask-matt",
     );
     wait_for_caret(
         &mut output,
@@ -1161,8 +1168,16 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
     );
     let skill_at = transcript.len();
     input
-        .write_all(b"\x1b[Crev")
-        .expect("filter Skills locally");
+        .write_all(b"ask")
+        .expect("filter commands and Skills from the Commands tab");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        skill_at,
+        b"> (skill) /ask-matt",
+    );
     wait_for_caret(
         &mut output,
         &mut input,
@@ -1179,7 +1194,7 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         skill_accept_at,
-        11,
+        13,
     );
     let skill_clear_at = transcript.len();
     input.write_all(b"\x03").expect("clear unsent Skill draft");
@@ -1189,6 +1204,52 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         &mut transcript,
         &mut answered,
         skill_clear_at,
+        3,
+    );
+    let invoke_at = transcript.len();
+    input.write_all(b"/ask").expect("filter Skill prefix again");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        invoke_at,
+        7,
+    );
+    let invoke_at = transcript.len();
+    input.write_all(b"\r").expect("invoke the focused Skill");
+    wait_for_screen(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (invoke_at, 40, 24),
+        "Choose a model",
+    );
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        invoke_at,
+        12,
+    );
+    assert!(
+        crate::screen_rows(&transcript, 40, 24)
+            .iter()
+            .any(|row| row.trim() == "> /ask-matt"),
+        "model rejection must retain the complete Skill invocation"
+    );
+    let clear_at = transcript.len();
+    input
+        .write_all(b"\x03")
+        .expect("clear retained Skill invocation");
+    wait_for_caret(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        clear_at,
         3,
     );
     let settings_at = transcript.len();
@@ -3696,16 +3757,21 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
             })
         );
     }
-    for (draft, objective) in [("/ask-matt", "/ask-matt"), ("/ask-matt do X", "do X")] {
+    for draft in [
+        "/ask-matt",
+        "/ask-matt   do X  ",
+        "/ask-matt\tline one\nline two",
+    ] {
         composer.clear();
         composer.insert_paste(draft).unwrap();
-        let Ok(Submission::Skill { name, task }) = composer.submission() else {
-            panic!("admitted Skill submission");
-        };
-        assert_eq!(
-            arany_cli::terminal::invoked_objective(name, task),
-            objective
-        );
+        assert!(matches!(
+            composer.submission(),
+            Ok(Submission::Skill {
+                name: "ask-matt",
+                ..
+            })
+        ));
+        assert_eq!(composer.take(), draft);
     }
     let mut tabs = Composer::default();
     tabs.set_runtime_skills(&["ask-matt".into()]);
@@ -3723,8 +3789,14 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
     tabs.set_runtime_skills(&["ask-matt".into(), "ask-mary".into()]);
     tabs.insert_paste("/ask-m").unwrap();
     assert_eq!(tabs.apply(TerminalInput::Submit), ComposerEdit::Unchanged);
-    assert_eq!(tabs.text(), "/ask-m");
-    assert!(tabs.submission().is_err());
+    assert_eq!(tabs.text(), "/ask-mary");
+    assert_eq!(
+        tabs.submission(),
+        Ok(Submission::Skill {
+            name: "ask-mary",
+            task: ""
+        })
+    );
     composer.clear();
     composer.insert_paste("/ask-m").unwrap();
     assert_eq!(composer.apply(TerminalInput::Tab), ComposerEdit::Changed);
