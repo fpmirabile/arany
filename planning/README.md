@@ -44,7 +44,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Anthropic-compatible custom routes](./anthropic-compatible-routes/README.md) | Remaining: Kimi API/Code and GLM Standard API recipes; S1 uses explicitly unavailable DeepSeek candidates, whose strict-compaction admission remains deferred |
+| [Anthropic-compatible custom routes](./anthropic-compatible-routes/README.md) | S3 review and CI; Kimi Code, GLM Standard and DeepSeek candidates remain unavailable pending strict-compaction evidence |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Switch between agent chats](./agent-chat-switching/README.md) | Four slices: read-only child transcript switching, committed live updates, searchable `/agents` switch picker, messaging the selected child |
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |

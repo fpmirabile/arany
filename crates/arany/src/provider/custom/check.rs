@@ -272,7 +272,7 @@ mod tests {
         auth: super::super::MessagesAuth,
     }
 
-    const MESSAGES_CASES: [MessagesCase; 2] = [
+    const MESSAGES_CASES: [MessagesCase; 4] = [
         MessagesCase {
             base_path: "/anthropic",
             model: "kimi-k3",
@@ -282,6 +282,16 @@ mod tests {
             base_path: "/coding/",
             model: "k3-256k",
             auth: super::super::MessagesAuth::ApiKey,
+        },
+        MessagesCase {
+            base_path: "/api/anthropic",
+            model: "glm-5.3",
+            auth: super::super::MessagesAuth::Bearer,
+        },
+        MessagesCase {
+            base_path: "/api/anthropic",
+            model: "glm-5.3-flash",
+            auth: super::super::MessagesAuth::Bearer,
         },
     ];
     const GENERIC_MESSAGES: MessagesCase = MessagesCase {
@@ -1127,7 +1137,7 @@ mod tests {
 
     #[tokio::test]
     async fn custom_compaction_requires_schema_only_challenges_at_every_effort() {
-        for messages in [None, Some(MESSAGES_CASES[0]), Some(MESSAGES_CASES[1])] {
+        for messages in [None].into_iter().chain(MESSAGES_CASES.map(Some)) {
             for reply in [
                 ProbeReply::IgnoredFormat(2),
                 ProbeReply::IgnoredFormat(4),

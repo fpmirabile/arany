@@ -16,7 +16,7 @@ const RESPONSES: RouteCase = RouteCase {
     credential_env: "ARANY_PROVIDER_LOCAL_KEY",
     key: "test-key",
 };
-const KIMI_ROUTES: [RouteCase; 2] = [
+const MESSAGES_ROUTES: [RouteCase; 4] = [
     RouteCase {
         base_path: "/anthropic",
         model: "kimi-k3",
@@ -31,6 +31,20 @@ const KIMI_ROUTES: [RouteCase; 2] = [
         credential_env: "ARANY_PROVIDER_KIMI_CODE_KEY",
         key: "kimi-code-canary",
     },
+    RouteCase {
+        base_path: "/api/anthropic",
+        model: "glm-5.3",
+        auth: Some("bearer"),
+        credential_env: "ARANY_PROVIDER_GLM_STANDARD_KEY",
+        key: "glm-standard-canary",
+    },
+    RouteCase {
+        base_path: "/api/anthropic",
+        model: "glm-5.3-flash",
+        auth: Some("bearer"),
+        credential_env: "ARANY_PROVIDER_GLM_STANDARD_KEY",
+        key: "glm-standard-canary",
+    },
 ];
 
 impl RouteCase {
@@ -38,7 +52,7 @@ impl RouteCase {
         command
             .env("ANTHROPIC_API_KEY", "omitted-native-key")
             .env("ANTHROPIC_WORKSPACE_ID", "OMITTED_NATIVE_SCOPE");
-        for route in KIMI_ROUTES {
+        for route in MESSAGES_ROUTES {
             if route.credential_env != self.credential_env {
                 command.env(route.credential_env, route.key);
             }
@@ -66,7 +80,7 @@ fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
 
 #[test]
 fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    for case in KIMI_ROUTES {
+    for case in MESSAGES_ROUTES {
         for failure in [
             RecheckFailure::SchemaRejected,
             RecheckFailure::SchemaIgnored,
@@ -400,7 +414,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     .windows(b"OMITTED_WORKSPACE_CANARY".len())
                     .any(|bytes| { bytes == b"OMITTED_WORKSPACE_CANARY" })
             );
-            for omitted in [KIMI_ROUTES[0].key, KIMI_ROUTES[1].key, "omitted-native-key"] {
+            for omitted in MESSAGES_ROUTES
+                .map(|route| route.key)
+                .into_iter()
+                .chain(["omitted-native-key"])
+            {
                 if omitted != case.key {
                     assert!(
                         !request
@@ -888,8 +906,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         assert!(log.contains("run disposition=Failed"));
         for forbidden in [
             case.key,
-            KIMI_ROUTES[0].key,
-            KIMI_ROUTES[1].key,
+            MESSAGES_ROUTES[0].key,
+            MESSAGES_ROUTES[1].key,
+            MESSAGES_ROUTES[2].key,
             "omitted-native-key",
             "OMITTED_WORKSPACE_CANARY",
             "EXPECTED_WORKSPACE_GUIDANCE",
@@ -1135,8 +1154,9 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     ] {
         for key in [
             case.key,
-            KIMI_ROUTES[0].key,
-            KIMI_ROUTES[1].key,
+            MESSAGES_ROUTES[0].key,
+            MESSAGES_ROUTES[1].key,
+            MESSAGES_ROUTES[2].key,
             "omitted-native-key",
         ] {
             assert!(
@@ -1657,9 +1677,13 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             "team answer",
         );
         let deadline = Instant::now() + Duration::from_secs(10);
+        // The agents panel also shows "team answer" while the Run is still active.
         while !super::screen_rows(&transcript, 100, 30)
-            .join(" ")
-            .contains("ready")
+            .iter()
+            .any(|row| row.trim() == "team answer")
+            || !super::screen_rows(&transcript, 100, 30)
+                .join(" ")
+                .contains("ready")
         {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
             assert!(Instant::now() < deadline, "team returns to ready composer");
