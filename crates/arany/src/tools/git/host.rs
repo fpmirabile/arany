@@ -10,6 +10,7 @@ use rustix::process::{Pid, Signal, kill_process_group};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -275,6 +276,7 @@ fn private_view(
     Ok(view)
 }
 
+#[derive(Clone)]
 pub(crate) struct Authentication {
     home: PathBuf,
     git_config: Vec<Vec<u8>>,
@@ -475,6 +477,12 @@ impl Scratch {
 
     fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        self.path()
     }
 }
 
@@ -681,7 +689,45 @@ fn preparation_refusal(error: &ToolError) -> &'static str {
     }
 }
 
-async fn prepare(
+async fn prepare<R: AsRef<Path> + Send + Sync + 'static>(
+    config: &Config,
+    authentication: &Authentication,
+    workspace: &Path,
+    intent: &EffectIntent,
+    root: Arc<R>,
+) -> Result<(Command, String), ToolError> {
+    let (mut command, digest) = {
+        let config = config.clone();
+        let authentication = authentication.clone();
+        let workspace = workspace.to_owned();
+        let intent = intent.clone();
+        // Keep the scratch lease alive even if the awaiting future is dropped.
+        let root = Arc::clone(&root);
+        tokio::task::spawn_blocking(move || {
+            prepare_command(
+                &config,
+                &authentication,
+                &workspace,
+                &intent,
+                (*root).as_ref(),
+            )
+        })
+        .await
+        .map_err(|_| ToolError::Operation)??
+    };
+    if let ToolCall::GitPush { remote, .. } = &intent.call
+        && destination(remote).is_some_and(|(_, ssh)| !ssh)
+    {
+        let git = config.git.as_ref().ok_or(ToolError::Configuration)?;
+        apply_credentials(
+            &mut command,
+            credential_config(git, &authentication.git_config, (*root).as_ref()).await?,
+        );
+    }
+    Ok((command, digest))
+}
+
+fn prepare_command(
     config: &Config,
     authentication: &Authentication,
     workspace: &Path,
@@ -819,14 +865,6 @@ async fn prepare(
         .stderr(Stdio::piped())
         .process_group(0)
         .kill_on_drop(true);
-    if let ToolCall::GitPush { remote, .. } = &intent.call
-        && destination(remote).is_some_and(|(_, ssh)| !ssh)
-    {
-        apply_credentials(
-            &mut command,
-            credential_config(git, &authentication.git_config, root).await?,
-        );
-    }
     if let Some(socket) = auth {
         command.env("SSH_AUTH_SOCK", socket);
     }
@@ -848,7 +886,7 @@ pub(crate) async fn run(
         return observation(intent, ToolDisposition::Denied, REFUSED, None);
     };
     let root = match Scratch::acquire(state) {
-        Ok(root) => root,
+        Ok(root) => Arc::new(root),
         Err(error) => {
             return observation(
                 intent,
@@ -870,18 +908,25 @@ pub(crate) async fn run(
     } else {
         None
     };
-    let (command, executable) =
-        match prepare(config, authentication, workspace, &intent, root.path()).await {
-            Ok(prepared) => prepared,
-            Err(error) => {
-                return observation(
-                    intent,
-                    ToolDisposition::Denied,
-                    preparation_refusal(&error),
-                    None,
-                );
-            }
-        };
+    let (command, executable) = match prepare(
+        config,
+        authentication,
+        workspace,
+        &intent,
+        Arc::clone(&root),
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return observation(
+                intent,
+                ToolDisposition::Denied,
+                preparation_refusal(&error),
+                None,
+            );
+        }
+    };
     let mut outcome = supervise(command, intent, executable, cancellation).await;
     if backing.is_some()
         && outcome.attestation.is_some()
@@ -1647,14 +1692,14 @@ mod tests {
         for n in 0..4100 {
             std::fs::write(extra.join(n.to_string()), b"x").unwrap();
         }
-        let private = tempfile::tempdir().unwrap();
+        let private = Arc::new(tempfile::tempdir().unwrap());
         let config = config();
         let (prepared, digest) = prepare(
             &config,
             &authentication(temp.path()),
             &workspace,
             &intent,
-            private.path(),
+            Arc::clone(&private),
         )
         .await
         .unwrap();
@@ -1714,13 +1759,13 @@ mod tests {
             &["update-ref", "refs/heads/main", "HEAD~1"],
         );
         let rejected = self::intent(&workspace, push());
-        let refusal_view = tempfile::tempdir().unwrap();
+        let refusal_view = Arc::new(tempfile::tempdir().unwrap());
         let (prepared, digest) = prepare(
             &config,
             &authentication(temp.path()),
             &workspace,
             &rejected,
-            refusal_view.path(),
+            Arc::clone(&refusal_view),
         )
         .await
         .unwrap();
@@ -1794,7 +1839,7 @@ mod tests {
         }
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
-        let private = tempfile::tempdir().unwrap();
+        let private = Arc::new(tempfile::tempdir().unwrap());
         let config = config();
         let mut authentication = authentication(temp.path());
         authentication.git_config = vec![format!("[credential \"https://github.com\"]\n helper =\n helper = \"!f() {{ echo username=synthetic; echo password={CANARY}; }}; f\"\n").into_bytes()];
@@ -1823,7 +1868,7 @@ mod tests {
             &authentication,
             &workspace,
             &approved,
-            private.path(),
+            Arc::clone(&private),
         )
         .await
         .unwrap();
@@ -1911,17 +1956,81 @@ done
     }
 
     #[tokio::test]
+    async fn host_preparation_keeps_scratch_alive_off_executor_after_cancellation() {
+        struct GatedRoot {
+            directory: tempfile::TempDir,
+            entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+            dropped: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl AsRef<Path> for GatedRoot {
+            fn as_ref(&self) -> &Path {
+                if let Some(entered) = self.entered.lock().unwrap().take() {
+                    entered.send(()).unwrap();
+                    self.release
+                        .lock()
+                        .unwrap()
+                        .recv_timeout(Duration::from_secs(10))
+                        .unwrap();
+                }
+                self.directory.path()
+            }
+        }
+        impl Drop for GatedRoot {
+            fn drop(&mut self) {
+                let _ = self.dropped.take().unwrap().send(());
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let intent = intent(&workspace, pr());
+        let authentication = authentication(temp.path());
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let (release, receiver) = std::sync::mpsc::channel();
+        let (dropped, finished) = tokio::sync::oneshot::channel();
+        let root = Arc::new(GatedRoot {
+            directory: tempfile::tempdir().unwrap(),
+            entered: std::sync::Mutex::new(Some(entered)),
+            release: std::sync::Mutex::new(receiver),
+            dropped: Some(dropped),
+        });
+        let weak = Arc::downgrade(&root);
+        let task = tokio::spawn(async move {
+            prepare(&config(), &authentication, &workspace, &intent, root).await
+        });
+        tokio::time::timeout(Duration::from_secs(10), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert!(
+            weak.upgrade().is_some(),
+            "blocking preparation owns scratch"
+        );
+        release.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), finished)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            weak.upgrade().is_none(),
+            "scratch released after preparation"
+        );
+    }
+
+    #[tokio::test]
     async fn host_git_fake_gh_pins_payload_and_discards_credential_output() {
         let temp = tempfile::tempdir().unwrap();
         let workspace = fixture(temp.path());
-        let private = tempfile::tempdir().unwrap();
+        let private = Arc::new(tempfile::tempdir().unwrap());
         let intent = intent(&workspace, pr());
         let (prepared, digest) = prepare(
             &config(),
             &authentication(temp.path()),
             &workspace,
             &intent,
-            private.path(),
+            Arc::clone(&private),
         )
         .await
         .unwrap();
@@ -1981,14 +2090,14 @@ done
         ] {
             let temp = tempfile::tempdir().unwrap();
             let workspace = fixture(temp.path());
-            let private = tempfile::tempdir().unwrap();
+            let private = Arc::new(tempfile::tempdir().unwrap());
             let intent = intent(&workspace, pr());
             let (prepared, digest) = prepare(
                 &config(),
                 &authentication(temp.path()),
                 &workspace,
                 &intent,
-                private.path(),
+                Arc::clone(&private),
             )
             .await
             .unwrap();

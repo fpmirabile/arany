@@ -1773,14 +1773,18 @@ pub(crate) fn render_answer(run: &RunView, heading: &str) -> String {
         return String::new();
     };
     let unguarded = run.unguarded_tools();
+    let host = run.host_tools();
+    let mut effects = Vec::new();
+    if unguarded > 0 {
+        effects.push(format!("unguarded effects: {unguarded}"));
+    }
+    if host > 0 {
+        effects.push(format!("host effects: {host}"));
+    }
     let mut rendered = match heading.strip_suffix(':') {
-        Some(base) if unguarded > 0 => format!("{base} (unguarded effects: {unguarded}):\n"),
+        Some(base) if !effects.is_empty() => format!("{base} ({}):\n", effects.join("; ")),
         _ => format!("{heading}\n"),
     };
-    let host = run.host_tools();
-    if host > 0 {
-        rendered.push_str(&format!("  host effects: {host}\n"));
-    }
     for line in message.split('\n') {
         rendered.push_str("  ");
         rendered.push_str(&escape_terminal(line));
@@ -3149,7 +3153,7 @@ mod unguarded_tests {
     }
 
     #[test]
-    fn answer_headings_count_unguarded_effects() {
+    fn answer_headings_count_unguarded_and_host_effects() {
         let mut run = arany::RunView {
             skill: None,
             supervisor: Default::default(),
@@ -3186,6 +3190,21 @@ mod unguarded_tests {
         assert_eq!(
             render_answer(&run, "Answer:"),
             "Answer (unguarded effects: 1):\n  Done\n"
+        );
+        let mut host = host_tool(ToolDisposition::Uncertain, false);
+        host.intent.call = ToolCall::GitPush {
+            remote: "https://github.com/example/project".into(),
+            branch: "main".into(),
+        };
+        run.tools.push(host);
+        assert_eq!(
+            render_answer(&run, "Answer:"),
+            "Answer (unguarded effects: 1; host effects: 1):\n  Done\n"
+        );
+        run.tools.remove(0);
+        assert_eq!(
+            render_answer(&run, "Arany · Answer:"),
+            "Arany · Answer (host effects: 1):\n  Done\n"
         );
     }
 }
