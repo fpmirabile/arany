@@ -225,7 +225,6 @@ pub(crate) struct ResponseShape {
     pub(crate) commentary: usize,
     pub(crate) finals: usize,
     pub(crate) unphased: usize,
-    pub(crate) structured: usize,
     pub(crate) done_messages: usize,
     pub(crate) done_finals: usize,
 }
@@ -249,12 +248,11 @@ fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: Stre
     if let Some(shape) = counts.response_shape {
         let _ = writeln!(
             record,
-            "response_shape messages={} commentary={} finals={} unphased={} structured={} done_messages={} done_finals={}",
+            "response_shape messages={} commentary={} finals={} unphased={} done_messages={} done_finals={}",
             shape.messages,
             shape.commentary,
             shape.finals,
             shape.unphased,
-            shape.structured,
             shape.done_messages,
             shape.done_finals,
         );

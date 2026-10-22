@@ -273,7 +273,7 @@ fn subscription_compaction_body_keeps_only_bounded_history_data() {
     assert!(input.contains("Completed objective"));
     assert!(input.contains("Unanswered objective"));
     assert!(!input.contains("workspace_guidance"));
-    assert_eq!(value["text"]["format"]["name"], "arany_compaction");
+    assert!(value.get("text").is_none());
     assert!(
         value["instructions"]
             .as_str()
@@ -307,10 +307,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         let reasoning = json!({"type":"response.output_item.done", "output_index":0,
             "item":{"id":"rs_synthetic", "type":"reasoning", "summary":[]}});
         let prefix = format!("data: {created}\n\ndata: {done}\n\n");
-        for (operation, text) in [
-            ("Run", r#"done"#),
-            ("compaction", r#"{"summary":"Condensed"}"#),
-        ] {
+        for (operation, text) in [("Run", r#"done"#), ("compaction", r#"Condensed"#)] {
             for populated in [false, true] {
                 let mut done = done.clone();
                 done["output_index"] = json!(1);
@@ -935,7 +932,7 @@ async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_c
     for (label, usage, expected) in rows {
         for compaction in [false, true] {
             let (text, cap) = if compaction {
-                (r#"{"summary":"Condensed"}"#, COMPACTION_VISIBLE_CAP)
+                (r#"Condensed"#, COMPACTION_VISIBLE_CAP)
             } else {
                 ("done", request().max_output_tokens)
             };
@@ -1039,7 +1036,7 @@ async fn only_received_events_restart_the_stream_idle_window() {
 
 #[tokio::test]
 async fn compaction_stream_requires_complete_bounded_summary() {
-    let stream = completed_with_text(Some(12), r#"{"summary":"Condensed"}"#);
+    let stream = completed_with_text(Some(12), r#"Condensed"#);
     let reply = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         stream.len()
@@ -1062,20 +1059,23 @@ async fn compaction_stream_requires_complete_bounded_summary() {
     assert_eq!(response.usage.output_tokens, Some(12));
     let request = server.await.expect("server");
     let document: Value = serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
-    assert_eq!(document["text"]["format"]["name"], "arany_compaction");
+    assert!(document.get("text").is_none());
     assert!(document.get("max_output_tokens").is_none());
 
     for (label, stream) in [
+        ("missing usage", completed_with_text(None, r#"Condensed"#)),
+        ("empty summary", completed_with_text(Some(12), "")),
+        ("whitespace summary", completed_with_text(Some(12), " \n\t")),
         (
-            "missing usage",
-            completed_with_text(None, r#"{"summary":"Condensed"}"#),
+            "oversized summary",
+            completed_with_text(Some(12), &"x".repeat(8 * 1024 + 1)),
         ),
         (
             "escaped token reflection",
-            completed_with_text(
-                Some(12),
-                r#"{"summary":"\u0073ynthetic-subscription-token"}"#,
-            ),
+            String::from_utf8(completed_with_text(Some(12), TOKEN))
+                .unwrap()
+                .replace(TOKEN, r#"\u0073ynthetic-subscription-token"#)
+                .into_bytes(),
         ),
         (
             "interrupted",
@@ -1288,11 +1288,7 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         Some(12),
         r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
     ));
-    let compact = event_reply(completed_with_id(
-        "resp_compact",
-        Some(12),
-        r#"{"summary":"Condensed"}"#,
-    ));
+    let compact = event_reply(completed_with_id("resp_compact", Some(12), r#"Condensed"#));
     let (endpoint, server) =
         serve_sequence(vec![direct.clone(), delegate.clone(), compact.clone()]).await;
     probe_model_at(&client(), endpoint, TOKEN, "model-a", Effort::Medium)
@@ -1310,10 +1306,11 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         assert_eq!(body["stream"], true);
         assert!(body.get("max_output_tokens").is_none());
         assert!(!request.contains("private-workspace-canary"));
+        assert!(body.get("text").is_none());
         if index == 2 {
-            assert_eq!(body["text"]["format"]["name"], "arany_compaction");
-        } else {
-            assert!(body.get("text").is_none());
+            for field in ["tools", "tool_choice", "parallel_tool_calls"] {
+                assert!(body.get(field).is_none());
+            }
         }
     }
 
@@ -1328,16 +1325,8 @@ async fn model_probe_requires_distinct_direct_delegate_and_compaction_outcomes()
         r#"{"outcome":{"type":"delegate","children":[{"objective":"Explain two","profile":null}]}}"#,
     ));
     let wrong_delegate = event_reply(completed_with_id("resp_delegate", Some(12), r#"done"#));
-    let blank_compact = event_reply(completed_with_id(
-        "resp_compact",
-        Some(12),
-        r#"{"summary":""}"#,
-    ));
-    let repeated_compact = event_reply(completed_with_id(
-        "resp_direct",
-        Some(12),
-        r#"{"summary":"Condensed"}"#,
-    ));
+    let blank_compact = event_reply(completed_with_id("resp_compact", Some(12), r#""#));
+    let repeated_compact = event_reply(completed_with_id("resp_direct", Some(12), r#"Condensed"#));
     let over_cap = event_reply(completed_with_id(
         "resp_direct",
         Some(PROBE_OUTPUT_CAP + 1),
