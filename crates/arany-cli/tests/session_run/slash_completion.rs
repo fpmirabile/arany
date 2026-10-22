@@ -3877,23 +3877,47 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         fcntl_setfl(&output, OFlags::NONBLOCK).unwrap();
         let mut transcript = Vec::new();
         let mut answered = crate::session_picker::PtyResponses::default();
-        wait_for(
+        let wait_text = |output: &mut std::process::ChildStdout,
+                         input: &mut std::process::ChildStdin,
+                         transcript: &mut Vec<u8>,
+                         answered: &mut crate::session_picker::PtyResponses,
+                         from: usize,
+                         text: &str| {
+            if linear {
+                wait_for_after(output, input, transcript, answered, from, text.as_bytes());
+            } else {
+                wait_for_screen(output, input, transcript, answered, (from, 120, 24), text);
+            }
+        };
+        wait_text(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            if linear { b"Input:\r\n" } else { b"Ask Arany" },
+            0,
+            if linear { "Input:\r\n" } else { "Ask Arany" },
         );
-        fresh_capture(&mut transcript, &mut answered);
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        } else {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                0,
+                3,
+            );
+        }
+        let from = transcript.len();
         input.write_all(b"/goal continue\r").unwrap();
-        wait_for(
+        wait_text(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            arany::EngineError::GoalIncludesUnavailable
-                .to_string()
-                .as_bytes(),
+            from,
+            &arany::EngineError::GoalIncludesUnavailable.to_string(),
         );
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
@@ -3914,13 +3938,13 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         if !linear {
             let from = transcript.len();
             input.write_all(b"\x03").unwrap();
-            wait_for_after(
+            wait_for_caret(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
                 from,
-                b"Ask Arany",
+                3,
             );
         } else {
             wait_for(
@@ -3931,7 +3955,10 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 b"Input:\r\n",
             );
         }
-        fresh_capture(&mut transcript, &mut answered);
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        }
+        let from = transcript.len();
         if linear {
             input.write_all(b"/paste\r").unwrap();
         } else {
@@ -3940,12 +3967,13 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 .unwrap();
         }
         let label = format!("[Pasted Content {} chars]", payload.chars().count());
-        wait_for(
+        wait_text(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            label.as_bytes(),
+            from,
+            &label,
         );
         if linear {
             wait_for(
@@ -3956,22 +3984,38 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 b"Input:\r\n",
             );
         }
-        fresh_capture(&mut transcript, &mut answered);
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        }
+        let from = transcript.len();
         input.write_all(b" typed suffix\r").unwrap();
-        wait_for(
+        wait_text(
             &mut output,
             &mut input,
             &mut transcript,
             &mut answered,
-            b"Attachment received",
+            from,
+            "Attachment received",
         );
-        wait_for(
-            &mut output,
-            &mut input,
-            &mut transcript,
-            &mut answered,
-            if linear { b"Input:\r\n" } else { b"Ask Arany" },
-        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                b"Input:\r\n",
+            );
+        } else {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                3,
+            );
+        }
         input.write_all(b"/exit\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
