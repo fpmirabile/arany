@@ -216,9 +216,8 @@ permission or a full/closed ACP output queue records unavailable approval
 without sending or truncating its intent
 or approval lines. Enqueue is attempted once, with no retry, and its ID is
 retired before reporting unavailable to serve; later replies are ignored.
-Permission requests are processed even while an earlier Tool update waits for
-output capacity. Invalid results and client errors are also unavailable, not
-human decline. No transport configuration widens the private grant.
+Deferred-queue bypass follows [ACP limits](#limits-and-compatibility). No
+transport configuration widens the private grant.
 
 A committed serve `item/completed` agentMessage produces exactly one
 `session/update` with `update.sessionUpdate:"agent_message_chunk"` and
