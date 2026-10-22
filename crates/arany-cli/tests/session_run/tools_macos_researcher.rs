@@ -107,7 +107,8 @@ done
         for directory in ["home", "environment-state", "environment-data"] {
             std::fs::create_dir(temp.path().join(directory)).unwrap();
         }
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
             .args([
                 "--exact",
                 "tools_researcher::journey::native_researcher_journey_helper",
@@ -119,7 +120,9 @@ done
             .env("HOME", temp.path().join("home"))
             .env("XDG_STATE_HOME", temp.path().join("environment-state"))
             .env("XDG_DATA_HOME", temp.path().join("environment-data"))
-            .current_dir(temp.path())
+            .current_dir(temp.path());
+        crate::process::isolate_host_authentication(&mut command, &temp.path().join("home"));
+        let output = command
             .bounded_output_for(Duration::from_secs(360), 32 * 1024)
             .unwrap();
         assert!(

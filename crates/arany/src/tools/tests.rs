@@ -2222,16 +2222,9 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
                 "git_commit",
                 "git_branch",
                 "git_switch",
-                "git_push",
             ]
         } else {
-            vec![
-                "git_status",
-                "git_diff",
-                "git_log",
-                "git_branch",
-                "git_push",
-            ]
+            vec!["git_status", "git_diff", "git_log", "git_branch"]
         };
         let catalog = catalog(config.clone(), git_writes);
         assert_eq!(catalog["git"]["write"], git_writes);

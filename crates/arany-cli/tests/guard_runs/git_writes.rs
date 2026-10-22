@@ -733,6 +733,8 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
             .env("HOME", &home)
             .env("XDG_CONFIG_HOME", home.join(".config"))
             .env("GH_CONFIG_DIR", gh)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
             .env(
                 "TMPDIR",
                 std::fs::canonicalize(std::env::temp_dir()).unwrap(),

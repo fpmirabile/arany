@@ -917,7 +917,16 @@ impl ToolRuntime {
             "mcp_servers": self.config.mcp.iter().map(|server| serde_json::json!({"name":server.name,"tools":server.tools,"protocol":catalog::MCP_PROTOCOL})).collect::<Vec<_>>(),
             "git": if self.config.git_available() {
                 let write = self.config.write && self.git_writes_available;
-                serde_json::json!({"write":write,"host":self.config.write,"operations":catalog::git_operations(write, self.config.write).into_iter().filter(|name| *name != "gh_pr_create" || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty())).collect::<Vec<_>>(),"scope":catalog::GIT_SCOPE})
+                let operations: Vec<_> = catalog::git_operations(write, self.config.write)
+                    .into_iter()
+                    .filter(|name| match *name {
+                        "git_push" | "gh_pr_create" => self.host_authentication.as_ref().as_ref()
+                            .is_some_and(|auth| auth.offers(name)),
+                        _ => true,
+                    })
+                    .filter(|name| *name != "gh_pr_create" || self.config.commands.iter().any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()))
+                    .collect();
+                serde_json::json!({"write":write,"host":self.config.write,"operations":operations,"scope":catalog::GIT_SCOPE})
             } else {
                 serde_json::json!("unavailable")
             },

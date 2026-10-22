@@ -323,6 +323,14 @@ impl Authentication {
         Ok(())
     }
 
+    pub(crate) fn offers(&self, operation: &str) -> bool {
+        match operation {
+            "git_push" => !self.git_config.is_empty() || self.ssh_agent.is_some(),
+            "gh_pr_create" => self.gh_hosts.is_some(),
+            _ => false,
+        }
+    }
+
     pub(crate) fn allows(&self, call: &ToolCall) -> bool {
         match call {
             ToolCall::GitPush { remote, .. } => destination(remote).is_some_and(|(_, ssh)| {
@@ -1020,6 +1028,116 @@ mod tests {
             interpreter: false,
             inputs: vec![],
         }
+    }
+
+    #[test]
+    fn host_catalog_uses_fixture_authentication_snapshotted_at_admission() {
+        use crate::test_support::process::{BoundedOutput, isolate_host_authentication};
+        const CHILD: &str = "ARANY_HOST_CATALOG_FIXTURE";
+        let Some(home) = std::env::var_os(CHILD) else {
+            let temp = tempfile::tempdir().unwrap();
+            let home = std::fs::canonicalize(temp.path()).unwrap();
+            let test = std::thread::current().name().unwrap().to_owned();
+            let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+            command
+                .env_clear()
+                .env(CHILD, &home)
+                .args(["--exact", &test, "--nocapture"]);
+            isolate_host_authentication(&mut command, &home);
+            let output = command
+                .bounded_output_for(Duration::from_secs(30), 64 * 1024)
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated host catalog fixture failed"
+            );
+            crate::test_support::process::assert_single_test_completed(&output.stdout, &test);
+            return;
+        };
+        let home = PathBuf::from(home);
+        assert!(std::env::var_os("SSH_AUTH_SOCK").is_none());
+        let mut runtime = crate::tools::tests::in_process_runtime(
+            &home,
+            json!({
+                "version": 1, "workspace_paths": ["."], "write": true,
+                "commands": [], "skills": [], "mcp": [],
+                "git": {"name":"git", "executable":"/usr/bin/git", "sha256":"0".repeat(64), "interpreter":false, "inputs":[]}
+            }),
+        );
+        let operations = |runtime: &crate::tools::ToolRuntime| {
+            let catalog: serde_json::Value =
+                serde_json::from_str(runtime.context().unwrap().catalog()).unwrap();
+            assert!(!catalog.to_string().contains("fixture-auth-canary"));
+            catalog["git"]["operations"].clone()
+        };
+        let reads = json!(["git_status", "git_diff", "git_log", "git_branch"]);
+        let with_push = json!([
+            "git_status",
+            "git_diff",
+            "git_log",
+            "git_branch",
+            "git_push"
+        ]);
+        runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
+        assert_eq!(operations(&runtime), reads);
+        std::fs::create_dir_all(home.join(".config/git")).unwrap();
+        for path in [home.join(".gitconfig"), home.join(".config/git/config")] {
+            private_file(
+                &path,
+                b"[credential]\n helper = store\n username = fixture-auth-canary\n",
+                0o600,
+            )
+            .unwrap();
+            assert_eq!(
+                operations(&runtime),
+                reads,
+                "catalog does not rediscover credentials"
+            );
+            runtime.host_authentication =
+                std::sync::Arc::new(Authentication::admit(&runtime.config));
+            assert_eq!(operations(&runtime), with_push);
+            std::fs::remove_file(path).unwrap();
+            assert_eq!(
+                operations(&runtime),
+                with_push,
+                "admitted snapshot survives file removal"
+            );
+            runtime.host_authentication =
+                std::sync::Arc::new(Authentication::admit(&runtime.config));
+            assert_eq!(operations(&runtime), reads);
+        }
+        std::fs::create_dir(home.join(".config/gh")).unwrap();
+        private_file(
+            &home.join(".config/gh/hosts.yml"),
+            b"github.com:\n oauth_token: fixture-auth-canary\n",
+            0o600,
+        )
+        .unwrap();
+        runtime.host_authentication = std::sync::Arc::new(Authentication::admit(&runtime.config));
+        assert_eq!(
+            operations(&runtime),
+            reads,
+            "PR creation also needs a native gh pin"
+        );
+        runtime.config.commands.push(crate::tools::config::Program {
+            name: "gh".into(),
+            executable: "/usr/bin/true".into(),
+            sha256: "0".repeat(64),
+            interpreter: false,
+            inputs: vec![],
+        });
+        assert_eq!(
+            operations(&runtime),
+            json!([
+                "git_status",
+                "git_diff",
+                "git_log",
+                "git_branch",
+                "gh_pr_create"
+            ])
+        );
+        runtime.config.write = false;
+        assert_eq!(operations(&runtime), reads);
     }
 
     #[tokio::test]

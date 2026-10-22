@@ -9,6 +9,17 @@ use std::{
 /// Serializes heavy native gates that share one test binary.
 pub static NATIVE_GATE: Mutex<()> = Mutex::new(());
 
+pub fn isolate_host_authentication(command: &mut Command, home: &std::path::Path) {
+    let home = std::fs::canonicalize(home).expect("physical fixture home");
+    command
+        .env("HOME", &home)
+        .env("XDG_CONFIG_HOME", home.join(".config"))
+        .env("GH_CONFIG_DIR", home.join(".config/gh"))
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("SSH_AUTH_SOCK");
+}
+
 pub const READ_ONLY_CONSENT_PROMPT: &str = concat!(
     "Type trust [profile numbers], trust none, or read only; bare trust ",
     "preserves selected profiles. Ctrl+C exits:"
