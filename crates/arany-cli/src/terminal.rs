@@ -1922,7 +1922,7 @@ impl AttachedTerminal {
     }
 
     pub fn print_user_run(run: &arany::RunView, inline: bool) -> Result<(), TerminalError> {
-        let heading = commands::slash_token(&run.objective, run.skill.as_deref())
+        let heading = commands::invoked_skill_token(&run.objective, run.skill.as_deref())
             .map(|token| format!("{}You ({}):", if inline { "\n› " } else { "" }, token.kind));
         Self::print_user_message_with_heading(
             &run.objective,

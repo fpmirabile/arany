@@ -442,10 +442,16 @@ pub(super) fn slash_token<'a, 's>(
     let name = control
         .split_once(char::is_whitespace)
         .map_or(control, |(name, _)| name);
-    let kind = if COMMANDS.iter().any(|command| command.name == name) {
-        "command"
+    let command_control = control.trim_end();
+    let command_name = command_control
+        .split_once(' ')
+        .map_or(command_control, |(name, _)| name);
+    let (kind, name) = if COMMANDS.iter().any(|command| command.name == command_name) {
+        ("command", command_name)
+    } else if COMMANDS.iter().any(|command| command.name == name) {
+        return None;
     } else if skills.into_iter().any(|skill| skill == name) {
-        "skill"
+        ("skill", name)
     } else {
         return None;
     };
@@ -453,6 +459,13 @@ pub(super) fn slash_token<'a, 's>(
         text: &text[..name.len() + 1],
         kind,
     })
+}
+
+pub(super) fn invoked_skill_token<'a>(
+    text: &'a str,
+    skill: Option<&str>,
+) -> Option<SlashToken<'a>> {
+    slash_token(text, [skill?]).filter(|token| token.kind == "skill")
 }
 
 pub fn command_completions(prefix: &str) -> Vec<&'static str> {

@@ -323,7 +323,7 @@ impl LinearState {
             self.line_open = false;
         }
         let mut lines = user_message_lines(objective, 80);
-        if let Some(token) = super::commands::slash_token(objective, skill) {
+        if let Some(token) = super::commands::invoked_skill_token(objective, skill) {
             lines[0] = format!("You ({}):", token.kind);
         }
         for line in lines {
@@ -1120,11 +1120,11 @@ mod tests {
             .write_user_message(&mut output, "/ask-matt   do X  \nnext", Some("ask-matt"))
             .unwrap();
         assert_eq!(output, b"You (skill):\n  /ask-matt   do X  \n  next\n");
-        output.clear();
-        linear
-            .write_user_message(&mut output, "/unknown task", None)
-            .unwrap();
-        assert_eq!(output, b"You:\n  /unknown task\n");
+        for text in ["/unknown task", "/help", "/ask-matt task"] {
+            output.clear();
+            linear.write_user_message(&mut output, text, None).unwrap();
+            assert_eq!(output, format!("You:\n  {text}\n").as_bytes());
+        }
 
         let mut composer = super::super::Composer::default();
         composer.insert_paste("alpha\tbeta\n🙂").expect("draft");

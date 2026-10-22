@@ -1051,7 +1051,7 @@ impl History {
                     MessageSource::User(run) => view.runs[run].skill.as_deref(),
                     _ => None,
                 };
-                super::commands::slash_token(&text, skill)
+                super::commands::invoked_skill_token(&text, skill)
             } else {
                 None
             };
@@ -1092,7 +1092,7 @@ pub(super) fn scrollback_transcript(view: &SessionView) -> String {
     for run in view.runs.iter().rev().take(MAX_CLASSIC_HISTORY_RUNS) {
         let objective = image_message_text(&run.objective, &run.images);
         let details = super::linear::transcript_details(run);
-        let heading = super::commands::slash_token(&run.objective, run.skill.as_deref())
+        let heading = super::commands::invoked_skill_token(&run.objective, run.skill.as_deref())
             .map_or_else(
                 || "You:".to_owned(),
                 |token| format!("You ({}):", token.kind),
@@ -1258,7 +1258,8 @@ fn classic_run_cost(run: &RunView, width: usize) -> (usize, usize) {
     }
     let (mut bytes, mut rows) =
         classic_message_cost(MessageKind::User, user_body_bytes, user_body_rows);
-    if let Some(token) = super::commands::slash_token(&run.objective, run.skill.as_deref()) {
+    if let Some(token) = super::commands::invoked_skill_token(&run.objective, run.skill.as_deref())
+    {
         bytes = bytes.saturating_add(token.kind.len() + 3);
     }
     let mut add_message = |kind, text: &str| {
@@ -1387,7 +1388,7 @@ pub(super) fn display_rows(
     skill: Option<&str>,
 ) -> Vec<HistoryRow> {
     let slash = (kind == MessageKind::User)
-        .then(|| super::commands::slash_token(text, skill))
+        .then(|| super::commands::invoked_skill_token(text, skill))
         .flatten();
     message_rows(kind, text, width)
         .iter()
@@ -1904,6 +1905,28 @@ mod tests {
             scrollback_transcript(&view)
                 .contains("You (skill):\r\n  /ask-matt   do X  \r\n  next\r\n")
         );
+        for draft in ["//help", "/goal /help", "//ask-matt"] {
+            use super::super::commands::{Submission, parse_submission};
+            let text = match parse_submission(draft).unwrap() {
+                Submission::Objective(text) => text,
+                Submission::Command {
+                    command: super::super::InteractiveCommand::Goal,
+                    argument: Some(text),
+                } => text,
+                _ => panic!("literal objective"),
+            };
+            view.runs = vec![run(text, "answer")];
+            let mut history = History::default();
+            history.sync(&view, 80, 20);
+            let rows = history.visible(&view);
+            assert_eq!(rows[0].text, "You:", "{draft}");
+            assert_eq!(rows[1].text, format!("  {text}"));
+            assert!(rows.iter().all(|row| row.slash_cells == 0), "{draft}");
+            let native = display_rows(MessageKind::User, text, 80, None);
+            assert_eq!(native[0].text, "You:");
+            assert!(native.iter().all(|row| row.slash_cells == 0));
+            assert!(scrollback_transcript(&view).contains(&format!("You:\r\n  {text}\r\n")));
+        }
     }
 
     #[test]

@@ -19,10 +19,11 @@ fn recognized_slash_tokens_are_accented_and_bold_without_changing_text() {
         empty_chat: false,
         agent_switch: false,
     };
-    for (text, kind, token_len) in [
-        ("/ask-matt task", Some("skill"), 9),
-        ("/help task", Some("command"), 5),
-        ("/unknown task", None, 0),
+    for (text, token_len, skill) in [
+        ("/ask-matt task", 9, Some("ask-matt")),
+        ("/ask-matt literal", 9, None),
+        ("/help task", 5, None),
+        ("/unknown task", 0, None),
     ] {
         for color in [false, true] {
             let mut composer = Composer::default();
@@ -47,12 +48,16 @@ fn recognized_slash_tokens_are_accented_and_bold_without_changing_text() {
                     }
                 );
             }
-            let rows =
-                super::super::history::display_rows(MessageKind::User, text, 40, Some("ask-matt"));
+            let rows = super::super::history::display_rows(MessageKind::User, text, 40, skill);
             assert_eq!(
                 rows[0].text,
-                kind.map_or("You:".into(), |kind| format!("You ({kind}):"))
+                if skill.is_some() {
+                    "You (skill):"
+                } else {
+                    "You:"
+                }
             );
+            let token_len = if skill.is_some() { token_len } else { 0 };
             for native in [false, true] {
                 terminal
                     .draw(|frame| {
