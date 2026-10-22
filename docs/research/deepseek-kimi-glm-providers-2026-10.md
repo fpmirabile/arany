@@ -9,8 +9,8 @@ keys, Kimi platform API keys, Kimi Code subscription console keys and GLM
 standard API keys. Exclude the GLM Coding Plan because its supported-tool
 allowlist excludes Arany. DeepSeek has no subscription route in scope. These
 are the owner's accepted planning choices; they do not establish working
-Arany routes. The [implementation plan](../../planning/anthropic-compatible-routes/README.md)
-owns delivery, while the [Provider](../specs/provider.md) and
+Arany routes. Delivery is tracked in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first),
+while the [Provider](../specs/provider.md) and
 [credential](../specs/credentials.md) specs own behavior and secret handling.
 
 Scope: official documentation and pinned peer source review. No credentials,

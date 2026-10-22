@@ -2,7 +2,7 @@
 
 - Question: how can Arany preserve stored state across format changes without inventing replay facts?
 - Source-check date: 2026-10-21. Repository inventory is pinned to `40be2a7a`; the Codex revision and evidence limits are in [peer practice](#4-peer-practice).
-- Related decisions: the [active plan](../../planning/state-migrations/README.md#chosen-direction) owns the design; [D-22](./next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns the accepted archive trade-off.
+- Related decisions: the [execution contract](../specs/execution.md#journal-migration) owns the design; [D-22](./next-step-decision-register.md#d-22--pre-beta-history-below-the-migration-floor) owns the accepted archive trade-off.
 - Scope: persisted-format inventory, churn, digest and storage constraints, and peer evidence; no implementation or native-platform verification claim.
 
 ## 1. Inventory (verified in repo @ main 40be2a7a)
