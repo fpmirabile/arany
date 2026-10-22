@@ -1411,7 +1411,6 @@ pub(super) struct GuardContext<'a> {
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
     pub(super) workspace: &'a Path,
-    pub(super) skill: Option<Vec<u8>>,
     pub(super) hook_stdin: Option<&'a str>,
     pub(super) hidden: &'a HiddenPaths,
     pub(super) definition: Option<Vec<u8>>,
@@ -1780,19 +1779,13 @@ pub(super) fn helper_main() -> ExitCode {
         stage = BootstrapStage::Workspace;
         let family = task.intent.call.facts().family;
         if task.worker.is_none()
-            && (matches!(family, Family::File | Family::Git)
-                || cfg!(target_os = "macos") && family == Family::Skill)
+            && matches!(family, Family::File | Family::Git)
             && super::fs::identity(&super::fs::open_directory(workspace)?)?
                 != (task.intent.workspace_device, task.intent.workspace_inode)
         {
             return Err(ToolError::ChangedInput);
         }
         let definition = definition_bytes(&task)?;
-        let skill = if task.intent.call.facts().family == Family::Skill {
-            Some(load_skill_bytes(&task)?)
-        } else {
-            None
-        };
         let (image, handover) = receive_bulk(&task, &mut stdin, workspace)?;
         #[cfg(target_os = "linux")]
         {
@@ -1867,7 +1860,6 @@ pub(super) fn helper_main() -> ExitCode {
             config: &task.config,
             root: &root,
             workspace,
-            skill,
             hook_stdin: task.hook_stdin.as_deref(),
             hidden: &task.hidden,
             definition,
@@ -1931,41 +1923,6 @@ fn definition_bytes(task: &Task) -> Result<Option<Vec<u8>>, ToolError> {
         (ToolCall::ParseAgentDefinition { .. }, _) | (_, Some(_)) => Err(ToolError::Configuration),
         (_, None) => Ok(None),
     }
-}
-
-fn load_skill_bytes(task: &Task) -> Result<Vec<u8>, ToolError> {
-    let ToolCall::Skill { name, resource } = &task.intent.call else {
-        return Err(ToolError::Configuration);
-    };
-    let resource = resource.as_deref().unwrap_or("SKILL.md");
-    #[cfg(target_os = "macos")]
-    let path = {
-        let skill = task
-            .config
-            .skills
-            .iter()
-            .find(|skill| &skill.name == name)
-            .ok_or(ToolError::Configuration)?;
-        Path::new(&skill.directory)
-            .join(resource)
-            .to_str()
-            .ok_or(ToolError::Path)?
-            .to_owned()
-    };
-    #[cfg(not(target_os = "macos"))]
-    let path = format!("/skills/{name}/{resource}");
-    let bytes = super::fs::read_regular(super::fs::open_absolute(&path)?, MAX_TOOL_RESULT_BYTES)?;
-    if task
-        .config
-        .skills
-        .iter()
-        .find(|skill| &skill.name == name)
-        .and_then(|skill| skill.files.get(resource))
-        != Some(&hex_digest(&bytes))
-    {
-        return Err(ToolError::ChangedInput);
-    }
-    Ok(bytes)
 }
 
 pub(super) fn runtime_path(runtime_grants: &[RuntimeGrant]) -> Result<String, ToolError> {

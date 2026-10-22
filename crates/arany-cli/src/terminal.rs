@@ -30,6 +30,7 @@ mod composer;
 mod history;
 mod input;
 mod linear;
+mod local_report;
 mod rewind;
 pub use rewind::RewindPanelError;
 mod view;

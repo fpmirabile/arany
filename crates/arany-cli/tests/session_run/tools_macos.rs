@@ -830,7 +830,10 @@ async fn native_file_journey_helper() {
             } => {
                 assert!(matches!(
                     observation.intent.call,
-                    ToolCall::Read { .. } | ToolCall::List { .. } | ToolCall::Search { .. }
+                    ToolCall::Read { .. }
+                        | ToolCall::List { .. }
+                        | ToolCall::Search { .. }
+                        | ToolCall::Skill { .. }
                 ));
                 assert_eq!(*policy_digest, observation.intent.policy_digest);
                 assert_eq!(

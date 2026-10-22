@@ -21,14 +21,36 @@ pub(super) fn schema() -> Option<Vec<(&'static str, Value)>> {
     Some(vec![("name", string()), ("resource", nullable())])
 }
 
-pub(super) fn run(call: &ToolCall, bytes: &[u8]) -> Result<String, ToolError> {
-    let ToolCall::Skill { name, resource } = call else {
+pub(super) fn read(
+    root: &Dir,
+    skill: &Skill,
+    call: &ToolCall,
+    result_bytes: usize,
+) -> Result<String, ToolError> {
+    let ToolCall::Skill { resource, .. } = call else {
         return Err(ToolError::Configuration);
     };
-    if resource.as_deref().unwrap_or("SKILL.md") == "SKILL.md" {
-        metadata(name, bytes)?;
+    let resource = resource.as_deref().unwrap_or("SKILL.md");
+    let expected = skill.files.get(resource).ok_or(ToolError::Path)?;
+    if fs::identity(root)? != fs::identity(&fs::open_directory(Path::new(&skill.directory))?)? {
+        return Err(ToolError::ChangedInput);
     }
-    String::from_utf8(bytes.to_vec()).map_err(|_| ToolError::Operation)
+    let file = fs::open_file(root, resource)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if file.metadata().map_err(|_| ToolError::Path)?.mode() & 0o6000 != 0 {
+            return Err(ToolError::FilesystemDenied);
+        }
+    }
+    let bytes = fs::read_regular(file, MAX_TOOL_RESULT_BYTES)?;
+    if hex_digest(&bytes) != *expected {
+        return Err(ToolError::ChangedInput);
+    }
+    std::str::from_utf8(&bytes).map_err(|_| ToolError::Operation)?;
+    let mut window = super::output::Window::new(bytes.len());
+    window.push(&bytes, MAX_TOOL_RESULT_BYTES as u64)?;
+    window.fitted(result_bytes.saturating_sub(2))
 }
 
 pub struct ProjectSkills {
@@ -344,43 +366,7 @@ impl<'de> Visitor<'de> for Bounded<'_> {
     }
 }
 
-pub(super) fn metadata(expected_name: &str, bytes: &[u8]) -> Result<Value, ToolError> {
-    if bytes.len() > MAX_TOOL_RESULT_BYTES {
-        return Err(ToolError::Limit);
-    }
-    let text = std::str::from_utf8(bytes).map_err(|_| ToolError::Configuration)?;
-    let yaml = frontmatter(text).ok_or(ToolError::Configuration)?;
-    let mut documents = yaml_serde::Deserializer::from_str(yaml);
-    let mut budget = Budget {
-        count_keys: false,
-        nodes: 0,
-        bytes: 0,
-        max_nodes: 256,
-        max_bytes: 16 * 1024,
-        max_depth: 8,
-    };
-    let metadata = Bounded {
-        budget: &mut budget,
-        depth: 0,
-    }
-    .deserialize(documents.next().ok_or(ToolError::Configuration)?)
-    .map_err(|_| ToolError::Configuration)?;
-    if documents.next().is_some()
-        || !metadata.is_object()
-        || metadata["name"].as_str() != Some(expected_name)
-    {
-        return Err(ToolError::Configuration);
-    }
-    let description = metadata["description"]
-        .as_str()
-        .filter(|value| !value.trim().is_empty() && value.len() <= 1024)
-        .ok_or(ToolError::Configuration)?;
-    Ok(
-        json!({"name":expected_name,"description":description,"sha256":hex_digest(bytes),"behavioral_fields":"guidance only; no permissions, interpolation, installation or fork activation"}),
-    )
-}
-
-// Discovery reads this literal opt-out only; YAML stays in the Guard.
+// Discovery reads this literal opt-out only, without evaluating YAML.
 pub(super) fn disables_model_invocation(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
         return true;
@@ -558,33 +544,6 @@ mod tests {
             let source =
                 format!("---\nname: useful\ndescription: Guidance\n{declaration}\n---\nBody");
             assert_eq!(disables_model_invocation(source.as_bytes()), disabled);
-        }
-    }
-
-    #[test]
-    fn portable_metadata_accepts_real_scalars_and_rejects_ambiguity() {
-        for source in [
-            "---\nname: useful\ndescription: 'Useful: a skill'\n---\nBody",
-            "---\nname: useful\ndescription: >\n  Read selected files\n  carefully.\nallowed-tools: Bash\n---\nBody",
-            "---\r\nname: useful\r\ndescription: >-\r\n  Read selected files\r\n---\r\nBody",
-            "---\nname: useful\ndescription: !!str Read selected files\n---\nBody",
-        ] {
-            assert_eq!(
-                metadata("useful", source.as_bytes()).expect("valid metadata")["name"],
-                "useful"
-            );
-        }
-        for source in [
-            "---\nname: useful\nname: shadow\ndescription: ok\n---\nbody",
-            "---\nname: other\ndescription: ok\n---\nbody",
-            "---\nname: useful\ndescription: !execute whoami\n---\nbody",
-            "body",
-            "---\nname: useful\ndescription: false\n---\nbody",
-        ] {
-            assert!(
-                metadata("useful", source.as_bytes()).is_err(),
-                "hostile metadata"
-            );
         }
     }
 }

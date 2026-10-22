@@ -445,16 +445,6 @@ pub(super) fn install(
     if task.worker.is_none() && task.intent.call.mutates() {
         profile.rule("allow file-write*", "subpath", &task.workspace)?;
     }
-    if let ToolCall::Skill { name, resource } = &task.intent.call {
-        let skill = task
-            .config
-            .skills
-            .iter()
-            .find(|skill| &skill.name == name)
-            .ok_or(ToolError::Configuration)?;
-        let path = Path::new(&skill.directory).join(resource.as_deref().unwrap_or("SKILL.md"));
-        profile.grant("allow file-read*", "literal", &path)?;
-    }
     profile.protect_guard(&task.guard_executable)?;
     profile.install()?;
     Ok(worker_root.unwrap_or_else(|| PathBuf::from("/")))

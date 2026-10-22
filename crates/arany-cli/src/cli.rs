@@ -12,6 +12,7 @@ pub(crate) mod provider;
 #[cfg(test)]
 mod record_formats;
 pub(crate) mod serve;
+pub(crate) mod storage;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum OutputArg {
