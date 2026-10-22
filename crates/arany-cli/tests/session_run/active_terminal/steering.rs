@@ -133,7 +133,7 @@ fn answer_provider_check(stream: &mut std::net::TcpStream, index: usize) {
     let text = match index {
         0 => serde_json::json!("ok"),
         1 => serde_json::from_str(DELEGATE).expect("Delegate JSON"),
-        _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+        _ => serde_json::json!(r#"synthetic summary"#),
     };
     send_response_for(stream, index, text, index < 2);
 }

@@ -433,7 +433,7 @@ async fn run_history_fixture() {
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child","profile":null}]}})
                     }
-                    _ => serde_json::json!(r#"{"summary":"summary"}"#),
+                    _ => serde_json::json!(r#"summary"#),
                 };
                 send_response(&mut stream, index, text);
             } else if index == 3 {

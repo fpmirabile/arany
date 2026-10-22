@@ -162,7 +162,10 @@ impl ToolArgumentShape {
             ToolCall::Read { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. } => Some((path, false)),
+            | ToolCall::Edit { path, .. }
+            | ToolCall::MultiEdit {
+                file_path: path, ..
+            } => Some((path, false)),
             ToolCall::Command { cwd, .. } => Some((cwd, true)),
             _ => None,
         };
@@ -172,6 +175,9 @@ impl ToolArgumentShape {
         }
         let digest = match call {
             ToolCall::Edit {
+                expected_digest, ..
+            }
+            | ToolCall::MultiEdit {
                 expected_digest, ..
             } => Some(expected_digest),
             ToolCall::Write {
@@ -225,7 +231,6 @@ pub(crate) struct ResponseShape {
     pub(crate) commentary: usize,
     pub(crate) finals: usize,
     pub(crate) unphased: usize,
-    pub(crate) structured: usize,
     pub(crate) done_messages: usize,
     pub(crate) done_finals: usize,
 }
@@ -249,12 +254,11 @@ fn write_failure(root: &StateRoot, stage: SubscriptionFailureStage, counts: Stre
     if let Some(shape) = counts.response_shape {
         let _ = writeln!(
             record,
-            "response_shape messages={} commentary={} finals={} unphased={} structured={} done_messages={} done_finals={}",
+            "response_shape messages={} commentary={} finals={} unphased={} done_messages={} done_finals={}",
             shape.messages,
             shape.commentary,
             shape.finals,
             shape.unphased,
-            shape.structured,
             shape.done_messages,
             shape.done_finals,
         );

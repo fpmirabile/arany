@@ -28,6 +28,8 @@ pub enum WorkerTool {
     Mkdir,
     Write,
     Edit,
+    #[serde(rename = "multiedit")]
+    MultiEdit,
     Skill,
     McpList,
     Command,
@@ -43,6 +45,7 @@ impl WorkerTool {
             Self::Mkdir => "mkdir",
             Self::Write => "write",
             Self::Edit => "edit",
+            Self::MultiEdit => "multiedit",
             Self::Skill => "skill",
             Self::McpList => "mcp_list",
             Self::Command => "command",
@@ -58,6 +61,7 @@ impl WorkerTool {
             ToolCall::Mkdir { .. } => Self::Mkdir,
             ToolCall::Write { .. } => Self::Write,
             ToolCall::Edit { .. } => Self::Edit,
+            ToolCall::MultiEdit { .. } => Self::MultiEdit,
             ToolCall::Skill { .. } => Self::Skill,
             ToolCall::McpList { .. } => Self::McpList,
             ToolCall::Command { .. } => Self::Command,
@@ -91,16 +95,18 @@ impl WorkerGrant {
                 .all(|p| crate::tools::types::valid_relative(p, true))
             && (self.write_paths == ["."] || valid_leases(&self.write_paths))
             && !self.tools.is_empty()
-            && self.tools.len() <= 10
+            && self.tools.len() <= 11
             && self
                 .tools
                 .iter()
                 .enumerate()
                 .all(|(i, t)| !self.tools[..i].contains(t))
-            && self
-                .tools
-                .iter()
-                .any(|t| matches!(t, WorkerTool::Write | WorkerTool::Edit))
+            && self.tools.iter().any(|t| {
+                matches!(
+                    t,
+                    WorkerTool::Write | WorkerTool::Edit | WorkerTool::MultiEdit
+                )
+            })
             && self.write_paths.iter().all(|p| within(p, &self.read_paths))
             && [&self.skills, &self.mcp_servers].iter().all(|names| {
                 names.len() <= 64
@@ -160,9 +166,10 @@ impl WorkerGrant {
                 | ToolCall::Glob { path, .. } => within(path, &self.read_paths),
                 ToolCall::Mkdir { path }
                 | ToolCall::Write { path, .. }
-                | ToolCall::Edit { path, .. } => {
-                    writable_path(path) && within(path, &self.write_paths)
-                }
+                | ToolCall::Edit { path, .. }
+                | ToolCall::MultiEdit {
+                    file_path: path, ..
+                } => writable_path(path) && within(path, &self.write_paths),
                 ToolCall::Skill { name, .. } => self.skills.contains(name),
                 ToolCall::McpList { server } => self.mcp_servers.contains(server),
                 ToolCall::Command { program, cwd, .. } => {

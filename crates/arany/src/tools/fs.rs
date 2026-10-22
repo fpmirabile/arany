@@ -47,6 +47,26 @@ pub(super) fn valid(call: &ToolCall) -> bool {
                 && !old.is_empty()
                 && old.len() + new.len() <= MAX_EDIT_CONTENT_BYTES
         }
+        ToolCall::MultiEdit {
+            file_path,
+            expected_digest,
+            edits,
+        } => {
+            valid_relative(file_path, false)
+                && valid_digest(expected_digest)
+                && (1..=MAX_MULTI_EDITS).contains(&edits.len())
+                && edits
+                    .iter()
+                    .all(|edit| !edit.old_string.is_empty() && edit.old_string != edit.new_string)
+                && edits
+                    .iter()
+                    .try_fold(0usize, |total, edit| {
+                        total
+                            .checked_add(edit.old_string.len())?
+                            .checked_add(edit.new_string.len())
+                    })
+                    .is_some_and(|total| total <= MAX_EDIT_CONTENT_BYTES)
+        }
         ToolCall::ApplyChangeset { source } => source.valid(),
         ToolCall::Glob { .. } => super::glob::valid(call),
         _ => false,
@@ -96,6 +116,29 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
         ],
         "glob" => super::glob::schema(),
+        "multiedit" => vec![
+            ("file_path", string()),
+            (
+                "expected_digest",
+                json!({"type":"string", "description":"Exact lowercase 64-character SHA-256 of the existing file from Read or a file include."}),
+            ),
+            (
+                "edits",
+                json!({
+                    "type":"array",
+                    "description":"Apply in order against each preceding result; all replacements publish once or none. Combined old_string and new_string UTF-8 bytes across the batch must be at most 65536. Every intermediate file must fit 1 MiB; unchanged final content rejects.",
+                    "items":{
+                        "type":"object", "additionalProperties":false,
+                        "properties":{
+                            "old_string":{"type":"string", "description":"Nonempty exact literal text, different from new_string; no Read line-number prefixes."},
+                            "new_string":{"type":"string", "description":"Literal replacement; empty removes only the matched bytes."},
+                            "replace_all":{"type":["boolean","null"], "description":"true replaces all non-overlapping matches (at least one required); false or null requires exactly one match. Defaults to false."}
+                        },
+                        "required":["old_string","new_string","replace_all"]
+                    }
+                }),
+            ),
+        ],
         "write" => vec![
             path,
             ("expected_digest", nullable()),
@@ -1337,21 +1380,15 @@ pub(super) fn native(
         ToolCall::Edit {
             path,
             expected_digest,
-            old,
-            new,
+            ..
+        }
+        | ToolCall::MultiEdit {
+            file_path: path,
+            expected_digest,
+            ..
         } => {
             let bytes = read_regular(open_file(&root, path)?, MAX_FILE_BYTES)?;
-            if hex_digest(&bytes) != *expected_digest {
-                return Err(ToolError::Conflict);
-            }
-            let text = String::from_utf8(bytes).map_err(|_| ToolError::Operation)?;
-            if text.match_indices(old).count() != 1 {
-                return Err(ToolError::Conflict);
-            }
-            let replacement = text.replacen(old, new, 1);
-            if replacement.len() > MAX_FILE_BYTES {
-                return Err(ToolError::Limit);
-            }
+            let replacement = edited_content(&bytes, call)?;
             replace(&root, path, Some(expected_digest), replacement.as_bytes())
         }
         ToolCall::ApplyChangeset {
@@ -1362,6 +1399,64 @@ pub(super) fn native(
                 return Err(ToolError::Path);
             }
             apply_changeset(&root, changeset)
+        }
+        _ => Err(ToolError::Operation),
+    }
+}
+
+pub(super) fn edited_content(bytes: &[u8], call: &ToolCall) -> Result<String, ToolError> {
+    if !valid(call) {
+        return Err(ToolError::Operation);
+    }
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(ToolError::Limit);
+    }
+    let expected_digest = match call {
+        ToolCall::Edit {
+            expected_digest, ..
+        }
+        | ToolCall::MultiEdit {
+            expected_digest, ..
+        } => expected_digest,
+        _ => return Err(ToolError::Operation),
+    };
+    if hex_digest(bytes) != *expected_digest {
+        return Err(ToolError::Conflict);
+    }
+    let original = std::str::from_utf8(bytes).map_err(|_| ToolError::Operation)?;
+    let replace = |text: &str, old: &str, new: &str, all: bool| {
+        let count = text.matches(old).count();
+        if count == 0 || !all && count != 1 {
+            return Err(ToolError::Conflict);
+        }
+        old.len()
+            .checked_mul(count)
+            .and_then(|removed| text.len().checked_sub(removed))
+            .and_then(|size| {
+                new.len()
+                    .checked_mul(count)
+                    .and_then(|added| size.checked_add(added))
+            })
+            .filter(|size| *size <= MAX_FILE_BYTES)
+            .ok_or(ToolError::Limit)?;
+        Ok(text.replace(old, new))
+    };
+    match call {
+        ToolCall::Edit { old, new, .. } => replace(original, old, new, false),
+        ToolCall::MultiEdit { edits, .. } => {
+            let mut result = original.to_owned();
+            for edit in edits {
+                result = replace(
+                    &result,
+                    &edit.old_string,
+                    &edit.new_string,
+                    edit.replace_all,
+                )?;
+            }
+            if result == original {
+                return Err(ToolError::Conflict);
+            }
+            Ok(result)
         }
         _ => Err(ToolError::Operation),
     }

@@ -54,10 +54,9 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Budget feedback](./budget-feedback/README.md) | `Ready`: G1 reproduce/classify budget refusal, persist its reservation detail and render deterministic explanations; independent of approvals |
 | [Tool failure continuation](./failure-feedback/README.md) | `Ready`: C1 primary failure/decline results and sanitized continuation after approvals A1; C2 delegated feedback |
 | [Arany-owned storage report](./arany-storage/README.md) | `Ready`: independent two-slice feature for user-local aggregated sizes/counts/paths via `arany storage`/`/storage`, then recorded native Guard storage; metadata-only lead default, no automatic model disclosure |
-| [Portable compaction](./portable-compaction/README.md) | `Ready`: one PR for bounded text compaction and exact custom checks |
 | [Provider check journal](./provider-check-journal/README.md) | `Ready`: C1 standalone custom/native check streams and SQLite migration; C2 ChatGPT checks and account-index migration; prerequisite for setup UI |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
-| [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
+| [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Ready: one PR for peer defaults across attached, exec and serve, retaining durable accounting and finite action/storage bounds |
 | [Large draft attachments](./large-draft-attachments/README.md) | Ready: three PRs for durable pasted text, full-capacity typed/restored drafts and clipboard/path image chips |
 | [Composer newline keys](./composer-newline-keys/README.md) | In progress: remaining slice negotiates modifier keys with capability-aware guidance and terminal restoration |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |

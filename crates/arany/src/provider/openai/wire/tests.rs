@@ -274,7 +274,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
-    assert_eq!(compact_body["text"]["format"]["schema"], summary_schema());
+    assert!(compact_body.get("text").is_none());
     let native_compact = compaction_body_with_effort(&compact, Effort::Low);
     assert_eq!(native_compact["reasoning"]["effort"], "low");
 }
@@ -462,7 +462,7 @@ fn outbound_requests_encrypted_reasoning_include_and_replays_items_adjacent_and_
         encoded.contains(&format!("{reasoning_text},{call_text}")),
         "the raw items are adjacent in the request bytes"
     );
-    assert_eq!(rendered["tools"].as_array().unwrap().len(), 19);
+    assert_eq!(rendered["tools"].as_array().unwrap().len(), 20);
 }
 
 #[test]
@@ -754,7 +754,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
 
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 11);
+    assert_eq!(rows.len(), 12);
     for (catalog, accepted) in [
         (
             json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
@@ -773,7 +773,7 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             3,
         ),
     ] {
-        request.input.tools = Some(tool_context(catalog));
+        request.input.tools = Some(tool_context(catalog.clone()));
         let rendered = body(&request);
         let valid = |row: &Value| {
             let mut arguments = row.clone();
@@ -801,7 +801,9 @@ fn native_functions_are_strict_catalog_scoped_and_followed_by_the_outcomes() {
             // The read-only glob row follows the scoped rows and is always offered.
             assert_eq!(
                 valid(row),
-                index < accepted || row["operation"] == "glob",
+                index < accepted
+                    || row["operation"] == "glob"
+                    || row["operation"] == "multiedit" && catalog["write"] == true,
                 "catalog Tool availability: {index}"
             );
             if (6..10).contains(&index) {
@@ -1164,6 +1166,10 @@ fn native_tool_argument_limits_include_outer_whitespace() {
             "edit",
             json!({"path":"README.md","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
         ),
+        (
+            "multiedit",
+            json!({"file_path":"README.md","expected_digest":"0".repeat(64),"edits":[{"old_string":"x","new_string":"y"}]}),
+        ),
     ] {
         let limit = argument_limit(operation);
         let text = input.to_string();
@@ -1258,6 +1264,73 @@ fn native_write_and_edit_decode_at_the_content_ceiling() {
 }
 
 #[test]
+fn multiedit_defaults_bounds_and_availability_hold_on_both_response_routes() {
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    let input = |option: Option<Value>| {
+        let mut edit = json!({"old_string":"a","new_string":"b"});
+        if let Some(option) = option {
+            edit["replace_all"] = option;
+        }
+        json!({"file_path":"src/a","expected_digest":"0".repeat(64),"edits":[edit]})
+    };
+    for option in [
+        None,
+        Some(json!(null)),
+        Some(json!(false)),
+        Some(json!(true)),
+    ] {
+        let fixture = response(
+            "completed",
+            json!([function_call("arany_multiedit", &input(option.clone()))]),
+        );
+        for decoded in [
+            decode(&request, &fixture).unwrap(),
+            decode_streamed(&request, &fixture).unwrap(),
+        ] {
+            let ProviderOutcome::Tools(calls) = decoded.outcome else {
+                panic!("MultiEdit call")
+            };
+            assert!(
+                matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if edits[0].replace_all == (option == Some(json!(true))))
+            );
+        }
+        for unavailable in [read_only_request(MODEL), researcher_request(MODEL)] {
+            assert!(decode(&unavailable, &fixture).is_err());
+            assert!(decode_streamed(&unavailable, &fixture).is_err());
+        }
+    }
+    let mut escaped = input(None);
+    escaped["edits"][0]["old_string"] = json!("\u{1}".repeat(32 * 1024));
+    escaped["edits"][0]["new_string"] = json!("\u{2}".repeat(32 * 1024));
+    let fixture = response(
+        "completed",
+        json!([function_call("arany_multiedit", &escaped)]),
+    );
+    assert!(decode(&request, &fixture).is_ok());
+    assert!(decode_streamed(&request, &fixture).is_ok());
+    for (pointer, value) in [
+        ("/edits/0/new_string", json!("x".repeat(32 * 1024 + 1))),
+        ("/edits/0/unknown", json!(false)),
+        ("/unknown", json!(false)),
+        ("/edits/0/replace_all", json!("false")),
+    ] {
+        let mut invalid = escaped.clone();
+        if pointer == "/unknown" {
+            invalid["unknown"] = value;
+        } else {
+            invalid["edits"][0][pointer.rsplit('/').next().unwrap()] = value;
+        }
+        let fixture = response(
+            "completed",
+            json!([function_call("arany_multiedit", &invalid)]),
+        );
+        assert!(decode(&request, &fixture).is_err(), "{pointer}");
+        assert!(decode_streamed(&request, &fixture).is_err(), "{pointer}");
+    }
+}
+
+#[test]
 fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     let request = read_only_request(MODEL);
     let finish = response(
@@ -1282,7 +1355,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     assert_eq!(accepted.turn.items("openai").unwrap().len(), 1);
     for compaction in [false, true] {
         let text = if compaction {
-            r#"{"summary":"short"}"#
+            r#"short"#
         } else {
             answer_text()
         };
@@ -1385,15 +1458,33 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             }
         }
     }
-    let compact_response = response("completed", json!([message(r#"{"summary":"short"}"#)]));
+    let compact_response = response("completed", json!([message(r#"short"#)]));
     let compact = decode_compaction(&serde_json::to_vec(&compact_response).unwrap(), MODEL)
         .expect("completed Responses compaction");
     assert_eq!(compact.summary, "short");
+    for (text, accepted) in [
+        (String::new(), false),
+        (" \n\t".into(), false),
+        ("x".repeat(8 * 1024), true),
+        ("é".repeat(4 * 1024), true),
+        ("x".repeat(8 * 1024 + 1), false),
+        ("é".repeat(4 * 1024 + 1), false),
+        ("  summary\n".into(), true),
+        (r#"{"summary":"ok","extra":1}"#.into(), true),
+    ] {
+        let fixture = response("completed", json!([message(&text)]));
+        let decoded = decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL);
+        assert_eq!(decoded.is_ok(), accepted);
+        if let Ok(decoded) = decoded {
+            assert_eq!(decoded.summary, text);
+        }
+    }
+
     for malformed in [
         json!({"type":"output_text"}),
         json!({"type":"output_text","text":null}),
     ] {
-        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"short"#)] {
             let fixture = response(
                 "completed",
                 json!([
@@ -1478,7 +1569,6 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     ] {
         assert!(structured_outcome(text).is_err(), "bad outcome shape");
     }
-    assert!(serde_json::from_str::<SummaryEnvelope>(r#"{"summary":"ok","extra":1}"#).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
     let overhead = r#"{"oversize":""}"#.len();
     for (window, ceiling) in [

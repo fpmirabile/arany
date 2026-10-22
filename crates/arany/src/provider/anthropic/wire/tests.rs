@@ -137,6 +137,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_git_commit",
             "arany_git_branch",
             "arany_git_switch",
+            "arany_multiedit",
             "arany_plan"
         ]
     );
@@ -529,7 +530,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
 }
 
 #[test]
-fn custom_messages_optional_effort_preserves_strict_compaction() {
+fn custom_messages_optional_effort_preserves_text_compaction() {
     let request = read_only_request("deepseek-flash");
     let conversation = render::conversation(&request).unwrap();
     let omitted = run_body_with_optional_effort(&request, &conversation, None).unwrap();
@@ -546,10 +547,7 @@ fn custom_messages_optional_effort_preserves_strict_compaction() {
     };
     let strict = compaction_body_with_optional_effort(&compact, None);
     assert!(strict["output_config"].get("effort").is_none());
-    assert_eq!(
-        strict["output_config"]["format"]["schema"],
-        summary_schema()
-    );
+    assert!(strict["output_config"].get("format").is_none());
     assert!(strict.get("thinking").is_none());
     for effort in Effort::ALL {
         assert_eq!(
@@ -630,7 +628,7 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
             .unwrap();
             let streamed: Value = serde_json::from_slice(&streamed).unwrap();
             assert_eq!(decode(&request, &streamed).unwrap().usage, expected);
-            fixture["content"] = json!([text_block(r#"{"summary":"short"}"#)]);
+            fixture["content"] = json!([text_block(r#"short"#)]);
             assert_eq!(
                 decode_compaction(&serde_json::to_vec(&fixture).unwrap(), model, 1024)
                     .unwrap()
@@ -732,7 +730,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
             text_block(answer_text())
         ]),
     );
-    let answer = decode(&request, &finish).expect("schema-constrained finish");
+    let answer = decode(&request, &finish).expect("text compaction finish");
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
     assert!(matches!(
@@ -775,9 +773,9 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
         ProviderOutcome::Delegate(Delegate { children, agent: None }) if children.iter().map(|child| child.objective.as_str()).collect::<Vec<_>>() == ["a", "b"]
     ));
 
-    let compact = response("end_turn", json!([text_block(r#"{"summary":"short"}"#)]));
+    let compact = response("end_turn", json!([text_block(r#"short"#)]));
     let summary = decode_compaction(&serde_json::to_vec(&compact).unwrap(), MODEL, 1024)
-        .expect("schema-constrained compaction");
+        .expect("complete text compaction");
     assert_eq!(summary.summary, "short");
     assert_eq!(summary.usage.output_tokens, Some(8));
     assert_eq!(
@@ -786,11 +784,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     );
     assert!(
         decode_compaction(
-            &serde_json::to_vec(&response(
-                "tool_use",
-                json!([text_block(r#"{"summary":"short"}"#)])
-            ))
-            .unwrap(),
+            &serde_json::to_vec(&response("tool_use", json!([text_block(r#"short"#)]))).unwrap(),
             MODEL,
             1024
         )
@@ -798,7 +792,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
         "compaction never accepts a Tool stop"
     );
     for malformed in [json!({"type":"text"}), json!({"type":"text","text":null})] {
-        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"short"#)] {
             let fixture = response("end_turn", json!([malformed, text_block(valid)]));
             let accepted = if compaction {
                 decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL, 1024).is_ok()
@@ -856,18 +850,26 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     assert!(
         matches!(decode(&request, &joined).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "hola! 🚀")
     );
-    assert!(
-        decode_compaction(
-            &serde_json::to_vec(&response(
-                "end_turn",
-                json!([text_block(r#"{"summary":"ok","extra":1}"#)])
-            ))
-            .unwrap(),
-            MODEL,
-            1024,
-        )
-        .is_err()
-    );
+
+    for (text, accepted) in [
+        (String::new(), false),
+        (" \n\t".into(), false),
+        ("x".repeat(8 * 1024), true),
+        ("é".repeat(4 * 1024), true),
+        ("x".repeat(8 * 1024 + 1), false),
+        ("é".repeat(4 * 1024 + 1), false),
+        ("  summary\n".into(), true),
+        (r#"{"summary":"ok","extra":1}"#.into(), true),
+    ] {
+        let fixture = response("end_turn", json!([text_block(&text)]));
+        let decoded = decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL, 1024);
+        assert_eq!(decoded.is_ok(), accepted);
+        if let Ok(decoded) = decoded {
+            assert_eq!(decoded.summary, text);
+        }
+    }
+    let split = response("end_turn", json!([text_block("one"), text_block("two")]));
+    assert!(decode_compaction(&serde_json::to_vec(&split).unwrap(), MODEL, 1024).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
 }
 
@@ -1095,10 +1097,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
-    assert_eq!(
-        compact_body["output_config"]["format"]["schema"],
-        summary_schema()
-    );
+    assert!(compact_body["output_config"].get("format").is_none());
 }
 
 fn sse(events: &[Value]) -> String {
@@ -1428,6 +1427,10 @@ fn native_tool_arguments_are_bounded_as_raw_text_before_parsing() {
             "edit",
             json!({"path":"src/main.rs","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
         ),
+        (
+            "multiedit",
+            json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"x","new_string":"y"}]}),
+        ),
     ] {
         let name = format!("arany_{operation}");
         let limit = argument_limit(operation);
@@ -1448,6 +1451,59 @@ fn native_tool_arguments_are_bounded_as_raw_text_before_parsing() {
                 accepted,
                 "{case}"
             );
+        }
+    }
+}
+
+#[test]
+fn multiedit_defaults_and_content_bounds_hold_in_messages_and_streams() {
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    for (old, new, replace_all, accepted) in [
+        ("a".into(), "b".into(), None, true),
+        ("a".into(), "b".into(), Some(json!(null)), true),
+        ("a".into(), "b".into(), Some(json!(false)), true),
+        ("a".into(), "b".into(), Some(json!(true)), true),
+        ("\u{1}".repeat(32768), "\u{2}".repeat(32768), None, true),
+        ("a".into(), "b".repeat(65536), None, false),
+        ("a".into(), "b".into(), Some(json!("false")), false),
+    ] {
+        let mut edit = json!({"old_string":old,"new_string":new});
+        if let Some(option) = replace_all.clone() {
+            edit["replace_all"] = option;
+        }
+        let input =
+            json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[edit]});
+        let fixture = response(
+            "tool_use",
+            json!([tool_use("toolu_1", "arany_multiedit", input.clone())]),
+        );
+        assert_eq!(decode(&request, &fixture).is_ok(), accepted);
+        let streamed = streamed_tool_use("arany_multiedit", &input.to_string())
+            .unwrap()
+            .unwrap();
+        let decoded = decode_streamed_tool(&streamed, 128_000);
+        assert_eq!(decoded.is_ok(), accepted);
+        if accepted {
+            let ProviderOutcome::Tools(calls) = decoded.unwrap().outcome else {
+                panic!("MultiEdit call")
+            };
+            assert!(
+                matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if edits[0].replace_all == (replace_all == Some(json!(true))))
+            );
+        }
+        for unavailable in [read_only_request(MODEL), researcher_request(MODEL)] {
+            assert!(decode(&unavailable, &fixture).is_err());
+        }
+    }
+    let input = json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"a","new_string":"b"}]});
+    let text = input.to_string();
+    for len in [400 * 1024, 400 * 1024 + 1] {
+        let raw = format!("{text}{}", " ".repeat(len - text.len()));
+        let streamed = streamed_tool_use("arany_multiedit", &raw);
+        assert_eq!(streamed.is_ok(), len == 400 * 1024);
+        if let Ok(Some(bytes)) = streamed {
+            assert!(decode_streamed_tool(&bytes, 128_000).is_ok());
         }
     }
 }

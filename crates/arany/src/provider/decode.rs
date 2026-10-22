@@ -57,7 +57,7 @@ pub(crate) fn function_outcome(
 pub(crate) fn argument_limit(operation: &str) -> usize {
     match operation {
         "delegate" => crate::store::MAX_EVENT_BYTES,
-        "write" | "edit" => MAX_TOOL_ARGUMENT_BYTES,
+        "write" | "edit" | "multiedit" => MAX_TOOL_ARGUMENT_BYTES,
         _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
     }
 }

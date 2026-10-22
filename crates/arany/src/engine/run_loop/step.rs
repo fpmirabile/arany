@@ -976,6 +976,9 @@ impl RunLoop<'_> {
                     } => true,
                     ToolCall::Write { path, .. }
                     | ToolCall::Edit { path, .. }
+                    | ToolCall::MultiEdit {
+                        file_path: path, ..
+                    }
                     | ToolCall::Mkdir { path } => {
                         !leases.iter().any(|l| crate::worker::overlaps(l, path))
                     }

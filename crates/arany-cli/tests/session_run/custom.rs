@@ -16,7 +16,14 @@ const RESPONSES: RouteCase = RouteCase {
     credential_env: "ARANY_PROVIDER_LOCAL_KEY",
     key: "test-key",
 };
-const MESSAGES_ROUTES: [RouteCase; 4] = [
+const MESSAGES_ROUTES: [RouteCase; 5] = [
+    RouteCase {
+        base_path: "/anthropic",
+        model: "deepseek-flash",
+        auth: Some("x-api-key"),
+        credential_env: "ARANY_PROVIDER_DEEPSEEK_KEY",
+        key: "deepseek-api-canary",
+    },
     RouteCase {
         base_path: "/anthropic",
         model: "kimi-k3",
@@ -65,8 +72,8 @@ impl RouteCase {
 
 #[derive(Clone, Copy)]
 enum RecheckFailure {
-    SchemaRejected,
-    SchemaIgnored,
+    CompactionRejected,
+    EmptySummary,
     EffortRejected,
     Unauthorized,
     Redirect,
@@ -75,15 +82,15 @@ enum RecheckFailure {
 
 #[test]
 fn custom_profile_process_gate_proves_conformance_and_durable_runs() {
-    custom_profile_process_gate(RESPONSES, RecheckFailure::SchemaRejected);
+    custom_profile_process_gate(RESPONSES, RecheckFailure::CompactionRejected);
 }
 
 #[test]
 fn messages_custom_profile_process_gate_proves_conformance_and_durable_runs() {
     for case in MESSAGES_ROUTES {
         for failure in [
-            RecheckFailure::SchemaRejected,
-            RecheckFailure::SchemaIgnored,
+            RecheckFailure::CompactionRejected,
+            RecheckFailure::EmptySummary,
             RecheckFailure::EffortRejected,
             RecheckFailure::Unauthorized,
             RecheckFailure::Redirect,
@@ -349,7 +356,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             assert_eq!(body["model"], case.model);
             let compact = matches!(index, 2 | 11 | 13 | 15);
             if messages.is_some() {
-                assert_eq!(body.get("output_config").is_some(), compact || index >= 12);
+                assert_eq!(body.get("output_config").is_some(), index >= 12);
                 assert_eq!(
                     body["output_config"]
                         .get("effort")
@@ -362,10 +369,10 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 );
                 assert!(body.get("thinking").is_none());
                 if compact {
-                    assert_eq!(body["output_config"]["format"]["type"], "json_schema");
+                    assert!(body["output_config"].get("format").is_none());
                 }
             } else {
-                assert_eq!(body.get("text").is_some(), compact);
+                assert!(body.get("text").is_none());
             }
             assert_eq!(
                 body[if messages.is_some() {
@@ -447,7 +454,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 .expect("synthetic redirect");
                 continue;
             }
-            if (index == 11 && matches!(failure, RecheckFailure::SchemaRejected))
+            if (index == 11 && matches!(failure, RecheckFailure::CompactionRejected))
                 || (index == 15 && !initial_effort)
             {
                 stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
@@ -461,7 +468,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 1 | 10 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 | 11 | 13 | 15 => serde_json::json!(r#"{"summary":"plausible summary"}"#),
+                2 | 11 | 13 | 15 => serde_json::json!(r#"plausible summary"#),
                 3 => {
                     serde_json::json!("verified answer")
                 }
@@ -482,22 +489,16 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                 }
                 _ => unreachable!(),
             };
-            let text = if index == 11 && matches!(failure, RecheckFailure::SchemaIgnored) {
-                let nonce =
-                    body["output_config"]["format"]["schema"]["properties"]["summary"]["enum"][0]
-                        .as_str()
-                        .unwrap();
-                assert_eq!(nonce.len(), 32);
-                let mut without_schema = body.clone();
-                without_schema["output_config"]["format"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("schema");
-                assert!(!without_schema.to_string().contains(nonce));
-                text
+            let text = if index == 11 && matches!(failure, RecheckFailure::EmptySummary) {
+                serde_json::json!(" \n\t")
             } else {
-                arany::semantic::compaction_probe_reply(&body, text)
+                text
             };
+            if compact {
+                for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
+                    assert!(body.get(field).is_none());
+                }
+            }
             let mut response = serde_json::json!({
                 "id": format!("resp_{}", index + 1),
                 "status": "completed",
@@ -791,7 +792,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             .iter()
             .find(|line| line["kind"] == "RunStarted")
             .unwrap()["event_version"],
-        20
+        21
     );
     std::fs::write(&roster_path, b"invalid roster after admission").unwrap();
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
@@ -909,6 +910,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             MESSAGES_ROUTES[0].key,
             MESSAGES_ROUTES[1].key,
             MESSAGES_ROUTES[2].key,
+            MESSAGES_ROUTES[3].key,
             "omitted-native-key",
             "OMITTED_WORKSPACE_CANARY",
             "EXPECTED_WORKSPACE_GUIDANCE",
@@ -1157,6 +1159,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
             MESSAGES_ROUTES[0].key,
             MESSAGES_ROUTES[1].key,
             MESSAGES_ROUTES[2].key,
+            MESSAGES_ROUTES[3].key,
             "omitted-native-key",
         ] {
             assert!(
@@ -1346,7 +1349,10 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             let body: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).unwrap();
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body.get("text").is_some(), matches!(index, 2 | 4 | 6));
+            assert!(body.get("text").is_none());
+            if matches!(index, 2 | 4 | 6) {
+                crate::loopback::assert_compaction_request(&body);
+            }
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
@@ -1360,11 +1366,14 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"read-only question","profile":null}]}})
                 }
-                2 | 4 | 6 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 | 4 | 6 => serde_json::json!(r#"synthetic summary"#),
                 _ => {
                     serde_json::json!("answer")
                 }
             };
+            if matches!(index, 2 | 4 | 6) {
+                assert_eq!(outcome, "synthetic summary", "plain-text compaction reply");
+            }
             super::loopback::send_response_for(&mut stream, index, outcome, body["stream"] == true);
         }
     });
@@ -1548,7 +1557,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     }]})).unwrap()).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let peer = thread::spawn(move || {
-        for index in 0..if cancel { 4 } else { 8 } {
+        for index in 0..if cancel { 4 } else { 9 } {
             let mut stream = crate::process::accept_with_deadline(
                 &listener,
                 Duration::from_secs(10),
@@ -1569,10 +1578,18 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             ))
             .unwrap();
             assert_eq!(body["model"], case.model);
-            assert_eq!(
-                body.get("output_config").is_some(),
-                index == 2 || index == 7
-            );
+            assert!(body.get("output_config").is_none());
+            if index == 2 || index == 7 {
+                for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
+                    assert!(body.get(field).is_none());
+                }
+            }
+            if index == 8 {
+                assert_eq!(
+                    crate::semantic::input(&body)["derived_context_summary"],
+                    "saved summary"
+                );
+            }
             assert!(body.get("thinking").is_none());
             if index == 3 && cancel {
                 assert_eq!(body["stream"], true);
@@ -1604,9 +1621,10 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                     1 | 4 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"inspect","profile":null}]}})
                     }
-                    2 | 7 => serde_json::json!(r#"{"summary":"strict saved summary"}"#),
+                    2 | 7 => serde_json::json!("saved summary"),
                     5 => serde_json::json!("child result"),
                     6 => serde_json::json!("team answer"),
+                    8 => serde_json::json!("continued after compaction"),
                     _ => serde_json::json!("verified answer"),
                 };
                 send_messages_response_for(
@@ -1714,6 +1732,18 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
             "Compaction saved"
         },
     );
+    if !cancel {
+        let from = transcript.len();
+        input.write_all(b"continue\r").unwrap();
+        wait_settled(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            "continued after compaction",
+        );
+    }
     input.write_all(b"/exit\r").unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.child().try_wait().unwrap().is_none() {
@@ -1757,7 +1787,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
         let session = sessions[0].id;
         let events = store.load_session(session).await.unwrap();
         let view = SessionView::replay(session, &events).unwrap().unwrap();
-        assert_eq!(view.runs.len(), if cancel { 1 } else { 2 });
+        assert_eq!(view.runs.len(), if cancel { 1 } else { 3 });
         assert_eq!(
             view.runs[0].status,
             if cancel {
@@ -1780,6 +1810,10 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                     .map(|agent| agent.provider_calls.len())
                     .sum::<usize>(),
                 3
+            );
+            assert_eq!(
+                view.runs[2].assistant_message.as_deref(),
+                Some("continued after compaction")
             );
             assert_eq!(view.compactions.len(), 1);
             assert!(matches!(
