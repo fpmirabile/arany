@@ -220,7 +220,10 @@ pub(super) fn budget_refusal_details(refusal: &crate::session::BudgetRefusal) ->
         fact.push_str(&format!("; required minimum {minimum}"));
     }
     if refusal.dimension == GoalLimit::ActiveTime {
-        fact.push_str("; reservation includes carried processing and Store margin 5000 ms");
+        fact.push_str(&format!(
+            "; reservation includes carried processing and Store margin {} ms",
+            crate::session::STORE_ACTION_OVERHEAD_MS
+        ));
     }
     if refusal.token_usage_unknown {
         fact.push_str("; token usage unknown");

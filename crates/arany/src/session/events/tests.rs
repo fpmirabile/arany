@@ -2045,6 +2045,16 @@ mod payload_version_tests {
             )
             .is_err()
         );
+        assert!(matches!(
+            Event::decode(
+                "GoalFinished",
+                finished.version() - 1,
+                &payload,
+                run_id,
+                agent_run_id
+            ),
+            Err(ReplayError::UnknownEvent)
+        ));
         assert_eq!(
             Event::decode(
                 "GoalFinished",
