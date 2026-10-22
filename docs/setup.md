@@ -117,13 +117,9 @@ renewal, permission and logout behavior.
 
 ## Storage and recovery
 
-Use `/setup` to recover selected-route account data. A confirmed local reset
-removes the disclosed account records and model choices; Back cancels. Reset
-preserves conversations and other-route accounts, but cannot revoke remote
-access or restore records if subsequent setup is cancelled. See [account scope,
-storage consent and recovery](./specs/credentials.md#storage-replacement-and-recovery)
-for backend pinning, private-file risks and uncertain writes. `--state-dir`
-changes Session/Tool configuration storage, not saved-account scope.
+Use `/setup` to recover selected-route account data. See the
+[credential storage and recovery contract](./specs/credentials.md#storage-replacement-and-recovery)
+for account scope, storage consent and reset behavior.
 
 History recovery is separate. Unsupported or damaged history offers Retry,
 Reset history and Exit. Reset requires explicit warning confirmation and discards
