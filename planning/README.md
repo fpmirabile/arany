@@ -48,5 +48,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
+| [Guarded Cargo tests](./guarded-cargo-test/README.md) | Draft: selected offline Rust environment, bounded multicore Build profile and exact repository measurement; full-suite socket incompatibility needs an owner decision |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
