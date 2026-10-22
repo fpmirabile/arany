@@ -1226,7 +1226,11 @@ fn selected_child_messaging_journey() {
         pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
         pty.step(
             b"/transcript agents 3\r",
-            &["viewing child 2 (message)", "/literal guidance"],
+            &[
+                "viewing child 2 (message)",
+                "/literal guidance",
+                "Note waiting for child 2's next step",
+            ],
             &[],
         );
         let from = pty.capture_from;
@@ -1244,12 +1248,24 @@ fn selected_child_messaging_journey() {
         pty.step(b"\x1b", &["Ask Arany"], &["viewing child"]);
         pty.step(
             b"/transcript agents 2\r",
-            &["viewing child 1 (read-only)", "> late note"],
+            &[
+                "viewing child 1 (read-only)",
+                "> late note",
+                "Note not delivered; child draft retained",
+            ],
             &[],
         );
         pty.step(b"\r", &["This child is read-only; draft retained"], &[]);
         pty.step(b"\x7f", &["Read-only"], &["> late note"]);
-        pty.step(b"\x1b[1;3C", &["viewing child 2 (message)", "> draft"], &[]);
+        pty.step(
+            b"\x1b[1;3C",
+            &[
+                "viewing child 2 (message)",
+                "> draft",
+                "agents · Esc primary",
+            ],
+            &[],
+        );
         gates.release.send(()).expect("server accepts the release");
         pty.await_request(&gates, "synthesis");
         pty.frame(
@@ -1324,7 +1340,9 @@ impl LivePty {
         screen_rows(&self.transcript[..end], LIVE_SIZE.0, LIVE_SIZE.1).join("\n")
     }
 
-    // Waits for a complete frame after `from` showing every needle and none of `absent`.
+    // Waits for a complete frame after `from` showing every needle and none of `absent`. A child
+    // view draws its hint row only once input is armed, so a step that sends keys right after a
+    // view switch must name that row, or the keys can precede the typeahead barrier and be dropped.
     fn frame(&mut self, from: usize, needles: &[&str], absent: &[&str]) -> usize {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
