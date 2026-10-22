@@ -32,6 +32,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 - `Draft`
 - `Ready` (Research and Plan gates passed; no material open questions)
 - `Ready`
+- `Ready` — Research and Plan gates passed; no material open question remains.
 - `In progress`
 - `Blocked`
 - `Done`
@@ -58,5 +59,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 | [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
+| [Guarded Cargo tests](./guarded-cargo-test/README.md) | Ready: selected offline Rust environment, Guard-only IPC test ignores, bounded multicore Build profile and exact repository measurement; owner decisions accepted |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
