@@ -44,7 +44,13 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
-| [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
+| [Git write workflow](./git-write-workflow/README.md) | S3 in progress: human-approved host push and PR creation; local writes and typed prefix rules landed |
+| [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
+| [Persistent worker assignment views](./worker-assignment-views/README.md) | Future C3 assignment-long Guard views, read-only assignment-time cache and MCP invocation exclusion; admission gate remains |
+| [Goal RPI](./goal-rpi/README.md) | Proposed durable phases, plan gate, bounded grilling, phase context and explicit headless RPI |
+| [Goal activity presentation](./goal-progress/README.md) | Proposed bounded agent notes and Goal activity/usage/question views |
+| [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
+| [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
+| [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
