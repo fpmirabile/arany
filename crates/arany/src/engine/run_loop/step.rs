@@ -2865,7 +2865,7 @@ impl RunLoop<'_> {
             .as_mut()
             .ok_or(EngineError::InvalidRequest)?;
         let mut catalog: serde_json::Value =
-            serde_json::from_str(&tools.catalog).map_err(|_| EngineError::InvalidRequest)?;
+            serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
         catalog["agents"] = serde_json::json!(
             registry
                 .values()
@@ -2892,12 +2892,12 @@ impl RunLoop<'_> {
                 })
                 .collect::<Vec<_>>()
         );
-        tools.catalog = serde_json::to_string(&catalog).map_err(|_| EngineError::InvalidRequest)?;
+        tools.set_catalog(&catalog);
         if serde_json::to_vec(&catalog["agents"])
             .map_err(|_| EngineError::InvalidRequest)?
             .len()
             > 8 * 1024
-            || tools.catalog.len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
+            || tools.catalog().len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
             return Ok(DefinitionInitialization::Stopped);

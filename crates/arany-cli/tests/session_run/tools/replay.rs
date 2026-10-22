@@ -1157,7 +1157,7 @@ pub(super) async fn native_command_changeset_corpus(
                 .input
                 .tools
                 .as_ref()
-                .map(|tools| serde_json::from_str::<serde_json::Value>(&tools.catalog))
+                .map(|tools| serde_json::from_str::<serde_json::Value>(tools.catalog()))
                 .transpose()
                 .map_err(|_| ProviderError::InvalidOutcome)?;
             if step > self.calls.len() || review && !self.review {
@@ -1677,7 +1677,7 @@ pub(super) async fn native_command_changeset_corpus(
                 goal.report
             );
             let catalog: serde_json::Value =
-                serde_json::from_str(&requests[0].input.tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
             assert_eq!(catalog["workspace_paths"], json!(["."]));
         }
         if case == "ai-approve" {

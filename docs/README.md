@@ -53,4 +53,5 @@ Read the owning contract and the rules [AGENTS.md](../AGENTS.md) triggers, then 
 
 The current milestone is a personal Linux beta. [Next steps](../NEXT_STEPS.md) owns open defects, unperformed checks and release work; [focused plans](../planning/README.md#active-plans) own proposed implementation work; accepted behavior belongs in specs. Keep specs independent of test totals, artifact hashes and past run logs.
 
-The executable snapshots the exact Workspace-root AGENTS.md, with CLAUDE.md only as an absence fallback. This documentation workflow does not make Arany discover nested rules, follow spec links, or expand outbound content. Its admission contract remains in [Session spec](./specs/session.md) and [security rules](../agents/security.md).
+Runtime instruction discovery belongs to the [Session contract](./specs/session.md#workspace-admission-and-authority);
+documentation routing grants no authority or outbound-content expansion.

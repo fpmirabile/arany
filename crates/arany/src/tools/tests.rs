@@ -2195,7 +2195,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
     let mut config: Config = serde_json::from_value(value).unwrap();
     let catalog = |config: Config, git_writes_available: bool| {
         let context = runtime(config, git_writes_available).context().unwrap();
-        parse_json(context.catalog.as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap()
+        parse_json(context.catalog().as_bytes(), MAX_TOOL_CATALOG_BYTES).unwrap()
     };
     assert_eq!(catalog(config.clone(), true)["git"], "unavailable");
     config.git = Some(
@@ -2355,14 +2355,14 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
         system_programs: None,
         process_enforcement_digest: [1; 32],
     };
-    let render = |catalog: String| {
-        let mut value: Value = serde_json::from_str(&catalog).unwrap();
+    let render = |catalog: &str| {
+        let mut value: Value = serde_json::from_str(catalog).unwrap();
         value["host_clock"]["unix_ms"] = json!(0);
         value
     };
     let rendered = json!({
-        "primary": render(runtime.context().unwrap().catalog),
-        "researcher": render(runtime.research_context(3).unwrap().catalog),
+        "primary": render(runtime.context().unwrap().catalog()),
+        "researcher": render(runtime.research_context(3).unwrap().catalog()),
     });
     let rendered = serde_json::to_string_pretty(&rendered).unwrap() + "\n";
     // Regenerate with ARANY_UPDATE_SNAPSHOTS=1 (per OS), then review the diff.
@@ -3644,7 +3644,7 @@ fn read_restrictions_cover_workspace_skill_files_and_catalog_previews() {
         decide(&skill("y", None)),
         (Decision::Ask, Some(super::ApprovalMode::Request))
     );
-    let catalog = runtime.context().unwrap().catalog;
+    let catalog = runtime.context().unwrap().catalog().to_owned();
     assert!(
         catalog.contains("shown x") && !catalog.contains("ASK_CANARY"),
         "{catalog}"
@@ -3686,5 +3686,5 @@ fn a_workspace_root_skill_maps_to_a_relative_path_and_stays_cataloged() {
         config.evaluate_skill_file(&call, runtime.skill_workspace_path(&call).as_deref()),
         config.evaluate(&call)
     );
-    assert!(runtime.context().unwrap().catalog.contains("root skill"));
+    assert!(runtime.context().unwrap().catalog().contains("root skill"));
 }

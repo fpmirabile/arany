@@ -77,51 +77,26 @@ changed HOME do not isolate an account derived from the effective OS user.
 Native account/OS-service gates follow the dedicated fixture rules and fail
 visibly when their isolation prerequisites are unavailable.
 
-## Evidence lanes
+## Behavioral evaluation
 
-| Lane | What it establishes | Scope limit |
-| --- | --- | --- |
-| Deterministic composition | Engine policy, strict Provider exchange, persistence, replay and visible facts | Scripted outcomes do not establish live service compatibility |
-| Product process | CLI admission, exits, channels, signals and fresh-process replay | Requires the actual built executable and bounded ownership |
-| Boundary corpus | Parsers, legal transitions, hostile input, limits and demonstrated regressions | A covered branch alone is not a useful assertion |
-| Native conformance | Filesystem/ACL, process/Guard, keyring, TLS and terminal behavior | Evidence is specific to the OS, architecture and activated scenario |
-| Live Provider smoke | Current wire compatibility through the complete production path | Explicitly authorized usage; structural facts, not model quality |
-| Human review | Desktop interoperability, theme, clipboard and accessibility UX | Automated frame or synthetic-service success does not replace it |
-| Named-host measurement | Latency, RSS, supervision and telemetry cost under recorded load | Separate release/performance gate, not a host-sensitive default assertion |
-| Triggered fuzz/model checks | Larger input/trace spaces at a bounded pure boundary | Add when escaped defects or state-space growth justify the tool |
+Methodology baseline: 2026-09-28; no executed model benchmark is claimed.
+[Evidence lanes](../../agents/testing.md#evidence-lanes) own required checks.
+Behavioral comparisons answer a named model, prompt or collaboration decision:
 
-A compile-only target does not prove native behavior. An ignored test or a
-filtered invocation that executes zero tests proves nothing. A helper filtered
-with `--exact` must complete its intended nonzero count and remain under its
-parent's deadline and kill/reap owner.
+- Check actual outcomes and deterministic invariants before subjective quality.
+  A model score cannot excuse unsafe disclosure or invalid durable history.
+- Compare the same tasks, environment and budgets, including an equal-budget
+  single-agent baseline for team changes. Repeat trials, vary order and report
+  failures and uncertainty alongside cost per success and latency.
+- Calibrate identifiable model judges against human review, including apparent
+  passes. Preserve useful failures as small synthetic cases, with finite usage
+  and retention; private conversations are not a benchmark corpus.
 
-Behavioral evaluation asks how reliably a model/scaffold solves a distribution
-of tasks; it belongs to [evaluation research](./evaluation-and-quality-strategy.md).
-Scores, one live answer and benchmarks cannot override a broken deterministic
-contract, unsafe disclosure or invalid durable history.
-
-## Maintenance
-
-Keep accepted behavior and scenario ownership in the domain specs. Keep
-implementation traps and fixture requirements in module rules. Keep only open
-claims and their completion conditions in next steps; remove resolved items
-instead of appending dated closeout sections.
-
-For an implementation handoff or PR, report checks actually run, their scope and
-material limitations. Git and CI preserve completed results. Retain a focused
-security finding or source investigation when its reasoning, unresolved cause
-or scoped audit evidence is still needed; it is not a second feature changelog.
-
-Review tests when their contract disappears or a stronger owner subsumes them.
-Remove obsolete fixtures and snapshots, while keeping security/durability
-regressions at the narrowest stable owner. Review manually maintained public
-output goldens when an intentional contract change alters bytes. Incidental
-UUIDs, timestamps and temporary paths may be canonicalized; user-controlled
-content, ordering and identity relationships may not.
-
-Use [the shared development guide](../development.md#verification) for current check
-commands and the workflow for CI configuration. Do not cache their commands,
-job names, test totals or historical native runs in this strategy.
+Source basis: [Anthropic evaluation guidance](https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents),
+[OpenAI agent evaluations](https://developers.openai.com/api/docs/guides/agent-evals).
+These are methodology sources, not a mandate for another framework or release
+suite. [Testing rules](../../agents/testing.md#failure-and-maintenance-discipline)
+own maintenance and deletion of superseded evidence.
 
 ## Primary sources
 

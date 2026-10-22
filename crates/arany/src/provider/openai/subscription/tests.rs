@@ -175,13 +175,9 @@ fn subscription_body_is_streaming_and_omits_unsupported_remote_cap() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
     coding.input.goal_budget = Some(crate::session::GoalBudget::default());
-    coding.input.tools = Some(crate::tools::ToolContext {
-        invoked_skill: None,
-        stop_bytes: 0,
-        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
-        history_summary: None,
-        steps: Vec::new(),
-    });
+    coding.input.tools = Some(crate::tools::ToolContext::new(
+        json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
+    ));
     let coding: Value =
         serde_json::from_slice(&body_for(&coding, Effort::Medium).unwrap()).unwrap();
     assert_eq!(coding["tool_choice"], "auto");
@@ -739,13 +735,9 @@ fn client() -> Client {
 async fn streaming_transport_accepts_only_final_usage_within_local_cap() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
-    coding.input.tools = Some(crate::tools::ToolContext {
-        invoked_skill: None,
-        stop_bytes: 0,
-        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
-        history_summary: None,
-        steps: Vec::new(),
-    });
+    coding.input.tools = Some(crate::tools::ToolContext::new(
+        json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
+    ));
     let response = json!({"id":"resp_function","status":"completed","model":"model-a","output":[{"type":"reasoning","id":"rs_function","summary":[],"encrypted_content":"CIPHERTEXT=="},{"type":"function_call","id":"fc_function","call_id":"call_function","name":"arany_read","arguments":json!({"path":"README.md","offset":null,"limit":null}).to_string(),"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12,"input_tokens_details":{"cached_tokens":7}}});
     let stream = format!(
         "data: {}\n\n",
@@ -1463,13 +1455,9 @@ fn subscription_accept_rejects_cached_tokens_above_input() {
 fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
     let mut coding = request();
     coding.input.role = PromptRole::Primary;
-    coding.input.tools = Some(crate::tools::ToolContext {
-        invoked_skill: None,
-        stop_bytes: 0,
-        catalog: json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}).to_string(),
-        history_summary: None,
-        steps: Vec::new(),
-    });
+    coding.input.tools = Some(crate::tools::ToolContext::new(
+        json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
+    ));
     let reply = json!({"id":"resp_1","status":"completed","model":"model-a","output":[
         {"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"CIPHERTEXT=="},
         {"type":"function_call","id":"fc_1","call_id":"call_1","name":"arany_read",

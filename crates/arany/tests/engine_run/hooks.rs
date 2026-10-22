@@ -345,7 +345,7 @@ async fn child_unguarded_inheritance_is_explicit_narrowing_and_pinned_on_replay(
         {
             let calls = provider.requests.lock().unwrap();
             let catalog: serde_json::Value =
-                serde_json::from_str(&calls[1].input.tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(calls[1].input.tools.as_ref().unwrap().catalog()).unwrap();
             assert_eq!(catalog["commands"], serde_json::json!([]));
         }
         engine.close().await.unwrap();

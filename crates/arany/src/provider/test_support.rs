@@ -15,13 +15,7 @@ pub(crate) fn catalog() -> Value {
 }
 
 pub(crate) fn tool_context(catalog: Value) -> ToolContext {
-    ToolContext {
-        invoked_skill: None,
-        stop_bytes: 0,
-        catalog: catalog.to_string(),
-        history_summary: None,
-        steps: Vec::new(),
-    }
+    ToolContext::new(catalog)
 }
 
 fn request(model: &str, phase: AgentPhase, input: RunInput) -> ProviderRequest {
