@@ -688,9 +688,15 @@ impl crate::Provider for ForegroundWorkerProvider {
                 if self.case == "clear_background" && step == 0 {
                     self.background_started.notified().await;
                     // Scheduling delays must not release the worker before clearing.
+                    struct ResumeTime;
+                    impl Drop for ResumeTime {
+                        fn drop(&mut self) {
+                            tokio::time::resume();
+                        }
+                    }
                     tokio::time::pause();
+                    let _resume_time = ResumeTime;
                     tokio::time::advance(std::time::Duration::from_secs(31)).await;
-                    tokio::time::resume();
                 }
                 if step < 40 {
                     super::scenario::tool_outcome(ToolCall::Read {
