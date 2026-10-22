@@ -1861,12 +1861,10 @@ fn live_linear_agent_chat(
         (bytes, offsets)
     });
     let stage = |expected| {
-        assert_eq!(
-            receiver
-                .recv_timeout(Duration::from_secs(10))
-                .expect("live linear agent chat stage"),
-            expected
-        );
+        let actual = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap_or_else(|error| panic!("live linear agent chat stage {expected}: {error:?}"));
+        assert_eq!(actual, expected);
     };
     let request = |expected| {
         assert_eq!(
