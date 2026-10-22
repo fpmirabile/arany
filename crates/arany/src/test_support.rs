@@ -3,6 +3,7 @@ pub mod approval;
 pub mod engine;
 pub mod git;
 pub mod goals;
+pub mod latency;
 #[cfg(unix)]
 pub mod process;
 pub mod routing;
