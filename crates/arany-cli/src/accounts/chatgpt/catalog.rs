@@ -395,6 +395,21 @@ mod tests {
     }
 
     #[test]
+    fn catalog_model_name_does_not_invent_a_window() {
+        for metadata in ["", ",\"context_window\":272000"] {
+            let body = format!(
+                r#"{{"models":[{{"slug":"gpt-6-luna","display_name":"Luna","visibility":"list"{metadata}}}]}}"#
+            );
+            let models =
+                parse_catalog(body.as_bytes(), "synthetic-catalog-token").expect("catalog");
+            assert_eq!(
+                models[0].context_window_tokens,
+                (!metadata.is_empty()).then_some(272_000)
+            );
+        }
+    }
+
+    #[test]
     fn catalog_window_is_present_only_within_the_admitted_range() {
         let token = "synthetic-catalog-token";
         let body = r#"{"models":[

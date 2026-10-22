@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-journal-v36";
+const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-journal-v37";
 
 pub struct CustomProfileCheck {
     profile_name: String,
