@@ -23,6 +23,7 @@ mod goal_success_tests {
         output: String,
     ) -> ToolObservation {
         let intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
@@ -866,7 +867,7 @@ mod account_default_tests {
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
         assert_eq!(payload_version("RunStarted"), Some(20));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -1635,6 +1636,7 @@ mod payload_version_tests {
 
     fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
         let intent = crate::tools::EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: run,
@@ -1739,9 +1741,9 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(21));
+        assert_eq!(payload_version("ToolFinished"), Some(22));
         assert_eq!(
-            Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
+            Event::decode("ToolFinished", 22, &payload, Some(run), Some(agent)).expect("current"),
             finished
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
@@ -1761,7 +1763,7 @@ mod payload_version_tests {
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":null,\"unknown\":null", 1),
             payload.replacen("\"checkpoint\":null", "\"checkpoint\":{\"status\":\"captured\",\"reason\":\"quota\",\"pruned_before_run\":null}", 1),
         ] {
-            assert!(Event::decode("ToolFinished", 21, &invalid, Some(run), Some(agent)).is_err());
+            assert!(Event::decode("ToolFinished", 22, &invalid, Some(run), Some(agent)).is_err());
         }
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("limit_cause");
@@ -1841,7 +1843,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(15));
+        assert_eq!(payload_version("ToolStarted"), Some(16));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
@@ -1987,7 +1989,7 @@ mod payload_version_tests {
             let payload = event.payload().expect("payload");
             let version = match event {
                 Event::RunStarted { .. } => 20,
-                Event::ToolStarted { .. } => 15,
+                Event::ToolStarted { .. } => 16,
                 Event::RunFinished { .. } => 9,
                 _ => 7,
             };
@@ -2315,7 +2317,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,
@@ -2344,7 +2346,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
             agent_id,
         )
     };
-    assert!(decode_call(&valid, 15).is_ok());
+    assert!(decode_call(&valid, 16).is_ok());
     assert!(decode_call(&valid, 14).is_err());
     for (field, value) in [
         ("refusal", serde_json::Value::Null),
@@ -2366,17 +2368,17 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     ] {
         let mut invalid = valid.clone();
         invalid[field] = value;
-        assert!(decode_call(&invalid, 15).is_err(), "field {field}");
+        assert!(decode_call(&invalid, 16).is_err(), "field {field}");
     }
     let mut worker_phase = valid.clone();
     worker_phase["phase"] = serde_json::json!("child_work");
-    assert!(decode_call(&worker_phase, 15).is_err());
+    assert!(decode_call(&worker_phase, 16).is_err());
     let mut synthesis = valid.clone();
     synthesis["phase"] = serde_json::json!("root_synthesis");
-    assert!(decode_call(&synthesis, 15).is_ok());
+    assert!(decode_call(&synthesis, 16).is_ok());
     let mut missing = valid.clone();
     missing.as_object_mut().unwrap().remove("refusal");
-    assert!(decode_call(&missing, 15).is_err());
+    assert!(decode_call(&missing, 16).is_err());
     for (disposition, failure, accepted) in [
         ("failed", serde_json::json!("proposal_refused"), true),
         ("failed", serde_json::Value::Null, false),
@@ -2436,7 +2438,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
             Some(AgentRunId::new()),
         )
     };
-    assert!(decode(&value, 15).is_ok());
+    assert!(decode(&value, 16).is_ok());
     assert!(decode(&value, 14).is_err());
     for (key, invalid) in [
         ("phase", serde_json::json!("child_work")),
@@ -2450,7 +2452,7 @@ fn plan_recorded_is_a_primary_control_call_without_effects_or_failure() {
     ] {
         let mut malformed = value.clone();
         malformed[key] = invalid;
-        assert!(decode(&malformed, 15).is_err(), "{key}");
+        assert!(decode(&malformed, 16).is_err(), "{key}");
     }
 }
 

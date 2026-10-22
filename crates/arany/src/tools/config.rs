@@ -328,6 +328,15 @@ impl Config {
             ToolCall::McpList { server } => {
                 return self.mcp.iter().any(|value| &value.name == server);
             }
+            ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
+                return self.git_available()
+                    && self.write
+                    && (!matches!(call, ToolCall::GhPrCreate { .. })
+                        || self
+                            .commands
+                            .iter()
+                            .any(|p| p.name == "gh" && !p.interpreter && p.inputs.is_empty()));
+            }
             ToolCall::GitStatus { .. }
             | ToolCall::GitDiff { .. }
             | ToolCall::GitLog { .. }
@@ -348,6 +357,8 @@ impl Config {
         (path.is_empty() || path == ".") && !call.mutates() || self.in_workspace_scope(path)
     }
 }
+
+pub(super) const MAX_EXECUTABLE_BYTES: u64 = 256 * 1024 * 1024;
 
 impl Program {
     fn validate(&self) -> Result<(), ToolError> {
@@ -373,14 +384,62 @@ impl Program {
         Ok(())
     }
 
-    pub(super) fn verify(&self) -> Result<(), ToolError> {
-        let file = open_absolute(&self.executable)?;
-        let bytes = read_regular(file, MAX_SNAPSHOT_BYTES)?;
-        let native_binary =
-            super::executable::has_magic(&bytes, super::executable::EXECUTABLES.program_magics);
-        if hex_digest(&bytes) != self.sha256 || !native_binary {
+    pub(super) fn verify_executable_to(
+        &self,
+        output: &mut impl std::io::Write,
+    ) -> Result<(), ToolError> {
+        use sha2::{Digest, Sha256};
+        use std::io::Read;
+        use std::os::unix::fs::MetadataExt;
+        let mut file = open_absolute(&self.executable)?;
+        let metadata = file.metadata().map_err(|_| ToolError::Operation)?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err(ToolError::Path);
+        }
+        if metadata.len() > MAX_EXECUTABLE_BYTES {
+            return Err(ToolError::Limit);
+        }
+        let mut header = [0; 4];
+        file.read_exact(&mut header)
+            .map_err(|_| ToolError::ChangedInput)?;
+        if !super::executable::has_magic(&header, super::executable::EXECUTABLES.program_magics) {
             return Err(ToolError::ChangedInput);
         }
+        let mut hash = Sha256::new();
+        hash.update(header);
+        output
+            .write_all(&header)
+            .map_err(|_| ToolError::Operation)?;
+        let mut total = 4u64;
+        let mut buffer = [0; 64 * 1024];
+        loop {
+            let count = file.read(&mut buffer).map_err(|_| ToolError::Operation)?;
+            if count == 0 {
+                break;
+            }
+            total += count as u64;
+            if total > MAX_EXECUTABLE_BYTES {
+                return Err(ToolError::Limit);
+            }
+            hash.update(&buffer[..count]);
+            output
+                .write_all(&buffer[..count])
+                .map_err(|_| ToolError::Operation)?;
+        }
+        if hash
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+            != self.sha256
+        {
+            return Err(ToolError::ChangedInput);
+        }
+        Ok(())
+    }
+
+    pub(super) fn verify(&self) -> Result<(), ToolError> {
+        self.verify_executable_to(&mut std::io::sink())?;
         for input in &self.inputs {
             if hex_digest(&read_regular(open_absolute(&input.path)?, MAX_FILE_BYTES)?)
                 != input.sha256

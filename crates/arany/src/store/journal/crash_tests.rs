@@ -467,3 +467,67 @@ fn rewind_process_death_preserves_exact_recovery_prefixes() {
         }
     }
 }
+
+#[test]
+fn host_verdict_process_death_reopens_without_outcome_or_retry() {
+    let f = crate::session::host_protocol_fixture();
+    let temp = tempfile::tempdir().unwrap();
+    let state = temp.path().join("state");
+    let event_path = temp.path().join("verdict.json");
+    let marker = temp.path().join("committed");
+    let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+    runtime().block_on(async {
+        for event in &f.events[..f.events.len() - 1] {
+            store.append(f.session, event.clone()).await.unwrap();
+        }
+        store.close().await.unwrap();
+    });
+    let verdict = f.events.last().unwrap();
+    let (run, actor) = verdict.scope();
+    std::fs::write(
+        &event_path,
+        serde_json::to_vec(&(
+            verdict.kind(),
+            verdict.version(),
+            verdict.payload().unwrap(),
+            run,
+            actor,
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    kill_at_append(
+        &state,
+        f.session,
+        f.run,
+        &marker,
+        "after",
+        Some(&event_path),
+    );
+    for _ in 0..2 {
+        let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+        runtime().block_on(async {
+            let events = store.load_session(f.session).await.unwrap();
+            assert_eq!(
+                events.iter().map(|e| &e.event).collect::<Vec<_>>(),
+                f.events.iter().collect::<Vec<_>>()
+            );
+            let view = store.load_view(f.session).await.unwrap().unwrap();
+            assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+            let tool = view.runs[0]
+                .tools
+                .iter()
+                .find(|t| t.intent.call.is_host())
+                .unwrap();
+            assert!(tool.ran_host() && tool.observation.is_none());
+            assert!(
+                crate::session::rewind::plan(&view, &view.rewinds.checkpoints[0])
+                    .unwrap()
+                    .non_rewindable
+                    .iter()
+                    .any(|(_, effect)| *effect == crate::session::rewind::NonRewindable::Host)
+            );
+            store.close().await.unwrap();
+        });
+    }
+}

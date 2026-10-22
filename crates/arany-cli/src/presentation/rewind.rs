@@ -180,6 +180,7 @@ pub fn non_rewindable_lines(plan: &arany::rewind::RewindPlan) -> Vec<String> {
         .iter()
         .map(|(sequence, effect)| {
             let label = match effect {
+                NonRewindable::Host => "host Git remote effect",
                 NonRewindable::UnguardedCommand => "unguarded command",
                 NonRewindable::Mcp => "MCP external effect",
                 NonRewindable::Cache => "build cache publication",

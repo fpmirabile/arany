@@ -1,3 +1,4 @@
+pub(crate) mod host;
 mod write;
 
 pub(crate) use write::recover_locks;
@@ -74,6 +75,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
             start_point,
         } => valid_branch(name) && start_point.as_deref().is_none_or(valid_revision),
         ToolCall::GitSwitch { branch } => valid_branch(branch),
+        call if call.is_host() => host::valid(call),
         _ => false,
     }
 }
@@ -144,7 +146,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             "branch",
             json!({"type":"string", "description":"Existing local branch name."}),
         )],
-        _ => return None,
+        _ => return host::schema(operation),
     })
 }
 

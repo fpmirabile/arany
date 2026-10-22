@@ -74,6 +74,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         cwd: String::new(),
     };
     let intent = arany::EffectIntent {
+        host: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: run,

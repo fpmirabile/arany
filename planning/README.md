@@ -44,7 +44,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.

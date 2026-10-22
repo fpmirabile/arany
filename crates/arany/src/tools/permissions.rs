@@ -274,6 +274,7 @@ impl PermissionConfig {
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule
                 )
                 && !call.is_unguarded()
+                && !call.is_host()
             {
                 ApprovalMode::Auto
             } else {
@@ -369,6 +370,7 @@ impl PermissionConfig {
                 || facts.spawns_process
                 || matches!(facts.family, Family::Mcp | Family::Git));
         let allow_skips_approval = !call.is_unguarded()
+            && !call.is_host()
             && !auto_review
             && !(self.mode == PermissionMode::AcceptEdits
                 && facts.asks_approval

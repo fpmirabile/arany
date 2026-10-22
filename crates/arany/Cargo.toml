@@ -8,10 +8,10 @@ description.workspace = true
 repository.workspace = true
 
 [features]
-test-support = ["dep:tempfile", "nix/fs", "nix/term", "tokio/test-util"]
+test-support = ["nix/fs", "nix/term", "tokio/test-util"]
 
 [dependencies]
-tempfile = { workspace = true, optional = true }
+tempfile.workspace = true
 async-trait.workspace = true
 aws-lc-rs.workspace = true
 base64.workspace = true
@@ -55,7 +55,6 @@ arany = { path = ".", features = ["test-support"] }
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 prost.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util", "io-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

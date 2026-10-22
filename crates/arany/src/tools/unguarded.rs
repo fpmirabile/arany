@@ -251,7 +251,7 @@ async fn wait(
     }
 }
 
-async fn stop_group(group: Pid) -> bool {
+pub(crate) async fn stop_group(group: Pid) -> bool {
     let _ = kill_process_group(group, Signal::KILL);
     for _ in 0..GROUP_POLLS {
         if test_kill_process_group(group) == Err(Errno::SRCH) {

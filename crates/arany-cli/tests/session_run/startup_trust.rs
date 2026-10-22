@@ -1798,13 +1798,13 @@ fn typed_prefix_permissions_edit_remove_and_restart() {
         &mut transcript,
         &mut answered,
         "verb menu",
-        &shows("gh pr create (unavailable; human approval required)"),
+        &shows("gh pr create (host; human approval required)"),
     );
     assert!(super::session_picker::screen_contains(
         &transcript,
         80,
         24,
-        "unavailable; human approval required"
+        "host; human approval required"
     ));
     input.write_all(b"\r").unwrap();
     until(

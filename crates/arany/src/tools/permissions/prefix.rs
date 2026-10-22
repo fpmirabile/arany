@@ -46,7 +46,7 @@ impl TypedGitPrefix {
     }
 
     pub fn available(self) -> bool {
-        !matches!(self, Self::Push | Self::PrCreate)
+        true
     }
 
     fn from_tokens(tokens: &[String]) -> Option<Self> {
@@ -61,6 +61,8 @@ impl TypedGitPrefix {
             ToolCall::GitCommit { .. } => Some(Self::Commit),
             ToolCall::GitBranch { name: Some(_), .. } => Some(Self::Branch),
             ToolCall::GitSwitch { .. } => Some(Self::Switch),
+            ToolCall::GitPush { .. } => Some(Self::Push),
+            ToolCall::GhPrCreate { .. } => Some(Self::PrCreate),
             _ => None,
         }
     }

@@ -110,6 +110,7 @@ pub struct RewindNonRewindable {
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum RewindEffect {
+    Host,
     UnguardedCommand,
     Mcp,
     Cache,

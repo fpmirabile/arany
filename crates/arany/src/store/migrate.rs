@@ -138,6 +138,20 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        variant_step!("ToolStarted", 15, crate::session::pre_host_git_payload),
+        variant_step!("ToolFinished", 21, crate::session::pre_host_git_payload),
+        variant_step!("HookStarted", 5, crate::session::pre_host_git_payload),
+        variant_step!("HookFinished", 10, crate::session::pre_host_git_payload),
+        variant_step!(
+            "GoalPlanContractRecorded",
+            8,
+            crate::session::pre_host_git_payload
+        ),
+        variant_step!(
+            "ProviderCallRecorded",
+            15,
+            crate::session::pre_host_git_payload
+        ),
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),
