@@ -1085,6 +1085,8 @@ impl RunLoop<'_> {
                 deadline,
                 cancellation,
                 preview,
+                #[cfg(feature = "test-support")]
+                None,
             )
             .await
         });
@@ -2279,6 +2281,8 @@ impl RunLoop<'_> {
                     deadline,
                     cancellation,
                     preview,
+                    #[cfg(feature = "test-support")]
+                    None,
                 )
                 .await
             });
@@ -2490,6 +2494,8 @@ impl RunLoop<'_> {
                     deadline,
                     cancellation,
                     Some(crate::provider::ResponsePreview::new().0),
+                    #[cfg(feature = "test-support")]
+                    None,
                 )
                 .await
             });

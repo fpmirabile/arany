@@ -144,6 +144,10 @@ pub(super) struct RunIdentity {
 
 impl Drop for RunLoop<'_> {
     fn drop(&mut self) {
+        #[cfg(feature = "test-support")]
+        if let Some(recorder) = self.journal.tool_latency.get() {
+            recorder.dispose(self.run_id);
+        }
         if let Some(steering) = &self.controls.steering {
             steering.end_run(self.session_id, self.run_id);
         }
@@ -1183,6 +1187,7 @@ pub(super) async fn invoke_bounded_with_preview(
     run_deadline: Instant,
     mut cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
+    #[cfg(feature = "test-support")] receipt: Option<crate::test_support::latency::Receipt<'_>>,
 ) -> (CallResult, Option<super::routing::Transient>) {
     if cancellation.is_cancelled() {
         return (CallResult::Cancelled, None);
@@ -1206,6 +1211,10 @@ pub(super) async fn invoke_bounded_with_preview(
         () = cancellation.cancelled() => return (CallResult::Cancelled, None),
         result = tokio::time::timeout(timeout, invocation) => result,
     };
+    #[cfg(feature = "test-support")]
+    if let (Some(receipt), Ok(Ok(response))) = (receipt, &result) {
+        receipt.received(response, std::time::Instant::now());
+    }
     let transient = match &result {
         Ok(Err(error)) => error
             .retry_cause()
@@ -1992,6 +2001,8 @@ mod call_bound_tests {
                 request,
                 started + Duration::from_secs(1200),
                 RunCancellation::new(),
+                None,
+                #[cfg(feature = "test-support")]
                 None,
             )
             .await;
