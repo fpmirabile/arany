@@ -1853,6 +1853,9 @@ impl Engine {
                 return Err(EngineError::RosterSelectionMismatch);
             }
         }
+        if request.goal.id.is_some() && goal.include_paths.is_none() {
+            return Err(EngineError::GoalIncludesUnavailable);
+        }
         let objective = if request.objective.trim().is_empty()
             && (request.goal.id.is_some() || request.goal.continues.is_some())
         {
