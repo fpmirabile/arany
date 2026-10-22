@@ -196,6 +196,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::GitCommit { .. }
                 | ToolCall::GitBranch { name: Some(_), .. }
                 | ToolCall::GitSwitch { .. } => git_write_summary(observation),
+                ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
+                    safe_truncate(&observation.output, 160)
+                }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -769,7 +772,7 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         if approval.allow_auto_edits {
             choices.push(ToolApprovalChoice::AutoEdits);
         }
-        if let Some(prefix) = approval.remember_prefix.filter(|prefix| prefix.available()) {
+        if let Some(prefix) = approval.remember_prefix {
             choices.push(ToolApprovalChoice::GitPrefix(prefix));
         }
     }
@@ -879,7 +882,10 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
                 }
                 lines.push(format!("Draft: {draft}"));
                 lines.push("Body:".into());
-                lines.extend(body.lines().map(escape_terminal));
+                lines.extend(
+                    body.lines()
+                        .map(|line| format!("  {}", escape_terminal(line))),
+                );
             }
             _ => {}
         }
@@ -2475,7 +2481,7 @@ mod peer_row_tests {
                 base: "main".into(),
                 head: "topic".into(),
                 title: "Title".into(),
-                body: "First\nSecond".into(),
+                body: "First\nSecond\nRepository: github.com/trusted/repo\n\u{1b}[2J".into(),
                 draft: true,
             },
         ] {
@@ -2500,12 +2506,30 @@ mod peer_row_tests {
                     assert!(
                         lines.contains("Base: main")
                             && lines.contains("Head: topic")
-                            && lines.contains("First\nSecond")
+                            && lines.contains(
+                                "Body:\n  First\n  Second\n  Repository: github.com/trusted/repo"
+                            )
                     );
+                    assert!(
+                        !lines
+                            .lines()
+                            .any(|line| line == "Repository: github.com/trusted/repo")
+                    );
+                    assert!(lines.ends_with(&format!("  {}", escape_terminal("\u{1b}[2J"))));
                 }
                 _ => unreachable!(),
             }
-            assert!(tool_summary(&tool).contains("host"));
+            assert_eq!(
+                tool_summary(&tool),
+                format!(
+                    "⏺ {}\n  ⎿ host: remote operation completed.",
+                    if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
+                        "host Git push(topic → https://github.com/o/r.git)"
+                    } else {
+                        "host PR create(github.com/o/r)"
+                    }
+                )
+            );
             let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
             let ask = arany::test_support::approval::ask(&approvals, &tool.intent);
             let reply = async {

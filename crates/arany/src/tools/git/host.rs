@@ -1541,7 +1541,22 @@ mod tests {
             );
             assert!(
                 output.status.success(),
-                "isolated HTTPS credential journey failed"
+                "isolated HTTPS credential journey failed: {}",
+                if output
+                    .stderr
+                    .windows(b"pinned git".len())
+                    .any(|w| w == b"pinned git")
+                {
+                    "Git fixture admission refused"
+                } else if output
+                    .stderr
+                    .windows(b"StateNotPrivate".len())
+                    .any(|w| w == b"StateNotPrivate")
+                {
+                    "private State admission refused"
+                } else {
+                    "credential journey assertion failed"
+                }
             );
             crate::test_support::process::assert_single_test_completed(&output.stdout, TEST);
             return;
@@ -1648,7 +1663,18 @@ done
             observation.output.clone(),
         ];
         surfaces.extend(events.iter().map(|e| e.event.payload().unwrap()));
-        surfaces.push(std::fs::read_to_string(state.path().join("development.log")).unwrap());
+        let diagnostics = std::fs::read_to_string(state.path().join("development.log"));
+        if cfg!(debug_assertions) {
+            let diagnostics = diagnostics.unwrap();
+            assert!(diagnostics.contains(
+                "tool operation=git_push disposition=Uncertain receipt=true stops_run=true"
+            ));
+            surfaces.push(diagnostics);
+        } else {
+            assert!(
+                matches!(diagnostics, Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+            );
+        }
         assert!(surfaces.iter().all(|s| !s.contains(CANARY)));
         reopened.close().await.unwrap();
     }
@@ -1770,39 +1796,45 @@ done
                 workspace_inode: 2,
                 call: push(),
                 limits: ToolLimits {
-                    runtime_ms: 1000,
+                    runtime_ms: 600_000,
                     network: NetworkGrant::Host,
                     ..ToolLimits::default()
                 },
                 expires_at_ms: crate::tools::now_ms() + 60_000,
                 use_count: 1,
             };
+            let (ready, child_ready) = std::os::unix::net::UnixStream::pair().unwrap();
+            ready.set_nonblocking(true).unwrap();
+            let mut ready = tokio::net::UnixStream::from_std(ready).unwrap();
             let mut command = Command::new("/bin/sh");
             command
                 .args([
                     "-c",
-                    "printf once > effect; printf credential-canary; while :; do :; done",
+                    "printf once > effect; printf credential-canary; printf ready >&0; read -r release",
                 ])
                 .current_dir(root.path())
                 .env_clear()
-                .stdin(Stdio::null())
+                .stdin(Stdio::from(std::os::fd::OwnedFd::from(child_ready)))
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .process_group(0)
                 .kill_on_drop(true);
             let cancellation = Cancellation::new();
             let trigger = cancellation.clone();
-            let marker_gate = marker.clone();
-            let gate = async move {
-                tokio::time::timeout(Duration::from_secs(5), async {
-                    while !marker_gate.exists() {
-                        tokio::task::yield_now().await;
-                    }
-                })
-                .await
-                .unwrap();
+            let gate = async {
+                let mut signal = [0; 5];
+                tokio::time::timeout(Duration::from_secs(30), ready.read_exact(&mut signal))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(&signal, b"ready");
                 if cancel {
                     trigger.cancel();
+                } else {
+                    // Advance only after the real child has completed its effect; reap on real time.
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_secs(600)).await;
+                    tokio::time::resume();
                 }
             };
             let (observation, ()) = tokio::join!(
@@ -1811,6 +1843,10 @@ done
             );
             assert_eq!(observation.disposition, ToolDisposition::Uncertain);
             assert!(observation.valid() && observation.stops_run());
+            assert!(matches!(
+                &observation.attestation,
+                Some(Attestation::Host(receipt)) if receipt.descendants_confirmed_stopped
+            ));
             assert_eq!(std::fs::read(&marker).unwrap(), b"once");
             assert!(
                 !serde_json::to_string(&observation)

@@ -496,6 +496,7 @@ done
                     assert_eq!(receipt.limits, observation.intent.limits);
                 }
                 Attestation::Unguarded(_) => panic!("researchers never run unguarded"),
+                Attestation::Host(_) => panic!("researchers never run host Tools"),
                 Attestation::WorkerRead { .. }
                 | Attestation::WorkerMutation { .. }
                 | Attestation::WorkerData { .. }

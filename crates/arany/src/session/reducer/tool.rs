@@ -132,8 +132,7 @@ pub(super) fn apply(
                 && !(permissions_pinned
                     && primary
                     && typed_basis
-                    && TypedGitPrefix::of_call(&pending_call)
-                        .is_some_and(TypedGitPrefix::available)
+                    && TypedGitPrefix::of_call(&pending_call).is_some()
                     && (!typed_source
                         // An allow whose dispatch a later plan, budget or pause gate refused is unapproved.
                         || verdict.decision == Decision::Allow

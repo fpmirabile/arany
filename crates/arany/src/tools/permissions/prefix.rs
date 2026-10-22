@@ -45,10 +45,6 @@ impl TypedGitPrefix {
         }
     }
 
-    pub fn available(self) -> bool {
-        true
-    }
-
     fn from_tokens(tokens: &[String]) -> Option<Self> {
         Self::ALL.into_iter().find(|prefix| {
             prefix.tokens().len() == tokens.len()
