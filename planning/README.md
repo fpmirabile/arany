@@ -30,6 +30,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Status
 
 - `Draft`
+- `Ready` (Research and Plan gates passed; no material open questions)
 - `In progress`
 - `Blocked`
 - `Done`
@@ -44,6 +45,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
 | [Git write workflow](./git-write-workflow/README.md) | S3 in progress: human-approved host push and PR creation; local writes and typed prefix rules landed |
 | [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
 | [Persistent worker assignment views](./worker-assignment-views/README.md) | Future C3 assignment-long Guard views, read-only assignment-time cache and MCP invocation exclusion; admission gate remains |
@@ -52,5 +54,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Per-agent route recovery](./agent-route-recovery/README.md) | Deferred exhausted-route pause, dependency blocking and user retry/switch |
 | [Typed judge adapters](./judge-adapters/README.md) | Deferred API research and one admitted typed-judge capability |
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
+| [Linux end-to-end Tool latency](./linux-tool-latency/README.md) | Read, Edit and guarded-command p95 reporting through durable result acknowledgement; ignored release corpus and owner-run named-host evidence |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
