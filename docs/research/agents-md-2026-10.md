@@ -3,7 +3,7 @@
 - Question: how do peer harnesses present `AGENTS.md`-style project instructions to the model, and how can Arany make the model follow them without letting file text carry authority?
 - Source-check date: 2026-10-21. Arany source was checked at `a3bbe160`; Codex source is pinned to `openai/codex` commit `a6839a481223fb5faab539a9eb2b7174ae29e560` (`main` on that date). Claude Code and OpenCode documentation is dated evidence.
 - Conclusion: copy Codex's user-role `# AGENTS.md instructions for …` / `<INSTRUCTIONS>` framing and its prompt rules (follow in scope, deeper wins, direct instructions win). Arany's Policy and Guard already decide authority independently of model text, so following the file for behavior changes no authority boundary.
-- Scope: source investigation for one feature. The [plan](../../planning/agents-md-instructions/README.md) owns proposed work; the [Session contract](../specs/session.md#workspace-admission-and-authority) is authoritative.
+- Scope: source investigation for one feature. The [Session contract](../specs/session.md#workspace-admission-and-authority) is authoritative.
 
 ## Arany before the change
 

@@ -236,6 +236,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                         provider_concurrency: 1,
                         workspace_device: metadata.dev(),
                         workspace_inode: metadata.ino(),
+                        user_instruction_digest: None,
                         instruction_sources: Vec::new(),
                         launch_directory: String::new(),
                         include_digests: Vec::new(),

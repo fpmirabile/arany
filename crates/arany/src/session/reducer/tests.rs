@@ -184,6 +184,7 @@ mod goal_replay_tests {
             provider_concurrency: 1,
             workspace_device: 1,
             workspace_inode: 2,
+            user_instruction_digest: None,
             instruction_sources: Vec::new(),
             launch_directory: String::new(),
             include_digests: Vec::new(),
@@ -192,7 +193,7 @@ mod goal_replay_tests {
             context_usage: None,
             compaction_event_sequence: None,
             compaction_content_digest: None,
-            tool_policy: tools.then_some(ToolPolicyReceipt {
+            tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
                 permissions_digest: None,
                 contract_version: 1,
                 config_digest: [1; 32],
@@ -200,7 +201,7 @@ mod goal_replay_tests {
                 unguarded_rules_digest: None,
                 unguarded: crate::tools::UnguardedGrant::HumanOnly,
                 child_unguarded: crate::tools::UnguardedGrant::Denied,
-            }),
+            })),
         }
     }
 

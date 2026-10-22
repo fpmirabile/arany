@@ -124,7 +124,7 @@ pub enum EngineError {
     InputNotRegular,
     #[error("Workspace input exceeds its byte limit")]
     InputTooLarge,
-    #[error("Workspace input is not UTF-8")]
+    #[error("input is not UTF-8")]
     InputNotUtf8,
     #[error("explicit include does not exist")]
     MissingInclude,
@@ -170,6 +170,7 @@ impl From<InputError> for EngineError {
             InputError::InvalidUtf8 => Self::InputNotUtf8,
             InputError::MissingInclude => Self::MissingInclude,
             InputError::TooManyIncludes => Self::TooManyIncludes,
+            InputError::State(error) => Self::Store(error),
             InputError::StateOverlap => Self::StateOverlap,
             InputError::Io(_) => Self::WorkspaceUnavailable,
         }
@@ -1837,6 +1838,10 @@ impl Engine {
             provider_concurrency,
             workspace_device: root_identity.device,
             workspace_inode: root_identity.inode,
+            user_instruction_digest: inputs
+                .user_instructions
+                .as_ref()
+                .map(|snapshot| snapshot.digest),
             instruction_sources: inputs
                 .instructions
                 .iter()
@@ -1857,7 +1862,7 @@ impl Engine {
             context_usage: Some(context.context_usage),
             compaction_event_sequence: context.compaction_event_sequence,
             compaction_content_digest: context.compaction_content_digest,
-            tool_policy: tools.as_ref().map(crate::tools::ToolRuntime::receipt),
+            tool_policy: tools.as_ref().map(|tools| Box::new(tools.receipt())),
         };
         config.validate().map_err(|_| EngineError::InvalidRequest)?;
         if !crate::session::run_started_fits(&config) {
@@ -2090,8 +2095,12 @@ fn root_request(
             goal_budget: (goal.autonomous || goal.plan_contract.is_some()).then_some(budget),
             pinned_budget: budget,
             goal_plan_contract: goal.plan_contract.clone(),
-            workspace_guidance: std::mem::take(&mut input.inputs.instructions)
+            workspace_guidance: input
+                .inputs
+                .user_instructions
+                .take()
                 .into_iter()
+                .chain(std::mem::take(&mut input.inputs.instructions))
                 .map(|snapshot| WorkspaceGuidance {
                     path: snapshot.path,
                     text: snapshot.content,

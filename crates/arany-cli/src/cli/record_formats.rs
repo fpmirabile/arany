@@ -6,8 +6,8 @@ use crate::cli::provider::{roster::PROVIDER_ROSTER, routing::PROVIDER_ROUTING};
 use arany::{RECORD_FORMATS, RecordFormat, RecordKind};
 use serde_json::Value;
 
-// permissions.json follows the Claude Code settings shape, which carries no version.
-const UNVERSIONED: [RecordKind; 1] = [RecordKind::Permissions];
+// permissions.json follows the Claude Code settings shape and AGENTS.md is plain Markdown; neither carries a version.
+const UNVERSIONED: [RecordKind; 2] = [RecordKind::Permissions, RecordKind::UserInstructions];
 
 type Fixture<'a> = (RecordKind, u64, &'a str, &'a str);
 // One identity row per record at its current version, plus one (input, expected) row per step.

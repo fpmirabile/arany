@@ -105,6 +105,7 @@ record_kinds!(
     ModelPreferences,
     ChatgptRegistration,
     ChatgptAccounts,
+    UserInstructions,
 );
 
 impl RecordKind {
@@ -162,6 +163,7 @@ impl RecordKind {
                 256,
                 true,
             ),
+            Self::UserInstructions => ("AGENTS.md", "AGENTS.pending", 64 * 1024, false),
             Self::ChatgptAccounts => (
                 "chatgpt-accounts.json",
                 "chatgpt-accounts.pending",
@@ -849,6 +851,7 @@ mod tests {
             RecordKind::ProviderRouting,
             RecordKind::ProviderRoster,
             RecordKind::Permissions,
+            RecordKind::UserInstructions,
         ] {
             assert!(matches!(
                 state.record(kind).replace(b"synthetic"),
@@ -1323,11 +1326,17 @@ mod roster_tests {
 
     #[test]
     fn provider_roster_records_refuse_unsafe_objects_and_keep_the_opened_root() {
+        for kind in [RecordKind::ProviderRoster, RecordKind::UserInstructions] {
+            refuses_unsafe_objects_and_keeps_the_opened_root(kind);
+        }
+    }
+
+    fn refuses_unsafe_objects_and_keeps_the_opened_root(kind: RecordKind) {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("state");
         let root = StateRoot::admit(&path).unwrap();
-        let record = root.record(RecordKind::ProviderRoster);
-        let file = path.join("provider-roster.json");
+        let record = root.record(kind);
+        let file = path.join(kind.file());
         assert!(record.read().unwrap().is_none());
         let target = temp.path().join("target");
         std::fs::write(&target, b"private canary").unwrap();
@@ -1367,7 +1376,7 @@ mod roster_tests {
         std::fs::rename(&path, temp.path().join("old-state")).unwrap();
         std::fs::create_dir(&path).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::fs::write(path.join("provider-roster.json"), b"replacement").unwrap();
+        std::fs::write(path.join(kind.file()), b"replacement").unwrap();
         assert!(root.readmit().is_err());
         assert_eq!(record.read().unwrap().unwrap(), b"original");
     }
