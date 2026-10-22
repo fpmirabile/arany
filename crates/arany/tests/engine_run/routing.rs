@@ -2024,9 +2024,21 @@ async fn plan_observations_settle_each_attempt_and_replay_without_dispatch_or_ba
         engine.close().await.unwrap();
         let (events, view) = reopen(&state, session).await;
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-        let fork_view = store.load_view(fork).await.unwrap();
+        let fork_view = store.load_view(fork).await.unwrap().unwrap();
         let inherited = store.load_session(session).await.unwrap();
-        assert_eq!(fork_view.unwrap().usage.plan_limits, view.usage.plan_limits);
+        let boundary_sequence = fork_view.lineage.unwrap().source_sequence;
+        let boundary_index = events
+            .iter()
+            .position(|event| event.sequence == boundary_sequence)
+            .unwrap();
+        assert!(matches!(
+            events[boundary_index].event,
+            Event::RunFinished { .. }
+        ));
+        let boundary_view = SessionView::replay(session, &events[..=boundary_index])
+            .unwrap()
+            .unwrap();
+        assert_eq!(fork_view.usage, boundary_view.usage);
         for original in &events {
             let copy = inherited
                 .iter()
