@@ -866,7 +866,10 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                     let body = read_request(&mut stream);
                     let wire: serde_json::Value = serde_json::from_slice(&body).unwrap();
                     assert_eq!(wire["model"], "model-1");
-                    assert_eq!(wire.get("text").is_some(), index == 2);
+                    assert!(wire.get("text").is_none());
+                    if index == 2 {
+                        crate::loopback::assert_compaction_request(&wire);
+                    }
                     let input: serde_json::Value = crate::semantic::input(&wire);
                     if index == 3 {
                         assert_eq!(input["objective"], "cancel");
@@ -902,6 +905,9 @@ fn native_active_terminal_restores_signals_cancellation_and_failed_calls() {
                         }
                         _ => serde_json::json!(r#"synthetic summary"#),
                     };
+                    if index == 2 {
+                        assert_eq!(outcome, "synthetic summary", "plain-text compaction reply");
+                    }
                     send_response(&mut stream, index, outcome);
                 }
             });

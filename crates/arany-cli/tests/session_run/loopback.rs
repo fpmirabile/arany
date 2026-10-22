@@ -95,6 +95,21 @@ pub(super) fn read_request_for(stream: &mut TcpStream, path: &str, auth: &str) -
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(super) fn assert_compaction_request(request: &serde_json::Value) {
+    for field in [
+        "text",
+        "response_format",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+    ] {
+        assert!(request.get(field).is_none(), "compaction must omit {field}");
+    }
+    assert!(request["output_config"].get("format").is_none());
+    assert!(crate::semantic::input(request)["items"].is_array());
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 thread_local! {
     static LAST_REQUEST_STREAMING: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }

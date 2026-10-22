@@ -110,7 +110,10 @@ fn synthetic_server(
         );
         let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
         assert_eq!(wire["model"], "model-1");
-        assert_eq!(wire.get("text").is_some(), index == 2 || index >= 5);
+        assert!(wire.get("text").is_none());
+        if index == 2 || index >= 5 {
+            crate::loopback::assert_compaction_request(&wire);
+        }
         assert_eq!(
             wire["max_output_tokens"],
             match index {
@@ -235,6 +238,17 @@ fn synthetic_server(
             }
             _ => serde_json::json!(r#"derived summary"#),
         };
+        if index == 2 || index >= 5 {
+            assert_eq!(
+                text,
+                if index == 2 {
+                    "synthetic summary"
+                } else {
+                    "derived summary"
+                },
+                "plain-text compaction reply"
+            );
+        }
         super::loopback::send_response_for(&mut stream, index, text, wire["stream"] == true);
     }
 }

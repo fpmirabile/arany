@@ -149,7 +149,10 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
             );
             let wire: serde_json::Value = serde_json::from_slice(&body).expect("Responses request");
             assert_eq!(wire["model"], "model-1");
-            assert_eq!(wire.get("text").is_some(), index == 2);
+            assert!(wire.get("text").is_none());
+            if index == 2 {
+                crate::loopback::assert_compaction_request(&wire);
+            }
             assert_eq!(
                 wire["max_output_tokens"],
                 if index == 1 || index == 2 { 128 } else { 4096 }
@@ -186,6 +189,9 @@ fn agent_inspector_preserves_progress_and_transient_mouse_selection() {
                     serde_json::json!("current answer")
                 }
             };
+            if index == 2 {
+                assert_eq!(text, "synthetic summary", "plain-text compaction reply");
+            }
             send_response(&mut stream, index, text);
         }
     });

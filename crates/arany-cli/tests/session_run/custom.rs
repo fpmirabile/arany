@@ -1349,7 +1349,10 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
             let body: serde_json::Value =
                 serde_json::from_slice(&read_request(&mut stream)).unwrap();
             assert_eq!(body["model"], "model-1");
-            assert_eq!(body.get("text").is_some(), matches!(index, 2 | 4 | 6));
+            assert!(body.get("text").is_none());
+            if matches!(index, 2 | 4 | 6) {
+                crate::loopback::assert_compaction_request(&body);
+            }
             assert_eq!(
                 body.get("reasoning")
                     .map(|value| value["effort"].as_str().unwrap()),
@@ -1368,6 +1371,9 @@ fn custom_effort_profile_pins_selected_effort_after_synthetic_conformance() {
                     serde_json::json!("answer")
                 }
             };
+            if matches!(index, 2 | 4 | 6) {
+                assert_eq!(outcome, "synthetic summary", "plain-text compaction reply");
+            }
             super::loopback::send_response_for(&mut stream, index, outcome, body["stream"] == true);
         }
     });

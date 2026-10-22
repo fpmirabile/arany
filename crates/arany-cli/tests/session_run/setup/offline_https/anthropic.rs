@@ -85,10 +85,10 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             body["output_config"]["effort"],
             if index < 4 { "low" } else { "high" }
         );
-        assert_eq!(
-            body["output_config"].get("format").is_some(),
-            matches!(index, 3 | 8)
-        );
+        assert!(body["output_config"].get("format").is_none());
+        if matches!(index, 3 | 8) {
+            crate::loopback::assert_compaction_request(&body);
+        }
         let content = crate::semantic::input(&body);
         match index {
             2 | 4 => assert_eq!(content["objective"], OBJECTIVE),
@@ -126,6 +126,9 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
                 json!("scoped answer")
             }
         };
+        if matches!(index, 3 | 8) {
+            assert_eq!(outcome, "scoped compacted", "plain-text compaction reply");
+        }
         chatgpt::send_json(
             input,
             &serde_json::to_vec(&json!({
