@@ -62,3 +62,7 @@ pub async fn run_routed(
     }
     Ok(result.run)
 }
+
+pub fn record_tool_latency(engine: &Engine) -> Arc<super::latency::Recorder> {
+    engine.record_tool_latency()
+}
