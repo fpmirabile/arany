@@ -2301,6 +2301,9 @@ mod goal_replay_tests {
             |r: &mut crate::BudgetRefusal| r.limit = 2,
             |r: &mut crate::BudgetRefusal| r.used = 0,
             |r: &mut crate::BudgetRefusal| r.run_id = Some(RunId::new()),
+            |r: &mut crate::BudgetRefusal| {
+                r.charge_basis = crate::BudgetChargeBasis::Conservative;
+            },
         ] {
             let mut forged = closing.clone();
             if let Event::GoalFinished {
@@ -3598,6 +3601,49 @@ mod goal_replay_tests {
             event,
             created_at_ms: 0,
         })
+    }
+
+    fn assert_exhausted_crash_receipt(view: &SessionView) {
+        let mut view = view.clone();
+        view.goals[0].budget.max_active_ms = Some(1000);
+        let goal = &view.goals[0];
+        let usage = goal.resume_usage(&view);
+        assert!(!usage.token_usage_unknown);
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (0, 0));
+        assert_eq!(usage.active_ms, 1000);
+        let mut refusal = goal
+            .effective_budget()
+            .refusal(usage, crate::BudgetAction::Resume)
+            .unwrap();
+        let mut close = Event::GoalFinished {
+            goal_id: goal.id,
+            status: GoalStatus::Failed,
+            active_ms: usage.active_ms,
+            report: GoalReport {
+                summary: "Out of budget.".into(),
+                changes: Vec::new(),
+                evidence: Vec::new(),
+                unresolved: Vec::new(),
+                cached_input_tokens: goal.known_cached_tokens,
+            },
+            exhausted: true,
+            budget_refusal: Some(refusal),
+        };
+        assert!(
+            rejected(&view, close.clone()),
+            "pending time is not observed"
+        );
+        refusal.charge_basis = crate::BudgetChargeBasis::Conservative;
+        if let Event::GoalFinished { budget_refusal, .. } = &mut close {
+            *budget_refusal = Some(refusal);
+        }
+        apply(&mut view, close.clone()).expect("crash ceiling closes conservatively");
+        let goal = &view.goals[0];
+        assert_eq!((goal.active_ms, goal.uncertain_active_ms), (1000, 1000));
+        assert_eq!(goal.active_ceiling_ms, 0);
+        assert_eq!(goal.budget_refusal, Some(refusal));
+        assert_eq!(goal.status, GoalStatus::Failed);
+        assert!(rejected(&view, close), "a closed Goal cannot charge twice");
     }
 
     fn child_intent(run_id: RunId, agent_run_id: AgentRunId, call: ToolCall) -> EffectIntent {
@@ -6888,7 +6934,17 @@ mod goal_replay_tests {
             "no request is declared before the step"
         );
         apply(&mut view, requesting_step(run, agent, 2)).expect("two-request step");
-        apply(&mut view, tool_started(run, agent, &first)).expect("first request starts");
+        apply(
+            &mut view,
+            Event::ToolStarted {
+                run_id: run,
+                agent_run_id: agent,
+                intent: first.clone(),
+                active_ceiling_ms: 1000,
+            },
+        )
+        .expect("first request starts");
+        assert_exhausted_crash_receipt(&view);
         apply(&mut view, tool_finished(run, agent, &first, b"one")).expect("first observed");
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
@@ -7829,6 +7885,7 @@ mod goal_replay_tests {
         .unwrap();
         assert_eq!(view.goals[0].resume_usage(&view).active_ms, 1000);
         assert!(!view.runs[0].hooks_settled());
+        assert_exhausted_crash_receipt(&view);
         let mut observation = observation_for(intent, b"");
         observation.disposition = ToolDisposition::Denied;
         observation.attestation = None;

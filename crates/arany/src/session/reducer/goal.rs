@@ -535,6 +535,8 @@ impl SessionView {
         let goal = self.goal(goal_id).ok_or(ReplayError::InvalidTransition)?;
         let budget = goal.effective_budget();
         let usage = goal.resume_usage(self);
+        let conservative_active =
+            goal.uncertain_active_ms > 0 || goal.unsettled_active_charge_ms() > 0;
         if matches!(refusal.action, BudgetAction::Run | BudgetAction::Resume) {
             let expected = budget
                 .refusal(usage, refusal.action)
@@ -604,10 +606,9 @@ impl SessionView {
             || !valid_ids
             || refusal.token_usage_unknown && !usage.token_usage_unknown
             || goal.run_start_usage.token_usage_unknown && !refusal.token_usage_unknown
-            || goal.uncertain_active_ms > 0
-                && refusal.charge_basis != BudgetChargeBasis::Conservative
+            || conservative_active && refusal.charge_basis != BudgetChargeBasis::Conservative
             || refusal.charge_basis == BudgetChargeBasis::Conservative
-                && goal.uncertain_active_ms == 0
+                && !conservative_active
                 && !usage.token_usage_unknown
         {
             return Err(ReplayError::InvalidTransition);
