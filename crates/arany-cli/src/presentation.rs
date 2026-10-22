@@ -27,6 +27,45 @@ pub enum Output {
     Jsonl,
 }
 
+pub fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        return format!("{bytes} B");
+    }
+    let mut size = bytes as f64;
+    let mut unit = "B";
+    for next in ["KB", "MB", "GB", "TB"] {
+        size /= 1024.0;
+        unit = next;
+        if (size * 10.0).round() / 10.0 < 1024.0 {
+            break;
+        }
+    }
+    format!("{size:.1} {unit}")
+}
+
+pub fn format_duration(milliseconds: u64) -> String {
+    let mut parts = Vec::with_capacity(3);
+    let hours = milliseconds / 3_600_000;
+    let minutes = milliseconds / 60_000 % 60;
+    let remaining_ms = milliseconds % 60_000;
+    if hours > 0 {
+        parts.push(format!("{hours} h"));
+    }
+    if minutes > 0 {
+        parts.push(format!("{minutes} min"));
+    }
+    if remaining_ms > 0 || parts.is_empty() {
+        let fraction = remaining_ms % 1000;
+        if fraction == 0 {
+            parts.push(format!("{} s", remaining_ms / 1000));
+        } else {
+            let value = format!("{}.{fraction:03}", remaining_ms / 1000);
+            parts.push(format!("{} s", value.trim_end_matches('0')));
+        }
+    }
+    parts.join(" ")
+}
+
 pub(crate) fn supervisor_line(verdict: &arany::supervisor::SupervisorVerdict) -> String {
     use arany::supervisor::SignalKind;
     let signals = verdict
@@ -304,8 +343,8 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
     use arany::LimitCause;
     match observation.limit_cause.unwrap_or(LimitCause::Resource) {
         LimitCause::Timeout => format!(
-            "timed out after {} s{}",
-            f64::from(observation.intent.effective_timeout_ms()) / 1_000.0,
+            "timed out after {}{}",
+            format_duration(u64::from(observation.intent.effective_timeout_ms())),
             if matches!(
                 observation.intent.call,
                 arany::ToolCall::Command { .. } | arany::ToolCall::CommandUnguarded { .. }
@@ -315,7 +354,12 @@ fn limit_summary(observation: &arany::ToolObservation) -> String {
                 ""
             }
         ),
-        LimitCause::OutputCeiling => "output passed 1 GiB; stopped".into(),
+        LimitCause::OutputCeiling => {
+            format!(
+                "output passed {}; stopped",
+                format_bytes(1024 * 1024 * 1024)
+            )
+        }
         LimitCause::ContextFull => "no room left in this Run's context".into(),
         LimitCause::ReadCapacity => "too many reads at once; nothing was read".into(),
         LimitCause::RequestedTime => "asked for more time than the pinned maximum".into(),
@@ -416,15 +460,17 @@ fn read_result_summary(tools: &[arany::ToolView]) -> String {
     }
     let mut summary = counts
         .into_iter()
-        .zip([("entry", "entries"), ("line", "lines"), ("byte", "bytes")])
-        .zip(units)
-        .filter(|(_, present)| *present)
-        .map(|(count, _)| count)
-        .map(|(count, (one, many))| format!("{count} {}", if count == 1 { one } else { many }))
+        .enumerate()
+        .filter(|(unit, _)| units[*unit])
+        .map(|(unit, count)| match unit {
+            0 => format!("{count} {}", if count == 1 { "entry" } else { "entries" }),
+            1 => format!("{count} {}", if count == 1 { "line" } else { "lines" }),
+            _ => format_bytes(count as u64),
+        })
         .collect::<Vec<_>>()
         .join(", ");
     if summary.is_empty() {
-        summary = "0 bytes".into();
+        summary = format_bytes(0);
     }
     if truncated {
         summary.push_str(" (truncated)");
@@ -1026,8 +1072,8 @@ fn changeset_version_lines(
         return;
     };
     lines.push(format!(
-        "{label}: {} bytes · sha256 {} · executable {}",
-        bytes.len(),
+        "{label}: {} · sha256 {} · executable {}",
+        format_bytes(bytes.len() as u64),
         version.sha256,
         version.executable
     ));
@@ -1415,10 +1461,10 @@ pub fn goal_status(view: &SessionView) -> String {
         } else {
             ""
         },
-        goal_clock(goal.active_ms),
+        format_duration(goal.active_ms),
         budget
             .max_active_ms
-            .map_or_else(|| "unlimited".to_owned(), goal_clock),
+            .map_or_else(|| "unlimited".to_owned(), format_duration),
     );
     let unguarded: usize = view
         .runs
@@ -1460,11 +1506,6 @@ fn goal_phase_word(phase: arany::GoalPhase) -> &'static str {
     }
 }
 
-fn goal_clock(ms: u64) -> String {
-    let seconds = ms / 1000;
-    format!("{}m{:02}s", seconds / 60, seconds % 60)
-}
-
 pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Output) -> String {
     let mut rendered = String::new();
     if output == Output::Text {
@@ -1478,7 +1519,7 @@ pub fn render_session(view: &SessionView, events: &[EventEnvelope], output: Outp
         let detail = match &envelope.event {
             Event::SessionStarted { title, .. } | Event::SessionRenamed { title } => title.clone(),
             Event::MessageAccepted { text, images, .. } if output == Output::Text && !images.is_empty() => {
-                serde_json::json!({ "text": text, "images": images.iter().enumerate().map(|(index, image)| image.description(index)).collect::<Vec<_>>() }).to_string()
+                serde_json::json!({ "text": text, "images": images.iter().enumerate().map(|(index, image)| image_description(image, index)).collect::<Vec<_>>() }).to_string()
             }
             _ => envelope.event.payload().expect("validated Event"),
         };
@@ -1799,9 +1840,9 @@ pub(crate) fn image_message_lines(images: &[arany::ImageAttachment], width: usiz
 pub(crate) fn image_description(image: &arany::ImageAttachment, index: usize) -> String {
     let (width, height) = image.dimensions();
     format!(
-        "Image {}: PNG {width}x{height}, {:.1} KB",
+        "Image {}: PNG {width}x{height}, {}",
         index + 1,
-        image.byte_len() as f64 / 1_000.0
+        format_bytes(image.byte_len() as u64)
     )
 }
 
@@ -1922,6 +1963,54 @@ mod tests {
         workspace_permission_lines,
     };
     use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn byte_sizes_use_binary_units_for_human_output() {
+        for (bytes, expected) in [
+            (0, "0 B"),
+            (1, "1 B"),
+            (512, "512 B"),
+            (1023, "1023 B"),
+            (1024, "1.0 KB"),
+            (1536, "1.5 KB"),
+            (39_240, "38.3 KB"),
+            (1024 * 1024 - 1024, "1023.0 KB"),
+            (1024 * 1024 - 1, "1.0 MB"),
+            (1024 * 1024, "1.0 MB"),
+            (1024 * 1024 * 1024 - 1, "1.0 GB"),
+            (1024 * 1024 * 1024, "1.0 GB"),
+            (1024_u64.pow(4), "1.0 TB"),
+            (u64::MAX, "16777216.0 TB"),
+        ] {
+            assert_eq!(super::format_bytes(bytes), expected, "{bytes}");
+        }
+    }
+
+    #[test]
+    fn durations_use_exact_hours_minutes_and_seconds_for_human_output() {
+        for (milliseconds, expected) in [
+            (0, "0 s"),
+            (1, "0.001 s"),
+            (999, "0.999 s"),
+            (1000, "1 s"),
+            (1500, "1.5 s"),
+            (59_999, "59.999 s"),
+            (60_000, "1 min"),
+            (60_001, "1 min 0.001 s"),
+            (90_000, "1 min 30 s"),
+            (3_599_999, "59 min 59.999 s"),
+            (3_600_000, "1 h"),
+            (3_600_001, "1 h 0.001 s"),
+            (5_400_000, "1 h 30 min"),
+            (u64::MAX, "5124095576030 h 25 min 51.615 s"),
+        ] {
+            assert_eq!(
+                super::format_duration(milliseconds),
+                expected,
+                "{milliseconds}"
+            );
+        }
+    }
 
     #[test]
     fn goal_fallback_notices_collect_every_run_once_in_order() {
@@ -2111,7 +2200,7 @@ mod goal_status_tests {
         let running = goal_status(&view);
         assert!(running.starts_with("Goal "), "{running}");
         assert!(
-            running.contains(" · running · implementation · autonomous · Runs 0/16 · calls 0/64 · tokens 0/unlimited · active 0m00s/30m00s"),
+            running.contains(" · running · implementation · autonomous · Runs 0/16 · calls 0/64 · tokens 0/unlimited · active 0 s/30 min"),
             "{running}"
         );
         assert!(!running.contains("/goal resume"), "{running}");
@@ -2289,9 +2378,9 @@ mod peer_row_tests {
         for (cause, copy) in [
             (
                 LimitCause::Timeout,
-                "timed out after 120 s; /settings raises it",
+                "timed out after 2 min; /settings raises it",
             ),
-            (LimitCause::OutputCeiling, "output passed 1 GiB; stopped"),
+            (LimitCause::OutputCeiling, "output passed 1.0 GB; stopped"),
             (
                 LimitCause::ContextFull,
                 "no room left in this Run's context",
@@ -2607,7 +2696,13 @@ mod peer_row_tests {
                 observation.intent.limits.runtime_ms = runtime_ms;
                 observation.disposition = ToolDisposition::Limit;
                 observation.limit_cause = Some(arany::LimitCause::Timeout);
-                let seconds = f64::from(runtime_ms.min(cap)) / 1_000.0;
+                let duration = match runtime_ms.min(cap) {
+                    1500 => "1.5 s",
+                    20_000 => "20 s",
+                    40_000 => "40 s",
+                    60_000 => "1 min",
+                    other => panic!("unexpected timeout fixture: {other}"),
+                };
                 let marker = if tool.ran_unguarded() {
                     " · UNGUARDED"
                 } else {
@@ -2617,13 +2712,13 @@ mod peer_row_tests {
                 assert_eq!(
                     summary,
                     format!(
-                        "⏺ {operation}\n  ⎿ limit: timed out after {seconds} s{guidance}{marker}"
+                        "⏺ {operation}\n  ⎿ limit: timed out after {duration}{guidance}{marker}"
                     )
                 );
                 assert_eq!(
                     plain_tool_summary(&summary),
                     format!(
-                        "{operation}\nResult: limit: timed out after {seconds} s{guidance}{marker}"
+                        "{operation}\nResult: limit: timed out after {duration}{guidance}{marker}"
                     )
                 );
             }
@@ -2732,7 +2827,7 @@ mod peer_row_tests {
                     resource: None,
                 },
                 "abc",
-                "⏺ Skill(review)\n  ⎿ 3 bytes",
+                "⏺ Skill(review)\n  ⎿ 3 B",
             ),
             (
                 ToolCall::Write {
@@ -2748,6 +2843,44 @@ mod peer_row_tests {
             assert_eq!(tool_summary(&tool), expected);
             assert!(!expected.contains("succeeded"));
         }
+        let skill = tool_fixture(
+            ToolCall::Skill {
+                name: "review".into(),
+                resource: None,
+            },
+            &"x".repeat(39_240),
+        );
+        assert_eq!(tool_summary(&skill), "⏺ Skill(review)\n  ⎿ 38.3 KB");
+        let mut tools = vec![
+            tool_fixture(
+                ToolCall::List { path: ".".into() },
+                r#"{"entries":["a","b"]}"#,
+            ),
+            tool_fixture(
+                ToolCall::Read {
+                    path: "a".into(),
+                    offset: None,
+                    limit: None,
+                },
+                r#"{"text":"one\ntwo\n"}"#,
+            ),
+            skill,
+        ];
+        let actor = tools[0].intent.agent_run_id;
+        for tool in &mut tools {
+            tool.intent.agent_run_id = actor;
+            tool.observation.as_mut().unwrap().intent.agent_run_id = actor;
+        }
+        let grouped = tool_groups(&tools).collect::<Vec<_>>();
+        assert_eq!(grouped, vec![(0..3, "⏺ Read 1 file, listed 1 directory, loaded 1 Skill\n  ⎿ 2 entries, 2 lines, 38.3 KB".into())]);
+        assert_eq!(
+            plain_tool_summary(&grouped[0].1),
+            "Read 1 file, listed 1 directory, loaded 1 Skill\nResult: 2 entries, 2 lines, 38.3 KB"
+        );
+        assert_eq!(
+            read_result_summary(&[tools[2].clone(), tools[2].clone()]),
+            "76.6 KB"
+        );
         let mut missing = tool_fixture(
             ToolCall::Read {
                 path: "agents/skills/ponytail/SKILL.md".into(),
@@ -3024,7 +3157,7 @@ mod unguarded_tests {
     fn host_runs_are_marked_unguarded_everywhere_they_are_summarized() {
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Succeeded, true)),
-            "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 bytes · UNGUARDED"
+            "⏺ Unguarded command(sh -c exit 0)\n  ⎿ 0 B · UNGUARDED"
         );
         assert_eq!(
             tool_summary(&host_tool(ToolDisposition::Uncertain, false)),
