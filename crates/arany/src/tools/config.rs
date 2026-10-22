@@ -302,7 +302,10 @@ impl Config {
             | ToolCall::Glob { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. } => Some(path),
+            | ToolCall::Edit { path, .. }
+            | ToolCall::MultiEdit {
+                file_path: path, ..
+            } => Some(path),
             ToolCall::CommandUnguarded { .. } => return true,
             ToolCall::Command { program, .. } => {
                 return self.commands.iter().any(|value| &value.name == program);

@@ -494,7 +494,7 @@ fn validate_request(
             .lease
             .iter()
             .any(|p| !within(p, &plan.paths) || !within(p, &policy.parent_grant.write_paths))
-        || ![WorkerTool::Write, WorkerTool::Edit]
+        || ![WorkerTool::Write, WorkerTool::Edit, WorkerTool::MultiEdit]
             .iter()
             .any(|op| policy.parent_grant.tools.contains(op) && definition.allows_worker_tool(*op))
         || match &request.criterion {
@@ -1019,6 +1019,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     let paths: Vec<_> = match &intent.call {
                         ToolCall::Write { path, .. }
                         | ToolCall::Edit { path, .. }
+                        | ToolCall::MultiEdit {
+                            file_path: path, ..
+                        }
                         | ToolCall::Mkdir { path } => vec![path],
                         ToolCall::ApplyChangeset {
                             source: ChangesetSource::CommandReceipt { changeset, .. },
@@ -1100,6 +1103,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                 let expected_path = match &o.intent.call {
                     ToolCall::Write { path, .. }
                     | ToolCall::Edit { path, .. }
+                    | ToolCall::MultiEdit {
+                        file_path: path, ..
+                    }
                     | ToolCall::Mkdir { path } => path,
                     _ => return Err(ReplayError::InvalidTransition),
                 };
@@ -1115,6 +1121,9 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                             expected_digest, ..
                         } => expected_digest.as_deref(),
                         ToolCall::Edit {
+                            expected_digest, ..
+                        }
+                        | ToolCall::MultiEdit {
                             expected_digest, ..
                         } => Some(expected_digest.as_str()),
                         _ => None,

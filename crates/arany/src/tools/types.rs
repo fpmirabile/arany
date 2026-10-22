@@ -10,11 +10,12 @@ use sha2::{Digest, Sha256};
 use std::path::{Component, Path};
 use uuid::Uuid;
 
-// Write content or combined Edit strings, in decoded UTF-8 bytes.
+// Write content or combined Edit/MultiEdit strings, in decoded UTF-8 bytes.
 pub(crate) const MAX_EDIT_CONTENT_BYTES: usize = 64 * 1024;
+pub(crate) const MAX_MULTI_EDITS: usize = 64;
 // Six escaped bytes per content byte plus room for the path, digest and keys.
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 400 * 1024;
-// Every operation other than Write and Edit keeps this serialized bound.
+// Every operation other than Write, Edit and MultiEdit keeps this serialized bound.
 pub(crate) const MAX_ORDINARY_TOOL_ARGUMENT_BYTES: usize = 16 * 1024;
 pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_READ_PAGE_LINES: u32 = 2000;
@@ -171,6 +172,15 @@ impl CommandResult {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LiteralEdit {
+    pub old_string: String,
+    pub new_string: String,
+    #[serde(default, deserialize_with = "or_default")]
+    pub replace_all: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ToolCall {
     ParseAgentDefinition {
@@ -236,6 +246,12 @@ pub enum ToolCall {
         expected_digest: String,
         old: String,
         new: String,
+    },
+    #[serde(rename = "multiedit")]
+    MultiEdit {
+        file_path: String,
+        expected_digest: String,
+        edits: Vec<LiteralEdit>,
     },
     Command {
         program: String,
@@ -398,7 +414,9 @@ impl ToolCall {
 
     pub(crate) fn argument_limit(&self) -> usize {
         match self {
-            Self::Write { .. } | Self::Edit { .. } => MAX_TOOL_ARGUMENT_BYTES,
+            Self::Write { .. } | Self::Edit { .. } | Self::MultiEdit { .. } => {
+                MAX_TOOL_ARGUMENT_BYTES
+            }
             _ => MAX_ORDINARY_TOOL_ARGUMENT_BYTES,
         }
     }
@@ -915,7 +933,10 @@ impl Attestation {
                 matches!(intent.target, EffectTarget::WorkerView { revision, .. } if revision == mutation.previous_revision && revision.checked_add(1) == Some(mutation.next_revision) && mutation.next_revision <= 16)
                     && matches!(
                         intent.call,
-                        ToolCall::Mkdir { .. } | ToolCall::Write { .. } | ToolCall::Edit { .. }
+                        ToolCall::Mkdir { .. }
+                            | ToolCall::Write { .. }
+                            | ToolCall::Edit { .. }
+                            | ToolCall::MultiEdit { .. }
                     )
                     && receipt.valid_for(intent)
                     && mutation.data.assignment_id == intent.agent_run_id
@@ -1464,7 +1485,7 @@ pub(crate) fn model_observation(observation: &ToolObservation) -> Value {
             .unwrap_or_else(|_| json!(observation.output));
     if matches!(
         observation.intent.call,
-        ToolCall::Write { .. } | ToolCall::Edit { .. }
+        ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. }
     ) && let Some(o) = output.as_object_mut()
     {
         o.remove("before");
@@ -1577,6 +1598,15 @@ mod model_call_tests {
                 expected_digest: hex_digest(b"old"),
                 old: "old".into(),
                 new: "new".into(),
+            },
+            ToolCall::MultiEdit {
+                file_path: "file".into(),
+                expected_digest: hex_digest(b"old"),
+                edits: vec![LiteralEdit {
+                    old_string: "old".into(),
+                    new_string: "new".into(),
+                    replace_all: false,
+                }],
             },
         ] {
             let intent = EffectIntent {
