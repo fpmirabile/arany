@@ -60,6 +60,7 @@ impl StateRoot {
     ) -> Result<Option<ArchivedHistory>, StoreError> {
         if self.archive_plan()?.is_none() && !migrate::pending(self)? {
             let _shared = self.lock_history(false)?;
+            let _checkpoints = checkpoints::lock(self)?;
             match check_history(self) {
                 Err(StoreError::InvalidHistory) => {}
                 result => return result.map(|()| None),
@@ -79,7 +80,7 @@ impl StateRoot {
                     Err(StoreError::InvalidHistory) => {}
                     result => return result.map(|()| None),
                 }
-                if migrate::upgrade(self, registry)? {
+                if !migrate::checkpoint_below_floor(self)? && migrate::upgrade(self, registry)? {
                     return Ok(None);
                 }
                 self.write_archive_plan()?
@@ -197,9 +198,18 @@ fn check_history(root: &StateRoot) -> Result<(), StoreError> {
     // The writable open still finishes SQLite recovery and enforces the journal pragmas.
     match migrate::inspect_history(root) {
         migrate::Inspection::Unsupported => Err(StoreError::InvalidHistory),
-        migrate::Inspection::Current => open_connection(root, false).map(drop),
+        migrate::Inspection::Current => {
+            if migrate::checkpoint_below_floor(root)? {
+                return Err(StoreError::InvalidHistory);
+            }
+            open_connection(root, false).map(drop)
+        }
         migrate::Inspection::Inconclusive => {
-            super::super::replay::validate_history(&open_connection(root, false)?)
+            super::super::replay::validate_history(&open_connection(root, false)?)?;
+            if migrate::checkpoint_below_floor(root)? {
+                return Err(StoreError::InvalidHistory);
+            }
+            Ok(())
         }
     }
 }
