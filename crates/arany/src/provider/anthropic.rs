@@ -562,9 +562,12 @@ mod tests {
             );
         }
 
-        let good_compaction = synthetic_reply(r#"{"summary":"safe"}"#);
+        let good_compaction = synthetic_reply(r#"safe"#);
         assert!(provider.decode_compaction(&good_compaction, 1024).is_ok());
-        let reflected_compaction = synthetic_reply(r#"{"summary":"\u0073ynthetic-native-secret"}"#);
+        let reflected_compaction = String::from_utf8(synthetic_reply(secret))
+            .unwrap()
+            .replace(secret, r#"\u0073ynthetic-native-secret"#)
+            .into_bytes();
         assert!(!raw_reflects_secret(&reflected_compaction, secret));
         assert!(matches!(
             provider.decode_compaction(&reflected_compaction, 1024),

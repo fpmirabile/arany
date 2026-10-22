@@ -209,7 +209,7 @@ fn product_exec_exports_only_safe_committed_trace_facts() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 => serde_json::json!("synthetic summary SUMMARY_SECRET_CANARY"),
                 4 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"child one","profile":null},{"objective":"child two","profile":null}]}})
                 }

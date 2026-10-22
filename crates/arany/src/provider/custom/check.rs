@@ -6,13 +6,12 @@ use crate::provider::{
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::{StateRoot, Store};
-use aws_lc_rs::rand::{SecureRandom, SystemRandom};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v34";
+const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-v35";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -195,18 +194,10 @@ async fn probe_compaction(
     request: &CompactionRequest,
     effort: Option<crate::provider::Effort>,
 ) -> Result<String, CustomProfileError> {
-    let mut random = [0; 16];
-    SystemRandom::new()
-        .fill(&mut random)
-        .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    let nonce = uuid::Uuid::from_bytes(random).simple().to_string();
     let response = transport
-        .probe_compaction(request, effort, &nonce)
+        .compact(request, effort)
         .await
         .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    if response.summary != nonce {
-        return Err(CustomProfileError::ConformanceFailed);
-    }
     response
         .response_id
         .ok_or(CustomProfileError::ConformanceFailed)
@@ -272,7 +263,12 @@ mod tests {
         auth: super::super::MessagesAuth,
     }
 
-    const MESSAGES_CASES: [MessagesCase; 4] = [
+    const MESSAGES_CASES: [MessagesCase; 5] = [
+        MessagesCase {
+            base_path: "/anthropic",
+            model: "deepseek-flash",
+            auth: super::super::MessagesAuth::ApiKey,
+        },
         MessagesCase {
             base_path: "/anthropic",
             model: "kimi-k3",
@@ -305,7 +301,7 @@ mod tests {
         Valid,
         ValidEfforts,
         CompactionRejected,
-        IgnoredFormat(usize),
+        EmptySummary(usize),
         EffortCompactionRejected,
         ZeroUsage,
         AggregateJsonNodes,
@@ -330,7 +326,7 @@ mod tests {
         reply: ProbeReply,
         messages: Option<MessagesCase>,
     ) -> TcpListener {
-        let count = if let ProbeReply::IgnoredFormat(index) = reply {
+        let count = if let ProbeReply::EmptySummary(index) = reply {
             index + 1
         } else if matches!(
             reply,
@@ -342,7 +338,6 @@ mod tests {
         } else {
             1
         };
-        let mut seen_nonces = std::collections::HashSet::new();
         for index in 0..count {
             let (mut stream, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
                 .await
@@ -400,76 +395,27 @@ mod tests {
                 "application/json"
             };
             let compaction = if messages.is_some() {
-                body["output_config"]["format"]["type"] == "json_schema"
+                body["system"][0]["text"] == crate::provider::prompts::COMPACTION_INSTRUCTIONS
             } else {
-                body["text"]["format"]["name"] == "arany_compaction"
+                body["instructions"] == crate::provider::prompts::COMPACTION_INSTRUCTIONS
             };
-            let schema = if messages.is_some() {
-                &body["output_config"]["format"]["schema"]
-            } else {
-                &body["text"]["format"]["schema"]
-            };
-            let nonce = schema
-                .pointer("/properties/summary/enum/0")
-                .and_then(serde_json::Value::as_str);
-            if let Some(nonce) = nonce {
-                assert!(
-                    compaction
-                        && nonce.len() == 32
-                        && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
-                );
-                assert!(
-                    seen_nonces.insert(nonce.to_owned()),
-                    "every compaction probe needs a fresh challenge"
-                );
-                let mut without_schema = body.clone();
-                if messages.is_some() {
-                    without_schema["output_config"]["format"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("schema");
-                } else {
-                    without_schema["text"]["format"]
-                        .as_object_mut()
-                        .unwrap()
-                        .remove("schema");
+            if compaction {
+                for field in ["text", "tools", "tool_choice", "parallel_tool_calls"] {
+                    assert!(
+                        body.get(field).is_none(),
+                        "unexpected compaction field {field}"
+                    );
                 }
-                assert!(
-                    !without_schema.to_string().contains(nonce),
-                    "the challenge occurs only in the schema, never in a prompt"
-                );
+                assert!(body["output_config"].get("format").is_none());
             }
             assert_eq!(body["model"], messages.map_or("model-1", |case| case.model));
             if messages.is_some() {
                 assert!(body.get("thinking").is_none());
-                if compaction {
-                    let mut expected = crate::provider::summary_schema();
-                    if let Some(nonce) = nonce {
-                        expected["properties"]["summary"]["enum"] = json!([nonce]);
-                    }
-                    assert_eq!(schema, &expected);
-                } else {
-                    assert_eq!(body.get("output_config").is_some(), index >= 3);
-                }
+                assert_eq!(body.get("output_config").is_some(), index >= 3);
             } else {
                 assert_eq!(body["store"], false);
                 assert_eq!(body["truncation"], "disabled");
-                assert_eq!(body.get("text").is_some(), compaction);
-            }
-            if let Some(delegate) =
-                body["text"]["format"]["schema"]["properties"]["outcome"]["anyOf"]
-                    .as_array()
-                    .and_then(|branches| {
-                        branches
-                            .iter()
-                            .find(|branch| branch["properties"]["type"]["enum"][0] == "delegate")
-                    })
-            {
-                let assignment = &delegate["properties"]["children"]["items"];
-                assert_eq!(assignment["type"], "object");
-                assert_eq!(assignment["required"], json!(["objective", "profile"]));
-                assert_eq!(assignment["additionalProperties"], false);
-                assert_eq!(assignment["properties"]["profile"]["enum"], json!([null]));
+                assert!(body.get("text").is_none());
             }
             assert_eq!(
                 body.get(if messages.is_some() {
@@ -540,7 +486,7 @@ mod tests {
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
                 | ProbeReply::CompactionRejected
-                | ProbeReply::IgnoredFormat(_)
+                | ProbeReply::EmptySummary(_)
                 | ProbeReply::EffortCompactionRejected
                 | ProbeReply::ZeroUsage
                 | ProbeReply::AggregateJsonNodes
@@ -553,7 +499,7 @@ mod tests {
                 | ProbeReply::InputAtLimit
                 | ProbeReply::InputAboveLimit => {
                     let text = match index {
-                        _ if compaction => json!(r#"{"summary":"plausible summary"}"#),
+                        _ if compaction => json!(r#"plausible summary"#),
                         0 if matches!(reply, ProbeReply::EscapedCredential) => {
                             json!("test-key")
                         }
@@ -569,12 +515,12 @@ mod tests {
                         1 => {
                             json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                         }
-                        _ => json!(r#"{"summary":"synthetic summary"}"#),
+                        _ => json!(r#"synthetic summary"#),
                     };
-                    let text = if matches!(reply, ProbeReply::IgnoredFormat(at) if at == index) {
-                        text
+                    let text = if matches!(reply, ProbeReply::EmptySummary(at) if at == index) {
+                        json!(" \n\t")
                     } else {
-                        crate::provider::render::semantic::compaction_probe_reply(&body, text)
+                        text
                     };
                     let model = if matches!(reply, ProbeReply::WrongModel) {
                         "drifted-model"
@@ -759,7 +705,7 @@ mod tests {
                 reply,
                 ProbeReply::ValidEfforts
                     | ProbeReply::EffortCompactionRejected
-                    | ProbeReply::IgnoredFormat(4 | 6)
+                    | ProbeReply::EmptySummary(4 | 6)
             ) {
                 vec![crate::provider::Effort::Low, crate::provider::Effort::High]
             } else {
@@ -1000,7 +946,7 @@ mod tests {
         let mut legacy = Sha256::new();
         for field in [
             env!("CARGO_PKG_VERSION"),
-            "custom-protocol-schema-challenge-conformance-effort-stream-v33",
+            "custom-protocol-schema-challenge-conformance-effort-stream-v34",
             profile.name(),
             profile.endpoint(),
             profile.model(),
@@ -1136,12 +1082,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn custom_compaction_requires_schema_only_challenges_at_every_effort() {
+    async fn custom_compaction_requires_valid_text_at_every_effort() {
         for messages in [None].into_iter().chain(MESSAGES_CASES.map(Some)) {
             for reply in [
-                ProbeReply::IgnoredFormat(2),
-                ProbeReply::IgnoredFormat(4),
-                ProbeReply::IgnoredFormat(6),
+                ProbeReply::EmptySummary(2),
+                ProbeReply::EmptySummary(4),
+                ProbeReply::EmptySummary(6),
                 ProbeReply::EffortCompactionRejected,
             ] {
                 assert!(matches!(
