@@ -162,7 +162,10 @@ impl ToolArgumentShape {
             ToolCall::Read { path, .. }
             | ToolCall::Mkdir { path }
             | ToolCall::Write { path, .. }
-            | ToolCall::Edit { path, .. } => Some((path, false)),
+            | ToolCall::Edit { path, .. }
+            | ToolCall::MultiEdit {
+                file_path: path, ..
+            } => Some((path, false)),
             ToolCall::Command { cwd, .. } => Some((cwd, true)),
             _ => None,
         };
@@ -172,6 +175,9 @@ impl ToolArgumentShape {
         }
         let digest = match call {
             ToolCall::Edit {
+                expected_digest, ..
+            }
+            | ToolCall::MultiEdit {
                 expected_digest, ..
             } => Some(expected_digest),
             ToolCall::Write {
