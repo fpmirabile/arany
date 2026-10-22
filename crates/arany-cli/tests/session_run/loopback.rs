@@ -146,6 +146,7 @@ pub(super) fn send_response_for(
 pub(super) fn send_messages_response_for(
     stream: &mut TcpStream,
     index: usize,
+    model: &str,
     text: serde_json::Value,
     streaming: bool,
 ) {
@@ -153,7 +154,7 @@ pub(super) fn send_messages_response_for(
         .with_borrow_mut(|pending| pending.take())
         .unwrap_or(text);
     let response = serde_json::json!({
-        "id": format!("msg_{}", index + 1), "type":"message", "role":"assistant", "model":"model-1",
+        "id": format!("msg_{}", index + 1), "type":"message", "role":"assistant", "model":model,
         "stop_reason": if text.is_object() { "tool_use" } else { "end_turn" },
         "content": arany::semantic::messages_content(&text), "usage":{"input_tokens":20,"output_tokens":10}
     });

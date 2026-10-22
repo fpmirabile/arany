@@ -44,7 +44,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
-| [Follow AGENTS.md instructions like Codex](./agents-md-instructions/README.md) | One slice after root and nested framing: user-global `STATE_DIR/AGENTS.md` |
 | [Anthropic-compatible custom routes](./anthropic-compatible-routes/README.md) | Remaining: Kimi API/Code and GLM Standard API recipes; S1 uses explicitly unavailable DeepSeek candidates, whose strict-compaction admission remains deferred |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Automatic state migrations](./state-migrations/README.md) | Four slices: automatic archive at startup, journal migration framework and guard, checkpoint store migration, JSON record migration |

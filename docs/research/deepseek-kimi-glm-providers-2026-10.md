@@ -74,9 +74,21 @@ thinking/text/tool-use blocks and `output_config` for effort and structured
 output. `input_tokens` excludes cache reads and cache writes; total input adds
 `cache_read_input_tokens` and `cache_creation_input_tokens`. Its example also
 includes `output_tokens_details.thinking_tokens`. Preserve these distinctions
-when testing usage accounting. The exact strict JSON-schema request and
-streamed completion behavior remain **unverified**.
-([Messages API](https://platform.kimi.ai/docs/api/messages))
+when testing usage accounting; optional thinking-token details must not be
+added to the output total again. The same reference and OpenAPI document
+`cache_creation` with required `ephemeral_5m_input_tokens` and
+`ephemeral_1h_input_tokens`. Anthropic documents their sum as equal to the flat
+creation total; Arany's [usage contract](../specs/provider.md#usage-provenance-and-reliability)
+owns normalization and disagreement rejection.
+([Messages API](https://platform.kimi.ai/docs/api/messages),
+[Anthropic cache usage](https://platform.claude.com/docs/en/build-with-claude/prompt-caching#mixing-different-ttls))
+
+Checked 2026-10-21: the official OpenAPI `MessagesRequest.output_config.format`
+accepts `{ "type": "json_schema", "schema": … }` and promises schema-constrained
+JSON. No additional `strict` flag is documented there. This matches Arany's
+existing compaction representation and makes the platform recipe eligible,
+conditional on unchanged exact conformance including the schema-only nonce.
+([Official OpenAPI definition](https://platform.kimi.ai/docs/openapi.json))
 
 The platform overview also names `kimi-k2.7-code-highspeed` and `kimi-k2.6`,
 but the reviewed Messages reference lists only `kimi-k3`. Messages support for
@@ -109,11 +121,13 @@ explains that `k3[1m]` is Claude Code syntax: other API clients use `k3`.
 Keep this client-specific suffix out of Arany model IDs.
 ([Code integration](https://www.kimi.com/code/docs/en/third-party-tools/claude-code))
 
-**Unverified for Code:** exact Messages usage fields, strict compaction schema
-support, thinking replay details, rate-limit headers and `Retry-After`.
-Platform Messages documentation does not prove Code endpoint behavior. Test
-the two Kimi services separately, including missing optional usage fields and
-required usage rejection; do not invent token counts.
+**S2 disposition: Code is UNAVAILABLE pending endpoint-specific strict-compaction
+evidence.** The reviewed Code documents establish console keys and Messages
+compatibility, but do not establish strict-schema enforcement. This is
+uncertainty, not proof of non-support. Platform evidence cannot be transferred
+to Code. Synthetic conformance proves adapter mechanics only; it does not
+promote the candidate. [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) owns the
+remaining live/platform checks.
 
 ### GLM: Standard API Key; subscription excluded
 
@@ -169,23 +183,17 @@ vendor recipes. Neither a native vendor enum nor a second wire adapter is
 justified by this investigation. Private first-party login mechanisms are not
 an alternative third-party authorization grant.
 
-## Evidence still needed
+## Admission implications
 
-- Recheck the exact vendor model, key class, terms and base URL before each
-  implementation slice. Authentication-header acceptance must match the
-  documented endpoint; DeepSeek's documented `x-api-key` support does not by
-  itself prove Bearer acceptance.
-- Use synthetic Messages fixtures for thinking/reasoning, streamed tool
-  arguments and completion, positive labelled usage, missing optional usage,
-  malformed/missing required usage, strict compaction and effort behavior.
-  Optional-field handling must not make required usage or strict schemas
-  optional. Treat absent `Retry-After` as a bounded error-policy case.
-- Keep TLS and URL admission, no credential forwarding or cross-route leakage,
-  cancellation, aggregate stream/output bounds and honest client identity as
-  implementation requirements; vendor compatibility cannot relax them.
-- The owner must run live `provider check` using their own keys for each exact
-  proposed route, including both Kimi services and the GLM Standard key.
-  A failed strict probe leaves that profile unadmitted. Keep credentials out
-  of the repository, fixtures, research, logs and PR artifacts.
+The [Provider contract](../specs/provider.md#custom-destinations-and-routing)
+owns exact endpoint/model checks, strict compaction, usage, cancellation, bounds,
+key isolation and truthful client identity. The [setup recipes](../setup.md#anthropic-compatible-custom-routes)
+follow explicit Messages base/key selection, matching Kimi's
+[Claude Code](https://www.kimi.com/code/docs/en/third-party-tools/claude-code) and
+[OpenCode](https://www.kimi.com/code/docs/en/third-party-tools/opencode) integration
+recipes. Another client's successful chat cannot establish Arany's durable
+provenance or pre-disclosure strict-compaction admission.
 
-No live success, platform parity or subscription billing result is claimed.
+Unresolved vendor, billing and native evidence and the owner-run procedures live
+only in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first). No live success,
+platform parity or subscription billing result is claimed.

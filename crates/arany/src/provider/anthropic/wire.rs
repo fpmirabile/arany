@@ -629,8 +629,16 @@ struct WireContent {
 struct WireUsage {
     input_tokens: u32,
     cache_creation_input_tokens: Option<u32>,
+    cache_creation: Option<WireCacheCreation>,
     cache_read_input_tokens: Option<u32>,
     output_tokens: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WireCacheCreation {
+    ephemeral_5m_input_tokens: u32,
+    ephemeral_1h_input_tokens: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -697,11 +705,31 @@ impl WireContent {
 
 impl WireResponse {
     fn admit(self, model: &str, output_cap: u32) -> Result<Admitted, ProviderError> {
+        let nested_creation = self
+            .usage
+            .cache_creation
+            .map(|creation| {
+                creation
+                    .ephemeral_5m_input_tokens
+                    .checked_add(creation.ephemeral_1h_input_tokens)
+                    .ok_or(ProviderError::InvalidOutcome)
+            })
+            .transpose()?;
+        if self
+            .usage
+            .cache_creation_input_tokens
+            .zip(nested_creation)
+            .is_some_and(|(flat, nested)| flat != nested)
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let cache_creation_input_tokens =
+            self.usage.cache_creation_input_tokens.or(nested_creation);
         // Messages reports cache counts beside `input_tokens`; the record total keeps the billed sum.
         let total_input_tokens = self
             .usage
             .input_tokens
-            .checked_add(self.usage.cache_creation_input_tokens.unwrap_or(0))
+            .checked_add(cache_creation_input_tokens.unwrap_or(0))
             .and_then(|total| total.checked_add(self.usage.cache_read_input_tokens.unwrap_or(0)))
             .ok_or(ProviderError::InvalidOutcome)?;
         let stop = match self.stop_reason.as_str() {
@@ -730,7 +758,7 @@ impl WireResponse {
                 input_tokens: Some(total_input_tokens),
                 output_tokens: Some(self.usage.output_tokens),
                 cache_read_input_tokens: self.usage.cache_read_input_tokens,
-                cache_creation_input_tokens: self.usage.cache_creation_input_tokens,
+                cache_creation_input_tokens,
             },
             stop,
             content: self.content,

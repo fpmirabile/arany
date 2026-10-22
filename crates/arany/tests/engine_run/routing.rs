@@ -1447,7 +1447,7 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
         Vec<(RetryCause, u32)>,
         bool,
     );
-    let cases: [Case; 5] = [
+    let cases: [Case; 8] = [
         (
             "429 honoring Retry-After, then success",
             vec![ProviderError::RateLimited(Some(Duration::from_secs(5)))],
@@ -1461,6 +1461,33 @@ async fn same_route_retries_are_journaled_charged_and_bounded_by_deadline_and_bu
             false,
             vec![(RetryCause::RateLimited, 2000)],
             true,
+        ),
+        (
+            "custom Messages 429 exhausts three retries without Retry-After",
+            (0..=MAX_PROVIDER_RETRIES)
+                .map(|_| ProviderError::RateLimited(None))
+                .collect(),
+            false,
+            vec![
+                (RetryCause::RateLimited, 2000),
+                (RetryCause::RateLimited, 4000),
+                (RetryCause::RateLimited, 8000),
+            ],
+            false,
+        ),
+        (
+            "custom Messages quota exhaustion is terminal",
+            vec![ProviderError::QuotaExceeded],
+            false,
+            vec![],
+            false,
+        ),
+        (
+            "custom Messages 401 is terminal",
+            vec![ProviderError::RemoteHttp(401)],
+            false,
+            vec![],
+            false,
         ),
         (
             "hostile Retry-After past the action deadline",

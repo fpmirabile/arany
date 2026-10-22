@@ -168,7 +168,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("HookStarted", 5),
     ("HookFinished", 10),
     ("ToolFinished", 21),
-    ("RunStarted", 19),
+    ("RunStarted", 20),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
@@ -1504,15 +1504,39 @@ pub(crate) fn run_started_v18_to_v19(value: serde_json::Value) -> Option<serde_j
     Some(serde_json::Value::Object(payload))
 }
 
-// Version 18's hashed text: the current text with the sources written back as one digest.
+// Version 19 had no user-instruction field, so no global file was loaded.
+pub(crate) fn run_started_v19_to_v20(value: serde_json::Value) -> Option<serde_json::Value> {
+    let serde_json::Value::Object(mut payload) = value else {
+        return None;
+    };
+    let serde_json::Value::Object(config) = payload.get_mut("config")? else {
+        return None;
+    };
+    if config.contains_key("user_instruction_digest") {
+        return None;
+    }
+    config.insert("user_instruction_digest".into(), serde_json::Value::Null);
+    Some(serde_json::Value::Object(payload))
+}
+
+const USER_DIGEST_FIELD: &str = r#""user_instruction_digest":null,"#;
+
+// Version 19's hashed text: the current text without the null user digest.
+pub(crate) fn run_started_v19_payload(payload: &str) -> Option<String> {
+    let value = run_started_v19_to_v20(serde_json::from_str(payload).ok()?)?;
+    let text = serialize(&parse::<RunStartedPayload>(&value.to_string()).ok()?).ok()?;
+    (text.matches(USER_DIGEST_FIELD).count() == 1).then(|| text.replacen(USER_DIGEST_FIELD, "", 1))
+}
+
+// Version 18's hashed text: version 19's with the sources written back as one digest.
 pub(crate) fn run_started_v18_payload(payload: &str) -> Option<String> {
     let value = run_started_v18_to_v19(serde_json::from_str(payload).ok()?)?;
-    let typed = parse::<RunStartedPayload>(&value.to_string()).ok()?;
-    let text = serialize(&typed).ok()?;
-    let sources = &typed.config.instruction_sources;
+    let sources: Vec<InstructionSource> =
+        serde_json::from_value(value["config"]["instruction_sources"].clone()).ok()?;
+    let text = run_started_v19_payload(&value.to_string())?;
     let current = format!(
         r#""instruction_sources":{},"launch_directory":"""#,
-        serialize(sources).ok()?
+        serialize(&sources).ok()?
     );
     let legacy = format!(
         r#""instruction_digest":{}"#,
