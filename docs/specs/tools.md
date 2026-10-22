@@ -451,6 +451,10 @@ unexpected multiple-link files, symlinks, special objects, foreign owners and
 unowned mount crossings are excluded and make coverage partial. Never follow a
 linked target. Linux uses `openat2` with no-cross-mount resolution; macOS uses
 no-follow handles and device checks. Unsupported enforcement fails closed.
+Linux `O_PATH` can admit a private mode-000 record for metadata inspection;
+macOS `O_EVTONLY` may still require read authorization. A denied metadata open
+excludes that record and makes its category partial, without reading content or
+changing permissions.
 
 Build-cache inventory reuses the owner's closed record-name classification. It
 counts committed/previous archives, candidate/staging files, lock files and

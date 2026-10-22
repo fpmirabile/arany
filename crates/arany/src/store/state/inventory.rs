@@ -574,6 +574,7 @@ mod tests {
             .open(&sparse_path)
             .expect("sparse fixture");
         sparse.set_len(16 * 1024 * 1024).expect("sparse extent");
+        #[cfg(target_os = "linux")]
         std::fs::set_permissions(&sparse_path, std::fs::Permissions::from_mode(0o000))
             .expect("no payload read permission");
         let cache = state.join("build-cache");
@@ -644,6 +645,38 @@ mod tests {
                 .sum::<u64>();
         assert_eq!(report.subtotal.allocated_bytes, expected_allocated);
         assert_eq!(std::fs::read_dir(&cache).expect("cache records").count(), 1);
+        #[cfg(target_os = "macos")]
+        {
+            std::fs::set_permissions(&sparse_path, std::fs::Permissions::from_mode(0o000))
+                .expect("unreadable macOS record");
+            let report = collect(
+                &workspace,
+                &state,
+                &state,
+                &account,
+                &cancelled,
+                MAX_ENTRIES,
+                DEADLINE,
+            )
+            .expect("unavailable metadata report");
+            let selected = report
+                .categories
+                .iter()
+                .find(|row| row.name == "Selected StateRoot")
+                .expect("selected category");
+            assert_eq!(selected.status, StorageStatus::Partial);
+            assert!(selected.reason.is_some());
+            assert_eq!(report.subtotal.files, 3);
+            let retained = sparse.metadata().expect("retained unreadable record");
+            assert_eq!(retained.len(), sparse_metadata.len());
+            assert_eq!(retained.permissions().mode() & 0o777, 0);
+            assert_eq!(
+                std::fs::read_dir(&cache)
+                    .expect("retained cache records")
+                    .count(),
+                1
+            );
+        }
     }
 
     #[test]
