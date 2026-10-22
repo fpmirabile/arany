@@ -1797,8 +1797,14 @@ pub(crate) fn session_host_protocol_fixture() -> Fixture {
     f.events.truncate(f.events.len() - 2);
     let epoch = uuid::Uuid::now_v7();
     for event in &mut f.events {
-        if let Event::RunStarted { config, .. } = event {
-            config.tool_policy.as_mut().unwrap().host_epoch = Some(epoch);
+        match event {
+            Event::RunStarted { config, .. } => {
+                config.tool_policy.as_mut().unwrap().host_epoch = Some(epoch);
+            }
+            Event::GoalPlanContractRecorded { contract, .. } => {
+                contract.commands = vec!["sh".into()];
+            }
+            _ => {}
         }
     }
     let mut intent = f.intent(
