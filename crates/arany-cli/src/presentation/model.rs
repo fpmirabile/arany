@@ -964,7 +964,7 @@ mod tests {
         for (cause, expected) in [
             (
                 arany::ProposalRefusalCause::InvalidPath,
-                "Arany refused a noncanonical Workspace-relative path. The proposed action did not run.",
+                "Arany refused an invalid or protected Workspace path. The proposed action did not run.",
             ),
             (
                 arany::ProposalRefusalCause::InvalidArguments,

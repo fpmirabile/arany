@@ -1215,6 +1215,7 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
                     ..
                 }
             )));
+            assert_eq!(view.runs[0].agents[0].provider_calls.len(), 3);
             assert!(view.runs[0].agents[0].provider_calls.iter().all(|call| {
                 call.disposition == ProviderCallDisposition::Rejected
                     && call.failure_reason == Some(arany::ProviderFailureReason::ProposalRefused)

@@ -456,7 +456,20 @@ impl ToolCall {
                 file_path: path, ..
             } => Some((path, false)),
             Self::Command { cwd, .. } | Self::CommandUnguarded { cwd, .. } => Some((cwd, true)),
-            _ => None,
+            Self::ParseAgentDefinition { .. }
+            | Self::ApplyChangeset { .. }
+            | Self::PrepareWorker { .. }
+            | Self::Skill { .. }
+            | Self::McpList { .. }
+            | Self::McpCall { .. }
+            | Self::GitStatus { .. }
+            | Self::GitDiff { .. }
+            | Self::GitLog { .. }
+            | Self::GitCommit { .. }
+            | Self::GitBranch { .. }
+            | Self::GitSwitch { .. }
+            | Self::GitPush { .. }
+            | Self::GhPrCreate { .. } => None,
         }
     }
 

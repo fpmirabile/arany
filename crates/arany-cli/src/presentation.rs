@@ -1340,7 +1340,7 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
     use arany::ProposalRefusalCause as Cause;
     match cause {
         Cause::InvalidPath => {
-            "Arany refused a noncanonical Workspace-relative path. The proposed action did not run."
+            "Arany refused an invalid or protected Workspace path. The proposed action did not run."
         }
         Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
