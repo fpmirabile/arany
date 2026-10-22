@@ -3910,6 +3910,15 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 .arg(format!("/usr/bin/{program}"))
                 .arg(format!("/usr/bin/{program}"));
         }
+        // The HTTP client loads system roots even for loopback HTTP; preserve bundle symlink targets.
+        if std::path::Path::new("/etc/ssl").is_dir() {
+            command.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
+        }
+        command.args([
+            "--ro-bind-try",
+            "/etc/ca-certificates",
+            "/etc/ca-certificates",
+        ]);
         command.args(["--", "/usr/bin/script"]);
         let mode = if linear {
             "--screen-reader"
