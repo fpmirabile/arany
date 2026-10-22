@@ -1287,8 +1287,10 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
         .iter()
         .position(|row| row.starts_with("Quick actions"))
         .expect("quick actions header");
-    // As in Codex, the seven-row dialog takes only its content height, right under history.
+    // The header, five actions and footer take only their content height, right under history.
     super::assert_history_above(&dialog, top, "open dialog");
+    assert!(dialog[top + 5].contains("Usage · reported tokens"));
+    assert!(dialog[top + 6].contains("1-5 or Up/Down · Enter open · Esc return"));
     assert_eq!(top + 7, 50, "no reserved rows below the dialog: {dialog:?}");
 
     let closed_at = transcript.len();

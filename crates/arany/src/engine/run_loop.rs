@@ -4,8 +4,8 @@ use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{
     AgentPhase, Answer, MAX_REPORTED_INPUT_TOKENS, PreviewText, Provider, ProviderFailureClass,
-    ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse, ResponsePreview,
-    Usage,
+    ProviderFailureReason, ProviderOutcome, ProviderRequest, ProviderResponse, RateLimitSlot,
+    RateLimits, ResponsePreview, Usage,
 };
 use crate::session::{
     AgentDisposition, AgentRunId, CollaborationPolicy, DisplayCategory, DisplayChunk, Event,
@@ -464,13 +464,15 @@ impl<'a> RunLoop<'a> {
                     break PrimaryEnd::Stopped(cause);
                 }
             }
-            let (first, active_segment) = match self.invoke_primary(root_request).await {
-                Ok(result) => result,
-                Err(EngineError::GoalBudgetExhausted) => {
-                    break PrimaryEnd::Stopped(StopCause::Budget);
-                }
-                Err(error) => return Err(error),
-            };
+            let limits = RateLimitSlot::default();
+            let (first, active_segment) =
+                match self.invoke_primary(root_request, limits.clone()).await {
+                    Ok(result) => result,
+                    Err(EngineError::GoalBudgetExhausted) => {
+                        break PrimaryEnd::Stopped(StopCause::Budget);
+                    }
+                    Err(error) => return Err(error),
+                };
             self.settle_active_segment(active_segment)?;
             let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
             let facts = RunFacts::observe(self)?;
@@ -482,6 +484,7 @@ impl<'a> RunLoop<'a> {
                 validity
                     .err()
                     .and_then(|cause| proposal_refusal(&first, cause)),
+                limits.take(),
             );
             self.append(Event::ProviderCallRecorded {
                 run_id: self.run_id,
@@ -725,13 +728,15 @@ impl<'a> RunLoop<'a> {
     fn invoke_primary<'b>(
         &'b self,
         root: &'b mut ProviderRequest,
+        limits: RateLimitSlot,
     ) -> step::BoxedStep<'b, (CallResult, ActiveSegment)> {
-        Box::pin(self.invoke_primary_inner(root))
+        Box::pin(self.invoke_primary_inner(root, limits))
     }
 
     async fn invoke_primary_inner(
         &self,
         root: &mut ProviderRequest,
+        limits: RateLimitSlot,
     ) -> Result<(CallResult, ActiveSegment), EngineError> {
         let provider = self.routing.bind(
             crate::provider::ProviderRole::Primary,
@@ -767,7 +772,13 @@ impl<'a> RunLoop<'a> {
         let Some(context) = context else {
             let result = self
                 .routing
-                .invoke(request, deadline, self.controls.cancellation.clone(), None)
+                .invoke(
+                    request,
+                    deadline,
+                    self.controls.cancellation.clone(),
+                    None,
+                    limits,
+                )
                 .await?;
             self.settle_result(&result)?;
             return Ok((result, active_segment));
@@ -790,6 +801,7 @@ impl<'a> RunLoop<'a> {
             deadline,
             self.controls.cancellation.clone(),
             Some(preview),
+            limits,
         );
         tokio::pin!(future);
         let mut observing = true;
@@ -1201,6 +1213,7 @@ pub(super) async fn invoke_bounded_with_preview(
     run_deadline: Instant,
     mut cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
+    limits: RateLimitSlot,
     #[cfg(feature = "test-support")] receipt: Option<crate::test_support::latency::Receipt<'_>>,
 ) -> (CallResult, Option<super::routing::Transient>) {
     if cancellation.is_cancelled() {
@@ -1214,12 +1227,7 @@ pub(super) async fn invoke_bounded_with_preview(
     let output_cap = request.max_output_tokens;
     let output_bound = provider.identity().limits.output_token_bound;
     let chatgpt = provider.identity().chatgpt_provenance().is_some();
-    let invocation = async {
-        match preview {
-            Some(preview) => provider.invoke_with_preview(request, preview).await,
-            None => provider.invoke(request).await,
-        }
-    };
+    let invocation = provider.invoke_observed(request, preview, limits);
     let result = tokio::select! {
         biased;
         () = cancellation.cancelled() => return (CallResult::Cancelled, None),
@@ -1325,6 +1333,7 @@ fn call_record(
     valid_response: bool,
     default_profile: Option<String>,
     refusal: Option<ProposalRefusal>,
+    rate_limits: Option<RateLimits>,
 ) -> ProviderCallRecord {
     let disposition = match result {
         CallResult::Response(ProviderResponse {
@@ -1363,7 +1372,8 @@ fn call_record(
         CallResult::Failed(_) | CallResult::Cancelled => (None, Usage::default(), None),
     };
     let refused = refusal.is_some();
-    ProviderCallRecord {
+    let mut record = ProviderCallRecord {
+        rate_limits,
         refusal,
         delegation: if disposition == ProviderCallDisposition::Delegated {
             match result {
@@ -1424,7 +1434,14 @@ fn call_record(
                 _ => None,
             }
         },
+    };
+    if record.rate_limits.is_some()
+        && !serde_json::to_vec(&record)
+            .is_ok_and(|bytes| bytes.len() <= crate::store::MAX_EVENT_BYTES)
+    {
+        record.rate_limits = None;
     }
+    record
 }
 
 // The Stop feedback directly before the next call owns that call's facts and notes.
@@ -1619,6 +1636,61 @@ mod decision_tests {
         response(ProviderOutcome::Answer(Answer {
             text: "done".into(),
         }))
+    }
+
+    #[test]
+    fn optional_plan_limits_cannot_overflow_a_delegated_call_record() {
+        let mut result = response(ProviderOutcome::Delegate(crate::provider::Delegate {
+            agent: None,
+            children: (0..8)
+                .map(|_| crate::provider::ChildAssignment {
+                    objective: "\0".repeat(1300),
+                    profile: None,
+                    editor: None,
+                })
+                .collect(),
+        }));
+        let sample = crate::test_support::routing::plan_sample(1000);
+        let make_record = |result: &CallResult, limits| {
+            call_record(AgentPhase::RootPlan, result, true, None, None, limits)
+        };
+        let small = make_record(&result, Some(sample.clone()));
+        assert_eq!(small.rate_limits, Some(sample.clone()));
+        let base_size = serde_json::to_vec(&make_record(&result, None))
+            .unwrap()
+            .len();
+        let CallResult::Response(response) = &mut result else {
+            unreachable!()
+        };
+        let ProviderOutcome::Delegate(delegation) = &mut response.outcome else {
+            unreachable!()
+        };
+        let mut remaining = crate::store::MAX_EVENT_BYTES - base_size;
+        for child in &mut delegation.children {
+            let added = remaining.min(2048 - child.objective.len());
+            child.objective.push_str(&"x".repeat(added));
+            remaining -= added;
+        }
+        assert_eq!(remaining, 0);
+        let record = make_record(&result, Some(sample.clone()));
+        assert!(record.rate_limits.is_none());
+        let mut event = Event::ProviderCallRecorded {
+            run_id: RunId::new(),
+            agent_run_id: AgentRunId::new(),
+            record,
+        };
+        assert_eq!(
+            event.payload().unwrap().len(),
+            crate::store::MAX_EVENT_BYTES
+        );
+        let Event::ProviderCallRecorded { record, .. } = &mut event else {
+            unreachable!()
+        };
+        record.rate_limits = Some(sample);
+        assert!(
+            event.payload().is_err(),
+            "replay still rejects oversized records"
+        );
     }
 
     fn tools(count: usize) -> CallResult {
@@ -1935,6 +2007,18 @@ mod call_bound_tests {
             &self.identity
         }
 
+        async fn invoke_observed(
+            &self,
+            request: ProviderRequest,
+            _preview: Option<ResponsePreview>,
+            limits: RateLimitSlot,
+        ) -> Result<ProviderResponse, ProviderError> {
+            if self.identity.chatgpt_provenance().is_some() {
+                limits.record(crate::test_support::routing::plan_sample(1234));
+            }
+            self.invoke(request).await
+        }
+
         async fn invoke(&self, _: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
             tokio::time::sleep(self.delay).await;
             Ok(ProviderResponse {
@@ -2009,6 +2093,7 @@ mod call_bound_tests {
                 max_output_tokens: identity.limits.max_output_tokens,
                 input: RunInput::new(PromptRole::ReadOnly, "Synthetic objective".into()),
             };
+            let limits = RateLimitSlot::default();
             let started = Instant::now();
             let (result, transient) = invoke_bounded_with_preview(
                 &provider,
@@ -2016,10 +2101,17 @@ mod call_bound_tests {
                 started + Duration::from_secs(1200),
                 RunCancellation::new(),
                 None,
+                limits.clone(),
                 #[cfg(feature = "test-support")]
                 None,
             )
             .await;
+            assert_eq!(
+                limits.take(),
+                identity
+                    .chatgpt_provenance()
+                    .map(|_| crate::test_support::routing::plan_sample(1234))
+            );
             // A ChatGPT ceiling cut is a stream cut; the router decides whether a retry still fits.
             assert_eq!(
                 transient.map(|transient| transient.cause),

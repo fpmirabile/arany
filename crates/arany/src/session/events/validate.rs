@@ -229,7 +229,11 @@ impl Event {
                 }
             }
             Self::ProviderFallbackUsed { fallback, .. } => {
-                if fallback.from.valid()
+                if fallback
+                    .rate_limits
+                    .as_ref()
+                    .is_none_or(|limits| limits.valid())
+                    && fallback.from.valid()
                     && fallback.to.valid()
                     && fallback.from != fallback.to
                     && fallback.failure == ProviderCallDisposition::Unavailable
@@ -242,7 +246,11 @@ impl Event {
             Self::ProviderRetryScheduled { retry, .. } => {
                 use crate::provider::{MAX_PROVIDER_RETRIES, MAX_PROVIDER_RETRY_DELAY_MS};
                 let backoff = crate::provider::ProviderRetry::backoff(retry.attempt).as_millis();
-                if (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
+                if retry
+                    .rate_limits
+                    .as_ref()
+                    .is_none_or(|limits| limits.valid())
+                    && (1..=MAX_PROVIDER_RETRIES).contains(&retry.attempt)
                     && (backoff..=u128::from(MAX_PROVIDER_RETRY_DELAY_MS))
                         .contains(&u128::from(retry.delay_ms))
                 {

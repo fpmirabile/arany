@@ -21,7 +21,7 @@ mod run;
 mod session;
 mod tool;
 mod usage;
-pub use usage::{TokenCount, UsageGroup, UsageView};
+pub use usage::{PlanUsage, TokenCount, UsageGroup, UsageView};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunStatus {

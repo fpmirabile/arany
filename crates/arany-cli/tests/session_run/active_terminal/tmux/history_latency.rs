@@ -270,6 +270,7 @@ async fn seed_history(state: &std::path::Path, workspace: &std::path::Path) -> (
                     run_id,
                     agent_run_id,
                     record: ProviderCallRecord {
+                        rate_limits: None,
                         delegation: None,
                         phase: AgentPhase::RootPlan,
                         disposition: ProviderCallDisposition::Finished,

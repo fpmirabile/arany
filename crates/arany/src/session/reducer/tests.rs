@@ -218,6 +218,7 @@ mod goal_replay_tests {
         tokens: Option<u32>,
     ) -> ProviderCallRecord {
         ProviderCallRecord {
+            rate_limits: None,
             delegation: (disposition == ProviderCallDisposition::Delegated).then(|| {
                 vec![crate::session::worker::ChildAssignment::Researcher {
                     objective: "Check the child result".into(),
@@ -689,6 +690,7 @@ mod goal_replay_tests {
             compacted.push(Event::ContextCompacted {
                 active_ms: Some(0),
                 record: crate::session::events::CompactionRecord {
+                    rate_limits: None,
                     covered_run_id: run,
                     covered_sequence: paused.runs[0].finished_sequence.unwrap(),
                     source_digest: crate::session::lineage::prefix_digest(
@@ -862,6 +864,7 @@ mod goal_replay_tests {
                     run_id: run,
                     agent_run_id: child,
                     fallback: ProviderFallback {
+                        rate_limits: None,
                         role: ProviderRole::Child,
                         call_index: 0,
                         failure: ProviderCallDisposition::Unavailable,
@@ -956,6 +959,7 @@ mod goal_replay_tests {
                 run_id: run,
                 agent_run_id: actor,
                 fallback: ProviderFallback {
+                    rate_limits: None,
                     role: ProviderRole::Primary,
                     call_index: 0,
                     from: primary,
@@ -1091,6 +1095,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: actor,
             retry: ProviderRetry {
+                rate_limits: None,
                 role: ProviderRole::Primary,
                 call_index: 0,
                 attempt,
@@ -1246,6 +1251,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: child,
             fallback: ProviderFallback {
+                rate_limits: None,
                 role: ProviderRole::Review,
                 call_index: 1,
                 from: primary,
@@ -1363,6 +1369,7 @@ mod goal_replay_tests {
             run_id: run,
             agent_run_id: child,
             retry: ProviderRetry {
+                rate_limits: None,
                 role,
                 call_index: 1,
                 attempt,
@@ -1430,6 +1437,7 @@ mod goal_replay_tests {
         assert!(SessionView::replay_open(fork, &open).unwrap().is_some());
         events.push(Event::ContextCompacted {
             record: crate::session::events::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: source_run,
                 covered_sequence: 1,
                 source_digest: [0; 32],
@@ -7269,6 +7277,7 @@ mod goal_replay_tests {
             run_id: run,
             covered_tool_count: count,
             record: crate::session::events::CompactionRecord {
+                rate_limits: None,
                 covered_run_id: run,
                 covered_sequence: covered.finished_sequence.expect("observed Tool"),
                 source_digest: [0; 32],

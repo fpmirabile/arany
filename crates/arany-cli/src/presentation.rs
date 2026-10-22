@@ -2137,6 +2137,7 @@ mod tests {
             (
                 arany::AgentRunId::new(),
                 ProviderFallback {
+                    rate_limits: None,
                     role: ProviderRole::Primary,
                     call_index: 0,
                     failure: ProviderCallDisposition::Unavailable,
