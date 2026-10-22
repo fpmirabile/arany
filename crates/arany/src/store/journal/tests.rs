@@ -1544,7 +1544,7 @@ async fn check_capacity_and_refused_appends_preserve_the_committed_prefix() {
         CheckJournal::start(StateRoot::open_existing(&path).unwrap(), invalid).await,
         Err(CheckOpenError {
             source: StoreError::InvalidHistory,
-            ..
+            receipt: None,
         })
     ));
     assert_eq!(

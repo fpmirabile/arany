@@ -249,7 +249,7 @@ async fn unfinished_checks_reopen_without_effects_and_recover_only_under_the_lea
             CheckJournal::start(StateRoot::open_existing(&path).unwrap(), start_fixture()).await,
             Err(CheckOpenError {
                 source: StoreError::ProviderCheckBusy,
-                ..
+                receipt: None,
             })
         ));
         let before = journal.view().clone();

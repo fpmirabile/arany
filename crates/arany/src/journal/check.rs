@@ -385,12 +385,15 @@ impl CheckJournal {
             .map_err(|_| StoreError::Closed)
             .and_then(|result| result)
             .and_then(|view| view.ok_or(StoreError::InvalidHistory))
-            .map_err(|source| CheckOpenError {
-                source,
-                receipt: Some(CheckReceipt {
-                    id,
-                    disposition: None,
-                }),
+            .map_err(|source| {
+                let ambiguous = matches!(source, StoreError::Closed | StoreError::Sqlite(_));
+                CheckOpenError {
+                    source,
+                    receipt: ambiguous.then_some(CheckReceipt {
+                        id,
+                        disposition: None,
+                    }),
+                }
             })?;
         Ok(Self {
             store,
