@@ -1300,6 +1300,7 @@ mod tests {
                 "Command: /model <model-id> [effort|default]; Choose model; during Run: view-only\n",
                 "Command: /permissions; Folder trust and approval settings; during Run: available\n",
                 "Command: /cache clear [all]; Clear private build caches; during Run: locked\n",
+                "Command: /storage; Report owned storage metadata; during Run: locked\n",
                 "Command: /settings; Slash menu, chat view and newline shortcut; during Run: locked\n",
                 "Command: /transcript [agents [number]]; Write or toggle transcript details; agents lists this Run's agent chats; during Run: available\n",
                 "Command: /exit; Exit Session; during Run: view-only\n",
