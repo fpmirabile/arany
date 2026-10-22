@@ -2992,8 +2992,12 @@ async fn approvals_bind_exact_actions_and_review_usage_survives_closed_replay() 
             assert!(
                 arany_cli::presentation::run_feedback(&replay.runs[0])
                     .unwrap()
-                    .contains("Action denied"),
-                "{name}: a failed optional review must not hide the human denial"
+                    .contains(if decision == "drop" {
+                        "Approval channel unavailable"
+                    } else {
+                        "Action denied"
+                    }),
+                "{name}: a failed optional review must not hide the approval outcome"
             );
         }
         assert!(
