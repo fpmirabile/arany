@@ -611,7 +611,7 @@ mod tests {
             run.tools[0].observation.as_mut().unwrap().cache_update = arany::CacheUpdate::Rejected;
             assert!(
                 crate::presentation::tool_summary(&run.tools[0])
-                    .contains("0 bytes · cache not saved (limit)")
+                    .contains("0 B · cache not saved (limit)")
             );
             assert_eq!(
                 crate::presentation::render_cache_update_feedback(run),
@@ -629,7 +629,7 @@ mod tests {
             observation.cache_update = arany::CacheUpdate::Uncertain;
             assert!(
                 crate::presentation::tool_summary(&run.tools[0])
-                    .contains("0 bytes · cache outcome uncertain")
+                    .contains("0 B · cache outcome uncertain")
             );
             assert_eq!(
                 crate::presentation::render_cache_update_feedback(run),

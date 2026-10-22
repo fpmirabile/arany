@@ -83,7 +83,7 @@ pub(super) async fn open(
                         );
                     }
                 } else {
-                    notice.push_str("; prompt exceeds 8 KiB and was not copied");
+                    notice.push_str("; prompt exceeds 8.0 KB and was not copied");
                 }
                 if conversation.images_omitted {
                     notice.push_str("; images were not copied; attach them again");

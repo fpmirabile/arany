@@ -4,6 +4,7 @@ use super::{
 };
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::ProviderArg;
+use crate::presentation::{format_bytes, format_duration};
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
     InteractiveCommand, MouseMode, NewlineShortcut, PointerSettings, Submission, TerminalInput,
@@ -20,6 +21,13 @@ use std::str::FromStr;
 const CACHE_USAGE: &str = "Usage: /cache clear [all]";
 const CACHE_CLEAR_FAILED: &str = "Error: private build cache could not be cleared";
 const UI_PREFERENCES_VERSION: u8 = 5;
+const SIZE_UNITS: &[(&str, u64)] = &[
+    ("B", 1),
+    ("KB", 1024),
+    ("MB", 1024_u64.pow(2)),
+    ("GB", 1024_u64.pow(3)),
+    ("TB", 1024_u64.pow(4)),
+];
 
 pub(crate) const UI_PREFERENCES: RecordFormat = RecordFormat {
     kind: RecordKind::UiPreferences,
@@ -119,198 +127,149 @@ fn on_off(value: bool) -> &'static str {
     if value { "on" } else { "off" }
 }
 
-// Linear rows take `NUMBER VALUE`, numbered as `setting_rows` lists them.
-fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
-    let Some((number, raw)) = value.split_once(' ') else {
-        return false;
-    };
-    let raw = raw.trim();
-    let original = *preferences;
-    let limit = |raw: &str| {
-        if raw == "unlimited" {
-            Some(None)
-        } else {
-            raw.parse::<u64>().ok().map(Some)
-        }
-    };
-    let parsed = match number.parse::<usize>() {
-        Ok(1) => [CompletionLayout::Tabs, CompletionLayout::Combined]
-            .into_iter()
-            .find(|completion| completion.label() == raw)
-            .map(|completion| preferences.completion = completion),
-        Ok(2) => [TerminalMode::Fullscreen, TerminalMode::Classic]
-            .into_iter()
-            .find(|view| view.label() == raw)
-            .map(|view| preferences.view = view),
-        Ok(3) => limit(raw).and_then(|limit| {
-            preferences.goal_budget.max_provider_calls =
-                limit.map(u32::try_from).transpose().ok()?;
+struct Setting {
+    label: &'static str,
+    hint: &'static str,
+    value: fn(&Preferences) -> String,
+    apply: fn(&mut Preferences, &str) -> Option<()>,
+    cycle: fn(&mut Preferences, bool),
+    guidance: Option<&'static str>,
+}
+
+const SETTINGS: &[Setting] = &[
+    Setting {
+        label: "Slash menu",
+        hint: "tabs|combined",
+        value: |p| p.completion.label().into(),
+        apply: |p, raw| {
+            p.completion = [CompletionLayout::Tabs, CompletionLayout::Combined]
+                .into_iter()
+                .find(|value| value.label() == raw)?;
             Some(())
-        }),
-        Ok(4) => limit(raw).map(|limit| preferences.goal_budget.max_tokens = limit),
-        Ok(5) => limit(raw).map(|limit| preferences.goal_budget.max_active_ms = limit),
-        Ok(6) => raw.parse().ok().map(|limit| {
-            preferences.resources.default_command_timeout_ms = limit;
-        }),
-        Ok(7) => raw.parse().ok().map(|limit| {
-            preferences.resources.max_command_timeout_ms = limit;
-        }),
-        Ok(8) => raw.parse().ok().map(|limit| {
-            preferences.resources.build_memory_bytes = limit;
-        }),
-        Ok(9) => raw.parse().ok().map(|limit| {
-            preferences.resources.build_processes = limit;
-        }),
-        Ok(10) => raw.parse().ok().map(|limit| {
-            preferences.resources.build_project_bytes = limit;
-        }),
-        Ok(11) => raw.parse().ok().map(|limit| {
-            preferences.resources.build_cache_bytes = limit;
-        }),
-        Ok(12) => MouseMode::ALL
-            .into_iter()
-            .find(|mouse| mouse.label() == raw)
-            .map(|mouse| preferences.mouse = mouse),
-        Ok(13) => [true, false]
-            .into_iter()
-            .find(|value| on_off(*value) == raw)
-            .map(|value| preferences.copy_on_select = value),
-        Ok(14) => NewlineShortcut::ALL
-            .into_iter()
-            .find(|shortcut| shortcut.label().eq_ignore_ascii_case(raw))
-            .map(|shortcut| preferences.newline = shortcut),
-        _ => None,
-    };
-    if parsed.is_none()
-        || preferences.goal_budget.validate().is_err()
-        || !preferences.resources.valid()
-    {
-        *preferences = original;
-        return false;
-    }
-    true
-}
-
-fn setting_rows(preferences: Preferences) -> Vec<String> {
-    let show =
-        |value: Option<u64>| value.map_or_else(|| "unlimited".into(), |value| value.to_string());
-    vec![
-        format!("Slash menu: {}", preferences.completion.label()),
-        format!("Chat view: {}", preferences.view.label()),
-        format!(
-            "Goal provider calls: {}",
-            show(preferences.goal_budget.max_provider_calls.map(u64::from))
-        ),
-        format!("Goal tokens: {}", show(preferences.goal_budget.max_tokens)),
-        format!(
-            "Goal active milliseconds: {}",
-            show(preferences.goal_budget.max_active_ms)
-        ),
-        format!(
-            "Default command timeout ms: {}",
-            preferences.resources.default_command_timeout_ms
-        ),
-        format!(
-            "Maximum command timeout ms: {}",
-            preferences.resources.max_command_timeout_ms
-        ),
-        format!(
-            "Build memory bytes: {}",
-            preferences.resources.build_memory_bytes
-        ),
-        format!(
-            "Build processes/threads: {}",
-            preferences.resources.build_processes
-        ),
-        format!(
-            "Build writable project bytes: {}",
-            preferences.resources.build_project_bytes
-        ),
-        format!(
-            "Build cache bytes: {}",
-            preferences.resources.build_cache_bytes
-        ),
-        format!("Mouse: {}", preferences.mouse.label()),
-        format!("Copy on select: {}", on_off(preferences.copy_on_select)),
-        format!("Newline shortcut: {}", preferences.newline.label()),
-    ]
-}
-
-fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
-    let mut rows = setting_rows(preferences);
-    rows[0].push_str(" (tabs|combined)");
-    rows[1].push_str(" (fullscreen|classic)");
-    for row in &mut rows[2..5] {
-        row.push_str(" (number or unlimited)");
-    }
-    rows[11].push_str(" (wheel and clicks|wheel only|off)");
-    rows[12].push_str(" (on|off)");
-    rows[13].push_str(" (shift+enter|alt+enter|ctrl+enter)");
-    rows
-}
-
-fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
-    fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
-        let index = values
-            .iter()
-            .position(|value| *value == current)
-            .unwrap_or(0);
-        values[if forward {
-            (index + 1) % values.len()
-        } else {
-            (index + values.len() - 1) % values.len()
-        }]
-    }
-    match row {
-        13 => preferences.newline = step(preferences.newline, &NewlineShortcut::ALL, forward),
-        0 => preferences.completion = preferences.completion.toggled(),
-        1 => preferences.view = preferences.view.toggled(),
-        2 => {
-            preferences.goal_budget.max_provider_calls = step(
-                preferences.goal_budget.max_provider_calls,
+        },
+        cycle: |p, _| {
+            p.completion = p.completion.toggled();
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Chat view",
+        hint: "fullscreen|classic",
+        value: |p| p.view.label().into(),
+        apply: |p, raw| {
+            p.view = [TerminalMode::Fullscreen, TerminalMode::Classic]
+                .into_iter()
+                .find(|value| value.label() == raw)?;
+            Some(())
+        },
+        cycle: |p, _| {
+            p.view = p.view.toggled();
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Goal provider calls",
+        hint: "number or unlimited",
+        value: |p| {
+            show_limit(p.goal_budget.max_provider_calls.map(u64::from), |value| {
+                value.to_string()
+            })
+        },
+        apply: |p, raw| {
+            p.goal_budget.max_provider_calls = parse_limit(raw, |value| value.parse().ok())?
+                .map(u32::try_from)
+                .transpose()
+                .ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.goal_budget.max_provider_calls = step(
+                p.goal_budget.max_provider_calls,
                 &[Some(64), Some(32), Some(16), None],
                 forward,
             );
-        }
-        3 => {
-            preferences.goal_budget.max_tokens = step(
-                preferences.goal_budget.max_tokens,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Goal tokens",
+        hint: "number or unlimited",
+        value: |p| show_limit(p.goal_budget.max_tokens, |value| value.to_string()),
+        apply: |p, raw| {
+            p.goal_budget.max_tokens = parse_limit(raw, |value| value.parse().ok())?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.goal_budget.max_tokens = step(
+                p.goal_budget.max_tokens,
                 &[None, Some(1_000_000), Some(100_000)],
                 forward,
             );
-        }
-        4 => {
-            preferences.goal_budget.max_active_ms = step(
-                preferences.goal_budget.max_active_ms,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Goal active time",
+        hint: "duration or unlimited",
+        value: |p| show_limit(p.goal_budget.max_active_ms, format_duration),
+        apply: |p, raw| {
+            p.goal_budget.max_active_ms = parse_limit(raw, parse_duration)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.goal_budget.max_active_ms = step(
+                p.goal_budget.max_active_ms,
                 &[Some(arany::MAX_GOAL_ACTIVE_MS), Some(15 * 60 * 1000), None],
                 forward,
             );
-        }
-        5 => {
-            let values = [120_000, 60_000, 30_000];
-            let next = step(
-                preferences.resources.default_command_timeout_ms,
-                &values,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Default command timeout",
+        hint: "duration, e.g. 30s",
+        value: |p| format_duration(u64::from(p.resources.default_command_timeout_ms)),
+        apply: |p, raw| {
+            p.resources.default_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.default_command_timeout_ms = step(
+                p.resources.default_command_timeout_ms,
+                &[120_000, 60_000, 30_000],
                 forward,
             );
-            if next <= preferences.resources.max_command_timeout_ms {
-                preferences.resources.default_command_timeout_ms = next;
-            }
-        }
-        6 => {
-            let values = [600_000, 300_000, 120_000];
-            let next = step(
-                preferences.resources.max_command_timeout_ms,
-                &values,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Maximum command timeout",
+        hint: "duration, e.g. 5m",
+        value: |p| format_duration(u64::from(p.resources.max_command_timeout_ms)),
+        apply: |p, raw| {
+            p.resources.max_command_timeout_ms = parse_duration(raw)?.try_into().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.max_command_timeout_ms = step(
+                p.resources.max_command_timeout_ms,
+                &[600_000, 300_000, 120_000],
                 forward,
             );
-            if next >= preferences.resources.default_command_timeout_ms {
-                preferences.resources.max_command_timeout_ms = next;
-            }
-        }
-        7 => {
-            preferences.resources.build_memory_bytes = step(
-                preferences.resources.build_memory_bytes,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Build memory",
+        hint: "size, e.g. 512MB",
+        value: |p| format_setting_size(p.resources.build_memory_bytes),
+        apply: |p, raw| {
+            p.resources.build_memory_bytes = parse_size(raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.build_memory_bytes = step(
+                p.resources.build_memory_bytes,
                 &[
                     4 * 1024_u64.pow(3),
                     2 * 1024_u64.pow(3),
@@ -319,17 +278,34 @@ fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
                 ],
                 forward,
             );
-        }
-        8 => {
-            preferences.resources.build_processes = step(
-                preferences.resources.build_processes,
-                &[256, 128, 64, 32],
-                forward,
-            );
-        }
-        9 => {
-            preferences.resources.build_project_bytes = step(
-                preferences.resources.build_project_bytes,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Build processes/threads",
+        hint: "number",
+        value: |p| p.resources.build_processes.to_string(),
+        apply: |p, raw| {
+            p.resources.build_processes = raw.parse().ok()?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.build_processes =
+                step(p.resources.build_processes, &[256, 128, 64, 32], forward);
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Build writable project",
+        hint: "size, e.g. 1GB",
+        value: |p| format_setting_size(p.resources.build_project_bytes),
+        apply: |p, raw| {
+            p.resources.build_project_bytes = parse_size(raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.build_project_bytes = step(
+                p.resources.build_project_bytes,
                 &[
                     1024_u64.pow(3),
                     512 * 1024 * 1024,
@@ -338,17 +314,247 @@ fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
                 ],
                 forward,
             );
-        }
-        10 => {
-            preferences.resources.build_cache_bytes = step(
-                preferences.resources.build_cache_bytes,
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Build cache",
+        hint: "size, e.g. 8GB",
+        value: |p| format_setting_size(p.resources.build_cache_bytes),
+        apply: |p, raw| {
+            p.resources.build_cache_bytes = parse_size(raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.resources.build_cache_bytes = step(
+                p.resources.build_cache_bytes,
                 &[8 * 1024_u64.pow(3), 4 * 1024_u64.pow(3), 1024_u64.pow(3), 0],
                 forward,
             );
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Mouse",
+        hint: "wheel and clicks|wheel only|off",
+        value: |p| p.mouse.label().into(),
+        apply: |p, raw| {
+            p.mouse = MouseMode::ALL
+                .into_iter()
+                .find(|value| value.label() == raw)?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.mouse = step(p.mouse, &MouseMode::ALL, forward);
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Copy on select",
+        hint: "on|off",
+        value: |p| on_off(p.copy_on_select).into(),
+        apply: |p, raw| {
+            p.copy_on_select = [true, false]
+                .into_iter()
+                .find(|value| on_off(*value) == raw)?;
+            Some(())
+        },
+        cycle: |p, _| {
+            p.copy_on_select = !p.copy_on_select;
+        },
+        guidance: None,
+    },
+    Setting {
+        label: "Newline shortcut",
+        hint: "shift+enter|alt+enter|ctrl+enter",
+        value: |p| p.newline.label().into(),
+        apply: |p, raw| {
+            p.newline = NewlineShortcut::ALL
+                .into_iter()
+                .find(|value| value.label().eq_ignore_ascii_case(raw))?;
+            Some(())
+        },
+        cycle: |p, forward| {
+            p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
+        },
+        guidance: Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE),
+    },
+];
+
+fn show_limit(value: Option<u64>, format: impl FnOnce(u64) -> String) -> String {
+    value.map_or_else(|| "unlimited".into(), format)
+}
+
+fn parse_limit(raw: &str, parse: fn(&str) -> Option<u64>) -> Option<Option<u64>> {
+    if raw.eq_ignore_ascii_case("unlimited") {
+        Some(None)
+    } else {
+        parse(raw).map(Some)
+    }
+}
+
+fn parse_quantity<'a>(raw: &'a str, units: &[(&str, u64)]) -> Option<(u64, u64, &'a str)> {
+    let raw = raw.trim_start();
+    let end = raw.find(|c: char| !c.is_ascii_digit() && c != '.')?;
+    let (number, rest) = raw.split_at(end);
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    if whole.is_empty()
+        || !whole.bytes().all(|c| c.is_ascii_digit())
+        || !fraction.bytes().all(|c| c.is_ascii_digit())
+        || number.ends_with('.')
+    {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let end = rest
+        .find(|c: char| !c.is_ascii_alphabetic())
+        .unwrap_or(rest.len());
+    let (unit, rest) = rest.split_at(end);
+    let scale = units
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(unit))?
+        .1;
+    let denominator = 10_u128.checked_pow(fraction.len().try_into().ok()?)?;
+    let whole = whole.parse::<u64>().ok()?;
+    let fraction = if fraction.is_empty() {
+        0
+    } else {
+        fraction.parse::<u128>().ok()?
+    };
+    let mut common = u128::from(scale);
+    let mut remaining = denominator;
+    while remaining != 0 {
+        (common, remaining) = (remaining, common % remaining);
+    }
+    let scaled_fraction = fraction.checked_mul(u128::from(scale) / common)?;
+    let denominator = denominator / common;
+    if scaled_fraction % denominator != 0 {
+        return None;
+    }
+    let value = whole
+        .checked_mul(scale)?
+        .checked_add((scaled_fraction / denominator).try_into().ok()?)?;
+    Some((value, scale, rest.trim_start()))
+}
+
+fn parse_duration(mut raw: &str) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut previous_scale = u64::MAX;
+    loop {
+        let (value, scale, rest) = parse_quantity(
+            raw,
+            &[
+                ("s", 1000),
+                ("m", 60_000),
+                ("min", 60_000),
+                ("h", 3_600_000),
+            ],
+        )?;
+        if scale >= previous_scale {
+            return None;
         }
-        11 => preferences.mouse = step(preferences.mouse, &MouseMode::ALL, forward),
-        12 => preferences.copy_on_select = !preferences.copy_on_select,
-        _ => {}
+        total = total.checked_add(value)?;
+        if rest.is_empty() {
+            return Some(total);
+        }
+        previous_scale = scale;
+        raw = rest;
+    }
+}
+
+fn parse_size(raw: &str) -> Option<u64> {
+    let (value, _, rest) = parse_quantity(raw, SIZE_UNITS)?;
+    rest.is_empty().then_some(value)
+}
+
+fn format_setting_size(bytes: u64) -> String {
+    let display = format_bytes(bytes);
+    if parse_size(&display) == Some(bytes) {
+        return display;
+    }
+    let (unit, scale) = SIZE_UNITS
+        .iter()
+        .rev()
+        .find(|(_, scale)| bytes >= *scale)
+        .copied()
+        .unwrap_or(("B", 1));
+    let mut exact = (bytes / scale).to_string();
+    let mut remainder = bytes % scale;
+    if remainder != 0 {
+        exact.push('.');
+        while remainder != 0 {
+            remainder *= 10;
+            exact.push(char::from(b'0' + (remainder / scale) as u8));
+            remainder %= scale;
+        }
+    }
+    format!("{exact} {unit}")
+}
+
+// Linear rows take `NUMBER VALUE`, numbered by the same table that renders them.
+fn apply_setting(preferences: &mut Preferences, value: &str) -> bool {
+    let Some((number, raw)) = value.split_once(' ') else {
+        return false;
+    };
+    let Some(setting) = number
+        .parse::<usize>()
+        .ok()
+        .and_then(|number| number.checked_sub(1))
+        .and_then(|index| SETTINGS.get(index))
+    else {
+        return false;
+    };
+    let mut chosen = *preferences;
+    if (setting.apply)(&mut chosen, raw.trim()).is_none()
+        || chosen.goal_budget.validate().is_err()
+        || !chosen.resources.valid()
+    {
+        return false;
+    }
+    *preferences = chosen;
+    true
+}
+
+fn setting_rows(preferences: Preferences) -> Vec<String> {
+    SETTINGS
+        .iter()
+        .map(|setting| format!("{}: {}", setting.label, (setting.value)(&preferences)))
+        .collect()
+}
+
+fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
+    SETTINGS
+        .iter()
+        .map(|setting| {
+            format!(
+                "{}: {} ({})",
+                setting.label,
+                (setting.value)(&preferences),
+                setting.hint
+            )
+        })
+        .collect()
+}
+
+fn step<T: Copy + Eq>(current: T, values: &[T], forward: bool) -> T {
+    let index = values
+        .iter()
+        .position(|value| *value == current)
+        .unwrap_or(0);
+    values[if forward {
+        (index + 1) % values.len()
+    } else {
+        (index + values.len() - 1) % values.len()
+    }]
+}
+
+fn cycle_setting(preferences: &mut Preferences, row: usize, forward: bool) {
+    if let Some(setting) = SETTINGS.get(row) {
+        let mut chosen = *preferences;
+        (setting.cycle)(&mut chosen, forward);
+        if chosen.goal_budget.validate().is_ok() && chosen.resources.valid() {
+            *preferences = chosen;
+        }
     }
 }
 
@@ -485,10 +691,10 @@ async fn choose_settings(
             Some(
                 "Modified newline shortcuts apply only to visual sessions; use backslash then Enter here",
             )
-        } else if selected_row == 13 {
-            Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE)
         } else {
-            None
+            SETTINGS
+                .get(selected_row)
+                .and_then(|setting| setting.guidance)
         };
         let rows = if linear {
             linear_setting_rows(chosen)
@@ -580,7 +786,7 @@ pub(super) async fn settings(
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
-                    "Settings saved · calls {} · active ms {} · command max {} ms{}",
+                    "Settings saved · calls {} · active {} · command max {}{}",
                     chosen
                         .goal_budget
                         .max_provider_calls
@@ -588,8 +794,8 @@ pub(super) async fn settings(
                     chosen
                         .goal_budget
                         .max_active_ms
-                        .map_or_else(|| "unlimited".into(), |value| value.to_string()),
-                    chosen.resources.max_command_timeout_ms,
+                        .map_or_else(|| "unlimited".into(), format_duration),
+                    format_duration(u64::from(chosen.resources.max_command_timeout_ms)),
                     if linear {
                         " · visual sessions"
                     } else if chosen.view != terminal.mode() {
@@ -1631,18 +1837,44 @@ mod tests {
             "3 0",
             "3 4294967296",
             "4 0",
-            "5 0",
-            "6 600001",
-            "7 119999",
+            "5 0s",
+            "6 600.001s",
+            "7 119.999s",
             "6 unlimited",
-            "8 0",
+            "8 0B",
             "9 257",
-            "10 1073741825",
-            "10 1",
-            "10 1073741823",
-            "11 8589934593",
-            "11 1",
-            "11 8589934591",
+            "10 1073741825B",
+            "10 1B",
+            "10 1073741823B",
+            "11 8589934593B",
+            "11 1B",
+            "11 8589934591B",
+            "5 60000",
+            "6 30000",
+            "8 512",
+            "5 2h",
+            "5 -1s",
+            "5 +1s",
+            "5 NaNs",
+            "5 1e3s",
+            "5 .5s",
+            "5 1.s",
+            "5 1..5s",
+            "5 1ms",
+            "5 0.0001s",
+            "5 1s 1m",
+            "5 1s 1s",
+            "5 1s junk",
+            "5 18446744073709551615h",
+            "5 18446744073709551.615s 1s",
+            "6 4294967.296s",
+            "8 unlimited",
+            "8 0.1B",
+            "8 1GB 1MB",
+            "8 1XB",
+            "8 18446744073709551616B",
+            "8 18446744073709551615TB",
+            "8 0.0000000000000000000000000000000000000001KB",
         ] {
             assert!(!apply_setting(&mut preferences, value), "{value}");
             assert_eq!(
@@ -1650,28 +1882,57 @@ mod tests {
                 "invalid value changed draft: {value}"
             );
         }
-        let rows = linear_setting_rows(preferences);
-        assert_eq!(rows.len(), 14);
-        assert_eq!(rows[0], "Slash menu: tabs (tabs|combined)");
         assert_eq!(
-            rows[2],
-            "Goal provider calls: unlimited (number or unlimited)"
+            linear_setting_rows(preferences),
+            [
+                "Slash menu: tabs (tabs|combined)",
+                "Chat view: fullscreen (fullscreen|classic)",
+                "Goal provider calls: unlimited (number or unlimited)",
+                "Goal tokens: unlimited (number or unlimited)",
+                "Goal active time: unlimited (duration or unlimited)",
+                "Default command timeout: 2 min (duration, e.g. 30s)",
+                "Maximum command timeout: 10 min (duration, e.g. 5m)",
+                "Build memory: 4.0 GB (size, e.g. 512MB)",
+                "Build processes/threads: 256 (number)",
+                "Build writable project: 1.0 GB (size, e.g. 1GB)",
+                "Build cache: 8.0 GB (size, e.g. 8GB)",
+                "Mouse: wheel and clicks (wheel and clicks|wheel only|off)",
+                "Copy on select: on (on|off)",
+                "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)",
+            ]
         );
-        assert_eq!(rows[3], "Goal tokens: unlimited (number or unlimited)");
-        assert_eq!(
-            rows[4],
-            "Goal active milliseconds: unlimited (number or unlimited)"
-        );
-        assert_eq!(rows[10], "Build cache bytes: 8589934592");
-        assert_eq!(
-            rows[11],
-            "Mouse: wheel and clicks (wheel and clicks|wheel only|off)"
-        );
-        assert_eq!(rows[12], "Copy on select: on (on|off)");
-        assert_eq!(
-            rows[13],
-            "Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)"
-        );
+        for (raw, expected) in [
+            ("30s", 30_000),
+            ("5m", 300_000),
+            (" 5M ", 300_000),
+            ("0.5h", 1_800_000),
+            ("1 min 30.001 s", 90_001),
+            ("0.001S", 1),
+            ("0.0001m", 6),
+        ] {
+            assert!(apply_setting(&mut preferences, &format!("5 {raw}")));
+            assert_eq!(preferences.goal_budget.max_active_ms, Some(expected));
+        }
+        for (raw, expected) in [
+            ("1B", 1),
+            ("1023 b", 1023),
+            ("1 KB", 1024),
+            ("512MB", 512 * 1024 * 1024),
+            ("1.5gb", 1536 * 1024 * 1024),
+            ("0.00390625KB", 4),
+            ("4.0 GB", 4 * 1024_u64.pow(3)),
+        ] {
+            assert!(apply_setting(&mut preferences, &format!("8 {raw}")));
+            assert_eq!(preferences.resources.build_memory_bytes, expected);
+        }
+        assert!(apply_setting(&mut preferences, "6 1.5s"));
+        assert_eq!(preferences.resources.default_command_timeout_ms, 1500);
+        assert!(apply_setting(&mut preferences, "10 512MB"));
+        assert_eq!(preferences.resources.build_project_bytes, 512 * 1024 * 1024);
+        assert!(apply_setting(&mut preferences, "11 0B"));
+        assert_eq!(preferences.resources.build_cache_bytes, 0);
+        assert!(apply_setting(&mut preferences, "11 8gb"));
+        assert_eq!(preferences.resources.build_cache_bytes, 8 * 1024_u64.pow(3));
         for shortcut in NewlineShortcut::ALL {
             assert!(apply_setting(
                 &mut preferences,
@@ -1687,11 +1948,11 @@ mod tests {
         assert!(apply_setting(&mut preferences, "3 8"));
         assert_eq!(preferences.goal_budget.max_provider_calls, Some(8));
         assert!(apply_setting(&mut preferences, "3 unlimited"));
-        assert!(apply_setting(&mut preferences, "5 60000"));
+        assert!(apply_setting(&mut preferences, "5 1min"));
         assert_eq!(preferences.goal_budget.max_active_ms, Some(60_000));
         assert!(apply_setting(&mut preferences, "5 unlimited"));
         assert!(apply_setting(&mut preferences, "4 100000"));
-        assert!(apply_setting(&mut preferences, "7 300000"));
+        assert!(apply_setting(&mut preferences, "7 5m"));
         assert!(apply_setting(&mut preferences, "12 wheel only"));
         assert!(apply_setting(&mut preferences, "13 off"));
         assert_eq!(preferences.mouse, MouseMode::WheelOnly);
@@ -1706,6 +1967,70 @@ mod tests {
         assert_eq!(preferences.goal_budget.max_provider_calls, None);
         assert_eq!(preferences.goal_budget.max_tokens, Some(100_000));
         assert_eq!(preferences.resources.max_command_timeout_ms, 300_000);
+    }
+
+    #[test]
+    fn every_setting_round_trips_its_rendered_value_and_limits_unlimited() {
+        let defaults = Preferences::default();
+        let custom = Preferences {
+            completion: CompletionLayout::Combined,
+            view: TerminalMode::Classic,
+            goal_budget: arany::GoalBudget {
+                max_provider_calls: Some(7),
+                max_tokens: Some(123_456),
+                max_active_ms: Some(90_001),
+                ..defaults.goal_budget
+            },
+            resources: arany::ToolResourceSettings {
+                default_command_timeout_ms: 1501,
+                max_command_timeout_ms: 123_456,
+                build_memory_bytes: 1025,
+                build_processes: 17,
+                build_project_bytes: 513 * 1024 * 1024,
+                build_cache_bytes: 1025 * 1024 * 1024,
+            },
+            mouse: MouseMode::WheelOnly,
+            copy_on_select: false,
+            newline: NewlineShortcut::AltEnter,
+        };
+        assert!(setting_rows(custom).contains(&"Build memory: 1.0009765625 KB".into()));
+        assert!(setting_rows(custom).contains(&"Build cache: 1.0009765625 GB".into()));
+        for mut original in [defaults, custom] {
+            for memory in [
+                1,
+                1023,
+                1024,
+                1025,
+                1536,
+                1024 * 1024 - 1,
+                4 * 1024_u64.pow(3) - 1,
+                4 * 1024_u64.pow(3),
+            ] {
+                original.resources.build_memory_bytes = memory;
+                assert!(original.resources.valid());
+                for (index, setting) in SETTINGS.iter().enumerate() {
+                    let number = index + 1;
+                    let rendered = (setting.value)(&original);
+                    let mut chosen = original;
+                    assert!(
+                        apply_setting(&mut chosen, &format!("{number} {rendered}")),
+                        "{}: {rendered}",
+                        setting.label
+                    );
+                    assert_eq!(chosen, original, "{}: {rendered}", setting.label);
+                    let accepts_unlimited = matches!(number, 3..=5);
+                    assert_eq!(
+                        apply_setting(&mut chosen, &format!("{number} unlimited")),
+                        accepts_unlimited,
+                        "{}",
+                        setting.label
+                    );
+                    if !accepts_unlimited {
+                        assert_eq!(chosen, original, "{}", setting.label);
+                    }
+                }
+            }
+        }
     }
 
     #[test]
