@@ -199,6 +199,7 @@ struct Driver {
     declined: bool,
     answered: bool,
     early: bool,
+    host_approval: bool,
     closed: bool,
     pages: usize,
     last_frame: String,
@@ -301,9 +302,9 @@ impl Driver {
             && !self.answered
         {
             self.last_frame = dialog.to_owned();
-            // The guarded attempt is approved once its last page shows; later frames await the re-run.
-            // Only the unguarded dialog offers a third choice, and its controls show on every page.
-            if case.starts_with("unguarded") && !frame.contains("3. No") {
+            self.host_approval |= dialog.contains("Run outside the Guard? (unguarded)");
+            // Finish reviewing the guarded attempt before handling the separate host approval.
+            if case.starts_with("unguarded") && !self.host_approval {
                 if !self.early && frame.contains("more lines") {
                     input.write_all(b"\x1b[6~").unwrap();
                 } else if !self.early {
@@ -327,7 +328,14 @@ impl Driver {
                 return;
             }
             if case.starts_with("unguarded") {
-                assert!(frame.contains("› 3. No"), "unguarded opens with No focused");
+                assert!(
+                    frame.contains("› 2. No"),
+                    "once-only host approval opens with No focused"
+                );
+                assert!(
+                    !frame.contains("3. "),
+                    "Auto edits cannot offer session approval"
+                );
             }
             if case == "unguarded-page-up" {
                 assert_eq!(self.pages, 0, "PageUp is tested on page zero");
@@ -347,7 +355,7 @@ impl Driver {
                 "linear-yes" => b"1\r",
                 "linear-no" => b"no\r",
                 "cancel" => b"\x03",
-                "unguarded" => b"2",
+                "unguarded" => b"1",
                 "unguarded-page-up" => b"\x1b[5~\r",
                 "unguarded-pages" => b"\x1b[5~\x1b[6~\r",
                 _ => unreachable!(),
@@ -444,7 +452,17 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
                 observation.attestation,
                 Some(arany::Attestation::Unguarded(_))
             ));
-            assert!(state.join("unguarded-commands.json").exists());
+            let verdict = run
+                .tools
+                .last()
+                .unwrap()
+                .permission_verdict
+                .as_ref()
+                .unwrap();
+            assert_eq!(verdict.source, arany::permissions::PermissionSource::Human);
+            let host = verdict.host.as_ref().unwrap();
+            assert!(!host.session && host.source_intent.is_none());
+            assert!(!state.join("unguarded-commands.json").exists());
         } else {
             assert_eq!(observation.disposition, ToolDisposition::Succeeded);
             assert!(matches!(

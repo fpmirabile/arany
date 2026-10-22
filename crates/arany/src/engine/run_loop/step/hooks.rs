@@ -154,17 +154,6 @@ fn occurrence_digest(
 }
 
 impl RunLoop<'_> {
-    pub(in crate::engine::run_loop) fn hook_rerun_feedback(
-        &self,
-        subject: [u8; 32],
-    ) -> Result<Vec<String>, EngineError> {
-        self.ledger().view(|view| {
-            view.runs
-                .last()
-                .map_or_else(Vec::new, |run| run.hook_rerun_proposals(Some(subject)))
-        })
-    }
-
     fn hook_plans(
         &self,
         runtime: &ToolRuntime,
@@ -651,8 +640,7 @@ impl RunLoop<'_> {
                 return Ok(Some(stop_feedback([&run.result])));
             }
         }
-        let proposals = self.hook_rerun_feedback(digest)?;
-        Ok((agent == self.primary_id && !proposals.is_empty()).then(|| proposals.join("\n")))
+        Ok(None)
     }
 
     fn idle_compact_stop(

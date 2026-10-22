@@ -982,12 +982,7 @@ impl RunLoop<'_> {
             profile: assignment.profile.or_else(|| self.default_child_profile()),
             grant: Some(if research {
                 ChildGrant::ReadOnly {
-                    unguarded: self
-                        .controls
-                        .tools
-                        .ok_or(EngineError::InvalidRequest)?
-                        .receipt()
-                        .child_unguarded,
+                    unguarded: crate::tools::UnguardedGrant::Denied,
                 }
             } else {
                 ChildGrant::NoTools
@@ -2068,14 +2063,7 @@ impl RunLoop<'_> {
                 let step = tools.steps.last_mut().ok_or(EngineError::InvalidHistory)?;
                 for tool in integrations {
                     let index = step.observations.len();
-                    let mut feedback = tool.hook_feedback();
-                    for proposal in self.hook_rerun_feedback(tool.intent.digest())? {
-                        if feedback.iter().map(String::len).sum::<usize>() + proposal.len()
-                            <= crate::tools::permissions::MAX_HOOK_FEEDBACK_BYTES
-                        {
-                            feedback.push(proposal);
-                        }
-                    }
+                    let feedback = tool.hook_feedback();
                     if !feedback.is_empty() {
                         step.hook_feedback.insert(index, feedback);
                     }
@@ -2090,24 +2078,11 @@ impl RunLoop<'_> {
                 serde_json::from_str(tools.catalog()).map_err(|_| EngineError::InvalidRequest)?;
             if let Some(fields) = catalog.as_object_mut() {
                 fields.remove("last_answer_refused");
-                fields.remove("hook_reruns");
             }
             catalog["pending_workers"] = serde_json::json!(pending);
             catalog["worker_coordination"] = serde_json::json!(
                 "While workers are pending, inspect or edit only paths outside their leases. Commands wait for lease quiescence. Answer or propose the next wave only after settlement and fresh primary verification."
             );
-            let proposals = self.ledger().view(|view| {
-                view.runs
-                    .last()
-                    .map_or_else(Vec::new, |run| run.hook_rerun_proposals(None))
-            })?;
-            if !proposals.is_empty() {
-                let mut offered = catalog.clone();
-                offered["hook_reruns"] = serde_json::json!(proposals);
-                if offered.to_string().len() <= crate::tools::types::MAX_TOOL_CATALOG_BYTES {
-                    catalog = offered;
-                }
-            }
             tools.set_catalog(&catalog);
         }
         Ok(())
@@ -2718,6 +2693,7 @@ mod delegation_bound_tests {
                         primary_id: outcome.run.agents[0].id,
                     },
                     LoopControls {
+                        host_settings: &engine.host_permissions,
                         policy: CollaborationPolicy::Single,
                         concurrency: 1,
                         goal_phase: crate::GoalPhase::Implementation,

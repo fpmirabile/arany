@@ -24,6 +24,7 @@ mod goal_success_tests {
     ) -> ToolObservation {
         let intent = EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: RunId::new(),
@@ -1550,7 +1551,6 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(13));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1653,6 +1653,7 @@ mod payload_version_tests {
     fn read_observation(run: RunId, agent: AgentRunId) -> crate::tools::ToolObservation {
         let intent = crate::tools::EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id: run,
@@ -1880,11 +1881,12 @@ mod payload_version_tests {
             run_id: run,
             agent_run_id: agent,
             verdict: crate::tools::permissions::PermissionVerdict {
+                host: None,
                 intent_digest: [3; 32],
                 decision: crate::tools::permissions::Decision::Allow,
                 mode: None,
-                basis: crate::tools::permissions::PermissionSource::ExactCommandRule,
-                source: crate::tools::permissions::PermissionSource::ExactCommandRule,
+                basis: crate::tools::permissions::PermissionSource::SessionApproval,
+                source: crate::tools::permissions::PermissionSource::SessionApproval,
                 approved: true,
                 hook_restriction: None,
                 hooks: 0,
@@ -2372,6 +2374,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
 
 #[test]
 fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings() {
+    let run_version = crate::test_support::payload_version("RunFinished");
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
@@ -2452,16 +2455,25 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         let value =
             serde_json::json!({"disposition":disposition, "failure":failure, "active_ms":0});
         assert_eq!(
-            Event::decode("RunFinished", 9, &value.to_string(), run_id, None).is_ok(),
+            Event::decode("RunFinished", run_version, &value.to_string(), run_id, None).is_ok(),
             accepted,
             "{disposition}"
         );
-        assert!(Event::decode("RunFinished", 8, &value.to_string(), run_id, None).is_err());
+        assert!(
+            Event::decode(
+                "RunFinished",
+                run_version - 1,
+                &value.to_string(),
+                run_id,
+                None
+            )
+            .is_err()
+        );
     }
     assert!(
         Event::decode(
             "RunFinished",
-            9,
+            run_version,
             r#"{"disposition":"failed","active_ms":0}"#,
             run_id,
             None

@@ -15,6 +15,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let run_id = RunId::new();
     let command_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -65,6 +66,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     tools.extend((0..15).map(|index| {
         let intent = EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: Uuid::now_v7(),
             run_id,
@@ -204,6 +206,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         budget_closed: false,
     };
     let view = crate::session::SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: session_id,
         title: "Report bounded evidence".into(),
@@ -214,6 +217,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             inode: 2,
         }),
         defaults: crate::session::SessionDefaults::default(),
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 2,
         lineage: None,
@@ -312,6 +316,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     late_run.tools.push(late_rejected_command);
     let uncertain_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -412,6 +417,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     byte_run.tools.truncate(13);
     let failed_intent = EffectIntent {
         host: None,
+        host_command: None,
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id,
@@ -508,6 +514,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         for failure_index in 0..denied_count {
             let intent = EffectIntent {
                 host: None,
+                host_command: None,
                 target: crate::session::worker::EffectTarget::Workspace,
                 id: Uuid::now_v7(),
                 run_id,
@@ -673,6 +680,7 @@ fn read_evidence_names_the_site_that_attested_it() {
 fn read_intent(call: &ToolCall) -> EffectIntent {
     EffectIntent {
         host: None,
+        host_command: call.is_unguarded().then(crate::tools::types::test_host_pin),
         target: crate::session::worker::EffectTarget::Workspace,
         id: Uuid::now_v7(),
         run_id: RunId::new(),
@@ -787,6 +795,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         active_ceiling_ms: 0,
     };
     let view = crate::session::SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: SessionId::new(),
         title: "Report".into(),
@@ -797,6 +806,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
             inode: 2,
         }),
         defaults: crate::session::SessionDefaults::default(),
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 2,
         lineage: None,

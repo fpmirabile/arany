@@ -39,6 +39,7 @@ pub struct ToolApprovals {
     mode: watch::Sender<ApprovalMode>,
     sender: mpsc::Sender<ToolApproval>,
     human_only: bool,
+    session_scope: bool,
 }
 
 pub struct ApprovalInbox(mpsc::Receiver<ToolApproval>);
@@ -48,7 +49,7 @@ pub enum ApprovalReply {
     Deny,
     Unavailable,
     AllowOnce,
-    AllowAlwaysInProject,
+    AllowForSession,
     AllowPrefixInFolder,
 }
 
@@ -58,12 +59,14 @@ impl From<bool> for ApprovalReply {
     }
 }
 
-/// What the user needs, beyond the intent, to judge an unguarded re-run.
+// What the user needs, beyond the intent, to judge a primary host command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnguardedPrompt {
     pub executable: String,
     pub attribution: Option<EnforcementCause>,
     pub remember: bool,
+    pub sensitive: bool,
+    pub inactive_rules: bool,
 }
 
 pub struct ToolApproval {
@@ -99,9 +102,19 @@ impl ToolApprovals {
                 mode,
                 sender,
                 human_only: true,
+                session_scope: true,
             },
             ApprovalInbox(receiver),
         )
+    }
+
+    pub fn once_only(mut self) -> Self {
+        self.session_scope = false;
+        self
+    }
+
+    pub(crate) fn admits_session_scope(&self) -> bool {
+        self.human_only && self.session_scope
     }
 
     pub fn without_human_only(mut self) -> Self {
@@ -126,7 +139,7 @@ impl ToolApprovals {
         matches!(
             self.ask_local(intent, false, None).await,
             ApprovalReply::AllowOnce
-                | ApprovalReply::AllowAlwaysInProject
+                | ApprovalReply::AllowForSession
                 | ApprovalReply::AllowPrefixInFolder
         )
     }
@@ -229,6 +242,9 @@ mod tests {
                 ToolCall::GitBranch {
                     name: Some("topic".into()),
                     start_point: None,
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 [true; 3],
             ),
@@ -268,6 +284,9 @@ mod tests {
                 ToolCall::GitBranch {
                     name: None,
                     start_point: None,
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 [false; 3],
             ),

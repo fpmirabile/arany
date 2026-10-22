@@ -394,16 +394,24 @@ pub(super) async fn worker_case(case: &'static str) {
                             matches!(
                                 observation.intent.call,
                                 arany::ToolCall::ApplyChangeset { .. }
-                            ) && step.hook_feedback.get(&index).is_some_and(|lines| {
-                                lines.iter().any(|line| {
-                                    line.contains("command_unguarded")
-                                        && line.contains("mkdir .ssh")
-                                })
-                            })
+                            ) && step.hook_feedback.get(&index).is_none_or(Vec::is_empty)
                         }
                     )),
-                "integration carries its Guard-failure rerun proposal before clearing"
+                "integration remains visible without an automatic host proposal"
             );
+            let publication = run
+                .tools
+                .iter()
+                .find(|tool| matches!(tool.intent.call, arany::ToolCall::ApplyChangeset { .. }))
+                .unwrap();
+            assert_eq!(publication.hooks.len(), 1);
+            assert!(matches!(
+                publication.hooks[0].outcome.as_ref().unwrap().result,
+                arany::permissions::HookResult::Ignored {
+                    why: arany::permissions::HookIgnoreReason::NotCompleted
+                }
+            ));
+            assert_eq!(run.unguarded_tools(), 0);
         }
         assert_eq!(child_calls, 4, "{case}: worker completed its script");
         assert_eq!(
@@ -969,7 +977,7 @@ fn pad_worker_session(state: &Path, id: SessionId, through: i64) {
             .execute(rusqlite::params![
                 sequence,
                 id.to_string(),
-                arany::test_support::payload_version("SessionRenamed").unwrap()
+                arany::test_support::payload_version("SessionRenamed")
             ])
             .unwrap();
     }

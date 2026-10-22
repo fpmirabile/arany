@@ -177,10 +177,18 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             16,
             crate::session::pre_host_git_payload
         ),
-        expiry_step!("ToolStarted", 17),
-        expiry_step!("ToolFinished", 23),
-        expiry_step!("HookStarted", 7),
-        expiry_step!("HookFinished", 12),
+        variant_step!("RunStarted", 21, crate::session::pre_host_payload),
+        variant_step!("ToolStarted", 17, crate::session::pre_host_payload),
+        variant_step!("ToolFinished", 23, crate::session::pre_host_payload),
+        variant_step!("ToolPermissionDecided", 5, crate::session::pre_host_payload),
+        variant_step!("AgentSpawned", 13, crate::session::pre_host_payload),
+        variant_step!("HookStarted", 7, crate::session::pre_host_payload),
+        variant_step!("HookFinished", 12, crate::session::pre_host_payload),
+        variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
+        expiry_step!("ToolStarted", 18),
+        expiry_step!("ToolFinished", 24),
+        expiry_step!("HookStarted", 8),
+        expiry_step!("HookFinished", 13),
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),
@@ -672,6 +680,14 @@ fn repin(recorded: &mut [u8; 32], pins: Option<&Pins>) -> Result<(), StoreError>
 }
 
 fn repin_intents(value: &mut Value, pins: &HashMap<[u8; 32], [u8; 32]>) {
+    if let Some(source) = value
+        .get_mut("host")
+        .and_then(|host| host.get_mut("source_intent"))
+        && let Ok(old) = serde_json::from_value::<[u8; 32]>(source.clone())
+        && let Some(new) = pins.get(&old)
+    {
+        *source = serde_json::json!(new);
+    }
     crate::session::rebind_intent_pins(value, &|old| pins.get(old).copied());
 }
 

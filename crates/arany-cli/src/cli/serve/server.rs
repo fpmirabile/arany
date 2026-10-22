@@ -573,6 +573,7 @@ pub(in crate::cli) async fn run_configured(
                                 let view = threads::load_view(&state, input.thread_id).await?;
                                 let goal = input.goal(loaded, &view)?;
                                 let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
+                                let approvals = approvals.once_only();
                                 let approvals =
                                     if threads.approval_channel == ApprovalChannel::Restricted {
                                         approvals.without_human_only()

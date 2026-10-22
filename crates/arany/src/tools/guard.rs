@@ -698,6 +698,9 @@ pub(super) async fn execute(
     intent: &EffectIntent,
     cancellation: Cancellation,
 ) -> Result<ToolObservation, ToolError> {
+    if let Err(error) = check_available() {
+        return dispatch_result(intent, false, Err(error));
+    }
     let mut dispatched = false;
     #[cfg(target_os = "macos")]
     let result = macos::execute_inner(runtime, intent, cancellation, &mut dispatched).await;
@@ -2283,12 +2286,6 @@ mod tests {
         });
         hook.policy_digest = [1; 32];
         hook.enforcement_digest = [2; 32];
-        let unguarded = ToolCall::CommandUnguarded {
-            program: "sh".into(),
-            args: vec!["-c".into(), "exit 0".into()],
-            cwd: String::new(),
-            justification: "Run the failed hook once".into(),
-        };
         for (stage, setup) in [
             (BootstrapStage::Admission, false),
             (BootstrapStage::Workspace, false),
@@ -2318,11 +2315,6 @@ mod tests {
             );
             assert!(observation.valid(), "{failure}");
             assert_eq!(observation.stops_run(), !setup, "{failure}");
-            assert_eq!(
-                qualifying_hook_failure(&unguarded, std::iter::once(&observation)).is_some(),
-                setup,
-                "{failure}"
-            );
             assert!(dispatch_result(&hook, true, parse_observation(&encoded)).is_err());
         }
     }
@@ -2768,6 +2760,7 @@ mod tests {
     fn intent(call: ToolCall) -> EffectIntent {
         EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: crate::session::RunId::default(),
@@ -2824,13 +2817,6 @@ mod tests {
             model_observation(&observation)["enforcement_cause"],
             "Guard enforcement: bootstrap failed before dispatch"
         );
-        let unguarded = ToolCall::CommandUnguarded {
-            program: "node".into(),
-            args: Vec::new(),
-            cwd: String::new(),
-            justification: "Run the failed command once".into(),
-        };
-        assert!(qualifying_guard_failure(&unguarded, std::iter::once(&observation)).is_none());
         assert!(dispatch_result(&intent, true, parse_observation(&encoded)).is_err());
     }
 
@@ -3519,6 +3505,7 @@ mod tests {
                 config: config.clone(),
                 intent: EffectIntent {
                     host: None,
+                    host_command: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: crate::session::RunId::new(),

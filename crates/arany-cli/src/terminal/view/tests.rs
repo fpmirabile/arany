@@ -1988,9 +1988,12 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                                 entry.name
                             );
                         }
-                        assert!(labels.iter().any(|row| {
-                            row.contains("Slash menu, chat view and newline shortcut")
-                        }));
+                        assert!(
+                            labels
+                                .iter()
+                                .any(|row| row.contains("Report owned storage metadata"))
+                        );
+                        assert!(!labels.iter().any(|row| row.contains("/settings")));
                     }
                     if !color {
                         assert!(buffer.content().iter().all(|cell| cell.fg == Color::Reset));
@@ -2683,8 +2686,13 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
     for width in [16, 20, 24, 40, 50, 80] {
         for height in [4, 6, 7, 8] {
             for color in [false, true] {
-                for (selected, name) in [(0, "Models"), (1, "Agents"), (2, "Resume"), (3, "Setup")]
-                {
+                for (selected, name) in [
+                    (0, "Models"),
+                    (1, "Agents"),
+                    (2, "Resume"),
+                    (3, "Setup"),
+                    (4, "Usage"),
+                ] {
                     for has_draft in [false, true] {
                         let mut terminal =
                             Terminal::new(TestBackend::new(width, height)).expect("quick selector");
@@ -2692,7 +2700,7 @@ fn quick_actions_keep_focus_and_draft_guard_visible_without_color() {
                             .draw(|frame| {
                                 draw_quick_actions_frame(
                                     frame,
-                                    bottom_area(frame.area(), 6),
+                                    bottom_area(frame.area(), 7),
                                     selected,
                                     true,
                                     has_draft,
@@ -3672,7 +3680,10 @@ fn inline_tool_approval_corpus_pages_complete_inert_actions_and_numbered_choices
                 assert!(page > 0);
             }
             if name == "unguarded" {
-                assert!(squashed.contains("this exact command"));
+                assert!(
+                    squashed.contains("this identical command in this live session (unguarded)"),
+                    "{width}: {squashed}"
+                );
             }
             if name == "git-prefix" {
                 assert!(
@@ -4247,5 +4258,94 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
             }
             assert!(!composer.has_open_menu());
         }
+    }
+}
+
+#[test]
+fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
+    let page = "Session totals\nInput: 12,340 known; some calls unreported\nCache write (included in input): unknown (not reported)\nChatGPT weekly: unknown (not reported)\nGroups 1-1 of 1\n";
+    for width in [80, 50, 40, 16] {
+        let lines = usage_lines(page, width);
+        assert!(lines.iter().all(|line| line.width() <= usize::from(width)));
+        let joined = lines.join(" ");
+        for phrase in [
+            "Session totals",
+            "some calls unreported",
+            "unknown (not reported)",
+        ] {
+            assert!(joined.contains(phrase));
+        }
+        for color in [false, true] {
+            let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+            for scroll in [0, lines.len()] {
+                terminal
+                    .draw(|frame| {
+                        draw_usage_frame(
+                            frame,
+                            frame.area(),
+                            &lines,
+                            scroll,
+                            (0, 2),
+                            true,
+                            Palette { color },
+                        )
+                    })
+                    .unwrap();
+                let buffer = terminal.backend().buffer();
+                let header = (0..width)
+                    .map(|x| buffer[(x, 0)].symbol())
+                    .collect::<String>();
+                let footer = (0..width)
+                    .map(|x| buffer[(x, 7)].symbol())
+                    .collect::<String>();
+                assert!(header.contains("Usage 1/2"));
+                assert!(footer.contains("Esc"));
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn usage_scroll_up_moves_immediately_after_reaching_the_last_window() {
+    let mut attached = crate::terminal::clipboard::cleanup_tests::released_terminal(None);
+    let lines: Vec<_> = (0..30).map(|index| format!("row-{index:02}")).collect();
+    attached.help_selected = Some(0);
+    attached.usage_panel = Some(crate::terminal::UsagePanel {
+        pages: vec![lines.join("\n")],
+        page: 0,
+        sequence: 0,
+        status: false,
+        starting_sequence: None,
+        rows: lines.len(),
+        visible: 6,
+    });
+    let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+    for (input, expected) in [
+        (TerminalInput::End, 24),
+        (TerminalInput::Down, 24),
+        (TerminalInput::PageDown, 24),
+        (TerminalInput::Up, 23),
+    ] {
+        attached.help_input(input);
+        let scroll = attached.help_selected.unwrap();
+        assert_eq!(scroll, expected);
+        terminal
+            .draw(|frame| {
+                draw_usage_frame(
+                    frame,
+                    frame.area(),
+                    &lines,
+                    scroll,
+                    (0, 1),
+                    true,
+                    Palette { color: false },
+                );
+            })
+            .unwrap();
+        assert_eq!(
+            buffer_row(terminal.backend().buffer(), 1).trim(),
+            lines[expected]
+        );
     }
 }

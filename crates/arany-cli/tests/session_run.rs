@@ -5,6 +5,108 @@ use arany::{
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
+    let timed_out = branches["timed_out"].as_bool().unwrap();
+    let rows = branches["branches"].as_array().unwrap();
+    assert_eq!(branches["history_complete"], true);
+    assert_eq!(
+        branches["truncated"],
+        timed_out || rows.iter().any(|row| row["counts_capped"] == true)
+    );
+    if branches["comparison_base"].is_null() {
+        assert!(timed_out && rows.is_empty());
+        return;
+    }
+    assert_eq!(branches["comparison_base"]["revision"], "HEAD~1");
+    assert!(rows.len() <= 3);
+    if !timed_out {
+        assert_eq!(rows.len(), 3);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let name = [
+            "refs/heads/main",
+            "refs/heads/protected",
+            "refs/remotes/review/topic",
+        ][index];
+        let oid = std::fs::read_to_string(workspace.join(".git").join(name)).unwrap();
+        assert_eq!(row["name"], name);
+        assert_eq!(row["name_truncated"], false);
+        assert_eq!(row["oid"], oid.trim());
+        assert_eq!(row["kind"], if index == 2 { "remote" } else { "local" });
+        assert_eq!(row["current"], index == 0);
+        assert!(row["symbolic_target"].is_null());
+        let capped = row["counts_capped"].as_bool().unwrap();
+        assert_eq!(row["counts_withheld"], capped);
+        if capped {
+            assert!(row["ahead"].is_null() && row["behind"].is_null());
+        } else {
+            assert_eq!(row["ahead"], if index == 1 { 2 } else { 1 });
+            assert_eq!(row["behind"], 0);
+        }
+        if row["subject_withheld"].as_bool().unwrap() {
+            assert!(row["subject"].is_null());
+            assert!(index == 1 || capped);
+        } else {
+            assert_ne!(index, 1);
+            assert_eq!(row["subject"], "second commit");
+        }
+        if index == 1 {
+            assert_eq!(row["subject_withheld"], true);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_closed_git_views(
+    state: &std::path::Path,
+    home: &std::path::Path,
+    workspace: &std::path::Path,
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+) {
+    use arany_cli::presentation::{Output, render_session};
+    use arany_cli::protocol::EventLine;
+    for format in ["text", "jsonl"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("HOME", home)
+            .current_dir(workspace)
+            .args(["show", "--state-dir"])
+            .arg(state)
+            .args(["--output", format])
+            .arg(view.id.to_string())
+            .bounded_output_for(std::time::Duration::from_secs(30), 4 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stderr, b"");
+        let canary = b"BRANCH_DISCLOSURE_CANARY";
+        for bytes in [
+            &output.stdout,
+            &output.stderr,
+            &std::fs::read(state.join("events.sqlite3")).unwrap(),
+        ] {
+            assert!(!bytes.windows(canary.len()).any(|window| window == canary));
+        }
+        if format == "text" {
+            assert_eq!(
+                output.stdout,
+                render_session(view, events, Output::Text).as_bytes()
+            );
+        } else {
+            let actual: Vec<EventLine> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                actual,
+                events.iter().map(EventLine::from).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 use process::BoundedOutput;
 use std::process::Command;
 
@@ -631,6 +733,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     .draw_setup(4, "Synthetic setup", "Returning to chat", 0, None)
                     .unwrap();
                 let mut view = SessionView {
+                    usage: Default::default(),
                     rewinds: Default::default(),
                     id: SessionId::new(),
                     title: "New Session".into(),
@@ -638,6 +741,7 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     inherited_title: None,
                     workspace_identity: None,
                     defaults: SessionDefaults::default(),
+                    host_epoch_floor: 0,
                     created_sequence: 0,
                     last_sequence: 0,
                     lineage: None,
@@ -3591,6 +3695,116 @@ fn acp_refuses_terminal_input_before_state_admission() {
     assert!(!state.exists());
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
+    use arany::test_support::scenario::{ScriptedProvider, request};
+    use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
+    use std::io::Write;
+    use std::process::Stdio;
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = temp.path().join("state");
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (id, before, view) = runtime.block_on(async {
+        let engine =
+            engine_support::open(StateRoot::admit(&state).unwrap(), Default::default()).unwrap();
+        let mut provider =
+            ScriptedProvider::new(vec![arany::test_support::goals::finish_with("Done")])
+                .with_profile("openai", "gpt-5.4");
+        provider.usage_override = Some(arany::Usage {
+            input_tokens: Some(12_340),
+            output_tokens: Some(8),
+            cache_read_input_tokens: Some(7),
+            cache_creation_input_tokens: Some(3),
+        });
+        let provider = Arc::new(provider);
+        let mut request = request(&workspace, "Inspect usage");
+        request.include_paths.clear();
+        let result = engine_support::run_to_end(&engine, &provider, request)
+            .await
+            .unwrap();
+        engine.close().await.unwrap();
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        set_session_defaults(
+            StateRoot::open_existing(&state).unwrap(),
+            workspace.clone(),
+            result.session_id,
+            SessionDefaults {
+                provider: Some("openai".into()),
+                model: Some("gpt-5.4".into()),
+                effort: Some(arany::Effort::Low),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(result.session_id).await.unwrap();
+        let view = store.load_view(result.session_id).await.unwrap().unwrap();
+        store.close().await.unwrap();
+        (result.session_id, events, view)
+    });
+    let expected = format!(
+        "Usage page 1 of 1\nUsage: Provider-reported tokens\nCommitted through Event {}\nCache reads/writes are included in input\nOutput includes reported reasoning tokens\n\nCurrent/latest Run\nProvider: openai\nModel: gpt-5.4\nInput: 12,340\nOutput: 8\nCache read (included in input): 7\nCache write (included in input): 3\nAPI rate limits: unknown (not reported)\n\nSession totals\nProvider: openai\nModel: gpt-5.4\nInput: 12,340\nOutput: 8\nCache read (included in input): 7\nCache write (included in input): 3\nAPI rate limits: unknown (not reported)\n",
+        view.last_sequence
+    );
+    for _ in 0..2 {
+        let mut command = isolation::account_isolated_script(temp.path());
+        command.env_clear().current_dir(&workspace)
+            .env("ARANY_TEST_EXE", env!("CARGO_BIN_EXE_arany"))
+            .env("ARANY_TEST_STATE", &state).env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("ARANY_TEST_SESSION", id.to_string()).env("TERM", "dumb")
+            .args(["-q", "-e", "-c", "exec \"$ARANY_TEST_EXE\" --screen-reader --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"", "/dev/null"])
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        let mut child = loopback::ChildGuard::new(command.spawn().unwrap());
+        let mut input = child.child().stdin.take().unwrap();
+        let mut output = child.child().stdout.take().unwrap();
+        let flags = fcntl_getfl(&output).unwrap();
+        fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
+        let mut bytes = Vec::new();
+        let mut answered = session_picker::PtyResponses::default();
+        for (needle, action) in [
+            ("Input:", "/usage\n"),
+            ("API rate limits: unknown (not reported)", "/exit\n"),
+        ] {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !String::from_utf8_lossy(&bytes).contains(needle) {
+                session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
+                assert!(Instant::now() < deadline, "usage PTY stage");
+                std::thread::yield_now();
+            }
+            input.write_all(action.as_bytes()).unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
+            if let Some(status) = child.child().try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(Instant::now() < deadline, "usage PTY exit");
+            std::thread::yield_now();
+        }
+        let text = String::from_utf8(bytes).unwrap().replace('\r', "");
+        let start = text.find("Usage page 1 of 1\n").unwrap();
+        assert_eq!(&text[start..start + expected.len()], expected);
+        assert!(!text.contains('\u{1b}'));
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            assert_eq!(store.load_session(id).await.unwrap(), before);
+            assert_eq!(store.load_view(id).await.unwrap().unwrap(), view);
+            store.close().await.unwrap();
+        });
+    }
+}
 #[cfg(all(unix, any(debug_assertions, target_os = "linux")))]
 #[path = "session_run/storage.rs"]
 mod storage;

@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step.
-const EVENT_FIXTURES: [EventFixture<'static>; 35] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 43] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -47,25 +47,25 @@ const EVENT_FIXTURES: [EventFixture<'static>; 35] = [
     ),
     (
         "ToolStarted",
-        17,
+        18,
         GLOB_TOOLSTARTED,
         include_str!("toolstarted-without-expiry.json"),
     ),
     (
         "ToolFinished",
-        23,
+        24,
         GLOB_TOOLFINISHED,
         include_str!("toolfinished-without-expiry.json"),
     ),
     (
         "HookStarted",
-        7,
+        8,
         GLOB_HOOKSTARTED,
         include_str!("hookstarted-without-expiry.json"),
     ),
     (
         "HookFinished",
-        12,
+        13,
         GLOB_HOOKFINISHED,
         include_str!("hookfinished-without-expiry.json"),
     ),
@@ -103,6 +103,19 @@ const EVENT_FIXTURES: [EventFixture<'static>; 35] = [
     (
         "ProviderCallRecorded",
         13,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("RunStarted", 21, HOST_RUNSTARTED, HOST_RUNSTARTED),
+    ("ToolStarted", 17, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 23, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("ToolPermissionDecided", 5, VERDICT_V4, VERDICT_V4),
+    ("AgentSpawned", 13, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
+    ("HookStarted", 7, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 12, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "ProviderCallRecorded",
+        17,
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
@@ -161,6 +174,8 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
         if let Some(upgraded) = upgraded {
             assert_eq!(upgraded, source);
         }
+        let host_step = REGISTRY.event_step("RunStarted", 21).unwrap();
+        assert_eq!((host_step.transform)(source.clone()), Some(source));
     }
 }
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
@@ -175,6 +190,7 @@ const GLOB_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":nu
 // Version 18 pinned only the root file's digest; version 19 names it as the root's source.
 const ROOT_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],"include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 // Version 20 adds the explicit null user-instruction digest.
+const HOST_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":{"contract_version":1,"config_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"permissions_digest":null,"max_context_bytes":65536,"unguarded_rules_digest":null,"unguarded":"human_only","child_unguarded":"denied"}},"active_deadline_ms":1800000}"#;
 const GLOBAL_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"user_instruction_digest":null,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 const NESTED_RUNSTARTED: &str = r#"{"config":{"supervisor":null,"worker_policy":null,"agent_definitions":null,"roster":null,"provider":"openai","model":"gpt-5.4","effort":null,"custom_profile_provenance":null,"saved_api_account_id":null,"chatgpt_provenance":null,"output_token_bound":"provider_enforced","context_window_tokens":null,"policy":{"mode":"single"},"output_token_cap":4096,"provider_concurrency":1,"workspace_device":1,"workspace_inode":1,"instruction_sources":[{"directory":"","file":null,"digest":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7]}],"launch_directory":"","include_digests":[],"history_run_ids":[],"excluded_history_runs":0,"context_usage":null,"compaction_event_sequence":null,"compaction_content_digest":null,"tool_policy":null},"active_deadline_ms":1800000}"#;
 
@@ -657,7 +673,10 @@ fn run_started_v19_migrates_without_reading_user_instructions() {
     assert_eq!(stored_rows(&upgraded), current);
     assert_eq!(fork_digests(&upgraded), digests);
     let started = first_of(&upgraded, "RunStarted");
-    assert_eq!(started.version, 21);
+    assert_eq!(
+        started.version,
+        crate::test_support::payload_version("RunStarted")
+    );
     assert!(
         started
             .payload
@@ -1296,7 +1315,7 @@ fn typed_prefix_verdict_migration_preserves_legacy_facts() {
     );
     let verdict = Event::decode(
         "ToolPermissionDecided",
-        5,
+        crate::session::payload_version("ToolPermissionDecided").unwrap(),
         &upgraded,
         Some(RunId::new()),
         Some(AgentRunId::new()),
@@ -1636,6 +1655,11 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
         ("worker", crate::session::worker_protocol_fixture()),
         ("command", crate::session::worker_command_protocol_fixture()),
         ("compacted", crate::session::worker_compacted_fixture(true)),
+        ("host", crate::session::host_protocol_fixture()),
+        (
+            "host-session",
+            crate::session::session_host_protocol_fixture(),
+        ),
     ] {
         for interrupted in [false, true] {
             let temp = tempfile::tempdir().unwrap();
@@ -1650,7 +1674,14 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
                     .get("intent")
                     .or_else(|| value.get("observation")?.get("intent"))
                     .cloned();
+                let prior_human = value
+                    .get("host")
+                    .and_then(|host| host.get("source_intent"))
+                    .and_then(|pin| serde_json::from_value::<[u8; 32]>(pin.clone()).ok());
                 repin_intents(&mut value, &pins);
+                if let Some(old) = prior_human.and_then(|pin| pins.get(&pin)) {
+                    value["host"]["source_intent"] = serde_json::json!(old);
+                }
                 let expiring = matches!(
                     event,
                     Event::ToolStarted { .. }
@@ -1714,6 +1745,132 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
             assert_eq!(actual, expected, "{name}, interrupted={interrupted}");
         }
     }
+}
+
+#[test]
+fn pre_host_migrations_never_create_live_authority() {
+    use crate::tools::permissions::{PermissionSource, PermissionVerdict};
+    let mut tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let control = crate::session::expiring_payload("ToolStarted", GLOB_TOOLSTARTED).unwrap();
+    assert_eq!(
+        crate::session::pre_host_payload("ToolStarted", &control),
+        Some(control)
+    );
+    tool["intent"]["call"] = serde_json::to_value(crate::tools::ToolCall::CommandUnguarded {
+        program: "find".into(),
+        args: vec![".".into()],
+        cwd: String::new(),
+        justification: "Inspect the Workspace".into(),
+    })
+    .unwrap();
+    assert!(crate::session::pre_host_payload("ToolStarted", &tool.to_string()).is_none());
+
+    let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
+    assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_some());
+    run["config"]["tool_policy"]["child_unguarded"] = serde_json::json!("human_only");
+    serde_json::from_value::<crate::session::RunConfig>(run["config"].clone()).unwrap();
+    assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_none());
+
+    let control: PermissionVerdict = serde_json::from_str(VERDICT_V4).unwrap();
+    let payload = serde_json::to_string(&control).unwrap();
+    assert_eq!(
+        crate::session::pre_host_payload("ToolPermissionDecided", &payload),
+        Some(payload)
+    );
+    for field in ["basis", "source"] {
+        let mut verdict = control.clone();
+        match field {
+            "basis" => verdict.basis = PermissionSource::SessionApproval,
+            "source" => verdict.source = PermissionSource::SessionApproval,
+            _ => unreachable!(),
+        }
+        assert!(
+            crate::session::pre_host_payload(
+                "ToolPermissionDecided",
+                &serde_json::to_string(&verdict).unwrap()
+            )
+            .is_none(),
+            "{field}"
+        );
+    }
+}
+
+#[test]
+fn pre_host_migrations_preserve_marker_words_in_data() {
+    for marker in [
+        "command_unguarded",
+        "arany_command_unguarded",
+        "exact_command_rule",
+        "session_approval",
+    ] {
+        let mut tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+        tool["intent"]["call"] =
+            serde_json::json!({"operation":"search","path":"src","query":marker});
+        let (run, agent) = intent_scope(&tool).unwrap();
+        let payload = crate::session::expiring_payload("ToolStarted", &tool.to_string()).unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ToolStarted", &payload),
+            Some(payload)
+        );
+        let mut finished: Value = serde_json::from_str(GLOB_TOOLFINISHED).unwrap();
+        finished["output"] = marker.into();
+        let payload =
+            crate::session::expiring_payload("ToolFinished", &finished.to_string()).unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ToolFinished", &payload),
+            Some(payload)
+        );
+        let mut provider: Value = serde_json::from_str(GLOB_PROVIDERCALLRECORDED).unwrap();
+        provider["response_id"] = marker.into();
+        let event = Event::decode(
+            "ProviderCallRecorded",
+            crate::test_support::payload_version("ProviderCallRecorded"),
+            &provider.to_string(),
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        let payload = event.payload().unwrap();
+        assert_eq!(
+            crate::session::pre_host_payload("ProviderCallRecorded", &payload),
+            Some(payload)
+        );
+    }
+}
+
+#[test]
+fn generic_host_migrations_preserve_preceding_typed_host_git_pins() {
+    let oid = "1".repeat(40);
+    let mut value: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    value["intent"]["call"] = serde_json::json!({"operation":"git_push", "remote":"https://github.com/o/r", "branch":"main"});
+    value["intent"]["host"] =
+        serde_json::json!({"source_oid":oid, "refspec":format!("{oid}:refs/heads/main")});
+    value["intent"]["limits"]["network"] = "host".into();
+    let (run, agent) = intent_scope(&value).unwrap();
+    let payload = crate::session::expiring_payload("ToolStarted", &value.to_string()).unwrap();
+    let step = REGISTRY.event_step("ToolStarted", 17).unwrap();
+    assert_eq!((step.canonical)(&payload), Some(payload.clone()));
+    let value: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!((step.transform)(value.clone()), Some(value.clone()));
+    let mut current = value.clone();
+    for from in 17..payload_version("ToolStarted").unwrap() {
+        current = (REGISTRY.event_step("ToolStarted", from).unwrap().transform)(current).unwrap();
+    }
+    let event = Event::decode(
+        "ToolStarted",
+        crate::test_support::payload_version("ToolStarted"),
+        &current.to_string(),
+        Some(run),
+        Some(agent),
+    )
+    .unwrap();
+    assert_eq!(current["intent"]["host"], value["intent"]["host"]);
+    assert_eq!(current["intent"]["limits"], value["intent"]["limits"]);
+    assert!(current["intent"].get("expires_at_ms").is_none());
+    assert_eq!(
+        serde_json::from_str::<Value>(&event.payload().unwrap()).unwrap(),
+        current
+    );
 }
 
 #[test]

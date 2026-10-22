@@ -56,9 +56,10 @@ pub(crate) use events::{
 };
 pub(crate) use events::{
     expiring_intent_text, expiring_payload, intent_without_expiry, pre_git_write_payload,
-    pre_glob_payload, pre_host_git_payload, pre_multiedit_payload, pre_typed_prefix_payload,
-    rebind_intent_pins, replace_intent_pin, run_started_fits, run_started_v18_payload,
-    run_started_v18_to_v19, run_started_v19_payload, run_started_v19_to_v20,
+    pre_glob_payload, pre_host_git_payload, pre_host_payload, pre_multiedit_payload,
+    pre_typed_prefix_payload, rebind_intent_pins, replace_intent_pin, run_started_fits,
+    run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
@@ -70,9 +71,11 @@ pub(crate) use reducer::worker_tests::{
     compacted_fixture as worker_compacted_fixture,
     completed_command_fixture as worker_command_protocol_fixture,
     completed_fixture as worker_protocol_fixture, host_protocol_fixture,
+    session_host_protocol_fixture,
 };
 pub use reducer::{
-    AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, ToolView,
+    AgentStatus, AgentView, CompactionView, GoalView, RunStatus, RunView, SessionView, TokenCount,
+    ToolView, UsageGroup, UsageView,
 };
 pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,

@@ -1229,6 +1229,8 @@ fn restrictions_hide_result_paths_of_broader_calls_they_did_not_resolve() {
         (&search("."), "src/a.rs", false),
         (&glob(""), "private/a.rs", true),
         (&status, "private/a", true),
+        (&branch_call(None), "private/a", true),
+        (&branch_call(None), "src/a.key", true),
         // A matching ask on the call's own path was approved before dispatch.
         (&search("a.key"), "a.key", false),
         (&search("vault"), "vault/b.key", true),
@@ -1499,6 +1501,7 @@ fn hook_results_only_narrow_and_validate_against_their_observation() {
     let mut observation = crate::tools::ToolObservation {
         intent: crate::tools::EffectIntent {
             host: None,
+            host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run,
@@ -2093,6 +2096,9 @@ fn branch_call(name: Option<&str>) -> ToolCall {
     ToolCall::GitBranch {
         name: name.map(Into::into),
         start_point: None,
+        scope: None,
+        base: None,
+        max_count: None,
     }
 }
 

@@ -10,6 +10,7 @@ mod agents;
 mod model;
 pub mod rewind;
 pub mod storage;
+pub(crate) mod usage;
 #[cfg(test)]
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
@@ -21,6 +22,7 @@ pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };
+pub use usage::usage_pages;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Output {
@@ -215,6 +217,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
+            ..
         } => match start_point {
             Some(start) => format!("Git branch({name} from {start})"),
             None => format!("Git branch({name})"),
@@ -782,7 +785,7 @@ impl ToolApprovalChoice {
             Self::Yes => "Yes",
             Self::AutoEdits => "Yes, and don't ask again for: file edits",
             Self::ExactCommand => {
-                "Yes, and don't ask again for: this exact command in this project (unguarded)"
+                "Yes, and don't ask again for: this identical command in this live session (unguarded)"
             }
             Self::GitPrefix(prefix) => match prefix {
                 arany::permissions::TypedGitPrefix::Commit => {
@@ -804,7 +807,7 @@ impl ToolApprovalChoice {
     pub fn reply(self) -> arany::ApprovalReply {
         match self {
             Self::Yes | Self::AutoEdits => arany::ApprovalReply::AllowOnce,
-            Self::ExactCommand => arany::ApprovalReply::AllowAlwaysInProject,
+            Self::ExactCommand => arany::ApprovalReply::AllowForSession,
             Self::GitPrefix(_) => arany::ApprovalReply::AllowPrefixInFolder,
             Self::No => arany::ApprovalReply::Deny,
         }
@@ -846,7 +849,7 @@ pub fn unguarded_approval_lines(
     };
     let mut lines = vec![
         "Run outside the Guard? (unguarded)".to_owned(),
-        "This command failed inside the Guard. The model asks to run it again on this machine with no sandbox.".into(),
+        "The primary asks to run this command on this machine with no sandbox.".into(),
         format!(
             "Program: {} → {}",
             escape_terminal(program),
@@ -862,7 +865,17 @@ pub fn unguarded_approval_lines(
                 .map(|argument| format!("  {}", escape_terminal(argument))),
         );
     }
-    lines.push(if cwd.is_empty() {
+    lines.push(if let Some(pin) = &intent.host_command {
+        format!(
+            "Directory: {}",
+            escape_terminal(
+                &std::path::Path::new(&pin.workspace)
+                    .join(cwd)
+                    .display()
+                    .to_string()
+            )
+        )
+    } else if cwd.is_empty() {
         "Directory: ./ (the real project folder)".into()
     } else {
         format!(
@@ -874,11 +887,18 @@ pub fn unguarded_approval_lines(
         "Model's reason: {}",
         escape_terminal(justification)
     ));
+    if prompt.sensitive {
+        lines.push("SENSITIVE PATH: this command names private credentials or Arany state; output may be sent to the Provider.".into());
+    }
+    if prompt.inactive_rules {
+        lines.push(
+            "Previous exact project approvals are inactive; fresh approval is required.".into(),
+        );
+    }
     lines.push(match prompt.attribution {
         Some(cause) => format!("Guard attribution: {}", cause.diagnostic()),
         None => {
-            "Guard attribution: none. Arany could not verify that the Guard caused the failure."
-                .into()
+            "Host access requires explicit authority; no prior Guard failure is required.".into()
         }
     });
     lines.extend(
@@ -886,6 +906,10 @@ pub fn unguarded_approval_lines(
             "Risk: it runs as you, with your home directory, network and every file you can reach.",
             "Changes land directly in the project without changeset validation, and Arany cannot",
             "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
+            "It can execute repository configuration, modify Arany permissions, Store and journal, and disclose private data to the Provider.",
+            "Host effects cannot be rewound; same-user state tampering is not prevented or reliably detected.",
+            "Shell/interpreter inline programs are opaque beyond a lexical privilege-tool check; it is not a security boundary.",
+            "File scripts, obfuscation and other payloads remain uninspected. Host children have no controlling terminal, so terminal privilege prompts cannot appear.",
             "Allow only if you would type this exact command yourself.",
         ]
         .map(String::from),
@@ -1092,6 +1116,7 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
         ToolCall::GitBranch {
             name: Some(name),
             start_point,
+            ..
         } => lines.push(format!(
             "Create branch {} at {} without switching",
             escape_terminal(name),
@@ -2401,6 +2426,7 @@ mod goal_status_tests {
 pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolView {
     let intent = arany::EffectIntent {
         host: None,
+        host_command: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),
@@ -2532,6 +2558,9 @@ mod peer_row_tests {
                 ToolCall::GitBranch {
                     name: Some("topic".into()),
                     start_point: Some("HEAD~1".into()),
+                    scope: None,
+                    base: None,
+                    max_count: None,
                 },
                 serde_json::json!({"branch": "topic", "oid": oid}),
                 "⏺ Git branch(topic from HEAD~1)\n  ⎿ created topic at aaaaaaaaaaaa",
@@ -2562,6 +2591,9 @@ mod peer_row_tests {
             ToolCall::GitBranch {
                 name: Some("topic".into()),
                 start_point: None,
+                scope: None,
+                base: None,
+                max_count: None,
             },
             &serde_json::json!({"branch": hostile, "oid": oid}).to_string(),
         ));
@@ -3081,6 +3113,7 @@ mod peer_row_tests {
             (PermissionSource::Mode, "permission mode denial"),
         ] {
             tool.permission_verdict = Some(PermissionVerdict {
+                host: None,
                 intent_digest: [0; 32],
                 decision: Decision::Deny,
                 mode: None,
@@ -3139,6 +3172,7 @@ mod enforcement_tests {
     fn tool_summary_preserves_the_guards_protected_path_diagnostic() {
         let intent = arany::EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: arany::RunId::new(),
@@ -3224,6 +3258,7 @@ mod unguarded_tests {
     fn intent(args: &[&str], cwd: &str) -> EffectIntent {
         EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -3246,6 +3281,8 @@ mod unguarded_tests {
     #[test]
     fn the_unguarded_prompt_carries_the_plan_copy_and_escapes_model_text() {
         let prompt = UnguardedPrompt {
+            sensitive: false,
+            inactive_rules: false,
             executable: "/usr/bin/bash".into(),
             attribution: None,
             remember: true,
@@ -3255,17 +3292,21 @@ mod unguarded_tests {
             lines,
             [
                 "Run outside the Guard? (unguarded)",
-                "This command failed inside the Guard. The model asks to run it again on this machine with no sandbox.",
+                "The primary asks to run this command on this machine with no sandbox.",
                 "Program: sh → /usr/bin/bash",
                 "Args:",
                 "  -c",
                 "  cargo test",
                 "Directory: ./ (the real project folder)",
                 "Model's reason: It needs the network\\u{001b}[31m",
-                "Guard attribution: none. Arany could not verify that the Guard caused the failure.",
+                "Host access requires explicit authority; no prior Guard failure is required.",
                 "Risk: it runs as you, with your home directory, network and every file you can reach.",
                 "Changes land directly in the project without changeset validation, and Arany cannot",
                 "guarantee that processes it leaves behind are stopped. This run is recorded as unguarded.",
+                "It can execute repository configuration, modify Arany permissions, Store and journal, and disclose private data to the Provider.",
+                "Host effects cannot be rewound; same-user state tampering is not prevented or reliably detected.",
+                "Shell/interpreter inline programs are opaque beyond a lexical privilege-tool check; it is not a security boundary.",
+                "File scripts, obfuscation and other payloads remain uninspected. Host children have no controlling terminal, so terminal privilege prompts cannot appear.",
                 "Allow only if you would type this exact command yourself.",
             ]
         );

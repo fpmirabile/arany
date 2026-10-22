@@ -1003,6 +1003,16 @@ pub(super) async fn submit_objective(
                                 }
                                 None
                             }
+                            ActiveSubmission::OpenUsage { status } => {
+                                if terminal
+                                    .open_usage(view, status, Some(starting_sequence))
+                                    .await
+                                    .is_err()
+                                {
+                                    break "terminal rendering failed".to_owned();
+                                }
+                                None
+                            }
                             ActiveSubmission::OpenHelp => {
                                 if terminal.open_help(view).await.is_err() {
                                     break "terminal rendering failed".to_owned();
@@ -2241,6 +2251,7 @@ mod approval_reply_tests {
             let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
             let intent = arany::EffectIntent {
                 host: None,
+                host_command: None,
                 target: arany::worker::EffectTarget::Workspace,
                 id: uuid::Uuid::now_v7(),
                 run_id: arany::RunId::new(),
@@ -2327,10 +2338,7 @@ mod approval_reply_tests {
             }
         }
         assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
-        assert_eq!(
-            ExactCommand.reply(),
-            arany::ApprovalReply::AllowAlwaysInProject
-        );
+        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
         assert_eq!(No.reply(), arany::ApprovalReply::Deny);
         assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
     }

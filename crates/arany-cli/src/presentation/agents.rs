@@ -487,6 +487,7 @@ impl AgentTranscript {
         Some(Self {
             label,
             view: SessionView {
+                usage: Default::default(),
                 rewinds: Default::default(),
                 id: view.id,
                 title: String::new(),
@@ -494,6 +495,7 @@ impl AgentTranscript {
                 inherited_title: None,
                 workspace_identity: None,
                 defaults: view.defaults.clone(),
+                host_epoch_floor: 0,
                 created_sequence: view.created_sequence,
                 last_sequence: view.last_sequence,
                 lineage: None,
@@ -683,6 +685,7 @@ pub(crate) mod tests {
 
     fn view() -> SessionView {
         SessionView {
+            usage: Default::default(),
             rewinds: Default::default(),
             id: SessionId::new(),
             title: "Session".into(),
@@ -693,6 +696,7 @@ pub(crate) mod tests {
                 policy: CollaborationPolicy::Single,
                 ..SessionDefaults::default()
             },
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,

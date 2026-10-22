@@ -45,6 +45,7 @@ fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
 fn ledger(budget: GoalBudget) -> GoalLedger {
     let goal_id = GoalId::new();
     let view = SessionView {
+        usage: Default::default(),
         rewinds: Default::default(),
         id: SessionId::new(),
         title: String::new(),
@@ -55,6 +56,7 @@ fn ledger(budget: GoalBudget) -> GoalLedger {
             inode: 2,
         }),
         defaults: SessionDefaults::default(),
+        host_epoch_floor: 0,
         created_sequence: 0,
         last_sequence: 0,
         lineage: None,

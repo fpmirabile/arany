@@ -122,6 +122,13 @@ async fn goal_report_counts_cached_input_tokens() {
         text: "accepted result".into(),
     })])
     .with_cached_input_tokens(7);
+    let mut provider = provider;
+    provider.usage_override = Some(arany::Usage {
+        input_tokens: Some(12),
+        output_tokens: Some(8),
+        cache_read_input_tokens: Some(7),
+        cache_creation_input_tokens: Some(3),
+    });
     let provider = Arc::new(provider);
     let engine = engine_support::open(
         StateRoot::admit(&state_path).expect("state"),
@@ -146,6 +153,15 @@ async fn goal_report_counts_cached_input_tokens() {
         .expect("Session");
     let report = view.goals[0].report.as_ref().expect("durable report");
     assert_eq!(report.cached_input_tokens, 7);
+    let usage = &view.usage.groups[0];
+    assert_eq!(usage.cache_read.known, Some(7));
+    assert_eq!(usage.cache_creation.known, Some(3));
+    assert_eq!(usage.cache_creation.unreported, 0);
+    assert_eq!(
+        usage.input.known.unwrap() + usage.output.known.unwrap(),
+        view.goals[0].known_tokens
+    );
+    assert!(view.usage.pending.is_empty());
 }
 
 #[tokio::test]
@@ -285,6 +301,7 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
             usage: arany::Usage {
                 input_tokens: Some(32),
                 output_tokens: Some(12),
+                cache_creation_input_tokens: Some(3),
                 ..Default::default()
             },
             wire_provenance: None,
@@ -525,6 +542,35 @@ async fn compact_with_guidance(objective: &str, (user, project): (&str, &str)) {
     let view = SessionView::replay(outcome.session_id, &events)
         .expect("closed replay validates active prefixes")
         .expect("Session");
+    assert_eq!(
+        view.usage
+            .groups
+            .iter()
+            .filter_map(|group| group.cache_creation.known)
+            .sum::<u64>(),
+        compacted
+            .iter()
+            .filter_map(|(_, record)| record.cache_creation_input_tokens)
+            .map(u64::from)
+            .sum::<u64>()
+    );
+    assert!(
+        view.usage
+            .groups
+            .iter()
+            .filter_map(|group| group.cache_creation.known)
+            .sum::<u64>()
+            >= 3
+    );
+    assert_eq!(
+        view.usage
+            .groups
+            .iter()
+            .map(|group| group.input.known.unwrap_or(0) + group.output.known.unwrap_or(0))
+            .sum::<u64>(),
+        view.goals[0].known_tokens
+    );
+    assert!(view.usage.pending.is_empty());
     let run = &view.runs[0];
     assert_eq!(
         run.tools.len(),
@@ -6264,7 +6310,7 @@ async fn steered_run(
             transaction
                 .execute(
                     "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()],
+                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 )
                 .expect("padding");
         }
@@ -6432,7 +6478,7 @@ async fn reviewed_write_run(
             transaction
                 .execute(
                     "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()],
+                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 )
                 .expect("padding");
         }
@@ -6857,7 +6903,7 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             for sequence in 2..=i64::try_from(10_000 - offset - free).unwrap() {
                 transaction.execute(
                     "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()],
+                    rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 ).unwrap();
             }
             transaction.commit().unwrap();

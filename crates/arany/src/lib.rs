@@ -72,7 +72,7 @@ pub use session::{
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
     RunFailure, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId, SessionListItem,
-    SessionPage, SessionView, ToolView, WorkspaceIdentity,
+    SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView, WorkspaceIdentity,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
@@ -91,6 +91,7 @@ pub use tools::{
     ToolStep, TrustRecordError, TrustReset, UnguardedGrant, UnguardedPrompt, UnguardedReceipt,
     WorkspacePermissions, configured_skill_names, list_workspace_entries, mention_paths,
     native_protection_supported, now_ms, project_skills, runtime_skill_names, tool_guard_main,
+    tool_host_main,
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;

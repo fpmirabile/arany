@@ -467,7 +467,7 @@
       "type": "function"
     },
     {
-      "description": "Ask the user to run a command that already failed inside the Guard again on the host with no sandbox. Use only after a `command` with identical program, args and cwd failed in this Run; put a one-sentence question for the user in `justification`. The user may refuse; never retry on your own.",
+      "description": "Request a primary host command with no sandbox and a one-sentence justification, before or after a Guard failure. Privilege tools and literal privilege-tool invocations through wrappers or inline programs cannot be approved: explicitly ask the user to run the exact displayed command by hand; never evade refusal through wrappers or children. Host access can expose private data to the Provider and modify Arany state; report partial coverage honestly. Never retry automatically.",
       "name": "arany_command_unguarded",
       "parameters": {
         "additionalProperties": false,
@@ -485,9 +485,6 @@
             "type": "string"
           },
           "program": {
-            "enum": [
-              "bash"
-            ],
             "type": "string"
           }
         },
@@ -570,13 +567,40 @@
       "type": "function"
     },
     {
-      "description": "With name null, list local branches. Otherwise create branch name at start_point, or HEAD when null, without switching; an existing name fails. Creating asks approval.",
+      "description": "With name null, discover sorted local or remote-tracking branch tips, optional divergence from base, filtered tip subjects and inert upstream metadata; no fetch. Otherwise create at start_point (null means HEAD) without switching; scope, base and max_count must be null. Creating asks approval.",
       "name": "arany_git_branch",
       "parameters": {
         "additionalProperties": false,
         "properties": {
+          "base": {
+            "description": "Optional comparison revision, resolved once to a commit OID. Counts describe whole available history: behind is base-only commits, ahead is tip-only commits. Counts are withheld beyond 1000 commits or one second per row. Must be null for creation.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_count": {
+            "description": "Returned ref rows: 1 through 256; null means 256. Symbolic remote aliases name their target and have no independent counts. Must be null for creation.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "name": {
-            "description": "null lists local branches; otherwise the new branch name: letters, digits, '.', '_', '-' and '/' separators, at most 128 bytes.",
+            "description": "null lists branch tips; otherwise the new branch name: letters, digits, '.', '_', '-' and '/' separators, at most 128 bytes.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "scope": {
+            "description": "Read scope; null means local. Remote means locally stored remote-tracking refs, which may be stale; never fetches. Must be null for creation.",
+            "enum": [
+              null,
+              "local",
+              "remote",
+              "all"
+            ],
             "type": [
               "string",
               "null"
@@ -592,7 +616,10 @@
         },
         "required": [
           "name",
-          "start_point"
+          "start_point",
+          "scope",
+          "base",
+          "max_count"
         ],
         "type": "object"
       },
@@ -999,9 +1026,6 @@
                             "type": "string"
                           },
                           "program": {
-                            "enum": [
-                              "bash"
-                            ],
                             "type": "string"
                           }
                         },

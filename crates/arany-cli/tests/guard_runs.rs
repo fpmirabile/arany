@@ -581,12 +581,12 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
                 assert_eq!(lines.len(), events.len());
                 let accepted = lines.iter().filter(|line| line["kind"] == "MessageAccepted").collect::<Vec<_>>();
                 assert_eq!(accepted.len(), 5);
-                assert_eq!(accepted[0]["event_version"], arany::test_support::payload_version("MessageAccepted").unwrap());
+                assert_eq!(accepted[0]["event_version"], arany::test_support::payload_version("MessageAccepted"));
                 assert_eq!(accepted[0]["payload"]["images"][0]["media_type"], "image/png");
                 assert_eq!(accepted[0]["payload"]["images"][0]["data"], view.runs[0].images[0].base64());
                 assert_eq!(accepted[2]["payload"]["text"], "");
                 assert!(accepted[3]["payload"]["text"].as_str() == Some(&realistic_objective[..64 * 1024]));
-                assert_eq!(accepted[4]["event_version"], arany::test_support::payload_version("MessageAccepted").unwrap());
+                assert_eq!(accepted[4]["event_version"], arany::test_support::payload_version("MessageAccepted"));
                 assert!(accepted[4]["payload"]["text"].as_str() == Some(maximal_objective.as_str()));
                 assert_eq!(accepted[4]["payload"].to_string().len(), 6 * 64 * 1024 + 36, "maximally escaped text-only input fits its Event");
                 assert_eq!(accepted[4]["payload"]["images"], serde_json::json!([]), "text-only input retains the current Message shape");
@@ -607,7 +607,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         let original: serde_json::Value = serde_json::from_str(&payload).unwrap();
         for fault in ["unsupported version", "unknown version", "missing images", "empty Message", "five images", "aggregate bytes", "non-PNG", "corrupted image", "URL", "extra field", "text overflow", "payload overflow", "agent scope"] {
             let mut invalid = original.clone();
-            let current_version = arany::test_support::payload_version("MessageAccepted").unwrap();
+            let current_version = arany::test_support::payload_version("MessageAccepted");
             let mut version = current_version;
             let mut agent_scope = None;
             match fault {
@@ -632,7 +632,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(matches!(store.load_view(first.session_id).await, Err(arany::StoreError::InvalidHistory)), "image replay fault: {fault}");
             store.close().await.unwrap();
         }
-        connection.execute("UPDATE events SET event_version=?3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence, arany::test_support::payload_version("MessageAccepted").unwrap()]).unwrap();
+        connection.execute("UPDATE events SET event_version=?3, payload=?1, agent_run_id=NULL WHERE sequence=?2", rusqlite::params![payload, sequence, arany::test_support::payload_version("MessageAccepted")]).unwrap();
         drop(connection);
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
         assert_eq!(store.load_view(first.session_id).await.unwrap().unwrap(), view);

@@ -1309,7 +1309,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 })
                 .unwrap();
             for sequence in first_padding_sequence..=i64::from(prefix) {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -1416,7 +1416,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .query_row("SELECT COALESCE(MAX(sequence), 0) + 1 FROM events", [], |row| row.get(0))
                 .unwrap();
             for sequence in first_padding_sequence..=prefix {
-                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()]).unwrap();
+                transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, id.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
             }
             transaction.commit().unwrap();
             drop(connection);
@@ -1480,7 +1480,7 @@ fn persistence_capacity_is_admitted_before_provider_usage() {
                 .unwrap();
             if let Some(prefix) = prefix {
                 for sequence in first_padding_sequence..=prefix {
-                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string(), arany::test_support::payload_version("SessionRenamed").unwrap()]).unwrap();
+                    transaction.execute("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)", rusqlite::params![sequence, root.to_string(), arany::test_support::payload_version("SessionRenamed")]).unwrap();
                 }
             }
             let event_count_before_forks = prefix.unwrap_or(first_padding_sequence - 1);
@@ -4593,6 +4593,14 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
         .await
         .expect("latest fork in Workspace");
         assert_eq!(continued.id, fork_id);
+        assert!(!continued.usage.groups.is_empty());
+        assert!(
+            continued
+                .usage
+                .groups
+                .iter()
+                .all(|group| group.session_id == first.session_id)
+        );
         let listed = list_sessions(
             StateRoot::open_existing(&state_path).expect("state readmission"),
             workspace.clone(),
