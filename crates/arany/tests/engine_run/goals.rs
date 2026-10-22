@@ -3,6 +3,42 @@ use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn default_goal_completes_past_64_calls_and_30_active_minutes() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "Fact");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let provider = Arc::new(long_turn_provider());
+    let outcome = run_with(
+        &engine,
+        &provider,
+        request(&workspace, "Inspect the folder"),
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("long default Goal");
+    assert_eq!(
+        outcome.run.assistant_message.as_deref(),
+        Some("Long turn completed")
+    );
+    engine.close().await.expect("Engine shutdown");
+    let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert_long_turn(&events, &view);
+    assert_eq!(provider.requests.lock().expect("requests").len(), 65);
+    assert!(provider.responses.lock().expect("script").is_empty());
+    assert!(
+        provider
+            .compact_requests
+            .lock()
+            .expect("compactions")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn goal_lifecycle_bounds_report_and_requires_goal_replay_linkage() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = temp.path().join("workspace");
@@ -1626,7 +1662,7 @@ async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume()
                 compaction_content_digest: None,
                 tool_policy: None,
             },
-            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
+            active_deadline_ms: None,
         },
         Event::AgentSpawned {
             profile: None,
@@ -5841,7 +5877,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
                 compaction_content_digest: None,
                 tool_policy: None,
             },
-            active_deadline_ms: Some(arany::MAX_GOAL_ACTIVE_MS),
+            active_deadline_ms: None,
         },
         Event::AgentSpawned {
             profile: None,

@@ -1613,7 +1613,15 @@ mod tests {
         let rows = linear_setting_rows(preferences);
         assert_eq!(rows.len(), 13);
         assert_eq!(rows[0], "Slash menu: tabs (tabs|combined)");
-        assert_eq!(rows[2], "Goal provider calls: 64 (number or unlimited)");
+        assert_eq!(
+            rows[2],
+            "Goal provider calls: unlimited (number or unlimited)"
+        );
+        assert_eq!(rows[3], "Goal tokens: unlimited (number or unlimited)");
+        assert_eq!(
+            rows[4],
+            "Goal active milliseconds: unlimited (number or unlimited)"
+        );
         assert_eq!(rows[10], "Build cache bytes: 8589934592");
         assert_eq!(
             rows[11],
@@ -1622,7 +1630,12 @@ mod tests {
         assert_eq!(rows[12], "Copy on select: on (on|off)");
         assert!(apply_setting(&mut preferences, "1 combined"));
         assert!(apply_setting(&mut preferences, "2  fullscreen"));
+        assert!(apply_setting(&mut preferences, "3 8"));
+        assert_eq!(preferences.goal_budget.max_provider_calls, Some(8));
         assert!(apply_setting(&mut preferences, "3 unlimited"));
+        assert!(apply_setting(&mut preferences, "5 60000"));
+        assert_eq!(preferences.goal_budget.max_active_ms, Some(60_000));
+        assert!(apply_setting(&mut preferences, "5 unlimited"));
         assert!(apply_setting(&mut preferences, "4 100000"));
         assert!(apply_setting(&mut preferences, "7 300000"));
         assert!(apply_setting(&mut preferences, "12 wheel only"));
@@ -1842,23 +1855,28 @@ mod tests {
             .unwrap();
         assert_eq!(
             original,
-            br#"{"version":4,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true}}"#
+            br#"{"version":4,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":null,"max_tokens":null,"max_active_ms":null,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592},"mouse":"wheel_and_clicks","copy_on_select":true}}"#
         );
         // A complete version-3 record upgrades in place, keeping its choices with the pointer defaults.
+        let finite = Preferences {
+            goal_budget: arany::GoalBudget {
+                max_provider_calls: Some(64),
+                max_active_ms: Some(1_800_000),
+                ..Default::default()
+            },
+            ..combined_classic
+        };
         let version_three = br#"{"version":3,"preferences":{"completion":"combined","view":"classic","goal_budget":{"max_provider_calls":64,"max_tokens":null,"max_active_ms":1800000,"max_runs":16},"resources":{"default_command_timeout_ms":120000,"max_command_timeout_ms":600000,"build_memory_bytes":4294967296,"build_processes":256,"build_project_bytes":1073741824,"build_cache_bytes":8589934592}}}"#;
         root.record(RecordKind::UiPreferences)
             .replace(version_three)
             .unwrap();
-        assert_eq!(
-            restore_settings(&admission).await.unwrap(),
-            combined_classic
-        );
+        assert_eq!(restore_settings(&admission).await.unwrap(), finite);
         let upgraded = root
             .record(RecordKind::UiPreferences)
             .read()
             .unwrap()
             .unwrap();
-        assert_eq!(decode_settings(&upgraded), Ok(combined_classic));
+        assert_eq!(decode_settings(&upgraded), Ok(finite));
         root.record(RecordKind::UiPreferences)
             .replace(&original)
             .unwrap();
@@ -1906,6 +1924,10 @@ mod tests {
             let file = admission.state_dir.join("ui-preferences.json");
             std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).unwrap();
             assert!(restore_settings(&admission).await.is_err());
+            assert_eq!(
+                settings_or_defaults(&admission).await.unwrap_err(),
+                "display settings unavailable or unsafe"
+            );
             assert!(
                 save_settings(&admission, Preferences::default())
                     .await

@@ -681,7 +681,7 @@ fn fixture_with_manifest(
     f.push(Event::RunStarted {
         run_id: run,
         config,
-        active_deadline_ms: Some(crate::session::MAX_GOAL_ACTIVE_MS),
+        active_deadline_ms: None,
     });
     f.push(Event::AgentSpawned {
         run_id: run,
