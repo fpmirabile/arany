@@ -201,7 +201,7 @@ records the refusal, so its history projects `paused`. A settled submission
 whose last Run has no terminal receipt also completes that Run once, with
 status `interrupted`; an Engine error keeps the fatal recovery path below.
 
-Optional `turn.goal.budgetRefusal` carries that same committed refusal record for the latest accepted Run. Budget stops carry the shared deterministic Arany status in `turn.error.message`, including when a committed answer is preserved. Reopened history projects the same fields. An exhausted `goal/resume` error names the committed closure without another Run or call; unacknowledged terminal writes stay explicitly uncommitted infrastructure diagnostics.
+Optional `turn.goal.budgetRefusal` carries that same committed refusal record for the latest accepted Run. Budget stops carry the shared deterministic Arany status in `turn.error.message`, including when a committed answer is preserved. Reopened history projects the same fields. An exhausted `goal/resume` error names the committed closure without another Run or call; terminal acknowledgment failures use the [Goal refusal diagnostics](./goals.md#budget-refusal-feedback) without claiming an acknowledged receipt.
 
 `turn.stopReason` is derived from it: `tokenBudgetExhausted` for the `tokens`
 limit and `actionBudgetExhausted` for the others. Intermediate autonomous turns

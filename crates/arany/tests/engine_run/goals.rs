@@ -230,6 +230,9 @@ async fn budget_refusal_store_failure_and_lost_ack_never_claim_a_live_receipt() 
         };
         if before_goal {
             assert!(matches!(error, EngineError::Store(_)));
+        } else if committed {
+            assert!(matches!(error, EngineError::GoalAdmissionUncertain));
+            assert!(!error.to_string().contains("uncommitted"));
         } else {
             assert!(matches!(error, EngineError::GoalBudgetUncommitted { .. }));
             assert!(error.to_string().contains("uncommitted"));
@@ -1181,111 +1184,133 @@ async fn known_active_time_exhaustion_closes_without_provider_dispatch() {
 
 #[tokio::test]
 async fn goal_paused_at_its_call_budget_closes_as_failed_on_explicit_resume() {
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("workspace");
-    let state_path = temp.path().join("state");
-    let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
-        text: "continue later".into(),
-    })]);
-    let first_engine_provider = Arc::new(first_provider);
-    let first_engine = engine_support::open(
-        StateRoot::admit(&state_path).expect("state"),
-        EngineConfig::default(),
-    )
-    .expect("first engine");
-    let mut first = request(&workspace, "Use the only Provider call");
-    first.include_paths.clear();
-    first.goal = arany::GoalRequest::new(
-        arany::GoalBudget {
-            max_provider_calls: Some(1),
-            ..arany::GoalBudget::default()
-        },
-        arany::GoalPhase::Implementation,
-    );
-    first.goal.finish_after_run = false;
-    let initial = run_to_end(&first_engine, &first_engine_provider, first)
-        .await
-        .expect("first Goal Run");
-    first_engine.close().await.expect("first engine shutdown");
+    for lost_ack in [false, true] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let state_path = temp.path().join("state");
+        let first_provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+            text: "continue later".into(),
+        })]);
+        let first_engine_provider = Arc::new(first_provider);
+        let first_engine = engine_support::open(
+            StateRoot::admit(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("first engine");
+        let mut first = request(&workspace, "Use the only Provider call");
+        first.include_paths.clear();
+        first.goal = arany::GoalRequest::new(
+            arany::GoalBudget {
+                max_provider_calls: Some(1),
+                ..arany::GoalBudget::default()
+            },
+            arany::GoalPhase::Implementation,
+        );
+        first.goal.finish_after_run = false;
+        let initial = run_to_end(&first_engine, &first_engine_provider, first)
+            .await
+            .expect("first Goal Run");
+        first_engine.close().await.expect("first engine shutdown");
 
-    let second_provider = ScriptedProvider::new(Vec::new());
-    let second_requests = Arc::clone(&second_provider.requests);
-    let second_engine_provider = Arc::new(second_provider);
-    let second_engine = engine_support::open(
-        StateRoot::open_existing(&state_path).expect("reopened state"),
-        EngineConfig::default(),
-    )
-    .expect("second engine");
-    let mut resumed = request(&workspace, "Try the exhausted Goal");
-    resumed.session_id = Some(initial.session_id);
-    resumed.title = None;
-    resumed.include_paths.clear();
-    resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    let result = run_to_end(&second_engine, &second_engine_provider, resumed).await;
-    assert!(
-        matches!(&result, Err(EngineError::GoalBudgetExhausted)),
-        "unexpected exhausted-resume result: {}",
-        result
-            .as_ref()
-            .err()
-            .map_or_else(|| "Run succeeded".into(), |error| format!("{error:?}"))
-    );
-    assert!(
-        second_requests
-            .lock()
-            .expect("Provider requests")
-            .is_empty()
-    );
+        let second_provider = ScriptedProvider::new(vec![finish_with("Forbidden extra call")]);
+        let second_requests = Arc::clone(&second_provider.requests);
+        let second_engine_provider = Arc::new(second_provider);
+        let second_engine = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("reopened state"),
+            EngineConfig::default(),
+        )
+        .expect("second engine");
+        let mut resumed = request(&workspace, "Try the exhausted Goal");
+        resumed.session_id = Some(initial.session_id);
+        resumed.title = None;
+        resumed.include_paths.clear();
+        resumed.goal = arany::GoalRequest::resume(initial.goal_id, true);
+        let result = {
+            let submission = run_to_end(&second_engine, &second_engine_provider, resumed);
+            tokio::pin!(submission);
+            if lost_ack {
+                let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(
+                    initial.session_id,
+                    |event| matches!(event, Event::GoalFinished { .. }),
+                );
+                tokio::select! {
+                    result = &mut submission => panic!("Resume ended before terminal acknowledgment: {:?}", result.map(|outcome| outcome.run.status)),
+                    entered = entered => entered.expect("exhausted resume receipt reached acknowledgment"),
+                }
+                drop(release);
+            }
+            submission.await
+        };
+        let expected = if lost_ack {
+            matches!(&result, Err(EngineError::GoalAdmissionUncertain))
+        } else {
+            matches!(&result, Err(EngineError::GoalBudgetExhausted))
+        };
+        assert!(
+            expected,
+            "unexpected exhausted-resume result: {}",
+            result
+                .as_ref()
+                .err()
+                .map_or_else(|| "Run succeeded".into(), |error| format!("{error:?}"))
+        );
+        assert!(
+            second_requests
+                .lock()
+                .expect("Provider requests")
+                .is_empty()
+        );
 
-    let mut again = request(&workspace, "Resume the closed Goal");
-    again.session_id = Some(initial.session_id);
-    again.title = None;
-    again.include_paths.clear();
-    again.goal = arany::GoalRequest::resume(initial.goal_id, true);
-    assert!(
-        matches!(
-            run_to_end(&second_engine, &second_engine_provider, again).await,
-            Err(EngineError::GoalUnavailable)
-        ),
-        "a closed Goal is not resumable"
-    );
-    second_engine.close().await.expect("second engine shutdown");
+        let mut again = request(&workspace, "Resume the closed Goal");
+        again.session_id = Some(initial.session_id);
+        again.title = None;
+        again.include_paths.clear();
+        again.goal = arany::GoalRequest::resume(initial.goal_id, true);
+        assert!(
+            matches!(
+                run_to_end(&second_engine, &second_engine_provider, again).await,
+                Err(EngineError::GoalUnavailable)
+            ),
+            "a closed Goal is not resumable"
+        );
+        second_engine.close().await.expect("second engine shutdown");
 
-    let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
-        .expect("read-only Store");
-    let events = store
-        .load_session(initial.session_id)
-        .await
-        .expect("Events");
-    let view = SessionView::replay(initial.session_id, &events)
-        .expect("strict replay")
-        .expect("Session");
-    let goal = &view.goals[0];
-    assert_eq!(goal.status, arany::GoalStatus::Failed);
-    let refusal = goal.budget_refusal.expect("exhausted resume receipt");
-    assert_eq!(refusal.action, arany::BudgetAction::Resume);
-    assert_eq!(refusal.dimension, arany::GoalLimit::Calls);
-    assert_eq!((refusal.used, refusal.limit), (1, 1));
-    assert_eq!((refusal.run_id, refusal.agent_run_id), (None, None));
-    assert!(
-        goal.report
-            .as_ref()
-            .is_some_and(|report| !report.summary.is_empty())
-    );
-    assert_eq!(view.interrupted_goal_id(), None);
-    assert_eq!(
-        view.runs.len(),
-        1,
-        "no Run is linked for the exhausted resume"
-    );
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(&event.event, Event::GoalResumed { .. })),
-        "the exhausted resume records no GoalResumed"
-    );
-    store.close().await.expect("Store shutdown");
+        let store = Store::open_read_only(StateRoot::open_existing(&state_path).expect("state"))
+            .expect("read-only Store");
+        let events = store
+            .load_session(initial.session_id)
+            .await
+            .expect("Events");
+        let view = SessionView::replay(initial.session_id, &events)
+            .expect("strict replay")
+            .expect("Session");
+        let goal = &view.goals[0];
+        assert_eq!(goal.status, arany::GoalStatus::Failed);
+        let refusal = goal.budget_refusal.expect("exhausted resume receipt");
+        assert_eq!(refusal.action, arany::BudgetAction::Resume);
+        assert_eq!(refusal.dimension, arany::GoalLimit::Calls);
+        assert_eq!((refusal.used, refusal.limit), (1, 1));
+        assert_eq!((refusal.run_id, refusal.agent_run_id), (None, None));
+        assert!(
+            goal.report
+                .as_ref()
+                .is_some_and(|report| !report.summary.is_empty())
+        );
+        assert_eq!(view.interrupted_goal_id(), None);
+        assert_eq!(
+            view.runs.len(),
+            1,
+            "no Run is linked for the exhausted resume"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(&event.event, Event::GoalResumed { .. })),
+            "the exhausted resume records no GoalResumed"
+        );
+        store.close().await.expect("Store shutdown");
+    }
 }
 
 #[tokio::test]

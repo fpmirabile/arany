@@ -1126,9 +1126,12 @@ impl Engine {
             },
         )
         .await
-        .map_err(|source| EngineError::GoalBudgetUncommitted {
-            refusal: Box::new(refusal),
-            source: Box::new(source),
+        .map_err(|source| match source {
+            EngineError::GoalAdmissionUncertain => EngineError::GoalAdmissionUncertain,
+            source => EngineError::GoalBudgetUncommitted {
+                refusal: Box::new(refusal),
+                source: Box::new(source),
+            },
         })?;
         Ok(())
     }
@@ -2225,26 +2228,27 @@ impl Engine {
             if exhausted && budget_refusal.is_none() {
                 return Err(EngineError::InvalidHistory);
             }
-            self.journal
-                .append(
-                    session_id,
-                    Event::GoalFinished {
-                        goal_id: goal.id,
-                        status,
-                        active_ms,
-                        report,
-                        exhausted,
-                        budget_refusal,
-                    },
-                )
-                .await
-                .map_err(|error| match budget_refusal {
-                    Some(refusal) => EngineError::GoalBudgetUncommitted {
-                        refusal: Box::new(refusal),
-                        source: Box::new(EngineError::from(error)),
-                    },
-                    None => EngineError::from(error),
-                })?;
+            self.append_goal_lifecycle(
+                session_id,
+                None,
+                Event::GoalFinished {
+                    goal_id: goal.id,
+                    status,
+                    active_ms,
+                    report,
+                    exhausted,
+                    budget_refusal,
+                },
+            )
+            .await
+            .map_err(|error| match (error, budget_refusal) {
+                (EngineError::GoalAdmissionUncertain, _) => EngineError::GoalAdmissionUncertain,
+                (source, Some(refusal)) => EngineError::GoalBudgetUncommitted {
+                    refusal: Box::new(refusal),
+                    source: Box::new(source),
+                },
+                (source, None) => source,
+            })?;
             Self::release_goal_workspace(leases, goal.id, workspace_identity);
             goal_status = status;
         }
