@@ -321,6 +321,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let reader_input = Arc::clone(&input);
     let mut output = attached.child().stdout.take().expect("PTY output");
     let (stage_sender, stages) = mpsc::channel();
+    let (paste_sender, paste_ready) = mpsc::sync_channel(1);
     let expect_idle = matches!(
         exit,
         ActiveExit::CtrlC
@@ -353,6 +354,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         let mut declined = false;
         let mut answered = 0;
         let mut bytes = Vec::new();
+        let mut paste_sender = expect_draft.then_some(paste_sender);
         let mut patterns: Vec<&[u8]> = vec![
             b"SHELL_PID:",
             if inline {
@@ -445,6 +447,16 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 &bytes,
                 &mut answered,
             );
+            if paste_sender.is_some()
+                && super::session_picker::screen_contains(
+                    &bytes,
+                    80,
+                    24,
+                    "Pasted Content 9216 chars",
+                )
+            {
+                paste_sender.take().unwrap().send(()).unwrap();
+            }
             while next < patterns.len() {
                 let Some(matched) =
                     crate::process::pty_text_matches(&bytes[search_from..], patterns[next]).next()
@@ -500,6 +512,9 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         let pasted = format!("@not-admitted /exit {}", "p".repeat(9196));
         assert_eq!(pasted.len(), 9 * 1024);
         write_input(&input, format!("\x1b[200~{pasted}\x1b[201~").as_bytes());
+        paste_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("chip rendered before the Run settles");
     }
     match exit {
         ActiveExit::ProviderFailure => {
@@ -997,9 +1012,6 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         !transcript.contains("@not-admitted"),
         "unsent payload stays collapsed and undisclosed"
     );
-    if expect_draft {
-        assert!(transcript.contains("Pasted Content 9216 chars"));
-    }
     assert!(!transcript.contains("test-key"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()

@@ -100,7 +100,7 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut bytes = Vec::new();
-        let stages: [&str; 24] = [
+        let stages: [&str; 26] = [
             "Input:",
             "Command: /exit",
             "Notice: Select /provider first",
@@ -114,7 +114,9 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
             "Notice: Provider: openai; set /model",
             "Notice: Model: gpt-linear-guard",
             "Notice: Model: gpt-linear-guard",
-            "Notice: Error: selected native API credentials or workspace configuration unavailable",
+            "Notice: Error: selected native API credentials or workspace configuration unavailable; draft retained (29 characters)",
+            "Input:",
+            "Input:",
             "Notice: Model: gpt-6-astra",
             "Provider unavailable",
             "Notice: Error: Session has an active operation; selection unchanged. Try again when it finishes",
@@ -176,12 +178,21 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
         (&b"/model gpt-linear-guard\n"[..], 10),
         (&b"/model gpt-linear-guard high\n"[..], 11),
         (&b"unaccepted physical objective\n"[..], 12),
-        (&b"/model gpt-6-astra high\n"[..], 13),
-        (&b"/model\n"[..], 14),
     ] {
         input.write_all(keys).expect("linear model journey");
         stage(expected + 1);
     }
+    stage(14);
+    input
+        .write_all(b"\x03")
+        .expect("clear the restored unaccepted draft");
+    stage(15);
+    input
+        .write_all(b"/model gpt-6-astra high\n")
+        .expect("choose model after clearing");
+    stage(16);
+    input.write_all(b"/model\n").expect("open model catalog");
+    stage(17);
     let held = File::open(state.join(format!("session-{session_id}.lock"))).expect("Session lock");
     let prefix = || {
         runtime.block_on(async {
@@ -201,34 +212,34 @@ fn screen_reader_model_catalog_selects_exact_profile_without_provider_egress() {
     input
         .write_all(b"/model gpt-6-astra low\n")
         .expect("busy atomic tuple");
-    stage(16);
+    stage(18);
     assert_eq!(prefix(), before);
     rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).expect("release operation");
     input
         .write_all(b"/provider custom:local\n")
         .expect("custom selection");
-    stage(17);
+    stage(19);
     rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .expect("held catalog operation");
     let before = prefix();
     input.write_all(b"/model\n").expect("busy catalog");
-    stage(18);
+    stage(20);
     input.write_all(b"1 low\n").expect("busy atomic selection");
-    stage(19);
+    stage(21);
     assert_eq!(prefix(), before);
     rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock).expect("release catalog");
     input.write_all(b"/model\n").expect("reopen catalog");
-    stage(20);
+    stage(22);
     input.write_all(b"1 low\n").expect("choice after unlock");
-    stage(21);
+    stage(23);
     input
         .write_all(b"/provider openai\n")
         .expect("restore Provider");
-    stage(22);
+    stage(24);
     input
         .write_all(b"/model gpt-6-astra high\n")
         .expect("restore atomic defaults");
-    stage(23);
+    stage(25);
     input.write_all(b"/exit\n").expect("exit attached mode");
     drop(input);
     let deadline = Instant::now() + Duration::from_secs(10);

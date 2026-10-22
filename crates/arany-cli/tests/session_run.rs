@@ -3046,7 +3046,8 @@ impl arany::Provider for HeldProvider {
                 request.input.workspace_guidance.is_empty(),
                 "holder call instructions"
             );
-            assert!(request.input.includes.is_empty(), "holder call includes");
+            assert_eq!(request.input.includes.len(), 1, "holder call includes");
+            assert!(request.input.includes[0].contains("Pinned lock fixture"));
             assert!(request.input.history.is_empty(), "holder call history");
             assert!(
                 request.input.context_summary.is_none(),
@@ -3102,7 +3103,7 @@ fn process_lock_holder() {
                 images: Vec::new(),
                 workspace: workspace.into(),
                 launch_directory: None,
-                include_paths: Vec::new(),
+                include_paths: vec!["held-include.txt".into()],
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
             },
@@ -3125,6 +3126,8 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let temp = tempfile::tempdir().expect("private temporary directory");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace directory");
+        let pinned_include = workspace.join("held-include.txt");
+        std::fs::write(&pinned_include, "Pinned lock fixture").expect("pinned include");
         let state_path = temp.path().join("state");
         let session_id = create_session(
             StateRoot::admit(&state_path).expect("state admission"),
@@ -3209,8 +3212,13 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let goal_id = view
             .interrupted_goal_id()
             .expect("held Goal became interrupted");
+        assert_eq!(
+            view.goal(goal_id).unwrap().include_paths,
+            Some(vec!["held-include.txt".into()])
+        );
         store.close().await.expect("close interrupted Store");
 
+        std::fs::remove_file(&pinned_include).expect("remove the originally admitted input");
         let released = contender(Some(goal_id));
         assert!(!released.status.success());
         assert_eq!(released.stdout, b"");
