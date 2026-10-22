@@ -66,6 +66,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Public-registry fetch](./registry-fetch/README.md) | Frozen proxy-only dependency retrieval followed by offline builds |
 | [Git branch reads](./git-branch-reads/README.md) | Ready; S1 local/remote-tracking branch metadata and divergence, S2 bounded range history and endpoint diffs |
 | [GitHub PR reads](./github-pr-reads/README.md) | Ready; depends on Git-write S3; S1 host PR listing with human or user-owned typed-prefix approval, S2 bounded PR discussion and checks |
+| [Primary host commands](./primary-host-commands/README.md) | `Draft`: owner approval pending for guarantee wording and headless policy; S1 primary escalation and session approval, S2 user-owned host prefixes, S3 serve/ACP/exec |
 | [Real-scale command snapshot](./real-scale-command-snapshot/README.md) | Ready: three command slices; `ignore` 0.4.33 approved behind the dependency review gate |
 | [Gitignore-aware read discovery](./gitignore-read-discovery/README.md) | Ready: typed discovery/suggestions, then Git disclosure; depends on snapshot PR1 (selector and enforced preparation) |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
