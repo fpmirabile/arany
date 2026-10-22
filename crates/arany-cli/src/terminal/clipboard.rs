@@ -650,7 +650,7 @@ fn run_process(
 }
 
 pub(super) const MAX_COPY_BYTES: usize = 100_000;
-pub(super) const COPY_TOO_LARGE: &str = "Copy exceeds 100 KB; use arany show";
+pub(super) const COPY_TOO_LARGE: &str = "Copy exceeds 97.7 KB; use arany show";
 
 // The escaped display text and what it names in the copy cue.
 pub(super) struct CopyRequest(String, &'static str);
@@ -1585,6 +1585,13 @@ mod copy_tests {
 
     #[test]
     fn copy_payload_is_sanitized_display_text_within_the_limit() {
+        assert_eq!(
+            COPY_TOO_LARGE,
+            format!(
+                "Copy exceeds {}; use arany show",
+                crate::presentation::format_bytes(MAX_COPY_BYTES as u64)
+            )
+        );
         assert_eq!(
             CopyRequest::answer("tab\there\n\u{1b}]52;c;aGk=\u{7}\r\u{202e}x")
                 .unwrap()

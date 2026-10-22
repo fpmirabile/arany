@@ -2356,7 +2356,7 @@ mod tests {
         full_history.sync(&view, 80, 20);
         let full_rows = full_history.visible(&view);
         assert!(full_rows.iter().any(|row| {
-            row.text == "  Image 1: PNG 1x1, 0.1 KB"
+            row.text == "  Image 1: PNG 1x1, 69 B"
                 && row.speaker == MessageKind::User
                 && !row.heading
         }));
