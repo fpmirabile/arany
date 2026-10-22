@@ -1075,6 +1075,8 @@ pub(super) mod cleanup_tests {
             secret_echo: None,
             agent_panel: None,
             agent_chat: None,
+            child_drafts: Vec::new(),
+            primary_draft_bytes: 0,
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,

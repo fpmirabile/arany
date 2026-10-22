@@ -70,6 +70,7 @@ event_kinds!(
     GoalContextCompacted,
     ToolResultsCleared,
     GoalSteeringNoteRecorded,
+    AgentSteeringNoteRecorded,
     AssistantDisplayRecorded,
     ToolStarted,
     ToolFinished,

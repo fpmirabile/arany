@@ -234,6 +234,7 @@
             "GoalContextCompacted",
             "ToolResultsCleared",
             "GoalSteeringNoteRecorded",
+            "AgentSteeringNoteRecorded",
             "AssistantDisplayRecorded",
             "ToolStarted",
             "ToolFinished",

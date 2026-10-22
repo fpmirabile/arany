@@ -43,6 +43,39 @@ fn supervisor_event_projects_canonical_jsonl_and_validates_against_exported_sche
 }
 
 #[test]
+fn child_steering_projects_as_an_actor_scoped_committed_event() {
+    let (session, run, actor, goal) = (
+        arany::SessionId::new(),
+        arany::RunId::new(),
+        arany::AgentRunId::new(),
+        arany::GoalId::new(),
+    );
+    let envelope = arany::EventEnvelope {
+        session_id: session,
+        run_id: Some(run),
+        agent_run_id: Some(actor),
+        sequence: 7,
+        created_at_ms: 0,
+        event: arany::Event::AgentSteeringNoteRecorded {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: actor,
+            text: "note".into(),
+        },
+    };
+    let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
+    assert_eq!(line["kind"], "AgentSteeringNoteRecorded");
+    assert_eq!(line["event_version"], 1);
+    assert_eq!(line["payload"], json!({"goal_id":goal,"text":"note"}));
+    let schema = protocol_schema();
+    validate(
+        &schema,
+        &schema["notifications"]["events/committed"]["params"],
+        &json!({"threadId":session,"event":line}),
+    );
+}
+
+#[test]
 fn schema_snapshot_is_byte_stable() {
     let actual = format!(
         "{}\n",

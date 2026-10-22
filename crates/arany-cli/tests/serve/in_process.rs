@@ -1440,6 +1440,7 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         summary: None,
         result: None,
         provider_calls: Vec::new(),
+        steering_notes: Vec::new(),
         grant: None,
         definition: None,
         tools: vec![child_tool],

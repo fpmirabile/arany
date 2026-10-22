@@ -145,6 +145,8 @@ Changing the decoder, prompts, request encoding, effort mapping, output cap or v
 
 Native adapters validate attachment count, aggregate bytes and objective or history origin before building a request body or egress.
 
+ChildWork requests may contain only notes recorded for that exact child, rendered as ordinary user data at their actual continuation boundary with the shared `steering_notes` block. ReadOnly, Researcher and Editor work roles admit them; ToolReview and invalid role/phase combinations reject them, including nested Tool-step and stop-feedback notes. Earlier request prefixes remain unchanged on later continuations and route/retry attempts. Primary notes do not enter child requests. Guidance cannot widen the child's grant, catalog, lease, plan or budget; [Goals](./goals.md#steering-notes-and-pause) owns admission and delivery semantics.
+
 ## Configuration and egress
 
 - An explicit CLI profile and model override trusted Session or user-configuration defaults. There is no compiled model default, Workspace-defined profile or implicit discovery.

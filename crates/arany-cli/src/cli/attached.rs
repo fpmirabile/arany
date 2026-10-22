@@ -2,8 +2,8 @@ use super::provider::select::ProviderArg;
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::Selection;
 use crate::terminal::{
-    AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand, Submission,
-    TerminalInput, invoked_objective, transcript_agents,
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
+    Submission, TerminalInput, invoked_objective, transcript_agents,
 };
 use arany::{
     CollaborationPolicy, Effort, Engine, EngineError, RunOutcome, RunStatus, SessionDefaults,
@@ -701,6 +701,14 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             view.defaults.model.as_deref(),
             view.defaults.account_id,
         );
+        if terminal.agent_chat_open()
+            && let AgentChatFollow::Closed(text) = terminal
+                .follow_agent_chat(&view)
+                .await
+                .map_err(|error| error.to_string())?
+        {
+            notice = Some(Feedback::History(text.into()));
+        }
         terminal
             .draw_notice(&view, &composer, notice.as_ref().map(Feedback::notice))
             .map_err(|error| error.to_string())?;
@@ -734,6 +742,13 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
             .await
             .map_err(|error| error.to_string())?
         {
+            AgentChatInput::ChildMessage { .. } => {
+                notice = Some(Feedback::Transient(
+                    "Historical children are read-only; draft retained".into(),
+                ));
+                continue;
+            }
+            AgentChatInput::ChildEdited(_) => continue,
             AgentChatInput::Pass => {}
             AgentChatInput::Handled | AgentChatInput::Returned => {
                 idle_escape = None;

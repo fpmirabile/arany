@@ -34,6 +34,7 @@ pub(super) struct ChildWork {
     pub(super) turns_remaining: u8,
     pub(super) editor: bool,
     pub(super) source_context: Option<ChildResult>,
+    pub(super) steering_notes: Vec<String>,
     pub(super) stop_hook_feedback: Vec<crate::provider::StopHookFeedback>,
     pub(super) tools: Option<ToolContext>,
     pub(super) tool_calls_remaining: usize,
@@ -1001,6 +1002,7 @@ impl RunLoop<'_> {
             definition,
             editor: false,
             source_context: None,
+            steering_notes: Vec::new(),
             stop_hook_feedback: Vec::new(),
             tools: self
                 .controls
@@ -2215,6 +2217,44 @@ impl RunLoop<'_> {
                 0,
             )
             .await?;
+            if self.controls.cancellation.is_cancelled()
+                || self.pause_requested()
+                || self.worker_stopped()?
+                || self.hook_requested_stop()?
+                || queue.stop.is_some()
+            {
+                let result = CallResult::Cancelled;
+                self.append(Event::ProviderCallRecorded {
+                    run_id: self.run_id,
+                    agent_run_id: child.agent_run_id,
+                    record: call_record(AgentPhase::ChildWork, &result, false, None, None),
+                })
+                .await?;
+                self.settle_result(&result)?;
+                self.ledger().child_call_finished()?;
+                queue.pending.push_front(index);
+                break;
+            }
+            if let Some(steering) = &self.controls.steering {
+                let target = crate::engine::ChildSteeringTarget {
+                    session_id: self.session_id,
+                    run_id: self.run_id,
+                    agent_run_id: child.agent_run_id,
+                };
+                if let Some(text) = steering.take_child_note(target) {
+                    self.append(Event::AgentSteeringNoteRecorded {
+                        goal_id: self.goal()?,
+                        run_id: self.run_id,
+                        agent_run_id: child.agent_run_id,
+                        text: text.clone(),
+                    })
+                    .await?;
+                    super::place_steering_note(&mut request.input, text);
+                    child.steering_notes = request.input.steering_notes.clone();
+                    child.tools = request.input.tools.clone();
+                    child.stop_hook_feedback = request.input.stop_hook_feedback.clone();
+                }
+            }
             let preview = (self
                 .routing
                 .chain(crate::provider::ProviderRole::Child, child.agent_run_id)?
@@ -2286,7 +2326,12 @@ impl RunLoop<'_> {
                             })
                             .sum::<usize>()
                         + context.as_ref().map_or(0, String::len)
-                        + CHILD_INTENT_RESERVE_BYTES,
+                        + CHILD_INTENT_RESERVE_BYTES
+                        + if self.controls.steering.is_some() {
+                            crate::session::MAX_STEERING_CONTEXT_BYTES
+                        } else {
+                            0
+                        },
                     crate::tools::ToolRuntime::step_context_reserve(
                         false,
                         Self::maximum_feedback_reserve(runtime),
@@ -2350,6 +2395,7 @@ impl RunLoop<'_> {
                 } else {
                     None
                 },
+                steering_notes: child.steering_notes.clone(),
                 stop_hook_feedback: child.stop_hook_feedback.clone(),
                 workspace_guidance: root.workspace_guidance.clone(),
                 assignment_context: context,
@@ -2633,12 +2679,24 @@ mod delegation_bound_tests {
                 false,
                 RunLoop::maximum_feedback_reserve(&runtime),
             );
-            for (headroom, answer_only) in [(0, true), (reserve - 1, true), (reserve, false)] {
+            for (steering, (headroom, answer_only)) in [None, Some(crate::RunSteering::new())]
+                .into_iter()
+                .flat_map(|steering| {
+                    [(0, true), (reserve - 1, true), (reserve, false)]
+                        .into_iter()
+                        .map(move |case| (steering.clone(), case))
+                })
+            {
                 let tools = runtime.research_context(16).unwrap();
                 runtime
                     .set_context_limit(
                         tools.rendered_len()
                             + CHILD_INTENT_RESERVE_BYTES
+                            + if steering.is_some() {
+                                crate::session::MAX_STEERING_CONTEXT_BYTES
+                            } else {
+                                0
+                            }
                             + MIN_CHILD_RESULT_BYTES
                             + headroom,
                     )
@@ -2659,7 +2717,7 @@ mod delegation_bound_tests {
                         cancellation: Default::default(),
                         tools: Some(&runtime),
                         approvals: None,
-                        steering: None,
+                        steering,
                     },
                     &ledger,
                     None,
@@ -2671,6 +2729,7 @@ mod delegation_bound_tests {
                     turns_remaining: 2,
                     editor: false,
                     source_context: None,
+                    steering_notes: Vec::new(),
                     stop_hook_feedback: Vec::new(),
                     tools: Some(tools),
                     tool_calls_remaining: 16,
@@ -2705,6 +2764,7 @@ mod delegation_bound_tests {
                 turns_remaining: 0,
                 editor,
                 source_context: None,
+                steering_notes: Vec::new(),
                 stop_hook_feedback: Vec::new(),
                 tools: None,
                 tool_calls_remaining: 0,

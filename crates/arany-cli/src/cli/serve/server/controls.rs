@@ -125,7 +125,7 @@ fn refusal(refused: SteeringRefused) -> Fault {
         SteeringRefused::RunFull => Reason::RunFull,
         SteeringRefused::Empty => Reason::Empty,
         SteeringRefused::TooLarge => Reason::TooLarge,
-        SteeringRefused::Unavailable => Reason::Unavailable,
+        SteeringRefused::Unavailable | SteeringRefused::ChildLimit => Reason::Unavailable,
     })
 }
 

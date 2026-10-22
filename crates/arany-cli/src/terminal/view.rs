@@ -1059,7 +1059,9 @@ pub(super) fn draw_history_rows(
                     palette.accent()
                 }
                 MessageKind::Supervisor => Style::default().add_modifier(Modifier::DIM),
-                MessageKind::Notice => palette.accent().add_modifier(Modifier::BOLD),
+                MessageKind::Notice | MessageKind::SteeringNote => {
+                    palette.accent().add_modifier(Modifier::BOLD)
+                }
                 MessageKind::Error => palette.error().add_modifier(Modifier::BOLD),
             }
         } else {
@@ -2230,11 +2232,27 @@ pub(super) fn draw_agent_inspector_frame(
 
 pub(super) const AGENT_CHAT_ROWS: u16 = 3;
 
-// The read-only label, the disabled composer and, once armed, the key hint.
+pub(super) struct AgentChatFrame<'a> {
+    pub label: &'a str,
+    pub draft: Option<&'a Composer>,
+    pub editable: bool,
+}
+
+impl<'a> From<&'a str> for AgentChatFrame<'a> {
+    fn from(label: &'a str) -> Self {
+        Self {
+            label,
+            draft: None,
+            editable: false,
+        }
+    }
+}
+
+// The actor label, its composer and, once armed, the key hint.
 pub(super) fn draw_agent_chat_frame(
     frame: &mut Frame,
     area: Rect,
-    label: &str,
+    state: AgentChatFrame<'_>,
     armed: bool,
     notice: Option<&str>,
     fullscreen: bool,
@@ -2245,19 +2263,29 @@ pub(super) fn draw_agent_chat_frame(
     }
     frame.render_widget(Clear, area);
     let width = usize::from(area.width);
-    let full = format!("viewing {label} (read-only)");
-    let short = format!("{label} (read-only)");
+    let label = state.label;
+    let mode = if state.editable {
+        "message"
+    } else {
+        "read-only"
+    };
+    let full = format!("viewing {label} ({mode})");
+    let short = format!("{label} ({mode})");
     let title = [full.as_str(), short.as_str()]
         .into_iter()
         .find(|title| UnicodeWidthStr::width(*title) <= width)
         .map_or_else(
-            || safe_truncate(&format!("{label} read-only"), width),
+            || safe_truncate(&format!("{label} {mode}"), width),
             str::to_owned,
         );
-    let composer = match width {
-        40.. => "> Read-only · Esc returns to primary",
-        20.. => "> Read-only · Esc",
-        _ => "> Read-only",
+    let composer = if state.editable {
+        "> Message · Enter offers guidance"
+    } else {
+        match width {
+            40.. => "> Read-only · Esc returns to primary",
+            20.. => "> Read-only · Esc",
+            _ => "> Read-only",
+        }
     };
     let hint = match (width, fullscreen) {
         (60.., true) => "Alt+Left/Right agents · Esc primary · PgUp/PgDn scroll",
@@ -2265,9 +2293,19 @@ pub(super) fn draw_agent_chat_frame(
         (24.., _) => "Alt+←/→ agents · Esc",
         _ => "Esc primary",
     };
+    let draft_rows = state
+        .draft
+        .map(|draft| wrapped_composer(draft, width.saturating_sub(2)));
+    let draft_line = draft_rows
+        .as_ref()
+        .filter(|_| state.draft.is_some_and(|draft| !draft.is_empty()))
+        .map(|rows| format!("> {}", rows.lines[rows.cursor_row]));
     let rows = [
         Some((title, palette.selection())),
-        Some((safe_truncate(composer, width), palette.subtle())),
+        Some((
+            safe_truncate(draft_line.as_deref().unwrap_or(composer), width),
+            palette.subtle(),
+        )),
         armed.then(|| {
             (
                 safe_truncate(notice.unwrap_or(hint), width),
@@ -2282,6 +2320,21 @@ pub(super) fn draw_agent_chat_frame(
                 Rect::new(area.x, area.y + offset as u16, area.width, 1),
             );
         }
+    }
+    if state.editable
+        && armed
+        && area.height >= 2
+        && area.width >= 3
+        && let Some(rows) = draft_rows
+    {
+        frame.set_cursor_position(Position {
+            x: area.x
+                + 2
+                + u16::try_from(rows.cursor_cells)
+                    .unwrap_or(u16::MAX)
+                    .min(area.width - 3),
+            y: area.y + 1,
+        });
     }
 }
 

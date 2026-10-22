@@ -808,6 +808,7 @@ impl RunLoop<'_> {
             editor: true,
             source_context,
             turns_remaining: assignment.max_turns,
+            steering_notes: Vec::new(),
             stop_hook_feedback: Vec::new(),
             tools: Some(runtime.editor_context(&grant, remaining)?),
             tool_calls_remaining: remaining,
