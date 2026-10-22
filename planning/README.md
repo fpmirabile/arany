@@ -30,6 +30,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Status
 
 - `Draft`
+- `Ready` — Research and Plan gates passed; no material open question remains.
 - `In progress`
 - `Blocked`
 - `Done`
@@ -46,6 +47,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
-| [Guarded Cargo tests](./guarded-cargo-test/README.md) | Draft: selected offline Rust environment, bounded multicore Build profile and exact repository measurement; full-suite socket incompatibility needs an owner decision |
+| [Guarded Cargo tests](./guarded-cargo-test/README.md) | Ready: selected offline Rust environment, Guard-only IPC test ignores, bounded multicore Build profile and exact repository measurement; owner decisions accepted |
 
 [Next steps](../NEXT_STEPS.md) owns priority, freezes and deferred checks.
