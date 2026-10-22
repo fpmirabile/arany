@@ -1678,7 +1678,11 @@ fn draw_composer(
         let command = model.draft_action != DraftAction::Retain
             && matches!(composer.submission(), Ok(Submission::Command { .. }));
         let hint = if composer.selected_paste().is_some() {
-            " Tab: inspect · Del: remove "
+            if composer_area.width >= 28 {
+                " Tab: inspect · Del: remove "
+            } else {
+                " Tab / Del "
+            }
         } else if picker_focused {
             if composer_area.width < 40 {
                 " Draft kept "

@@ -737,6 +737,13 @@ impl Composer {
             .map(|(start, grapheme)| start + grapheme.len())
             .find(|end| *end >= target)
             .unwrap_or(self.text.len());
+        if let Some(paste) = self
+            .pastes
+            .iter()
+            .find(|paste| paste.range.start < self.cursor && self.cursor < paste.range.end)
+        {
+            self.cursor = paste.range.end;
+        }
         self.vertical_grapheme_column = None;
         self.completion_index = 0;
         self.completion_hidden = false;
@@ -1896,6 +1903,40 @@ mod tests {
 
     #[test]
     fn text_attachments_keep_exact_bytes_atomic_identity_and_literal_syntax() {
+        for input in [
+            Some(TerminalInput::Character('!')),
+            Some(TerminalInput::Newline),
+            None,
+        ] {
+            let mut composer = Composer::default();
+            let payload = format!("\u{301}{} @private.txt", "paste ".repeat(200));
+            composer.insert_paste(&payload).unwrap();
+            composer.apply(TerminalInput::Home);
+            composer.insert_paste("a").unwrap();
+            assert_eq!(composer.cursor_byte_offset(), composer.text().len());
+            let suffix = match input {
+                Some(input) => {
+                    assert_eq!(composer.apply(input), ComposerEdit::Changed);
+                    if input == TerminalInput::Newline {
+                        "\n"
+                    } else {
+                        "!"
+                    }
+                }
+                None => {
+                    composer.insert_paste("tail").unwrap();
+                    "tail"
+                }
+            };
+            assert_eq!(composer.text(), format!("a{payload}{suffix}"));
+            assert_eq!(composer.text[composer.pastes[0].range.clone()], payload);
+            assert_eq!(composer.editable_text(), format!("a {suffix}"));
+            assert!(
+                arany::mention_paths(&composer.editable_text())
+                    .unwrap()
+                    .is_empty()
+            );
+        }
         for (input, characters, collapsed) in [
             ("a".repeat(1000), 1000, false),
             ("中".repeat(1001), 1001, true),

@@ -4252,7 +4252,7 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
 
 #[test]
 fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
-    for width in [16, 20, 50, 80] {
+    for width in [16, 20, 27, 28, 50, 80] {
         let mut composer = Composer::default();
         let payload = format!("literal @missing /exit\n{}", "content ".repeat(1152));
         composer.insert_paste("before ").unwrap();
@@ -4261,9 +4261,39 @@ fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
         let caret = composer.cursor_byte_offset();
         let compact = wrapped_composer(&composer, usize::from(width));
         assert!(!compact.lines.join(" ").contains("@missing"));
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        let model = PresentationModel {
+            status_line: "ready".into(),
+            activity_lines: Vec::new(),
+            setup_required: false,
+            draft_action: DraftAction::Submit,
+            empty_chat: true,
+            agent_switch: false,
+        };
+        terminal
+            .draw(|frame| {
+                draw_composer(
+                    frame,
+                    &model,
+                    &composer,
+                    Palette { color: false },
+                    frame.area(),
+                    0,
+                    false,
+                );
+            })
+            .unwrap();
+        let hint = buffer_row(terminal.backend().buffer(), 7);
+        assert!(
+            hint.contains(if width >= 28 {
+                "Tab: inspect · Del: remove"
+            } else {
+                "Tab / Del"
+            }),
+            "{width}: {hint}"
+        );
         assert!(composer.inspect_input(TerminalInput::Tab));
         let (label, text, _) = composer.paste_detail().unwrap();
-        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
         terminal
             .draw(|frame| {
                 draw_paste_detail(

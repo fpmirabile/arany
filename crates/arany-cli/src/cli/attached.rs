@@ -1616,23 +1616,15 @@ async fn submit_idle_run(
         }
         Ok(RunSubmission::Shutdown(reason)) => Err(reason),
         Err(error) => {
-            let reloaded = load_view(&admission.state_dir, *session_id).await;
-            let accepted = reloaded.as_ref().ok().is_some_and(|view| {
-                view.runs
-                    .iter()
-                    .any(|run| run.accepted_sequence > starting_sequence)
-            });
-            let uncertain = reloaded.is_err();
-            if !accepted {
-                composer.restore_draft(submitted);
-            }
-            let error = if uncertain {
-                format!(
-                    "{error}; acceptance is unknown; check Session history before submitting again"
-                )
-            } else {
-                error
-            };
+            reconcile_failed_submission(
+                terminal,
+                &admission.state_dir,
+                view,
+                composer,
+                submitted,
+                starting_sequence,
+            )
+            .await?;
             let text = if composer.is_empty() {
                 format!("Error: {error}")
             } else {
@@ -1641,7 +1633,56 @@ async fn submit_idle_run(
                     composer.character_count()
                 )
             };
-            Ok(reload_view_or_keep(view, reloaded, Some(text), None).map(Feedback::History))
+            Ok(Some(Feedback::History(text)))
+        }
+    }
+}
+
+async fn reconcile_failed_submission(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    view: &mut SessionView,
+    composer: &mut Composer,
+    submitted: ComposerDraft,
+    starting_sequence: u64,
+) -> Result<(), String> {
+    loop {
+        match load_view(state_dir, view.id).await {
+            Ok(reloaded) => {
+                if !reloaded
+                    .runs
+                    .iter()
+                    .any(|run| run.accepted_sequence > starting_sequence)
+                {
+                    composer.restore_draft(submitted);
+                }
+                *view = reloaded;
+                return Ok(());
+            }
+            Err(error) => {
+                let notice = format!(
+                    "Acceptance is unknown; draft held and cannot be resubmitted. History could not be reloaded: {error}"
+                );
+                terminal
+                    .draw_progress(view, &notice)
+                    .map_err(|error| error.to_string())?;
+                if setup::choose_focused(
+                    terminal,
+                    1,
+                    "Submission recovery",
+                    "Draft held until history confirms acceptance. Check history never submits.",
+                    &[
+                        (b'1', "Check history"),
+                        (b'0', "Exit (discard local draft)"),
+                    ],
+                    None,
+                )
+                .await?
+                    != Some(b'1')
+                {
+                    return Err(notice);
+                }
+            }
         }
     }
 }
