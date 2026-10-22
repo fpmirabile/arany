@@ -712,6 +712,7 @@ fn unguarded_counts_retain_only_pending_digests_and_approval_flags() {
         let mut segment = Segment::begin(&telemetry, unit_context());
         let agent_run_id = segment.spawn(AgentRole::Primary);
         let intent = EffectIntent {
+            host: None,
             target: crate::session::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: segment.run_id,

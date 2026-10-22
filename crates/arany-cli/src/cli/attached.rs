@@ -1225,6 +1225,15 @@ pub(crate) async fn run(mut args: AttachedArgs, telemetry: Telemetry) -> Result<
                                 )
                                 .await?,
                             );
+                        } else if command == InteractiveCommand::Storage {
+                            crate::cli::storage::attached(
+                                &mut terminal,
+                                admission.workspace.clone(),
+                                admission.state_dir.clone(),
+                                &view,
+                                &mut composer,
+                            )
+                            .await?;
                         } else if command == InteractiveCommand::Help {
                             terminal
                                 .open_help(&view)

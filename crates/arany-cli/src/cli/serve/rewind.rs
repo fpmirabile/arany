@@ -162,6 +162,7 @@ pub(super) async fn preview(
                 .map(|(sequence, effect)| RewindNonRewindable {
                     sequence: *sequence,
                     effect: match effect {
+                        NonRewindable::Host => RewindEffect::Host,
                         NonRewindable::UnguardedCommand => RewindEffect::UnguardedCommand,
                         NonRewindable::Mcp => RewindEffect::Mcp,
                         NonRewindable::Cache => RewindEffect::Cache,

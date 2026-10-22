@@ -420,7 +420,9 @@ impl GoalPlanContract {
             // Commits, branches and switches act on the whole repository.
             ToolCall::GitCommit { .. }
             | ToolCall::GitBranch { .. }
-            | ToolCall::GitSwitch { .. } => self.allows_path("."),
+            | ToolCall::GitSwitch { .. }
+            | ToolCall::GitPush { .. }
+            | ToolCall::GhPrCreate { .. } => self.allows_path("."),
         }
     }
 
