@@ -13,6 +13,10 @@ pub mod worker_teams;
 pub use crate::provider::test_image;
 pub use crate::tools::types::MAX_TOOL_CONTEXT_BYTES;
 
+pub fn payload_version(kind: &str) -> i64 {
+    crate::session::payload_version(kind).expect("known Event kind")
+}
+
 pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }
@@ -593,6 +597,7 @@ pub async fn exercise_private_guard_target(
             WorkerTool::Read,
             WorkerTool::Write,
             WorkerTool::Edit,
+            WorkerTool::MultiEdit,
             WorkerTool::Mkdir,
         ],
         skills: Vec::new(),
@@ -617,11 +622,21 @@ pub async fn exercise_private_guard_target(
     )?;
     let original =
         std::fs::read(workspace.join("owned/a")).map_err(|_| crate::tools::ToolError::Operation)?;
-    let call = ToolCall::Edit {
-        path: "owned/a".into(),
+    let call = ToolCall::MultiEdit {
+        file_path: "owned/a".into(),
         expected_digest: crate::tools::types::hex_digest(&original),
-        old: "original".into(),
-        new: "private".into(),
+        edits: vec![
+            crate::LiteralEdit {
+                old_string: "original".into(),
+                new_string: "intermediate".into(),
+                replace_all: false,
+            },
+            crate::LiteralEdit {
+                old_string: "intermediate".into(),
+                new_string: "private".into(),
+                replace_all: false,
+            },
+        ],
     };
     let mut intent = runtime.intent(view.run_id(), view.assignment(), call);
     intent.target = view.target();
@@ -689,11 +704,21 @@ pub async fn exercise_private_guard_target(
     let mut idle_intent = runtime.intent(
         run_id,
         idle.assignment(),
-        ToolCall::Edit {
-            path: "owned/a".into(),
+        ToolCall::MultiEdit {
+            file_path: "owned/a".into(),
             expected_digest: crate::tools::types::hex_digest(&original),
-            old: "original".into(),
-            new: "never".into(),
+            edits: vec![
+                crate::LiteralEdit {
+                    old_string: "original".into(),
+                    new_string: "intermediate".into(),
+                    replace_all: false,
+                },
+                crate::LiteralEdit {
+                    old_string: "intermediate".into(),
+                    new_string: "never".into(),
+                    replace_all: false,
+                },
+            ],
         },
     );
     idle_intent.target = idle.target();
@@ -714,11 +739,21 @@ pub async fn exercise_private_guard_target(
     let mut lost_intent = runtime.intent(
         run_id,
         lost.assignment(),
-        ToolCall::Edit {
-            path: "owned/a".into(),
+        ToolCall::MultiEdit {
+            file_path: "owned/a".into(),
             expected_digest: crate::tools::types::hex_digest(&original),
-            old: "original".into(),
-            new: "discarded".into(),
+            edits: vec![
+                crate::LiteralEdit {
+                    old_string: "original".into(),
+                    new_string: "intermediate".into(),
+                    replace_all: false,
+                },
+                crate::LiteralEdit {
+                    old_string: "intermediate".into(),
+                    new_string: "discarded".into(),
+                    replace_all: false,
+                },
+            ],
         },
     );
     lost_intent.target = lost.target();

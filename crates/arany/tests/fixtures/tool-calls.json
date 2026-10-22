@@ -9,5 +9,6 @@
   {"operation": "skill", "name": "example", "resource": null},
   {"operation": "mcp_list", "server": "example"},
   {"operation": "mcp_call", "server": "example", "tool": "echo", "schema_digest": "0000000000000000000000000000000000000000000000000000000000000000", "arguments": "{\"value\":42}"},
-  {"operation": "glob", "pattern": "**/*.rs", "path": null, "limit": null}
+  {"operation": "glob", "pattern": "**/*.rs", "path": null, "limit": null},
+  {"operation": "multiedit", "file_path": "src/main.rs", "expected_digest": "0000000000000000000000000000000000000000000000000000000000000000", "edits": [{"old_string": "old", "new_string": "new", "replace_all": null}]}
 ]

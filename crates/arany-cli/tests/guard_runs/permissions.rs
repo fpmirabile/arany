@@ -50,6 +50,329 @@ fn call(kind: &str) -> arany::ToolCall {
     }
 }
 
+fn multiedit() -> arany::ToolCall {
+    arany::ToolCall::MultiEdit {
+        file_path: "notes/facts.txt".into(),
+        expected_digest: hash(b"Fact"),
+        edits: vec![
+            arany::LiteralEdit {
+                old_string: "Fact".into(),
+                new_string: "intermediate".into(),
+                replace_all: false,
+            },
+            arany::LiteralEdit {
+                old_string: "intermediate".into(),
+                new_string: "done".into(),
+                replace_all: false,
+            },
+        ],
+    }
+}
+
+#[tokio::test]
+async fn multiedit_guard_publication_denials_late_failure_and_closed_replay() {
+    for case in [
+        "success",
+        "late_failure",
+        "stale",
+        "read_deny",
+        "hook_deny",
+        "grant",
+    ] {
+        let mut settings = json!({"permissions":{"defaultMode":"acceptEdits"}});
+        if case == "read_deny" {
+            settings["permissions"]["deny"] = json!(["Read(./notes/**)"]);
+        }
+        if case == "hook_deny" {
+            settings["hooks"] =
+                json!({"PreToolUse":[{"matcher":"MultiEdit","hooks":[shell_hook("exit 2")]}]});
+        }
+        let fixture = Fixture::new(Some(&settings), case != "grant");
+        let mut call = multiedit();
+        if let arany::ToolCall::MultiEdit {
+            expected_digest,
+            edits,
+            ..
+        } = &mut call
+        {
+            if case == "late_failure" {
+                edits[1].old_string = "missing".into();
+            }
+            if case == "stale" {
+                *expected_digest = hash(b"stale");
+            }
+        }
+        let outcomes = if case == "success" {
+            vec![
+                plan_outcome(plan(&call)),
+                tool_outcome(call.clone()),
+                finish("answer"),
+            ]
+        } else {
+            vec![tool_outcome(call.clone()), finish("answer")]
+        };
+        let (result, requests, humans) = fixture.run(outcomes, None, false).await;
+        assert_eq!(humans, 0, "{case}");
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+            if case == "success" {
+                b"done".as_slice()
+            } else {
+                b"Fact".as_slice()
+            },
+            "{case}"
+        );
+        let (events, view) = fixture.reopen(result.session_id).await;
+        assert_eq!(
+            requests.len(),
+            if case == "success" { 3 } else { 2 },
+            "{case}"
+        );
+        if case == "grant" {
+            let observed = view.runs[0].tools[0].observation.as_ref().unwrap();
+            assert_eq!(observed.disposition, arany::ToolDisposition::Denied);
+            assert_eq!(
+                observed.output,
+                "Tool operation is outside the pinned grant"
+            );
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|e| matches!(e.event, Event::ToolStarted { .. }))
+                    .count(),
+                1
+            );
+            continue;
+        }
+        let tool = &view.runs[0].tools[0];
+        assert_eq!(tool.intent.call, call);
+        let observed = tool.observation.as_ref().unwrap();
+        assert_eq!(
+            observed.disposition,
+            match case {
+                "success" => arany::ToolDisposition::Succeeded,
+                "late_failure" | "stale" => arany::ToolDisposition::Conflict,
+                _ => arany::ToolDisposition::Denied,
+            },
+            "{case}"
+        );
+        if case == "success" {
+            assert_eq!(
+                tool.checkpoint.as_ref().unwrap().status,
+                arany::CheckpointStatus::Captured
+            );
+            assert!(view.goals[0].success_criterion_satisfied);
+            assert!(render_session(&view, &events, Output::Text).contains("multiedit"));
+            let jsonl = render_session(&view, &events, Output::Jsonl);
+            let exported: Vec<arany_cli::protocol::EventLine> = jsonl
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                exported,
+                events
+                    .iter()
+                    .map(arany_cli::protocol::EventLine::from)
+                    .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(events.iter().filter(|e| matches!(&e.event, Event::ToolFinished { observation, .. } if matches!(observation.intent.call, arany::ToolCall::MultiEdit { .. }))).count(), 1);
+    }
+}
+
+#[tokio::test]
+async fn multiedit_cancelled_approval_and_lost_receipt_never_retry() {
+    for lost in [false, true] {
+        let fixture = Fixture::new(None, true);
+        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(multiedit())]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+        let cancellation = RunCancellation::new();
+        let mut input = request(&fixture.workspace, "Make one atomic edit");
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Single;
+        let mut asked = 0;
+        let outcome = {
+            let running = run_with(
+                &fixture.engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    approvals: Some(approvals),
+                    cancellation: cancellation.clone(),
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    biased;
+                    result = &mut running => break result,
+                    Some(approval) = inbox.next() => {
+                        asked += 1;
+                        if lost { arany::FaultPlan::lose_guard_receipt(approval.intent.id); }
+                        else { cancellation.cancel(); }
+                        approval.decide(true);
+                    }
+                }
+            }
+        };
+        if lost {
+            assert!(matches!(
+                outcome,
+                Err(EngineError::Tool(arany::ToolError::Uncertain))
+            ));
+        } else {
+            assert_eq!(outcome.unwrap().run.status, RunStatus::Cancelled);
+        }
+        assert_eq!(asked, 1);
+        let session = {
+            let requests = provider.requests.lock().unwrap();
+            assert_eq!(requests.len(), 1, "no continuation or automatic retry");
+            requests[0].session_id
+        };
+        let expected = if lost {
+            b"done".as_slice()
+        } else {
+            b"Fact".as_slice()
+        };
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+            expected
+        );
+        let (_, view) = fixture.reopen(session).await;
+        assert_eq!(view.runs[0].tools.len(), 1);
+        let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+        if lost {
+            assert_eq!(observation.disposition, arany::ToolDisposition::Uncertain);
+        } else {
+            assert!(observation.attestation.is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn multiedit_crash_prefixes_keep_pre_go_and_committed_publication_facts() {
+    for finished in [false, true] {
+        let fixture = Fixture::new(None, true);
+        let session = fixture
+            .engine
+            .create_session(fixture.workspace.clone(), None)
+            .await
+            .unwrap();
+        let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(
+            session,
+            if finished {
+                |e| matches!(e, Event::ToolFinished { .. })
+            } else {
+                |e| matches!(e, Event::ToolStarted { .. })
+            },
+        );
+        let provider = Arc::new(ScriptedProvider::new(vec![tool_outcome(multiedit())]));
+        let mut input = request(&fixture.workspace, "Make one atomic edit");
+        input.session_id = Some(session);
+        input.title = None;
+        input.include_paths.clear();
+        input.policy = CollaborationPolicy::Single;
+        {
+            let running = run_with(
+                &fixture.engine,
+                &provider,
+                input,
+                RunControls {
+                    tools: ToolGrant::Configured,
+                    ..Default::default()
+                },
+            );
+            tokio::pin!(running);
+            tokio::select! {
+                result = &mut running => panic!("acknowledgment gate was not reached: {result:?}"),
+                entered = entered => entered.unwrap(),
+            }
+            drop(release);
+            assert!(running.await.is_err());
+        }
+        assert_eq!(provider.requests.lock().unwrap().len(), 1);
+        let bytes = if finished {
+            b"done".as_slice()
+        } else {
+            b"Fact".as_slice()
+        };
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+            bytes
+        );
+        let (_, view) = fixture.reopen(session).await;
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.runs[0].tools.len(), 1);
+        let observed = &view.runs[0].tools[0].observation;
+        assert_eq!(observed.is_some(), finished);
+        if let Some(observed) = observed {
+            assert_eq!(observed.disposition, arany::ToolDisposition::Succeeded);
+        }
+    }
+}
+
+#[tokio::test]
+async fn multiedit_content_ceiling_and_full_hook_input_refuse_overflow_without_publication() {
+    for case in ["exact", "overflow", "hook"] {
+        let mut settings = json!({"permissions":{"defaultMode":"acceptEdits"}});
+        if case == "hook" {
+            settings["hooks"] =
+                json!({"PreToolUse":[{"matcher":"MultiEdit","hooks":[shell_hook("exit 0")]}]});
+        }
+        let fixture = Fixture::new(Some(&settings), true);
+        let old = "a".repeat(32768);
+        let new = "b".repeat(32768 + usize::from(case == "overflow"));
+        std::fs::write(fixture.workspace.join("notes/facts.txt"), &old).unwrap();
+        let call = arany::ToolCall::MultiEdit {
+            file_path: "notes/facts.txt".into(),
+            expected_digest: hash(old.as_bytes()),
+            edits: vec![arany::LiteralEdit {
+                old_string: old.clone(),
+                new_string: new.clone(),
+                replace_all: false,
+            }],
+        };
+        let (result, _, humans) = fixture
+            .run(
+                vec![tool_outcome(call.clone()), finish("answer")],
+                None,
+                false,
+            )
+            .await;
+        assert_eq!(humans, 0);
+        let expected = if case == "exact" { &new } else { &old };
+        assert_eq!(
+            std::fs::read(fixture.workspace.join("notes/facts.txt")).unwrap(),
+            expected.as_bytes()
+        );
+        let (events, view) = fixture.reopen(result.session_id).await;
+        if case == "overflow" {
+            assert!(view.runs[0].tools.is_empty());
+        } else {
+            let observation = view.runs[0].tools[0].observation.as_ref().unwrap();
+            assert_eq!(observation.intent.call, call);
+            assert_eq!(
+                observation.disposition,
+                if case == "exact" {
+                    arany::ToolDisposition::Succeeded
+                } else {
+                    arany::ToolDisposition::Denied
+                }
+            );
+            if case == "hook" {
+                assert!(observation.output.contains("hook input exceeds its limit"));
+                assert!(
+                    !events
+                        .iter()
+                        .any(|e| matches!(e.event, Event::HookStarted { .. }))
+                );
+            }
+        }
+    }
+}
+
 struct Fixture {
     _temp: tempfile::TempDir,
     workspace: std::path::PathBuf,
