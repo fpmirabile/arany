@@ -15,7 +15,7 @@ use std::{
 
 static BEFORE_COMMIT_MARKER: OnceLock<PathBuf> = OnceLock::new();
 
-pub(super) fn before_commit() {
+pub(in crate::store) fn before_commit() {
     if let Some(marker) = BEFORE_COMMIT_MARKER.get() {
         std::fs::write(marker, b"inserted").expect("pre-commit marker");
         loop {
@@ -53,6 +53,7 @@ impl Drop for CrashChild {
 
 fn runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
+        .enable_time()
         .build()
         .expect("Store test runtime")
 }
@@ -169,6 +170,26 @@ fn crash_append_child() {
     let store = Store::open(StateRoot::open_existing(&state).expect("existing State"))
         .expect("crash child Store");
     runtime().block_on(async {
+        if let Some(path) = std::env::var_os("ARANY_TEST_CRASH_EVENT") {
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            if let Some(id) = value.get("check_id") {
+                let id = serde_json::from_value(id.clone()).unwrap();
+                let op = if let Some(record) = value.get("record") {
+                    crate::journal::check::CheckOp::PublishProvider {
+                        id,
+                        record: serde_json::from_value(record.clone()).unwrap(),
+                    }
+                } else {
+                    crate::journal::check::CheckOp::Append {
+                        id,
+                        event: serde_json::from_value(value["event"].clone()).unwrap(),
+                    }
+                };
+                store.check(op).await.expect("acknowledged check Event");
+                return;
+            }
+        }
         store
             .append(
                 session_id,
@@ -563,6 +584,101 @@ async fn plan_observation_process_death_preserves_only_committed_attempt_samples
                 "replay cannot dispatch"
             );
             store.close().await.unwrap();
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(not(arany_ci), ignore)]
+fn provider_check_process_death_never_completes_unconfirmed_publication() {
+    use crate::journal::check::{
+        CheckDisposition, CheckEvent, CheckJournal, CheckOp,
+        tests::{fixture, start_fixture},
+    };
+    use crate::provider::evidence::ProviderEvidenceRecord;
+    for index in [2, 3, 8, 9] {
+        for stage in ["before", "after"] {
+            let temp = tempfile::tempdir().unwrap();
+            let state = temp.path().join("state");
+            let marker = temp.path().join("stage");
+            let event_path = temp.path().join("check.json");
+            let (id, mut events) = fixture();
+            let now = crate::journal::check::now_ms().unwrap();
+            let record = ProviderEvidenceRecord {
+                name: "local".into(),
+                digest: [1; 32],
+                addresses: vec!["127.0.0.1:9321".parse().unwrap()],
+                checked_at_ms: now,
+                expires_at_ms: now + 60_000,
+            };
+            let digest = crate::store::check::provider_digest(&record).unwrap();
+            events[8] = CheckEvent::ProviderCheckEvidenceStarted {
+                digest,
+                snapshot: record.digest,
+            };
+            events[9] = CheckEvent::ProviderCheckFinished {
+                disposition: CheckDisposition::Succeeded,
+                evidence: Some(digest),
+            };
+            let store = Store::open(StateRoot::admit(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                store
+                    .check(CheckOp::Start {
+                        id,
+                        start: start_fixture(),
+                    })
+                    .await
+                    .unwrap();
+                for event in &events[2..index] {
+                    store
+                        .check(CheckOp::Append {
+                            id,
+                            event: event.clone(),
+                        })
+                        .await
+                        .unwrap();
+                }
+                store.close().await.unwrap();
+            });
+            let packet = if index == 9 {
+                serde_json::json!({"check_id":id,"record":record})
+            } else {
+                serde_json::json!({"check_id":id,"event":events[index]})
+            };
+            std::fs::write(&event_path, serde_json::to_vec(&packet).unwrap()).unwrap();
+            kill_at_append(
+                &state,
+                SessionId::new(),
+                RunId::new(),
+                &marker,
+                stage,
+                Some(&event_path),
+            );
+            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+            runtime().block_on(async {
+                let view = store.load_check(id).await.unwrap().unwrap();
+                let success = index == 9 && stage == "after";
+                assert_eq!(view.events, index + usize::from(stage == "after"));
+                assert_eq!(
+                    view.replay_disposition(),
+                    if success {
+                        CheckDisposition::Succeeded
+                    } else {
+                        CheckDisposition::Uncertain
+                    }
+                );
+                assert_eq!(
+                    store.load_provider_evidence("local".into()).await.unwrap(),
+                    success.then_some(record)
+                );
+                store.close().await.unwrap();
+                let next =
+                    CheckJournal::start(StateRoot::open_existing(&state).unwrap(), start_fixture())
+                        .await
+                        .unwrap();
+                assert_eq!(next.view().completed_calls, 0);
+                next.close().await.unwrap();
+            });
         }
     }
 }

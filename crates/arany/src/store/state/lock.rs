@@ -98,6 +98,14 @@ pub(crate) struct SessionRunLock {
 }
 
 pub(crate) struct WorkspaceRunLock(File);
+pub(crate) struct ProviderCheckLock(File);
+
+impl Drop for ProviderCheckLock {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
 
 impl Drop for WorkspaceRunLock {
     fn drop(&mut self) {
@@ -128,6 +136,23 @@ impl Drop for SessionRunLock {
 }
 
 impl StateRoot {
+    pub(crate) fn lock_provider_check(&self) -> Result<ProviderCheckLock, StoreError> {
+        #[cfg(unix)]
+        {
+            use rustix::fs::{FlockOperation, flock};
+            let (file, _) = open_private_lock_file(&self.dir, "provider-check.lock", || Ok(()))?;
+            match flock(&file, FlockOperation::NonBlockingLockExclusive) {
+                Ok(()) => Ok(ProviderCheckLock(file)),
+                Err(rustix::io::Errno::WOULDBLOCK) => Err(StoreError::ProviderCheckBusy),
+                Err(error) => Err(StoreError::Io(io::Error::from_raw_os_error(
+                    error.raw_os_error(),
+                ))),
+            }
+        }
+        #[cfg(not(unix))]
+        Err(StoreError::InvalidStateDirectory)
+    }
+
     pub(crate) fn lock_history(&self, exclusive: bool) -> Result<HistoryLock, StoreError> {
         #[cfg(unix)]
         {
@@ -604,6 +629,36 @@ mod tests {
             state.with_account_replacement_lock(&workspace, || ()),
             Err(StoreError::StateNotPrivate)
         ));
+    }
+
+    #[test]
+    fn provider_check_lease_reuses_private_lock_admission() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = StateRoot::admit(&temp.path().join("state")).unwrap();
+        let path = root.path().join("provider-check.lock");
+        let lease = root.lock_provider_check().unwrap();
+        assert!(matches!(
+            root.lock_provider_check(),
+            Err(StoreError::ProviderCheckBusy)
+        ));
+        drop(lease);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        drop(root.lock_provider_check().unwrap());
+        std::fs::write(&path, "nonempty").unwrap();
+        assert!(matches!(
+            root.lock_provider_check(),
+            Err(StoreError::StateNotPrivate)
+        ));
+        std::fs::remove_file(&path).unwrap();
+        let target = temp.path().join("outside");
+        std::fs::write(&target, "unchanged").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(root.lock_provider_check().is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"unchanged");
     }
 
     #[test]

@@ -6,6 +6,7 @@ use serde_json::{Value, json};
 const WORKSPACE_ID: &str = "wrkspc_Selected123";
 const MODEL: &str = "claude-sonnet-5";
 const CHECKED_MODEL: &str = "claude-offline-new";
+const CHECK_WORKSPACE_CANARY: &str = "native-check-private-workspace-canary";
 const OBJECTIVE: &str = "scoped offline objective";
 
 pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
@@ -18,6 +19,30 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             + 4;
         let headers = std::str::from_utf8(&request[..header_end]).expect("ASCII headers");
         let catalog = matches!(index, 0 | 1 | 5);
+        if index >= 5 {
+            assert!(
+                !request
+                    .windows(CHECK_WORKSPACE_CANARY.len())
+                    .any(|part| part == CHECK_WORKSPACE_CANARY.as_bytes())
+            );
+            let database = rusqlite::Connection::open_with_flags(
+                "/root/state-scoped-check/events.sqlite3",
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )
+            .unwrap();
+            let payload: String = database
+                .query_row(
+                    "SELECT payload FROM provider_check_events ORDER BY sequence DESC LIMIT 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let event: arany::CheckEvent = serde_json::from_str(&payload).unwrap();
+            assert!(
+                matches!(event, arany::CheckEvent::ProviderCheckCallStarted { ordinal, .. } if usize::from(ordinal) == index - 5)
+            );
+        }
+
         assert!(
             headers.starts_with(if catalog {
                 "GET /v1/models?limit=1000 HTTP/1.1\r\n"
@@ -80,7 +105,7 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
             body["max_tokens"],
             if matches!(index, 2 | 4) { 4096 } else { 1024 }
         );
-        assert_eq!(body["stream"], false);
+        assert_eq!(body["stream"], index == 6);
         assert_eq!(
             body["output_config"]["effort"],
             if index < 4 { "low" } else { "high" }
@@ -129,16 +154,19 @@ pub(super) fn respond(input: &mut impl Write, output: &mut impl Read) {
         if matches!(index, 3 | 8) {
             assert_eq!(outcome, "scoped compacted", "plain-text compaction reply");
         }
-        chatgpt::send_json(
-            input,
-            &serde_json::to_vec(&json!({
-                "id": format!("msg_scoped_{index}"), "type": "message", "role": "assistant",
-                "model": model, "stop_reason": if index == 7 { "tool_use" } else { "end_turn" }, "stop_details": null,
-                "stop_sequence": null, "content": arany::semantic::messages_content(&outcome),
-                "usage": {"input_tokens": 12, "output_tokens": 8}
-            }))
-            .expect("synthetic Messages reply"),
-        );
+        let response = json!({
+            "id": format!("msg_scoped_{index}"), "type": "message", "role": "assistant",
+            "model": model, "stop_reason": if index == 7 { "tool_use" } else { "end_turn" }, "stop_details": null,
+            "stop_sequence": null, "content": arany::semantic::messages_content(&outcome),
+            "usage": {"input_tokens": 12, "output_tokens": 8}
+        });
+        if index == 6 {
+            let body = arany::semantic::messages_stream(&response);
+            write!(input, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            input.flush().unwrap();
+        } else {
+            chatgpt::send_json(input, &serde_json::to_vec(&response).unwrap());
+        }
     }
 }
 
@@ -259,6 +287,7 @@ pub(super) fn stage() {
         ],
         Some(b"Answer:\r\n  scoped answer"),
     );
+    std::fs::write("/root/workspace/check-private.txt", CHECK_WORKSPACE_CANARY).unwrap();
     let checked = command(&[
         "provider",
         "check",
@@ -271,7 +300,12 @@ pub(super) fn stage() {
         "--state-dir",
         "/root/state-scoped-check",
     ]);
-    assert_eq!(checked.stdout, b"Provider: anthropic\nModel: claude-offline-new\nEffort: high\nCredential: saved API account\nStatus: native synthetic conformance passed\n");
+    crate::assert_check_privacy(
+        &checked,
+        Path::new("/root/state-scoped-check"),
+        &[KEY, CHECK_WORKSPACE_CANARY],
+    );
+    assert_eq!(crate::check_output(&checked.stdout, Path::new("/root/state-scoped-check"), arany::CheckDisposition::Succeeded), b"Provider: anthropic\nModel: claude-offline-new\nEffort: high\nCredential: saved API account\nStatus: native synthetic conformance passed\n");
     server
         .responder
         .take()

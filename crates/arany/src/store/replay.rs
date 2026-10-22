@@ -793,6 +793,7 @@ fn load_session_events(
 }
 
 pub(super) fn validate_history(connection: &Connection) -> Result<(), StoreError> {
+    super::check::validate(connection)?;
     scan_all_events(connection, |_| Ok(()))
 }
 

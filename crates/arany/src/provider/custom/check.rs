@@ -5,20 +5,30 @@ use crate::provider::{
     ProviderRequest, RunInput,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
-use crate::store::{StateRoot, Store};
+use crate::store::StateRoot;
+#[cfg(test)]
+use crate::store::Store;
+use crate::{
+    CheckCallKind, CheckDisposition, CheckJournal, CheckProbe, CheckReceipt, CheckStart,
+    CheckTarget, CheckUsage,
+};
 use sha2::{Digest, Sha256};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-v37";
+const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
 
 pub struct CustomProfileCheck {
     profile_name: String,
     expires_at_ms: i64,
+    receipt: CheckReceipt,
 }
 
 impl CustomProfileCheck {
+    pub fn receipt(&self) -> CheckReceipt {
+        self.receipt
+    }
     pub fn profile_name(&self) -> &str {
         &self.profile_name
     }
@@ -32,48 +42,163 @@ pub async fn check_custom_profile(
     root: StateRoot,
     name: &str,
 ) -> Result<CustomProfileCheck, CustomProfileError> {
+    check_custom_profile_with_cancellation(root, name, crate::RunCancellation::new()).await
+}
+
+pub async fn check_custom_profile_with_cancellation(
+    root: StateRoot,
+    name: &str,
+    mut cancellation: crate::RunCancellation,
+) -> Result<CustomProfileCheck, CustomProfileError> {
     let profile = CustomProfile::load_named(&root, name)?;
-    let store = Store::open(root).map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-    let result = async {
-        store
-            .clear_provider_evidence(profile.name().to_owned())
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let record = tokio::time::timeout(TOTAL_DEADLINE, async {
-            let destination = profile.resolve_destination().await?;
-            let key = std::env::var(profile.credential_env())
-                .map_err(|_| CustomProfileError::CredentialUnavailable)?;
-            probe(&profile, &destination, key).await
-        })
+    let check_root = root
+        .try_clone()
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    let mut journal = CheckJournal::start(check_root, start(&profile)?)
         .await
-        .map_err(|_| CustomProfileError::ConformanceFailed)??;
-        store
-            .record_provider_evidence(record.clone())
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        let observed = store
-            .load_provider_evidence(record.name.clone())
-            .await
-            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-        if observed.as_ref() != Some(&record) {
+        .map_err(|error| CustomProfileError::Journal(Box::new(error)))?;
+    let deadline = (tokio::time::Instant::now() + TOTAL_DEADLINE).min(journal.request_deadline());
+    let mut cancelled = false;
+    let result = tokio::select! {
+        biased;
+        () = cancellation.cancelled() => { cancelled = true; Err(CustomProfileError::ConformanceFailed) },
+        result = tokio::time::timeout_at(deadline, async {
+        let destination = profile.resolve_destination().await?;
+        let key = std::env::var(profile.credential_env())
+            .map_err(|_| CustomProfileError::CredentialUnavailable)?;
+        let record = probe(&profile, &destination, key, &mut journal).await?;
+        let current = CustomProfile::load_named(&root, name)?;
+        if fingerprint(&current) != record.digest
+            || current.resolve_destination().await?.addresses() != record.addresses
+        {
             return Err(CustomProfileError::EvidenceUnavailable);
         }
-        Ok(CustomProfileCheck {
+        let digest = crate::store::check::provider_digest(&record)
+            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+        journal
+            .evidence_started(digest, record.digest)
+            .await
+            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+        journal
+            .publish_provider(record.clone())
+            .await
+            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+        Ok::<_, CustomProfileError>(record)
+    }) => result.map_err(|_| CustomProfileError::ConformanceFailed).and_then(|result| result),
+    };
+    if result.is_err() {
+        let _ = journal
+            .finish(if cancelled {
+                CheckDisposition::Cancelled
+            } else {
+                CheckDisposition::Failed
+            })
+            .await;
+    }
+    let receipt = journal.receipt();
+    let closed = journal.close().await;
+    match (result, closed) {
+        (Ok(record), Ok(_)) => Ok(CustomProfileCheck {
             profile_name: record.name,
             expires_at_ms: record.expires_at_ms,
-        })
+            receipt,
+        }),
+        (Err(source), _) => Err(CustomProfileError::Check {
+            source: Box::new(source),
+            receipt,
+        }),
+        (Ok(_), Err(_)) => Err(CustomProfileError::Check {
+            source: Box::new(CustomProfileError::EvidenceUnavailable),
+            receipt,
+        }),
     }
-    .await;
-    let closed = store.close().await;
-    let report = result?;
-    closed.map_err(|_| CustomProfileError::EvidenceUnavailable)?;
-    Ok(report)
+}
+
+fn start(profile: &CustomProfile) -> Result<CheckStart, CustomProfileError> {
+    let mut probes = vec![
+        CheckProbe {
+            kind: CheckCallKind::Answer,
+            effort: None,
+            output_tokens: profile.max_output_tokens(),
+        },
+        CheckProbe {
+            kind: CheckCallKind::Delegate,
+            effort: None,
+            output_tokens: 128,
+        },
+        CheckProbe {
+            kind: CheckCallKind::Compaction,
+            effort: None,
+            output_tokens: 128,
+        },
+    ];
+    for effort in profile.efforts() {
+        for kind in [CheckCallKind::Answer, CheckCallKind::Compaction] {
+            probes.push(CheckProbe {
+                kind,
+                effort: Some(*effort),
+                output_tokens: 128,
+            });
+        }
+    }
+    CheckStart::new(
+        CheckTarget::Custom {
+            name: profile.name().to_owned(),
+        },
+        profile.model().to_owned(),
+        fingerprint(profile),
+        Sha256::digest(profile.endpoint().as_bytes()).into(),
+        0,
+        probes,
+    )
+    .map_err(|_| CustomProfileError::EvidenceUnavailable)
+}
+
+async fn rejected(journal: &mut CheckJournal) -> CustomProfileError {
+    if journal
+        .reject_pending(CheckDisposition::Rejected)
+        .await
+        .is_err()
+    {
+        CustomProfileError::EvidenceUnavailable
+    } else {
+        CustomProfileError::ConformanceFailed
+    }
+}
+async fn transport_failure(
+    journal: &mut CheckJournal,
+    error: super::transport::TransportError,
+) -> CustomProfileError {
+    use super::transport::TransportError;
+    let disposition = match error {
+        TransportError::Transport
+        | TransportError::PartialTransport
+        | TransportError::StreamEnded
+        | TransportError::Unavailable => CheckDisposition::Uncertain,
+        TransportError::Rejected
+        | TransportError::InvalidOutcome
+        | TransportError::HttpServerUnavailable(_)
+        | TransportError::RateLimited(_)
+        | TransportError::QuotaExceeded => CheckDisposition::Rejected,
+    };
+    if journal.reject_pending(disposition).await.is_err() {
+        CustomProfileError::EvidenceUnavailable
+    } else {
+        CustomProfileError::ConformanceFailed
+    }
+}
+fn usage(usage: &crate::Usage) -> Option<CheckUsage> {
+    Some(CheckUsage {
+        input_tokens: usage.input_tokens?,
+        output_tokens: usage.output_tokens?,
+    })
 }
 
 async fn probe(
     profile: &CustomProfile,
     destination: &PinnedDestination,
     key: String,
+    journal: &mut CheckJournal,
 ) -> Result<ProviderEvidenceRecord, CustomProfileError> {
     let transport = CustomTransport::new(profile, destination, key)?;
     let session_id = SessionId::new();
@@ -88,17 +213,33 @@ async fn probe(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: finish directly with a short factual sentence. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = crate::provider::ResponsePreview::new();
-    let direct_response = transport
-        .run_streamed(&direct, None, Some(preview))
+    let token = journal
+        .call_started(CheckCallKind::Answer)
         .await
-        .map_err(|_| CustomProfileError::ConformanceFailed)?;
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    let direct_response = transport.run_streamed(&direct, None, Some(preview)).await;
+    let direct_response = match direct_response {
+        Ok(value) => value,
+        Err(error) => return Err(transport_failure(journal, error).await),
+    };
     if !matches!(&direct_response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
     {
-        return Err(CustomProfileError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
-    let direct_id = direct_response
-        .response_id
-        .ok_or(CustomProfileError::ConformanceFailed)?;
+    let direct_id = direct_response.response_id.clone();
+    let Some(direct_id) = direct_id else {
+        return Err(rejected(journal).await);
+    };
+
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&direct_response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
 
     let delegate = ProviderRequest {
         session_id,
@@ -111,20 +252,36 @@ async fn probe(
         input: RunInput::new(PromptRole::ReadOnly, "Synthetic conformance check: delegate exactly one independent read-only question about the number two. No Workspace content is supplied.".into()),
     };
     let (preview, observed) = crate::provider::ResponsePreview::new();
-    let delegate_response = transport
-        .run_streamed(&delegate, None, Some(preview))
+    let token = journal
+        .call_started(CheckCallKind::Delegate)
         .await
-        .map_err(|_| CustomProfileError::ConformanceFailed)?;
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    let delegate_response = transport.run_streamed(&delegate, None, Some(preview)).await;
+    let delegate_response = match delegate_response {
+        Ok(value) => value,
+        Err(error) => return Err(transport_failure(journal, error).await),
+    };
     if !matches!(&delegate_response.outcome, ProviderOutcome::Delegate(value) if value.children.len() == 1 && !value.children[0].objective.trim().is_empty() && value.children[0].profile.is_none() && observed.borrow().answer.is_empty())
     {
-        return Err(CustomProfileError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
-    let delegate_id = delegate_response
-        .response_id
-        .ok_or(CustomProfileError::ConformanceFailed)?;
+    let delegate_id = delegate_response.response_id.clone();
+    let Some(delegate_id) = delegate_id else {
+        return Err(rejected(journal).await);
+    };
     if delegate_id == direct_id {
-        return Err(CustomProfileError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
+
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&delegate_response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
 
     let compact = CompactionRequest {
         session_id,
@@ -137,9 +294,16 @@ async fn probe(
         })],
         max_output_tokens: 128,
     };
-    let compact_id = probe_compaction(&transport, &compact, None).await?;
+    let compact_id = probe_compaction(
+        &transport,
+        &compact,
+        None,
+        journal,
+        &[direct_id.clone(), delegate_id.clone()],
+    )
+    .await?;
     if compact_id == direct_id || compact_id == delegate_id {
-        return Err(CustomProfileError::ConformanceFailed);
+        return Err(rejected(journal).await);
     }
 
     let mut seen_ids = vec![direct_id, delegate_id, compact_id];
@@ -149,24 +313,42 @@ async fn probe(
         selected.agent_run_id = AgentRunId::new();
         selected.max_output_tokens = 128;
         let (preview, observed) = crate::provider::ResponsePreview::new();
+        let token = journal
+            .call_started(CheckCallKind::Answer)
+            .await
+            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
         let response = transport
             .run_streamed(&selected, Some(*effort), Some(preview))
-            .await
-            .map_err(|_| CustomProfileError::ConformanceFailed)?;
+            .await;
+        let response = match response {
+            Ok(value) => value,
+            Err(error) => return Err(transport_failure(journal, error).await),
+        };
         if !matches!(&response.outcome, ProviderOutcome::Answer(value) if !observed.borrow().answer.is_empty() && value.text.starts_with(&observed.borrow().answer))
         {
-            return Err(CustomProfileError::ConformanceFailed);
+            return Err(rejected(journal).await);
         }
-        let id = response
-            .response_id
-            .ok_or(CustomProfileError::ConformanceFailed)?;
+        let id = response.response_id.clone();
+        let Some(id) = id else {
+            return Err(rejected(journal).await);
+        };
         if seen_ids.contains(&id) {
-            return Err(CustomProfileError::ConformanceFailed);
+            return Err(rejected(journal).await);
         }
+        journal
+            .call_finished(
+                token,
+                CheckDisposition::Succeeded,
+                usage(&response.usage),
+                false,
+            )
+            .await
+            .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
         seen_ids.push(id);
-        let compact_id = probe_compaction(&transport, &compact, Some(*effort)).await?;
+        let compact_id =
+            probe_compaction(&transport, &compact, Some(*effort), journal, &seen_ids).await?;
         if seen_ids.contains(&compact_id) {
-            return Err(CustomProfileError::ConformanceFailed);
+            return Err(rejected(journal).await);
         }
         seen_ids.push(compact_id);
     }
@@ -193,14 +375,33 @@ async fn probe_compaction(
     transport: &CustomTransport,
     request: &CompactionRequest,
     effort: Option<crate::provider::Effort>,
+    journal: &mut CheckJournal,
+    seen: &[String],
 ) -> Result<String, CustomProfileError> {
-    let response = transport
-        .compact(request, effort)
+    let token = journal
+        .call_started(CheckCallKind::Compaction)
         .await
-        .map_err(|_| CustomProfileError::ConformanceFailed)?;
-    response
-        .response_id
-        .ok_or(CustomProfileError::ConformanceFailed)
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    let response = match transport.compact(request, effort).await {
+        Ok(value) => value,
+        Err(error) => return Err(transport_failure(journal, error).await),
+    };
+    let Some(id) = response.response_id else {
+        return Err(rejected(journal).await);
+    };
+    if seen.contains(&id) {
+        return Err(rejected(journal).await);
+    }
+    journal
+        .call_finished(
+            token,
+            CheckDisposition::Succeeded,
+            usage(&response.usage),
+            false,
+        )
+        .await
+        .map_err(|_| CustomProfileError::EvidenceUnavailable)?;
+    Ok(id)
 }
 
 pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
@@ -730,9 +931,16 @@ mod tests {
             .await
             .expect("pinned loopback");
         let server = tokio::spawn(serve_probe(listener, reply, messages));
+        let state = tempfile::tempdir().expect("check state");
+        let mut journal = CheckJournal::start(
+            StateRoot::admit(&state.path().join("state")).expect("state"),
+            start(&profile).expect("manifest"),
+        )
+        .await
+        .expect("check journal");
         let result = tokio::time::timeout(
             Duration::from_secs(10),
-            probe(&profile, &destination, "test-key".into()),
+            probe(&profile, &destination, "test-key".into(), &mut journal),
         )
         .await
         .expect("bounded probe");
