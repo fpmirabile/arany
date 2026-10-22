@@ -1284,21 +1284,28 @@ fn inline_frame_keeps_composer_and_status_in_the_viewport() {
                         );
                         assert_eq!(composer.text(), text);
                         assert_eq!(composer.cursor_byte_offset(), text.len());
-                        composer.clear();
-                        for character in "/s".chars() {
-                            composer.apply(TerminalInput::Character(character));
+                        composer.set_runtime_skills(&["ask-matt".into()]);
+                        for draft in ["/s", "/ask", "/ask-matt", "/ask-matt task"] {
+                            composer.clear();
+                            composer.insert_paste(draft).unwrap();
+                            terminal
+                                .draw(|frame| {
+                                    draw_frame(frame, &model, &composer, None, Palette { color })
+                                })
+                                .expect("busy completion frame");
+                            let buffer = terminal.backend().buffer();
+                            assert!(
+                                (0..8).any(|y| buffer_row(buffer, y).contains("Enter keeps")),
+                                "busy completion does not imply execution: {draft}"
+                            );
+                            assert!(buffer_row(buffer, 7).contains("state"));
+                            for y in 0..8 {
+                                let row = buffer_row(buffer, y);
+                                assert!(!row.contains("Enter invokes"), "{draft}: {row}");
+                                assert!(!row.contains("Enter submits"), "{draft}: {row}");
+                            }
+                            assert_eq!(composer.text(), draft);
                         }
-                        terminal
-                            .draw(|frame| {
-                                draw_frame(frame, &model, &composer, None, Palette { color })
-                            })
-                            .expect("busy completion frame");
-                        let buffer = terminal.backend().buffer();
-                        assert!(
-                            (0..8).any(|y| buffer_row(buffer, y).contains("Enter keeps")),
-                            "busy completion does not imply execution"
-                        );
-                        assert_eq!(composer.text(), "/s");
                     }
                 }
             }
