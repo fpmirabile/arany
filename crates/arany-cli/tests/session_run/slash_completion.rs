@@ -18,14 +18,15 @@ use std::{
 };
 
 #[test]
-fn local_registry_has_twenty_two_commands_and_refuses_arguments_without_state_access() {
+fn local_registry_has_twenty_three_commands_and_refuses_arguments_without_state_access() {
     use arany_cli::terminal::{
         CommandParseError, InteractiveCommand, Submission, command_completions, parse_submission,
     };
     let names = command_completions("/");
-    assert_eq!(names.len(), 22);
+    assert_eq!(names.len(), 23);
     assert!(names.contains(&"rewind"));
     assert!(names.contains(&"storage"));
+    assert!(names.contains(&"usage"));
     assert_eq!(
         InteractiveCommand::Storage.availability(true),
         arany_cli::terminal::CommandAvailability::Locked
@@ -1358,6 +1359,24 @@ fn inline_tab_completion_keeps_placeholders_out_of_commands_and_restores_termina
         status_at,
         b"Runs",
     );
+    wait_for_frame(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        (status_at, 40, 24),
+        |screen| screen.iter().any(|row| row.contains("Esc close")),
+    );
+    let closed = transcript.len();
+    input.write_all(b"\x1b").expect("close status report");
+    wait_for_after(
+        &mut output,
+        &mut input,
+        &mut transcript,
+        &mut answered,
+        closed,
+        b"Ask Arany",
+    );
     let newline_at = transcript.len();
     input
         .write_all(b"alpha\\\r")
@@ -2127,6 +2146,47 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
             &mut transcript,
             &mut answered,
             b"Yb",
+        );
+        let usage_at = transcript.len();
+        input.write_all(b"\x0b").expect("usage quick selector");
+        wait_armed(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            usage_at,
+        );
+        input
+            .write_all(b"5")
+            .expect("inspect usage over Unicode draft");
+        wait_for_frame(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            (usage_at, 40, 24),
+            |screen| {
+                screen.iter().any(|row| row.contains("no calls yet"))
+                    && screen.iter().any(|row| row.contains("Esc close"))
+            },
+        );
+        let after_usage = transcript.len();
+        input.write_all(b"\x1b").expect("close usage");
+        wait_for_after(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            after_usage,
+            b"Ask Arany",
+        );
+        input.write_all(b"U").expect("edit at retained usage caret");
+        wait_for(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            b"Ub",
         );
         let after_inspection = transcript.len();
         input.write_all(b"\x0b").expect("reopen quick selector");

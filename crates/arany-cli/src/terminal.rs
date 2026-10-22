@@ -58,6 +58,16 @@ use view::{
     session_picker_index,
 };
 
+struct UsagePanel {
+    pages: Vec<String>,
+    page: usize,
+    sequence: u64,
+    status: bool,
+    starting_sequence: Option<u64>,
+    rows: usize,
+    visible: usize,
+}
+
 pub const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
@@ -458,6 +468,7 @@ pub struct AttachedTerminal {
     child_drafts: Vec<agent_chat::ChildDraft>,
     primary_draft_bytes: usize,
     help_selected: Option<usize>,
+    usage_panel: Option<UsagePanel>,
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
     deferred_input: Option<TerminalInput>,
@@ -773,6 +784,7 @@ impl AttachedTerminal {
             child_drafts: Vec::new(),
             primary_draft_bytes: 0,
             help_selected: None,
+            usage_panel: None,
             clipboard: None,
             clipboard_paste: None,
             deferred_input: None,
@@ -1501,6 +1513,7 @@ impl AttachedTerminal {
         let secret_input = self.secret_echo.is_some();
         let mut panel = self.agent_panel.take();
         let help_selected = self.help_selected.take();
+        let usage_panel = self.usage_panel.take();
         if let Some(panel) = &mut panel {
             panel.printed = None;
         }
@@ -1514,6 +1527,7 @@ impl AttachedTerminal {
         }
         resumed.agent_panel = panel;
         resumed.help_selected = help_selected;
+        resumed.usage_panel = usage_panel;
         resumed
             .input
             .as_mut()
@@ -2296,10 +2310,39 @@ impl AttachedTerminal {
         self.cancel_clipboard_paste();
         let palette = self.palette();
         let armed = self.dialog_armed;
-        self.draw_dialog(Some(session), 6, |frame, area| {
+        self.draw_dialog(Some(session), 7, |frame, area| {
             draw_quick_actions_frame(frame, area, selected, armed, has_draft, palette);
         })?;
         Ok(())
+    }
+
+    pub async fn open_usage(
+        &mut self,
+        session: &SessionView,
+        status: bool,
+        starting_sequence: Option<u64>,
+    ) -> Result<(), TerminalError> {
+        self.cancel_clipboard_paste();
+        let pages = crate::presentation::usage::usage_pages(session, status, starting_sequence);
+        if let Some(linear) = &mut self.linear {
+            return linear
+                .write_usage(&mut io::stderr(), &pages)
+                .map_err(TerminalError::Io);
+        }
+        self.begin_dialog();
+        self.help_selected = Some(0);
+        self.usage_panel = Some(UsagePanel {
+            pages,
+            page: 0,
+            sequence: session.last_sequence,
+            status,
+            starting_sequence,
+            rows: 0,
+            visible: 0,
+        });
+        self.draw_help(0, session)?;
+        self.arm_dialog().await?;
+        self.draw_help(0, session)
     }
 
     pub async fn open_help(&mut self, session: &SessionView) -> Result<(), TerminalError> {
@@ -2323,12 +2366,44 @@ impl AttachedTerminal {
 
     pub fn close_help(&mut self) {
         self.help_selected = None;
+        self.usage_panel = None;
+        // Discard queued dialog keys before the composer owns input again.
+        self.discard_draft_input();
     }
 
     pub fn help_input(&mut self, input: TerminalInput) {
         let Some(selected) = self.help_selected.as_mut() else {
             return;
         };
+        if let Some(panel) = &mut self.usage_panel {
+            let max_scroll = panel.rows.saturating_sub(panel.visible.max(1));
+            match input {
+                TerminalInput::Left => {
+                    panel.page = panel.page.saturating_sub(1);
+                    *selected = 0;
+                }
+                TerminalInput::Right => {
+                    panel.page = (panel.page + 1).min(panel.pages.len() - 1);
+                    *selected = 0;
+                }
+                TerminalInput::Up | TerminalInput::PointerScrollUp { .. } => {
+                    *selected = selected.saturating_sub(1)
+                }
+                TerminalInput::Down | TerminalInput::PointerScrollDown { .. } => {
+                    *selected = (*selected + 1).min(max_scroll)
+                }
+                TerminalInput::PageUp => *selected = selected.saturating_sub(10),
+                TerminalInput::PageDown => *selected = (*selected + 10).min(max_scroll),
+                TerminalInput::Home => *selected = 0,
+                TerminalInput::End => *selected = max_scroll,
+                TerminalInput::Escape
+                | TerminalInput::Submit
+                | TerminalInput::Interrupt
+                | TerminalInput::EndOfInput => self.close_help(),
+                _ => {}
+            }
+            return;
+        }
         match input {
             TerminalInput::Up => *selected = selected.saturating_sub(1),
             TerminalInput::Down => *selected = (*selected + 1).min(help_len() - 1),
@@ -2347,6 +2422,48 @@ impl AttachedTerminal {
     fn draw_help(&mut self, selected: usize, session: &SessionView) -> Result<(), TerminalError> {
         let palette = self.palette();
         let armed = self.dialog_armed;
+        if let Some(panel) = &mut self.usage_panel {
+            if panel.sequence != session.last_sequence {
+                panel.pages = crate::presentation::usage::usage_pages(
+                    session,
+                    panel.status,
+                    panel.starting_sequence,
+                );
+                panel.sequence = session.last_sequence;
+                panel.page = panel.page.min(panel.pages.len() - 1);
+            }
+            let width = self
+                .terminal
+                .as_mut()
+                .expect("visual terminal")
+                .size()?
+                .width;
+            let lines = view::usage_lines(&panel.pages[panel.page], width);
+            panel.rows = lines.len();
+            let page = panel.page;
+            let pages = panel.pages.len();
+            let height = if self.mode == TerminalMode::Classic {
+                u16::try_from(lines.len().saturating_add(2)).unwrap_or(u16::MAX)
+            } else {
+                20
+            };
+            let area = self.draw_dialog(Some(session), height, |frame, area| {
+                view::draw_usage_frame(
+                    frame,
+                    area,
+                    &lines,
+                    selected,
+                    (page, pages),
+                    armed,
+                    palette,
+                );
+            })?;
+            let panel = self.usage_panel.as_mut().expect("open usage panel");
+            panel.visible = usize::from(area.height.saturating_sub(2));
+            self.help_selected =
+                Some(selected.min(panel.rows.saturating_sub(panel.visible.max(1))));
+            return Ok(());
+        }
         // Classic shows the header, the capped command rows, the focused description and the
         // key hint; Fullscreen keeps its 20-row panel below live history.
         let height = if self.mode == TerminalMode::Classic {
@@ -3347,6 +3464,7 @@ mod pointer_tests {
             .unwrap()
             .block_on(async {
                 let view = arany::SessionView {
+                    usage: Default::default(),
                     rewinds: Default::default(),
                     id: arany::SessionId::new(),
                     title: "Pager".into(),
@@ -3391,6 +3509,7 @@ mod pointer_tests {
             .unwrap()
             .block_on(async {
                 let view = arany::SessionView {
+                    usage: Default::default(),
                     rewinds: Default::default(),
                     id: arany::SessionId::new(),
                     title: "Selection".into(),

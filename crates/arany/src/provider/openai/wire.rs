@@ -579,10 +579,11 @@ struct WireUsage {
     input_tokens_details: Option<WireInputTokensDetails>,
 }
 
-// Input tokens already include cache reads; do not add them again.
+// Input tokens already include cache subsets; do not add them again.
 #[derive(Deserialize)]
 struct WireInputTokensDetails {
-    cached_tokens: u32,
+    cached_tokens: Option<u32>,
+    cache_write_tokens: Option<u32>,
 }
 
 fn provider_usage(usage: Option<&WireUsage>) -> Usage {
@@ -591,8 +592,10 @@ fn provider_usage(usage: Option<&WireUsage>) -> Usage {
         output_tokens: usage.map(|value| value.output_tokens),
         cache_read_input_tokens: usage
             .and_then(|value| value.input_tokens_details.as_ref())
-            .map(|details| details.cached_tokens),
-        cache_creation_input_tokens: None,
+            .and_then(|details| details.cached_tokens),
+        cache_creation_input_tokens: usage
+            .and_then(|value| value.input_tokens_details.as_ref())
+            .and_then(|details| details.cache_write_tokens),
     }
 }
 
