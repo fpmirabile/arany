@@ -1084,6 +1084,7 @@ impl From<&Event> for TraceEventKind {
             | Event::WorkerVerificationRecorded { .. }
             | Event::AssistantDisplayRecorded { .. }
             | Event::GoalSteeringNoteRecorded { .. }
+            | Event::AgentSteeringNoteRecorded { .. }
             | Event::SessionStarted { .. }
             | Event::SessionDefaultChanged { .. }
             | Event::SessionForked { .. }

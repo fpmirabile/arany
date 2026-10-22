@@ -5,7 +5,7 @@ mod goal_recovery_tests {
     use super::*;
     use crate::tools::{EffectIntent, ToolCall, ToolDisposition, ToolObservation};
 
-    fn pending_plan_view(disposition: Option<ToolDisposition>) -> SessionView {
+    pub(super) fn pending_plan_view(disposition: Option<ToolDisposition>) -> SessionView {
         let session_id = SessionId::new();
         let goal_id = GoalId::new();
         let run_id = RunId::new();
@@ -1590,6 +1590,324 @@ mod goal_replay_tests {
         );
     }
 
+    fn child_note_prefix(
+        goal_id: GoalId,
+        run_id: RunId,
+        primary: AgentRunId,
+        child: AgentRunId,
+    ) -> Vec<Event> {
+        let mut events = vec![goal_started(goal_id, GoalBudget::default())];
+        events.extend(start_run(
+            goal_id,
+            run_id,
+            primary,
+            config(
+                CollaborationPolicy::Auto {
+                    max_active_children: 2,
+                },
+                false,
+            ),
+        ));
+        events.extend([
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id: primary,
+                active_ceiling_ms: 0,
+            },
+            Event::ProviderCallRecorded {
+                run_id,
+                agent_run_id: primary,
+                record: record(
+                    AgentPhase::RootPlan,
+                    ProviderCallDisposition::Delegated,
+                    None,
+                ),
+            },
+            Event::AgentSpawned {
+                profile: None,
+                assignment: None,
+                definition: None,
+                run_id,
+                agent_run_id: child,
+                role: AgentRole::Child,
+                ordinal: 1,
+                objective: Some("Inspect facts".into()),
+                grant: Some(ChildGrant::NoTools),
+            },
+        ]);
+        events
+    }
+
+    #[test]
+    fn child_steering_requires_its_open_work_reservation() {
+        let (session, goal, run, primary, child) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+            AgentRunId::new(),
+        );
+        let base = child_note_prefix(goal, run, primary, child);
+        let reservation = Event::GoalProviderCallReserved {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: child,
+            active_ceiling_ms: 0,
+        };
+        let note = Event::AgentSteeringNoteRecorded {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: child,
+            text: "literal /grant all".into(),
+        };
+        let mut open = base.clone();
+        open.push(reservation);
+        let accepts = |events: Vec<Event>| {
+            SessionView::replay_open(session, &session_with(session, events)).is_ok()
+        };
+        assert!(accepts(open.clone()));
+        let mut valid = open.clone();
+        valid.push(note.clone());
+        let view = SessionView::replay_open(session, &session_with(session, valid))
+            .unwrap()
+            .unwrap();
+        assert!(view.runs[0].steering_notes.is_empty());
+        assert_eq!(
+            view.runs[0].agents[1].steering_notes,
+            ["literal /grant all"]
+        );
+        assert_eq!(view.runs[0].agents[1].grant, Some(ChildGrant::NoTools));
+        let mut settled = open.clone();
+        settled.push(Event::ProviderCallRecorded {
+            run_id: run,
+            agent_run_id: child,
+            record: record(
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::Finished,
+                None,
+            ),
+        });
+        let mut finished = settled.clone();
+        finished.push(Event::AgentFinished {
+            worker: None,
+            run_id: run,
+            agent_run_id: child,
+            disposition: AgentDisposition::Finished,
+            summary: Some("done".into()),
+            result: Some("done".into()),
+        });
+        for prefix in [base, settled, finished] {
+            assert!(accepts(prefix.clone()), "valid rejection prefix");
+            let mut rejected = prefix;
+            rejected.push(note.clone());
+            assert!(!accepts(rejected));
+        }
+        for invalid in [
+            Event::AgentSteeringNoteRecorded {
+                goal_id: GoalId::new(),
+                run_id: run,
+                agent_run_id: child,
+                text: "x".into(),
+            },
+            Event::AgentSteeringNoteRecorded {
+                goal_id: goal,
+                run_id: RunId::new(),
+                agent_run_id: child,
+                text: "x".into(),
+            },
+            Event::AgentSteeringNoteRecorded {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: primary,
+                text: "x".into(),
+            },
+            Event::AgentSteeringNoteRecorded {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: AgentRunId::new(),
+                text: "x".into(),
+            },
+        ] {
+            assert!(accepts(open.clone()));
+            let mut rejected = open.clone();
+            rejected.push(invalid);
+            assert!(!accepts(rejected));
+        }
+        let mut capped = open.clone();
+        capped.push(Event::AgentSteeringNoteRecorded {
+            goal_id: goal,
+            run_id: run,
+            agent_run_id: child,
+            text: "x".repeat(
+                crate::session::MAX_STEERING_NOTE_BYTES
+                    - crate::session::MAX_CHILD_STEERING_LABEL_BYTES,
+            ),
+        });
+        assert!(accepts(capped.clone()));
+        capped.push(note);
+        assert!(!accepts(capped));
+        let mut prefix = SessionView::replay_open(session, &session_with(session, open))
+            .unwrap()
+            .unwrap();
+        let pending = super::goal_recovery_tests::pending_plan_view(None).runs[0].tools[0].clone();
+        prefix.runs[0].tools.push(pending.clone());
+        assert!(
+            prefix
+                .record_agent_steering_note(&goal, &run, &child, "unrelated primary review")
+                .is_ok()
+        );
+        prefix.runs[0].agents[1].tools.push(pending);
+        assert!(
+            prefix
+                .record_agent_steering_note(&goal, &run, &child, "own review")
+                .is_err()
+        );
+        prefix.runs[0].agents[1].tools.pop();
+        prefix.runs[0].tools.pop();
+        assert!(
+            prefix
+                .clone()
+                .record_agent_steering_note(&goal, &run, &child, "control")
+                .is_ok()
+        );
+        type Mutate = fn(&mut SessionView, RunId, AgentRunId);
+        let rejections: [(&str, Mutate); 6] = [
+            ("paused goal", |view, _, _| {
+                view.goals[0].status = GoalStatus::Interrupted;
+            }),
+            ("finished goal", |view, _, _| {
+                view.goals[0].status = GoalStatus::Completed;
+            }),
+            ("non-latest run", |view, _, _| {
+                let mut later = view.runs[0].clone();
+                later.id = RunId::new();
+                view.runs.push(later);
+            }),
+            ("workers stop", |view, _, _| {
+                view.runs[0].workers.stop =
+                    Some((1, crate::session::worker::WorkerStopReason::Paused));
+            }),
+            ("hook stop", |view, run, child| {
+                let intent = child_intent(
+                    run,
+                    child,
+                    ToolCall::Command {
+                        program: "sh".into(),
+                        args: Vec::new(),
+                        cwd: String::new(),
+                    },
+                );
+                view.runs[0].lifecycle_hooks.push(HookView {
+                    sequence: 99,
+                    invocation: crate::tools::permissions::HookInvocation {
+                        event: crate::tools::permissions::HookEvent::SubagentStop,
+                        group: 0,
+                        handler: 0,
+                        subject_digest: [0; 32],
+                        intent: intent.clone(),
+                        input_digest: [0; 32],
+                        active_ceiling_ms: None,
+                    },
+                    outcome: Some(crate::tools::permissions::HookOutcome {
+                        observation: observation_for(intent, b""),
+                        result: crate::tools::permissions::HookResult::Stopped { reason: None },
+                        boundary_active_ms: None,
+                    }),
+                    idle: false,
+                });
+            }),
+            ("finished child", |view, _, _| {
+                view.runs[0].agents[1].status = AgentStatus::Finished;
+            }),
+        ];
+        for (name, mutate) in rejections {
+            let mut view = prefix.clone();
+            mutate(&mut view, run, child);
+            assert!(
+                view.record_agent_steering_note(&goal, &run, &child, "x")
+                    .is_err(),
+                "{name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_steering_replays_as_history_without_redelivery() {
+        let (session, goal, run, primary, child) = (
+            SessionId::new(),
+            GoalId::new(),
+            RunId::new(),
+            AgentRunId::new(),
+            AgentRunId::new(),
+        );
+        let mut prefix = child_note_prefix(goal, run, primary, child);
+        prefix.extend([
+            Event::GoalProviderCallReserved {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: child,
+                active_ceiling_ms: 0,
+            },
+            Event::AgentSteeringNoteRecorded {
+                goal_id: goal,
+                run_id: run,
+                agent_run_id: child,
+                text: "keep the fixture".into(),
+            },
+        ]);
+        let temp = tempfile::tempdir().unwrap();
+        let state = temp.path().join("state");
+        let store = crate::Store::open(crate::StateRoot::admit(&state).unwrap()).unwrap();
+        for envelope in session_with(session, prefix) {
+            store.append(session, envelope.event).await.unwrap();
+        }
+        store.close().await.unwrap();
+        let store =
+            crate::Store::open_read_only(crate::StateRoot::open_existing(&state).unwrap()).unwrap();
+        let mut events = store.load_session(session).await.unwrap();
+        store.close().await.unwrap();
+        let crashed = SessionView::replay(session, &events).unwrap().unwrap();
+        assert_eq!(crashed.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(crashed.runs[0].agents[1].status, AgentStatus::Interrupted);
+        assert_eq!(
+            crashed.runs[0].agents[1].steering_notes,
+            ["keep the fixture"]
+        );
+        assert!(
+            crashed.runs[0]
+                .history_user_text()
+                .contains("[child 1 / 1] keep the fixture")
+        );
+        let mut next = vec![Event::GoalResumed { goal_id: goal }];
+        next.extend(start_run(
+            goal,
+            RunId::new(),
+            AgentRunId::new(),
+            config(CollaborationPolicy::Single, false),
+        ));
+        let first = events.last().unwrap().sequence + 1;
+        for (sequence, event) in (first..).zip(next) {
+            let (run_id, agent_run_id) = event.scope();
+            events.push(EventEnvelope {
+                session_id: session,
+                sequence,
+                run_id,
+                agent_run_id,
+                event,
+                created_at_ms: 0,
+            });
+        }
+        let resumed = SessionView::replay_open(session, &events).unwrap().unwrap();
+        assert!(resumed.runs[1].steering_notes.is_empty());
+        assert!(
+            resumed.runs[1]
+                .agents
+                .iter()
+                .all(|actor| actor.steering_notes.is_empty())
+        );
+    }
+
     #[test]
     fn steering_notes_charge_labels_and_stay_within_the_run_byte_bound() {
         let (goal_id, run_id, agent_run_id) = (GoalId::new(), RunId::new(), AgentRunId::new());
@@ -1711,6 +2029,31 @@ mod goal_replay_tests {
         let mut bare = run.clone();
         bare.steering_notes.clear();
         assert_eq!(bare.history_user_text(), run.objective);
+        let mut mixed = bare;
+        let primary = mixed.agents[0].clone();
+        for ordinal in 1..=8 {
+            let mut child = primary.clone();
+            child.role = AgentRole::Child;
+            child.ordinal = ordinal;
+            child.id = AgentRunId::new();
+            mixed.agents.push(child);
+        }
+        let mut next = 0;
+        while mixed.steering_bytes() + 1 + crate::session::MAX_CHILD_STEERING_LABEL_BYTES
+            <= crate::session::MAX_STEERING_NOTE_BYTES
+        {
+            if next % 9 == 0 {
+                mixed.steering_notes.push("n".into());
+            } else {
+                mixed.agents[next % 9].steering_notes.push("n".into());
+            }
+            next += 1;
+        }
+        assert!(
+            mixed.history_user_text().len() - mixed.objective.len()
+                <= crate::session::MAX_STEERING_CONTEXT_BYTES
+        );
+        assert!(mixed.history_user_text().contains("[child 8 /"));
     }
 
     #[test]
@@ -3050,6 +3393,7 @@ mod goal_replay_tests {
                         ProviderCallDisposition::Delegated,
                         Some(0),
                     )],
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Active,
@@ -4144,6 +4488,7 @@ mod goal_replay_tests {
                             Some(0),
                         ),
                     ],
+                    steering_notes: Vec::new(),
                     grant: None,
                     tools: Vec::new(),
                     status: AgentStatus::Active,
@@ -4344,6 +4689,7 @@ mod goal_replay_tests {
                             ProviderCallDisposition::PlanRecorded,
                             Some(0),
                         )],
+                        steering_notes: Vec::new(),
                         grant: None,
                         tools: Vec::new(),
                         status: AgentStatus::Active,

@@ -119,7 +119,8 @@ impl Corpus {
                     );
                 }
             }
-            Event::GoalSteeringNoteRecorded { run_id, .. } => {
+            Event::GoalSteeringNoteRecorded { run_id, .. }
+            | Event::AgentSteeringNoteRecorded { run_id, .. } => {
                 self.label(*run_id, |labels| labels.steering = true);
             }
             Event::RunFinished {

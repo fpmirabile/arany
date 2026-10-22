@@ -451,6 +451,8 @@ pub struct AttachedTerminal {
     secret_echo: Option<SecretEcho>,
     agent_panel: Option<AgentPanel>,
     agent_chat: Option<AgentChat>,
+    child_drafts: Vec<agent_chat::ChildDraft>,
+    primary_draft_bytes: usize,
     help_selected: Option<usize>,
     clipboard: Option<ClipboardRead>,
     clipboard_paste: Option<Result<ClipboardContent, &'static str>>,
@@ -763,6 +765,8 @@ impl AttachedTerminal {
             secret_echo: None,
             agent_panel: None,
             agent_chat: None,
+            child_drafts: Vec::new(),
+            primary_draft_bytes: 0,
             help_selected: None,
             clipboard: None,
             clipboard_paste: None,
@@ -2624,6 +2628,8 @@ impl AttachedTerminal {
         replacement.classic_history = std::mem::take(&mut self.classic_history);
         replacement.dialog_armed = self.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
+        replacement.child_drafts = std::mem::take(&mut self.child_drafts);
+        replacement.primary_draft_bytes = self.primary_draft_bytes;
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {

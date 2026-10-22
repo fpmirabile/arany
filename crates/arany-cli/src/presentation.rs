@@ -13,7 +13,8 @@ pub mod rewind;
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{
     AgentFocus, AgentInspectorModel, AgentQuery, AgentRow, AgentTarget, AgentTranscript, Appended,
-    MAX_AGENT_ROWS, MAX_AGENT_SEARCH, TranscriptPart, agent_targets, run_targets,
+    MAX_AGENT_ROWS, MAX_AGENT_SEARCH, MAX_RECENT_RUNS, STEERING_NOTE_HEADING, TranscriptPart,
+    agent_targets, run_targets,
 };
 pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{

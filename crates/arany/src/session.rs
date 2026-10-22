@@ -28,6 +28,7 @@ pub(crate) const MAX_STEERING_NOTE_BYTES: usize = 8 * 1024;
 pub(crate) const MAX_STEERING_CONTEXT_BYTES: usize = MAX_STEERING_NOTE_BYTES + 256;
 // Charge the longest history label so rendered notes cannot exceed the Run's byte bound.
 pub(crate) const MAX_STEERING_LABEL_BYTES: usize = 8;
+pub(crate) const MAX_CHILD_STEERING_LABEL_BYTES: usize = 24;
 pub(crate) const MAX_ASSISTANT_MESSAGE_BYTES: usize = 32 * 1024;
 
 pub(crate) use compaction::{

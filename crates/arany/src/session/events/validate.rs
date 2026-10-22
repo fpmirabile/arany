@@ -13,6 +13,7 @@ impl Event {
             | Self::GoalCompactionCallReserved { goal_id, .. }
             | Self::GoalContextCompacted { goal_id, .. }
             | Self::GoalSteeringNoteRecorded { goal_id, .. }
+            | Self::AgentSteeringNoteRecorded { goal_id, .. }
             | Self::GoalFinished { goal_id, .. } => goal_id.valid(),
             _ => true,
         };
@@ -100,7 +101,8 @@ impl Event {
                 contract.validate()?;
                 Ok(())
             }
-            Self::GoalSteeringNoteRecorded { text, .. } => {
+            Self::GoalSteeringNoteRecorded { text, .. }
+            | Self::AgentSteeringNoteRecorded { text, .. } => {
                 if text.trim().is_empty() || text.len() > super::MAX_STEERING_NOTE_BYTES {
                     return Err(ReplayError::InvalidPayload);
                 }

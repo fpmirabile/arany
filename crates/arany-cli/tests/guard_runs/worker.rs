@@ -65,12 +65,13 @@ async fn closed_bundle(
 }
 
 pub(super) async fn worker_case(case: &'static str) {
-    // A worker admission reserves three retry facts for each of its ten calls, 30 more than before.
+    // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
+    // child call; each case pads to the largest prefix that still reaches its capacity stop.
     let padding = match case {
         "headroom" => Some(9_876),
-        "headroom_child" => Some(9_882),
-        "headroom_background" => Some(9_886),
-        "headroom_race" => Some(9_886),
+        "headroom_child" => Some(9_876),
+        "headroom_background" => Some(9_882),
+        "headroom_race" => Some(9_880),
         _ => None,
     };
     arany::test_support::isolate_account_root();
