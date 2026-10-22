@@ -3590,3 +3590,75 @@ fn acp_refuses_terminal_input_before_state_admission() {
     );
     assert!(!state.exists());
 }
+
+fn check_output(
+    bytes: &[u8],
+    state: &std::path::Path,
+    disposition: arany::CheckDisposition,
+) -> Vec<u8> {
+    let text = std::str::from_utf8(bytes).expect("check output UTF-8");
+    let (prefix, receipt) = text.rsplit_once("Check: ").expect("durable check receipt");
+    let (id, status) = receipt.split_once('\n').expect("check disposition");
+    let id: arany::CheckId = id.parse().expect("check UUID");
+    assert_eq!(status, format!("Disposition: {disposition}\n"));
+    let database = rusqlite::Connection::open_with_flags(
+        state.join("events.sqlite3"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .expect("closed check database");
+    let mut statement = database.prepare("SELECT kind, event_version, payload FROM provider_check_events WHERE check_id=?1 ORDER BY sequence").expect("check events");
+    let events: Vec<arany::CheckEvent> = statement
+        .query_map([id.to_string()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .expect("query")
+        .map(|row| {
+            let (kind, version, payload) = row.expect("event row");
+            let event: arany::CheckEvent =
+                serde_json::from_str(&payload).expect("typed check event");
+            assert_eq!(kind, event.kind());
+            assert_eq!(version, event.version());
+            event
+        })
+        .collect();
+    let view = arany::CheckView::replay(id, &events)
+        .expect("strict check replay")
+        .expect("check");
+    assert_eq!(view.disposition, Some(disposition));
+    if disposition == arany::CheckDisposition::Succeeded {
+        assert_eq!(
+            view.completed_calls as usize,
+            view.start.probes.len() + usize::from(view.start.catalog_pages > 0)
+        );
+    }
+    prefix.as_bytes().to_vec()
+}
+
+#[cfg(unix)]
+fn assert_check_privacy(output: &std::process::Output, state: &std::path::Path, canaries: &[&str]) {
+    let database = std::fs::read(state.join("events.sqlite3")).expect("whole check database");
+    let diagnostics = match std::fs::read(state.join("development.log")) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("diagnostic inspection failed: {error}"),
+    };
+    for (channel, bytes) in [
+        ("stdout", output.stdout.as_slice()),
+        ("stderr", output.stderr.as_slice()),
+        ("database", database.as_slice()),
+        ("diagnostics", diagnostics.as_slice()),
+    ] {
+        for canary in canaries {
+            assert!(
+                !bytes
+                    .windows(canary.len())
+                    .any(|part| part == canary.as_bytes()),
+                "check leaked a private canary into {channel}"
+            );
+        }
+    }
+}

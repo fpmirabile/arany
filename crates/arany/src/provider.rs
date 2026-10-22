@@ -44,12 +44,13 @@ pub use conversation::{
 pub(crate) use custom::PROVIDER_PROFILES;
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
+    check_custom_profile_with_cancellation,
 };
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{ImageAttachment, ImageOrigin, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ProviderImage};
 pub use native_check::{
-    NativeCheckError, check_native_model_from_env, check_native_model_with_api_key,
-    check_native_model_with_credentials,
+    NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
+    check_native_model_with_api_key, check_native_model_with_credentials,
 };
 pub use openai::{ChatGptProvider, OpenAiProvider, probe_chatgpt_model};
 pub(crate) use render::instructions_text;
@@ -276,6 +277,7 @@ pub const MAX_NATIVE_API_KEY_BYTES: usize = 512;
 pub const MAX_ANTHROPIC_WORKSPACE_ID_BYTES: usize = 128;
 
 /// A selected native key and its explicit API workspace, never ambient account state.
+#[derive(Clone, Eq, PartialEq)]
 pub struct NativeApiCredentials {
     profile: &'static str,
     key: String,

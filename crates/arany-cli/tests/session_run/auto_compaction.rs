@@ -322,7 +322,7 @@ fn run_attached_auto_compaction(case: CompactionCase) {
     let checked = wait_product(check);
     assert!(checked.status.success());
     assert_eq!(
-        checked.stdout,
+        check_output(&checked.stdout, &state, arany::CheckDisposition::Succeeded),
         b"Provider: local\nStatus: custom verified\n"
     );
     assert_eq!(checked.stderr, b"");

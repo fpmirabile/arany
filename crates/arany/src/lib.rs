@@ -39,6 +39,11 @@ pub use engine::{
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
+pub use journal::check::{
+    CHECK_FORMATS, CheckCallKind, CheckCallToken, CheckDisposition, CheckEvent, CheckId,
+    CheckJournal, CheckOpenError, CheckProbe, CheckReceipt, CheckStart, CheckTarget, CheckUsage,
+    CheckView,
+};
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
 pub use provider::semantic;
@@ -50,13 +55,14 @@ pub use provider::{
     GoalContextFacts, HistoryTurn, ImageAttachment, ImageOrigin, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
     MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS,
     MAX_PROVIDER_RETRIES, MAX_PROVIDER_SWITCHES, ModelEntry, NamedProviderRoutes,
-    NativeApiCredentials, NativeCheckError, OpenAiProvider, OutputTokenBound, PlanRequest,
-    PreviewText, PromptRole, Provenance, Provider, ProviderError, ProviderFailureReason,
-    ProviderFallback, ProviderIdentity, ProviderImage, ProviderOutcome, ProviderRequest,
-    ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
+    NativeApiCredentials, NativeCheckError, NativeCheckRequest, OpenAiProvider, OutputTokenBound,
+    PlanRequest, PreviewText, PromptRole, Provenance, Provider, ProviderError,
+    ProviderFailureReason, ProviderFallback, ProviderIdentity, ProviderImage, ProviderOutcome,
+    ProviderRequest, ProviderResponse, ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn,
     ProviderWireProvenance, Providers, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot,
     RunInput, ToolUseId, UnansweredStatus, Usage, WorkspaceGuidance, admitted_context_window,
-    check_custom_profile, check_native_model_from_env, check_native_model_with_api_key,
+    check_custom_profile, check_custom_profile_with_cancellation, check_native_model,
+    check_native_model_from_env, check_native_model_with_api_key,
     check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
     resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,

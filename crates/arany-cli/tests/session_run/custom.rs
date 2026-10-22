@@ -259,6 +259,7 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         .expect("private profile file");
 
     let mutation_path = state_path.join("provider-roster.json");
+    let check_database = state_path.join("events.sqlite3");
     let server = thread::spawn(move || {
         listener.set_nonblocking(true).expect("bounded accept");
         for wire_index in 0..if messages.is_some() {
@@ -301,6 +302,27 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
                     Err(error) => panic!("accept failed: {error}"),
                 }
             };
+            if wire_index < if effort_case { 7 } else { 3 } {
+                let database = rusqlite::Connection::open_with_flags(
+                    &check_database,
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                )
+                .expect("journal before received request");
+                let (kind, payload): (String, String) = database.query_row("SELECT kind,payload FROM provider_check_events ORDER BY sequence DESC LIMIT 1", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+                assert_eq!(kind, "ProviderCheckCallStarted");
+                let event: arany::CheckEvent = serde_json::from_str(&payload).unwrap();
+                assert!(
+                    matches!(event, arany::CheckEvent::ProviderCheckCallStarted { ordinal, .. } if usize::from(ordinal) == wire_index)
+                );
+                assert_eq!(database.query_row("SELECT COUNT(*) FROM provider_check_events WHERE kind='ProviderCheckCallFinished'", [], |row| row.get::<_,i64>(0)).unwrap(), i64::try_from(wire_index).unwrap());
+                assert_eq!(
+                    database
+                        .query_row("SELECT COUNT(*) FROM events", [], |row| row
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
             stream
                 .set_nonblocking(false)
                 .expect("blocking accepted stream");
@@ -570,8 +592,21 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
         Some(proxy_addr),
     );
     assert!(checked.status.success());
+    assert_check_privacy(
+        &checked,
+        &state_path,
+        &[
+            case.key,
+            "OMITTED_WORKSPACE_CANARY",
+            "EXPECTED_WORKSPACE_GUIDANCE",
+        ],
+    );
     assert_eq!(
-        checked.stdout,
+        check_output(
+            &checked.stdout,
+            &state_path,
+            arany::CheckDisposition::Succeeded
+        ),
         b"Provider: local\nStatus: custom verified\n"
     );
     assert_eq!(checked.stderr, b"");
@@ -818,7 +853,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert!(!redirected.status.success());
     assert_eq!(redirected.stdout, b"");
     assert_eq!(
-        redirected.stderr,
+        check_output(
+            &redirected.stderr,
+            &state_path,
+            arany::CheckDisposition::Failed
+        ),
         b"error: custom Provider conformance failed\n"
     );
     assert!(matches!(
@@ -1181,7 +1220,11 @@ fn custom_profile_process_gate(case: RouteCase, failure: RecheckFailure) {
     assert!(!unavailable.status.success());
     assert_eq!(unavailable.stdout, b"");
     assert_eq!(
-        unavailable.stderr,
+        check_output(
+            &unavailable.stderr,
+            &state_path,
+            arany::CheckDisposition::Failed
+        ),
         b"error: custom Provider credential unavailable\n"
     );
     let connection = rusqlite::Connection::open(state_path.join("events.sqlite3"))
@@ -1650,7 +1693,7 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
     let checked = wait_product(check.spawn().unwrap());
     assert!(checked.status.success());
     assert_eq!(
-        checked.stdout,
+        check_output(&checked.stdout, &state, arany::CheckDisposition::Succeeded),
         b"Provider: local\nStatus: custom verified\n"
     );
     assert!(checked.stderr.is_empty());
@@ -1856,4 +1899,222 @@ fn messages_attached_case(cancel: bool, case: RouteCase) {
                 .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
         );
     });
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn interrupted_provider_check_never_retries_and_a_live_owner_cannot_be_recovered() {
+    use super::loopback::{ChildGuard, read_request, wait_product, write_profile};
+    use std::{
+        net::TcpListener,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    for graceful in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        let state = temp.path().join("state");
+        std::fs::create_dir(&workspace).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        write_profile(&state, listener.local_addr().unwrap().port());
+        let command = |with_key: bool| {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_arany"));
+            command
+                .env_clear()
+                .current_dir(&workspace)
+                .args(["provider", "check", "local", "--state-dir"])
+                .arg(&state)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if with_key {
+                command.env("ARANY_PROVIDER_LOCAL_KEY", "test-key");
+            }
+            command
+        };
+        let mut child = ChildGuard::new(command(true).spawn().unwrap());
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline);
+                    assert!(child.child().try_wait().unwrap().is_none());
+                    std::thread::yield_now();
+                }
+                Err(error) => panic!("fixture accept failed: {error}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        read_request(&mut stream);
+        let database = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+        let id: String = database
+            .query_row(
+                "SELECT check_id FROM provider_check_events ORDER BY sequence DESC LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            database
+                .query_row("SELECT COUNT(*) FROM provider_check_events", [], |row| row
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            3
+        );
+        drop(database);
+        let concurrent = wait_product(command(true).spawn().unwrap());
+        assert!(!concurrent.status.success());
+        assert_eq!(concurrent.stdout, b"");
+        assert_eq!(
+            concurrent.stderr,
+            b"error: Provider check could not start: another Provider check is active\n"
+        );
+        if graceful {
+            rustix::process::kill_process(
+                rustix::process::Pid::from_raw(i32::try_from(child.child().id()).unwrap()).unwrap(),
+                rustix::process::Signal::INT,
+            )
+            .unwrap();
+            let output = wait_product(child.take());
+            assert!(!output.status.success());
+            assert_eq!(output.stdout, b"");
+            assert_eq!(
+                check_output(&output.stderr, &state, arany::CheckDisposition::Uncertain),
+                b"error: custom Provider conformance failed\n"
+            );
+        } else {
+            child.child().kill().unwrap();
+            assert!(!child.child().wait().unwrap().success());
+        }
+        drop(stream);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let view = store
+                .load_check(id.parse().unwrap())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                view.replay_disposition(),
+                arany::CheckDisposition::Uncertain
+            );
+            assert_eq!(view.disposition.is_some(), graceful);
+            store.close().await.unwrap();
+        });
+        let fresh = wait_product(command(false).spawn().unwrap());
+        assert!(!fresh.status.success());
+        assert_eq!(
+            check_output(&fresh.stderr, &state, arany::CheckDisposition::Failed),
+            b"error: custom Provider credential unavailable\n"
+        );
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            assert_eq!(
+                store
+                    .load_check(id.parse().unwrap())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .disposition,
+                Some(arany::CheckDisposition::Uncertain)
+            );
+            store.close().await.unwrap();
+        });
+        assert!(
+            listener
+                .accept()
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+    }
+}
+
+#[test]
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+fn provider_check_refuses_a_declaration_changed_during_its_probes() {
+    use super::loopback::{read_request, send_response, wait_product, write_profile};
+    use std::{
+        net::TcpListener,
+        process::Stdio,
+        time::{Duration, Instant},
+    };
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let state = temp.path().join("state");
+    std::fs::create_dir(&workspace).unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    write_profile(&state, listener.local_addr().unwrap().port());
+    let declaration = state.join("provider-profiles.json");
+    let server = std::thread::spawn(move || {
+        for index in 0..3 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline);
+                        std::thread::yield_now();
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            read_request(&mut stream);
+            if index == 2 {
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&declaration).unwrap()).unwrap();
+                value["profiles"][0]["model"] = serde_json::json!("changed-model");
+                std::fs::write(&declaration, serde_json::to_vec(&value).unwrap()).unwrap();
+            }
+            let text = if index == 1 {
+                serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"One question","profile":null}]}})
+            } else {
+                serde_json::json!("synthetic answer")
+            };
+            send_response(&mut stream, index, text);
+        }
+        listener
+    });
+    let child = Command::new(env!("CARGO_BIN_EXE_arany"))
+        .env_clear()
+        .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+        .current_dir(&workspace)
+        .args(["provider", "check", "local", "--state-dir"])
+        .arg(&state)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = wait_product(child);
+    let listener = server.join().unwrap();
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"");
+    assert_eq!(
+        check_output(&output.stderr, &state, arany::CheckDisposition::Failed),
+        b"error: custom Provider evidence unavailable\n"
+    );
+    let database = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
+    for table in ["provider_evidence", "events"] {
+        assert_eq!(
+            database
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    assert!(
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    );
 }

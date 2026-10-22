@@ -6,8 +6,8 @@ use super::{CommandOutput, state_dir};
 use crate::accounts::{chatgpt, credentials};
 use crate::presentation::escape_terminal;
 use arany::{
-    CustomProfile, Effort, ModelEntry, NativeApiCredentials, StateRoot, check_custom_profile,
-    check_native_model_from_env, check_native_model_with_credentials,
+    CustomProfile, Effort, ModelEntry, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
+    RunCancellation, StateRoot, check_custom_profile_with_cancellation, check_native_model,
     list_native_models_with_credentials, validate_native_model_id,
 };
 use clap::{Args, Subcommand};
@@ -223,7 +223,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
                 let model = model.expect("native model checked above");
                 let effort = effort.expect("native effort checked above");
-                if saved_account {
+                let (key, account_id) = if saved_account {
                     let account = credentials::load()
                         .await
                         .map_err(|error| error.to_string())?
@@ -231,32 +231,64 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     if account.provider != profile {
                         return Err("saved API account belongs to a different Provider".into());
                     }
-                    let account_id = account.id;
-                    check_native_model_with_credentials(
-                        root,
-                        &profile,
-                        &model,
-                        effort,
+                    let id = account.id;
+                    (
                         account
                             .into_credentials()
                             .map_err(|error| error.to_string())?,
-                        Some(account_id),
+                        Some(id),
                     )
-                    .await
-                    .map_err(|error| error.to_string())?;
                 } else {
-                    check_native_model_from_env(root, &profile, &model, effort)
-                        .await
-                        .map_err(|error| error.to_string())?;
-                }
+                    (
+                        NativeApiCredentials::from_env(&profile)
+                            .map_err(|error| error.to_string())?,
+                        None,
+                    )
+                };
+                let revalidate = async {
+                    if let Some(id) = account_id {
+                        let account = credentials::load()
+                            .await
+                            .map_err(|_| NativeCheckError::CredentialUnavailable)?
+                            .ok_or(NativeCheckError::CredentialUnavailable)?;
+                        if account.id != id || account.provider != profile {
+                            return Err(NativeCheckError::EvidenceUnavailable);
+                        }
+                        account
+                            .into_credentials()
+                            .map_err(|_| NativeCheckError::CredentialUnavailable)
+                    } else {
+                        NativeApiCredentials::from_env(&profile)
+                            .map_err(|_| NativeCheckError::CredentialUnavailable)
+                    }
+                };
+                let cancellation = RunCancellation::new();
+                let view = check_signalled(
+                    check_native_model(
+                        root,
+                        NativeCheckRequest {
+                            profile: profile.clone(),
+                            model: model.clone(),
+                            effort,
+                            credentials: key,
+                            account_id,
+                        },
+                        cancellation.clone(),
+                        revalidate,
+                    ),
+                    cancellation,
+                )
+                .await?;
                 return Ok(CommandOutput {
                     stdout: format!(
-                        "Provider: {profile}\nModel: {model}\nEffort: {effort}\nCredential: {}\nStatus: native synthetic conformance passed\n",
+                        "Provider: {profile}\nModel: {model}\nEffort: {effort}\nCredential: {}\nStatus: native synthetic conformance passed\nCheck: {}\nDisposition: {}\n",
                         if saved_account {
                             "saved API account"
                         } else {
                             "environment API key"
-                        }
+                        },
+                        view.id,
+                        view.replay_disposition()
                     ),
                     stderr: String::new(),
                     success: true,
@@ -264,19 +296,40 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             }
             let root = StateRoot::open_existing(&state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-            let report =
-                check_custom_profile(root, profile.strip_prefix("custom:").unwrap_or(&profile))
-                    .await
-                    .map_err(|error| error.to_string())?;
+            let cancellation = RunCancellation::new();
+            let report = check_signalled(
+                check_custom_profile_with_cancellation(
+                    root,
+                    profile.strip_prefix("custom:").unwrap_or(&profile),
+                    cancellation.clone(),
+                ),
+                cancellation,
+            )
+            .await?;
             Ok(CommandOutput {
                 stdout: format!(
-                    "Provider: {}\nStatus: custom verified\n",
-                    report.profile_name()
+                    "Provider: {}\nStatus: custom verified\n{}\n",
+                    report.profile_name(),
+                    report.receipt()
                 ),
                 stderr: String::new(),
                 success: true,
             })
         }
+    }
+}
+
+async fn check_signalled<T, E: std::fmt::Display>(
+    check: impl std::future::Future<Output = Result<T, E>>,
+    cancellation: RunCancellation,
+) -> Result<T, String> {
+    let mut signals = super::exec::StopSignals::install()
+        .map_err(|_| "signal handling unavailable".to_owned())?;
+    tokio::pin!(check);
+    tokio::select! {
+        biased;
+        _ = signals.next() => { cancellation.cancel(); check.await.map_err(|error| error.to_string()) },
+        result = &mut check => result.map_err(|error| error.to_string()),
     }
 }
 

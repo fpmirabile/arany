@@ -10,7 +10,9 @@ use std::sync::mpsc::sync_channel;
 use std::thread::JoinHandle;
 use tokio::sync::{mpsc, oneshot};
 
+pub(crate) mod check;
 mod evidence;
+use crate::journal::check::{CheckId, CheckOp, CheckView};
 mod journal;
 mod migrate;
 mod replay;
@@ -29,8 +31,8 @@ pub(crate) use state::checkpoints::{
 };
 pub use state::{ArchivedHistory, HistoryReset};
 pub(crate) use state::{
-    BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, SessionRunLock,
-    WorkspaceRunLock, archive_size_with_limit,
+    BUILD_CACHE_ARCHIVE_BYTES, BuildCacheIdentity, BuildCacheLease, ProviderCheckLock,
+    SessionRunLock, WorkspaceRunLock, archive_size_with_limit,
 };
 pub use state::{Record, RecordKind, StateRoot};
 #[cfg(target_os = "macos")]
@@ -80,6 +82,8 @@ pub enum StoreError {
     ForkNotAtRunBoundary,
     #[error("state storage is full")]
     StorageFull,
+    #[error("another Provider check is active")]
+    ProviderCheckBusy,
     #[error("Session has an active operation")]
     SessionBusy,
     #[error("Workspace has an active writer")]
@@ -205,6 +209,10 @@ impl From<ReplayError> for StoreError {
 }
 
 enum Request {
+    Check {
+        op: Box<CheckOp>,
+        reply: oneshot::Sender<Result<Option<CheckView>, StoreError>>,
+    },
     SupervisorCorpus {
         session_id: SessionId,
         reply: oneshot::Sender<Result<String, crate::supervisor::CorpusError>>,
@@ -298,6 +306,17 @@ pub struct Store {
 }
 
 impl Store {
+    pub(crate) async fn check(&self, op: CheckOp) -> Result<Option<CheckView>, StoreError> {
+        self.call(|reply| Request::Check {
+            op: Box::new(op),
+            reply,
+        })
+        .await
+    }
+    pub async fn load_check(&self, id: CheckId) -> Result<Option<CheckView>, StoreError> {
+        self.check(CheckOp::Load(id)).await
+    }
+
     pub fn open(root: StateRoot) -> Result<Self, StoreError> {
         Self::start(root, false)
     }
@@ -489,6 +508,10 @@ impl Store {
                             };
                             let _ = reply.send(result);
                         }
+                        Request::Check { op, reply } => {
+                            let result = check::apply(&mut connection, read_only, *op);
+                            let _ = reply.send(result);
+                        }
                         Request::Evidence { op, reply } => {
                             let _ = reply.send(evidence::apply(&mut connection, read_only, op));
                         }
@@ -595,16 +618,13 @@ impl Store {
         .await
     }
 
-    pub(crate) async fn clear_provider_evidence(&self, name: String) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::ClearProvider(name)).await?;
-        Ok(())
-    }
-
+    #[cfg(test)]
     pub(crate) async fn record_provider_evidence(
         &self,
         record: ProviderEvidenceRecord,
     ) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::RecordProvider(record)).await?;
+        self.check(CheckOp::Seed(EvidenceRecord::Provider(record)))
+            .await?;
         Ok(())
     }
 
@@ -619,6 +639,7 @@ impl Store {
         }
     }
 
+    #[cfg(test)]
     pub(crate) async fn clear_native_evidence(
         &self,
         fingerprint: [u8; 32],
@@ -627,11 +648,13 @@ impl Store {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) async fn record_native_evidence(
         &self,
         record: NativeEvidenceRecord,
     ) -> Result<(), StoreError> {
-        self.evidence(EvidenceOp::RecordNative(record)).await?;
+        self.check(CheckOp::Seed(EvidenceRecord::Native(record)))
+            .await?;
         Ok(())
     }
 

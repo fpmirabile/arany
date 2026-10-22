@@ -26,7 +26,7 @@ pub(crate) use build_cache::{
 pub(crate) use build_cache::{capture_archive_async_with_limit, restore_archive_async_with_limit};
 #[cfg(target_os = "linux")]
 pub(crate) use build_cache::{capture_archive_with_limit, restore_archive_with_limit};
-pub(crate) use lock::{HistoryLock, SessionRunLock, WorkspaceRunLock};
+pub(crate) use lock::{HistoryLock, ProviderCheckLock, SessionRunLock, WorkspaceRunLock};
 
 pub(super) const HISTORY_FILES: [&str; 4] = [
     "events.sqlite3-journal",
@@ -1294,6 +1294,7 @@ mod tests {
             RecordKind::ChatgptRegistration.pending(),
             RecordKind::ChatgptAccounts.pending(),
             "account-credentials.lock",
+            "provider-check.lock",
             "model-preferences.pending",
             "ui-preferences.pending",
         ] {
@@ -1323,6 +1324,10 @@ mod tests {
         ));
         assert!(matches!(
             state.with_account_replacement_lock(&workspace, || ()),
+            Err(StoreError::StateNotPrivate)
+        ));
+        assert!(matches!(
+            state.lock_provider_check(),
             Err(StoreError::StateNotPrivate)
         ));
 
