@@ -643,13 +643,24 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
         .replace(&serde_json::to_vec(&preferences).unwrap())
         .unwrap();
 
-    let provider = Arc::new(ScriptedProvider::new(Vec::new()).with_profile("openai", "gpt-5.4"));
+    let provider = Arc::new(
+        ScriptedProvider::new(vec![finish("Newer answer")]).with_profile("openai", "gpt-5.4"),
+    );
     let requests = provider.requests.clone();
     serve_in(
         root.path(),
         provider,
         Some(id),
         |mut wire, thread| async move {
+            let newer = wire.start_turn(&thread, "Finish a newer Goal").await;
+            assert_ne!(newer["goalId"], goal);
+            let completed = wire.notification("turn/completed").await;
+            assert_eq!(completed["params"]["turn"]["status"], "completed");
+            let started_before = wire
+                .seen
+                .iter()
+                .filter(|message| message["method"] == "turn/started")
+                .count();
             let params = json!({"threadId":thread,"goalId":goal});
             let exhausted = wire.call(40, "goal/resume", params.clone()).await;
             assert_eq!(
@@ -664,19 +675,31 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
             );
             let again = wire.call(41, "goal/resume", params).await;
             assert_eq!(reason(&again), (&json!(-32000), &json!("goalUnavailable")));
-            assert!(wire.seen.iter().all(|m| m["method"] != "turn/started"));
+            assert_eq!(
+                wire.seen
+                    .iter()
+                    .filter(|message| message["method"] == "turn/started")
+                    .count(),
+                started_before,
+                "exhausted resume starts no new Run"
+            );
             thread
         },
     )
     .await;
-    assert!(requests.lock().unwrap().is_empty());
+    assert_eq!(
+        requests.lock().unwrap().len(),
+        1,
+        "only the newer Goal calls"
+    );
     let (events, view) = closed_view(&state, id).await;
     assert!(
         !events
             .iter()
             .any(|e| matches!(e.event, Event::GoalResumed { .. }))
     );
-    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs.len(), 2);
     assert_eq!(view.goals[0].status, arany::GoalStatus::Failed);
+    assert_eq!(view.goals[1].status, arany::GoalStatus::Completed);
     assert_eq!(view.interrupted_goal_id(), None);
 }

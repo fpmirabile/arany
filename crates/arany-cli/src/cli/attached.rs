@@ -1774,6 +1774,7 @@ async fn finish_submission(
         }
     }
     if let Some(config) = automatic {
+        let submission_feedback = composer.is_empty().then(|| notice.take()).flatten();
         let compaction_notice = match compact_current(
             engine,
             terminal,
@@ -1820,6 +1821,9 @@ async fn finish_submission(
             answer_hidden.then_some(hidden_answer),
         )
         .map(Feedback::History);
+        if let Some(feedback) = submission_feedback {
+            append_notice(&mut notice, &feedback);
+        }
     }
     if let Some(error) = reload_error {
         notice = Some(Feedback::History(match notice.as_deref() {
