@@ -87,6 +87,51 @@ fn scope_for(request: &ProviderRequest) -> wire::RunScope<'_> {
     wire::RunScope::new(request, &render::conversation(request).unwrap(), TOKEN)
 }
 
+#[test]
+fn multiedit_subscription_stream_preserves_defaults_and_advertises_only_admitted_calls() {
+    let mut coding = request();
+    coding.max_output_tokens = 128_000;
+    coding.input.role = PromptRole::Primary;
+    coding.input.tools = Some(crate::tools::ToolContext::new(
+        json!({"write":true,"commands":[],"skills":[],"mcp_servers":[]}),
+    ));
+    let advertised: Value =
+        serde_json::from_slice(&body_for(&coding, Effort::Low).unwrap()).unwrap();
+    assert!(
+        advertised["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["name"] == "arany_multiedit")
+    );
+    for (new, accepted) in [
+        ("\u{2}".repeat(32768), true),
+        ("\u{2}".repeat(32769), false),
+    ] {
+        let arguments = json!({"file_path":"src/a","expected_digest":"0".repeat(64),"edits":[{"old_string":"\u{1}".repeat(32768),"new_string":new}]}).to_string();
+        let response = json!({"id":"resp_multiedit","status":"completed","model":"model-a","output":[{"type":"function_call","id":"fc_multi","call_id":"call_multi","name":"arany_multiedit","arguments":arguments,"status":"completed"}],"usage":{"input_tokens":12,"output_tokens":12}});
+        let stream = format!(
+            "data: {}\n\n",
+            json!({"type":"response.completed","response":response})
+        );
+        let completed = StreamDecoder::new(TOKEN)
+            .feed(stream.as_bytes())
+            .unwrap()
+            .unwrap();
+        let decoded = wire::decode_streamed_run(&completed, &scope_for(&coding));
+        assert_eq!(decoded.is_ok(), accepted);
+        if accepted {
+            let ProviderOutcome::Tools(calls) = decoded.unwrap().outcome else {
+                panic!("MultiEdit call")
+            };
+            assert!(
+                matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if !edits[0].replace_all)
+            );
+        }
+        assert!(wire::decode_streamed_run(&completed, &scope_for(&request())).is_err());
+    }
+}
+
 fn compaction_request() -> CompactionRequest {
     CompactionRequest {
         session_id: SessionId::new(),

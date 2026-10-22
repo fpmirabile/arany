@@ -283,7 +283,7 @@ impl AgentDefinition {
             || self.background
             || self.tools.as_ref().is_some_and(|tools| {
                 tools.iter().any(|tool| {
-                    matches!(tool.as_str(), "edit" | "write" | "mkdir")
+                    matches!(tool.as_str(), "edit" | "multiedit" | "write" | "mkdir")
                         && !self.disallowed_tools.contains(tool)
                 })
             })
@@ -376,12 +376,13 @@ fn supported_tool(name: &str) -> Option<Vec<&str>> {
         // As in the permission mapping, the peer Glob covers List too.
         "Glob" => vec!["glob", "list"],
         "Grep" => vec!["search"],
-        "Edit" => vec!["edit"],
+        "Edit" => vec!["edit", "multiedit"],
+        "MultiEdit" => vec!["multiedit"],
         "Write" => vec!["write"],
         "Skill" => vec!["skill"],
         "Bash" => vec!["command"],
-        "list" | "read" | "search" | "glob" | "edit" | "write" | "mkdir" | "skill" | "mcp_list"
-        | "command" => {
+        "list" | "read" | "search" | "glob" | "edit" | "multiedit" | "write" | "mkdir"
+        | "skill" | "mcp_list" | "command" => {
             vec![name]
         }
         _ => return None,
@@ -708,6 +709,29 @@ mod tests {
         let (inherited, _) =
             strict(&document("disallowedTools: ['Bash(rm:*)']\n", "Body")).unwrap();
         assert!(!inherited.allows_worker(&call));
+    }
+
+    #[test]
+    fn agent_definition_multiedit_requires_an_editor_and_never_expands_its_grant() {
+        let call = ToolCall::MultiEdit {
+            file_path: "owned/a".into(),
+            expected_digest: "0".repeat(64),
+            edits: vec![crate::LiteralEdit {
+                old_string: "a".into(),
+                new_string: "b".into(),
+                replace_all: false,
+            }],
+        };
+        for name in ["Edit", "MultiEdit", "multiedit"] {
+            let editor = definition(&format!("tools: [{name}]\n"));
+            assert!(editor.editor() && editor.allows_worker(&call));
+            assert!(!editor.allows(&call));
+            assert!(
+                !definition(&format!("tools: [{name}]\ndisallowedTools: [Edit]\n"))
+                    .allows_worker(&call)
+            );
+        }
+        assert!(!definition("tools: [Read]\n").allows_worker(&call));
     }
 
     #[test]
