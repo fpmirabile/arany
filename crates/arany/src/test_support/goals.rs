@@ -711,12 +711,7 @@ impl crate::Provider for ForegroundWorkerProvider {
         }
         if self.case == "clear_background" && request.phase == AgentPhase::ChildWork && step == 0 {
             self.background_started.notify_one();
-            tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                self.clearing_finished.notified(),
-            )
-            .await
-            .expect("primary reaches the clearing boundary");
+            self.clearing_finished.notified().await;
         }
         let mut release_child = None;
         let outcome = match (request.phase, step) {
@@ -732,12 +727,17 @@ impl crate::Provider for ForegroundWorkerProvider {
             (AgentPhase::RootPlan, 1) => self.delegation(&request),
             (AgentPhase::RootSynthesis, _) if self.case.starts_with("clear_") => {
                 if self.case == "clear_background" && step == 0 {
-                    tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        self.background_started.notified(),
-                    )
-                    .await
-                    .expect("background worker starts");
+                    self.background_started.notified().await;
+                    // Scheduling delays must not release the worker before clearing.
+                    struct ResumeTime;
+                    impl Drop for ResumeTime {
+                        fn drop(&mut self) {
+                            tokio::time::resume();
+                        }
+                    }
+                    tokio::time::pause();
+                    let _resume_time = ResumeTime;
+                    tokio::time::sleep(std::time::Duration::from_secs(31)).await;
                 }
                 if step < 40 {
                     super::scenario::tool_outcome(ToolCall::Read {
