@@ -5,6 +5,108 @@ use arany::{
     StoreError, continue_session, create_session, list_sessions, rename_session, resume_session,
     set_session_defaults,
 };
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_git_branch_journey(branches: &serde_json::Value, workspace: &std::path::Path) {
+    let timed_out = branches["timed_out"].as_bool().unwrap();
+    let rows = branches["branches"].as_array().unwrap();
+    assert_eq!(branches["history_complete"], true);
+    assert_eq!(
+        branches["truncated"],
+        timed_out || rows.iter().any(|row| row["counts_capped"] == true)
+    );
+    if branches["comparison_base"].is_null() {
+        assert!(timed_out && rows.is_empty());
+        return;
+    }
+    assert_eq!(branches["comparison_base"]["revision"], "HEAD~1");
+    assert!(rows.len() <= 3);
+    if !timed_out {
+        assert_eq!(rows.len(), 3);
+    }
+    for (index, row) in rows.iter().enumerate() {
+        let name = [
+            "refs/heads/main",
+            "refs/heads/protected",
+            "refs/remotes/review/topic",
+        ][index];
+        let oid = std::fs::read_to_string(workspace.join(".git").join(name)).unwrap();
+        assert_eq!(row["name"], name);
+        assert_eq!(row["name_truncated"], false);
+        assert_eq!(row["oid"], oid.trim());
+        assert_eq!(row["kind"], if index == 2 { "remote" } else { "local" });
+        assert_eq!(row["current"], index == 0);
+        assert!(row["symbolic_target"].is_null());
+        let capped = row["counts_capped"].as_bool().unwrap();
+        assert_eq!(row["counts_withheld"], capped);
+        if capped {
+            assert!(row["ahead"].is_null() && row["behind"].is_null());
+        } else {
+            assert_eq!(row["ahead"], if index == 1 { 2 } else { 1 });
+            assert_eq!(row["behind"], 0);
+        }
+        if row["subject_withheld"].as_bool().unwrap() {
+            assert!(row["subject"].is_null());
+            assert!(index == 1 || capped);
+        } else {
+            assert_ne!(index, 1);
+            assert_eq!(row["subject"], "second commit");
+        }
+        if index == 1 {
+            assert_eq!(row["subject_withheld"], true);
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn assert_closed_git_views(
+    state: &std::path::Path,
+    home: &std::path::Path,
+    workspace: &std::path::Path,
+    events: &[arany::EventEnvelope],
+    view: &SessionView,
+) {
+    use arany_cli::presentation::{Output, render_session};
+    use arany_cli::protocol::EventLine;
+    for format in ["text", "jsonl"] {
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_arany"))
+            .env_clear()
+            .env("HOME", home)
+            .current_dir(workspace)
+            .args(["show", "--state-dir"])
+            .arg(state)
+            .args(["--output", format])
+            .arg(view.id.to_string())
+            .bounded_output_for(std::time::Duration::from_secs(30), 4 * 1024 * 1024)
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0));
+        assert_eq!(output.stderr, b"");
+        let canary = b"BRANCH_DISCLOSURE_CANARY";
+        for bytes in [
+            &output.stdout,
+            &output.stderr,
+            &std::fs::read(state.join("events.sqlite3")).unwrap(),
+        ] {
+            assert!(!bytes.windows(canary.len()).any(|window| window == canary));
+        }
+        if format == "text" {
+            assert_eq!(
+                output.stdout,
+                render_session(view, events, Output::Text).as_bytes()
+            );
+        } else {
+            let actual: Vec<EventLine> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(
+                actual,
+                events.iter().map(EventLine::from).collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
 use process::BoundedOutput;
 use std::process::Command;
 
