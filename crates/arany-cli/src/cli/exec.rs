@@ -291,10 +291,7 @@ fn invoked_skill(
         })?;
     Ok(
         match crate::terminal::skill_invocation(&admission.objective, &names) {
-            Some((name, task)) => (
-                crate::terminal::invoked_objective(name, task),
-                Some(name.to_owned()),
-            ),
+            Some((name, _)) => (admission.objective.clone(), Some(name.to_owned())),
             None => (admission.objective.clone(), None),
         },
     )
@@ -794,10 +791,12 @@ mod tests {
             let admission = exec.admit().expect("admitted");
             invoked_skill(&exec, &admission).expect("skill resolution")
         };
-        assert_eq!(
-            invoked("/ask-matt do X", true),
-            ("do X".to_owned(), Some("ask-matt".into()))
-        );
+        for text in ["/ask-matt do X", "/ask-matt   do X  \nnext"] {
+            assert_eq!(
+                invoked(text, true),
+                (text.to_owned(), Some("ask-matt".into()))
+            );
+        }
         assert_eq!(
             invoked("/ask-matt", true),
             ("/ask-matt".to_owned(), Some("ask-matt".into()))

@@ -611,7 +611,10 @@ fn upgrades_with_recomputed_digests(goal_compacted: bool, rewritten: i64) {
         "every fork digest covers the rewritten prefix"
     );
     let started = first_of(&upgraded, "SessionStarted");
-    assert_eq!(started.version, 6);
+    assert_eq!(
+        started.version,
+        crate::test_support::payload_version("SessionStarted")
+    );
     assert!(
         started.payload.starts_with(r#"{"title":"#),
         "{}",
@@ -1293,7 +1296,7 @@ fn typed_prefix_verdict_migration_preserves_legacy_facts() {
     );
     let verdict = Event::decode(
         "ToolPermissionDecided",
-        crate::session::payload_version("ToolPermissionDecided").unwrap(),
+        crate::test_support::payload_version("ToolPermissionDecided"),
         &upgraded,
         Some(RunId::new()),
         Some(AgentRunId::new()),

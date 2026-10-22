@@ -333,13 +333,18 @@ impl LinearState {
         &mut self,
         writer: &mut impl Write,
         objective: &str,
+        skill: Option<&str>,
     ) -> io::Result<()> {
         if self.newline_pending || self.line_open {
             writeln!(writer)?;
             self.newline_pending = false;
             self.line_open = false;
         }
-        for line in user_message_lines(objective, 80) {
+        let mut lines = user_message_lines(objective, 80);
+        if let Some(token) = super::commands::invoked_skill_token(objective, skill) {
+            lines[0] = format!("You ({}):", token.kind);
+        }
+        for line in lines {
             writeln!(writer, "{line}")?;
         }
         writer.flush()
@@ -1121,12 +1126,23 @@ mod tests {
         linear.line_open = true;
         let mut output = Vec::new();
         linear
-            .write_user_message(&mut output, "hello\u{1b}[2J\nworld")
+            .write_user_message(&mut output, "hello\u{1b}[2J\nworld", None)
             .expect("write committed user message");
         assert_eq!(output, b"\nYou:\n  hello\\u{001b}[2J\n  world\n");
         assert!(!output.contains(&0x1b));
         assert!(!output.contains(&b'\r'));
         assert!(!linear.line_open);
+
+        output.clear();
+        linear
+            .write_user_message(&mut output, "/ask-matt   do X  \nnext", Some("ask-matt"))
+            .unwrap();
+        assert_eq!(output, b"You (skill):\n  /ask-matt   do X  \n  next\n");
+        for text in ["/unknown task", "/help", "/ask-matt task"] {
+            output.clear();
+            linear.write_user_message(&mut output, text, None).unwrap();
+            assert_eq!(output, format!("You:\n  {text}\n").as_bytes());
+        }
 
         let mut composer = super::super::Composer::default();
         composer.insert_paste("alpha\tbeta\n🙂").expect("draft");
