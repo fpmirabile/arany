@@ -2693,6 +2693,7 @@ mod delegation_bound_tests {
                         primary_id: outcome.run.agents[0].id,
                     },
                     LoopControls {
+                        host_settings: &engine.host_permissions,
                         policy: CollaborationPolicy::Single,
                         concurrency: 1,
                         goal_phase: crate::GoalPhase::Implementation,

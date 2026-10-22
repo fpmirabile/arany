@@ -58,7 +58,7 @@ impl From<bool> for ApprovalReply {
     }
 }
 
-/// What the user needs, beyond the intent, to judge a primary host command.
+// What the user needs, beyond the intent, to judge a primary host command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnguardedPrompt {
     pub executable: String,

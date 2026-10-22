@@ -564,7 +564,7 @@ async fn live_session_approval_reuses_identical_intents_without_writing_old_rule
 
 #[tokio::test]
 async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
-    for configured in [false, true] {
+    for (program, configured) in [("sh", false), ("sh", true), ("env", false), ("env", true)] {
         let host = Host::new(None);
         let config_path = host.state.join("tools.json");
         let mut config: Value =
@@ -575,13 +575,20 @@ async fn host_interpreter_refusal_distinguishes_a_pin_from_admission() {
             config["commands"] = json!([]);
         }
         private_file(&config_path, &serde_json::to_vec(&config).unwrap());
+        let call = if program == "sh" {
+            unguarded("printf inspected")
+        } else {
+            ToolCall::CommandUnguarded {
+                program: program.into(),
+                args: vec!["sh".into(), "-c".into(), "printf inspected".into()],
+                cwd: String::new(),
+                justification: "Inspect through an explicit interpreter".into(),
+            }
+        };
         let seen = host
             .run(
                 &host.workspace,
-                vec![
-                    tool_outcome(unguarded("printf inspected")),
-                    finish("refused"),
-                ],
+                vec![tool_outcome(call), finish("refused")],
                 Some(ApprovalMode::Request),
                 vec![],
             )

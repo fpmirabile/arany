@@ -421,6 +421,63 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn run_started_host_epochs_follow_live_runs_and_resume_boundaries() {
+        let old = uuid::Uuid::now_v7();
+        let newer = uuid::Uuid::now_v7();
+        for (name, previous, resumed, next, accepted) in [
+            ("consecutive", vec![old], false, old, true),
+            ("resumed", vec![old], true, old, false),
+            ("older", vec![old, newer], false, old, false),
+            ("new", vec![old], false, newer, true),
+            ("new-after-resume", vec![old], true, newer, true),
+        ] {
+            let (session, goal) = (SessionId::new(), GoalId::new());
+            let mut events = vec![goal_started(
+                goal,
+                GoalBudget {
+                    max_runs: 8,
+                    ..Default::default()
+                },
+            )];
+            for epoch in previous {
+                let (run, agent) = (RunId::new(), AgentRunId::new());
+                let mut config = config(CollaborationPolicy::Single, true);
+                config.tool_policy.as_mut().unwrap().host_epoch = Some(epoch);
+                events.extend(start_run(goal, run, agent, config));
+                events.extend(cancel_run(run, agent));
+            }
+            if resumed {
+                events.push(Event::GoalResumed { goal_id: goal });
+            }
+            let mut config = config(CollaborationPolicy::Single, true);
+            config.tool_policy.as_mut().unwrap().host_epoch = Some(next);
+            let run = RunId::new();
+            let mut started = start_run(goal, run, AgentRunId::new(), config);
+            started.truncate(3);
+            let event = started.pop().unwrap();
+            assert!(matches!(event, Event::RunStarted { .. }));
+            events.extend(started);
+            let envelopes = session_with(session, events);
+            let mut view = SessionView::replay_open(session, &envelopes)
+                .unwrap()
+                .unwrap();
+            assert!(view.runs.last().unwrap().config.is_none());
+            assert_eq!(view.host_epoch_floor > 0, resumed);
+            let sequence = view.last_sequence + 1;
+            let (run_id, agent_run_id) = event.scope();
+            let result = view.apply_committed(&EventEnvelope {
+                session_id: session,
+                sequence,
+                run_id,
+                agent_run_id,
+                event,
+                created_at_ms: 0,
+            });
+            assert_eq!(result.is_ok(), accepted, "{name}: {result:?}");
+        }
+    }
+
+    #[test]
     fn run_failure_is_present_exactly_on_failed_terminal_events() {
         use crate::session::RunFailure;
         let session = SessionId::new();

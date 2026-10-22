@@ -108,6 +108,61 @@ pub(crate) fn interpreter(program: &str) -> bool {
         .is_some_and(|name| INTERPRETERS.contains(&name) || ["busybox", "toybox"].contains(&name))
 }
 
+pub(crate) fn wrapper(program: &str) -> bool {
+    basename(program).is_some_and(|name| WRAPPERS.contains(&name))
+}
+
+pub(super) fn wrapper_interpreters_admitted(
+    intent: &super::EffectIntent,
+    commands: &[Program],
+) -> bool {
+    let super::ToolCall::CommandUnguarded { args, cwd, .. } = &intent.call else {
+        return false;
+    };
+    let Some(host) = &intent.host else {
+        return false;
+    };
+    let workspace = Path::new(&host.workspace);
+    let cwd = workspace.join(cwd);
+    let mut checked = std::collections::BTreeSet::new();
+    args.iter().all(|arg| {
+        let candidate = arg.split_once('=').map_or(arg.as_str(), |(_, value)| value);
+        let resolved = if candidate.contains('/') {
+            cwd.join(candidate).canonicalize().ok()
+        } else {
+            use std::os::unix::fs::MetadataExt;
+            std::env::split_paths(&host.path)
+                .map(|entry| entry.join(candidate))
+                .find(|path| {
+                    path.metadata()
+                        .is_ok_and(|metadata| metadata.is_file() && metadata.mode() & 0o111 != 0)
+                })
+                .and_then(|path| path.canonicalize().ok())
+        };
+        let candidate = if interpreter(candidate) {
+            candidate
+        } else if let Some(target) = resolved
+            .as_ref()
+            .and_then(|target| target.to_str())
+            .filter(|target| interpreter(target))
+        {
+            target
+        } else {
+            return true;
+        };
+        if !checked.insert(candidate.to_owned()) {
+            return true;
+        }
+        pin(candidate, workspace, &host.path).is_ok_and(|pin| {
+            commands.iter().any(|command| {
+                command.interpreter
+                    && command.executable == pin.executable
+                    && command.sha256 == pin.sha256
+            })
+        })
+    })
+}
+
 fn administrator(args: &[String]) -> bool {
     args.iter().any(|arg| {
         arg.to_ascii_lowercase()
@@ -897,6 +952,87 @@ mod tests {
             cwd: "sub".into(),
             justification: "Inspect requested paths".into(),
         }
+    }
+
+    #[test]
+    fn wrappers_require_the_nested_interpreters_own_path_and_digest() {
+        let fixture = fixture();
+        let root = fixture._dir.path().canonicalize().unwrap();
+        let mut host = pin("sh", &fixture.workspace, root.to_str().unwrap()).unwrap();
+        host.executable = "/usr/bin/env".into();
+        let mut intent = crate::tools::EffectIntent {
+            host: Some(host),
+            target: crate::worker::EffectTarget::Workspace,
+            id: uuid::Uuid::now_v7(),
+            run_id: crate::RunId::new(),
+            agent_run_id: crate::AgentRunId::new(),
+            policy_digest: [1; 32],
+            enforcement_digest: [2; 32],
+            workspace_device: fixture.identity.device,
+            workspace_inode: fixture.identity.inode,
+            call: host_call(&[]),
+            limits: crate::tools::ToolLimits::default(),
+            expires_at_ms: 1,
+            use_count: 1,
+        };
+        std::os::unix::fs::symlink(&fixture.program.executable, root.join("alias")).unwrap();
+        std::os::unix::fs::symlink(
+            &fixture.program.executable,
+            fixture.workspace.join("sub/alias"),
+        )
+        .unwrap();
+        for candidate in [
+            "sh",
+            fixture.program.executable.as_str(),
+            "alias",
+            "./alias",
+        ] {
+            intent.call = crate::tools::ToolCall::CommandUnguarded {
+                program: "env".into(),
+                args: vec![candidate.into(), "-c".into(), "printf inspected".into()],
+                cwd: "sub".into(),
+                justification: "Inspect through the declared interpreter".into(),
+            };
+            for (command, expected) in [
+                (None, false),
+                (Some(fixture.program.clone()), true),
+                (
+                    Some(Program {
+                        interpreter: false,
+                        ..fixture.program.clone()
+                    }),
+                    false,
+                ),
+                (
+                    Some(Program {
+                        sha256: "0".repeat(64),
+                        ..fixture.program.clone()
+                    }),
+                    false,
+                ),
+                (
+                    Some(Program {
+                        executable: "/usr/bin/env".into(),
+                        ..fixture.program.clone()
+                    }),
+                    false,
+                ),
+            ] {
+                let commands: Vec<_> = command.into_iter().collect();
+                assert_eq!(
+                    wrapper_interpreters_admitted(&intent, &commands),
+                    expected,
+                    "{candidate}"
+                );
+            }
+        }
+        let crate::tools::ToolCall::CommandUnguarded { args, .. } = &mut intent.call else {
+            unreachable!()
+        };
+        *args = vec!["sh".into()];
+        let mut command = fixture.program.clone();
+        command.executable = root.join("other/sh").to_string_lossy().into_owned();
+        assert!(!wrapper_interpreters_admitted(&intent, &[command]));
     }
 
     #[test]

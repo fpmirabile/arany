@@ -431,6 +431,60 @@ async fn remembered_git_prefix_applies_next_run_and_revocation_survives_restart(
         offered,
         [Some(TypedGitPrefix::Commit), Some(TypedGitPrefix::Commit)]
     );
+    for drift in [false, true] {
+        if drift {
+            let path = repo.state.join("permissions.json");
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes.push(b' ');
+            std::fs::write(path, bytes).unwrap();
+        }
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            tool_outcome(ToolCall::CommandUnguarded {
+                program: "find".into(),
+                args: vec![
+                    repo.workspace.to_string_lossy().into_owned(),
+                    "-maxdepth".into(),
+                    "0".into(),
+                ],
+                cwd: String::new(),
+                justification: "Inspect the repository after saving the approved typed rule".into(),
+            }),
+            answer(),
+        ]));
+        let (approvals, mut inbox) = arany::ToolApprovals::new(ApprovalMode::Request);
+        let mut input = request(&repo.workspace, "Inspect the repository");
+        input.session_id = Some(first.session_id);
+        input.include_paths.clear();
+        let controls = RunControls {
+            tools: ToolGrant::Configured,
+            approvals: Some(approvals),
+            ..Default::default()
+        };
+        let mut prompted = 0;
+        let next = {
+            let running = run_with(&engine, &provider, input, controls);
+            tokio::pin!(running);
+            loop {
+                tokio::select! {
+                    result = &mut running => break result.unwrap(),
+                    Some(approval) = inbox.next() => {
+                        assert!(approval.unguarded.is_some());
+                        prompted += 1;
+                        approval.decide(arany::ApprovalReply::Deny);
+                    }
+                }
+            }
+        };
+        assert_eq!(prompted, usize::from(!drift));
+        let observation = next.run.tools.last().unwrap().observation.as_ref().unwrap();
+        assert_eq!(observation.disposition, ToolDisposition::Denied);
+        assert!(observation.output.contains(if drift {
+            "permission settings changed outside admission"
+        } else {
+            "Approval was not granted"
+        }));
+        assert_eq!(next.run.unguarded_tools(), 0);
+    }
     let (_, view) = repo.reopen(engine, first.session_id).await;
     let verdict = verdict_of(&view, 0);
     assert_eq!(

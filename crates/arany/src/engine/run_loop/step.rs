@@ -1264,7 +1264,7 @@ impl RunLoop<'_> {
             }),
             unguarded: match grant {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
-                    gate: unguarded_gate(runtime, &intent).map(|mut prompt| {
+                    gate: unguarded_gate(runtime, &intent).await.map(|mut prompt| {
                         prompt.remember = host_permission.remember;
                         prompt
                     }),
@@ -1397,7 +1397,35 @@ impl RunLoop<'_> {
                 Some(save),
             ) => {
                 let saved = match save {
-                    RuleSave::Prefix(prefix) => runtime.record_typed_prefix_rule(prefix),
+                    RuleSave::Prefix(prefix) => {
+                        let expected = self
+                            .controls
+                            .host_settings
+                            .lock()
+                            .expect("host permissions lock")
+                            .as_ref()
+                            .filter(|settings| !settings.changed)
+                            .map(|settings| settings.digest);
+                        expected
+                            .ok_or(ToolError::ChangedInput)
+                            .and_then(|expected| {
+                                runtime
+                                    .record_typed_prefix_rule(prefix, expected)
+                                    .map(|digest| {
+                                        let mut pinned = self
+                                            .controls
+                                            .host_settings
+                                            .lock()
+                                            .expect("host permissions lock");
+                                        if let Some(settings) = pinned.as_mut()
+                                            && !settings.changed
+                                            && settings.digest == expected
+                                        {
+                                            settings.digest = Some(digest);
+                                        }
+                                    })
+                            })
+                    }
                     RuleSave::Session => Ok(()),
                 };
                 if saved.is_ok() {
@@ -2730,7 +2758,7 @@ fn undispatched(
     }
 }
 
-fn unguarded_gate(
+async fn unguarded_gate(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
 ) -> Result<UnguardedPrompt, UnguardedRefusal> {
@@ -2747,7 +2775,7 @@ fn unguarded_gate(
         .host
         .as_ref()
         .ok_or(UnguardedRefusal::UnavailableProgram)?;
-    if !runtime.host_interpreter_admitted(intent) {
+    if !runtime.host_interpreter_admitted(intent).await {
         return Err(UnguardedRefusal::InterpreterNotAdmitted);
     }
     if crate::tools::types::uses_guard_alias(args) {

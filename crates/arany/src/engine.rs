@@ -1538,6 +1538,7 @@ impl Engine {
                     submission,
                     goal.id,
                     LoopControls {
+                        host_settings: &self.host_permissions,
                         policy: request.policy,
                         concurrency: provider_concurrency,
                         goal_phase: goal.phase,

@@ -828,7 +828,8 @@ impl ToolRuntime {
     pub(crate) fn record_typed_prefix_rule(
         &self,
         prefix: permissions::TypedGitPrefix,
-    ) -> Result<(), ToolError> {
+        expected: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], ToolError> {
         fs::validate_workspace(self)?;
         let state = self
             .cache_state
@@ -839,6 +840,7 @@ impl ToolRuntime {
             &self.workspace,
             self.workspace_identity,
             prefix,
+            expected,
         )
         .map_err(|error| match error {
             permissions::SettingsError::Busy => ToolError::AccountBusy,
@@ -1058,18 +1060,32 @@ impl ToolRuntime {
         }
     }
 
-    pub(crate) fn host_interpreter_admitted(&self, intent: &EffectIntent) -> bool {
+    pub(crate) async fn host_interpreter_admitted(&self, intent: &EffectIntent) -> bool {
         let ToolCall::CommandUnguarded { program, .. } = &intent.call else {
             return false;
         };
-        intent.host.as_ref().is_some_and(|pin| {
-            !unguarded::interpreter(program) && !unguarded::interpreter(&pin.executable)
-                || self.config.commands.iter().any(|command| {
-                    command.interpreter
-                        && command.executable == pin.executable
-                        && command.sha256 == pin.sha256
-                })
+        let Some(pin) = intent.host.as_ref() else {
+            return false;
+        };
+        if (unguarded::interpreter(program) || unguarded::interpreter(&pin.executable))
+            && !self.config.commands.iter().any(|command| {
+                command.interpreter
+                    && command.executable == pin.executable
+                    && command.sha256 == pin.sha256
+            })
+        {
+            return false;
+        }
+        if !unguarded::wrapper(program) && !unguarded::wrapper(&pin.executable) {
+            return true;
+        }
+        let intent = intent.clone();
+        let commands = self.config.commands.clone();
+        tokio::task::spawn_blocking(move || {
+            unguarded::wrapper_interpreters_admitted(&intent, &commands)
         })
+        .await
+        .unwrap_or(false)
     }
 
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
@@ -1187,7 +1203,7 @@ impl ToolRuntime {
         let Some(pin) = &intent.host else {
             return unstarted_observation(intent, ToolError::Configuration);
         };
-        if !self.host_interpreter_admitted(&intent) {
+        if !self.host_interpreter_admitted(&intent).await {
             return unstarted_observation(intent, ToolError::Configuration);
         }
         let settings_match = self.cache_state.as_ref().is_some_and(|state| {
