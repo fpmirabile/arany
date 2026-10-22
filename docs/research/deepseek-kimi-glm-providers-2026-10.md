@@ -5,8 +5,8 @@ API keys and, where authorized, consumer coding subscriptions without adding
 another wire adapter or impersonating a vendor client?
 
 Conclusion: Anthropic-compatible custom routes reuse the existing adapter.
-Kimi platform is eligible for exact-profile conformance; DeepSeek, Kimi Code
-and GLM Standard remain unavailable pending their strict-compaction evidence.
+DeepSeek API, Kimi platform/Code and GLM Standard are eligible for exact-profile
+text-compaction conformance; live compatibility remains unverified.
 GLM Coding Plan is excluded by its supported-tool authorization boundary.
 The [Provider contract](../specs/provider.md#provider-support-summary) owns route
 admission; [setup](../setup.md#anthropic-compatible-custom-routes) owns recipes.
@@ -52,11 +52,10 @@ No subscription integration was established by the reviewed material; this
 plan therefore includes only pay-as-you-go API access.
 ([Models and pricing](https://api-docs.deepseek.com/quick_start/pricing/))
 
-**Planning implication:** strict compaction JSON-schema support cannot be
-assumed: `output_config.format` is outside the documented supported fields.
-This is a known compatibility obstacle. A passing ordinary answer or tool call
-does not resolve it. Preserve the strict compaction requirement; investigate
-an equally strict supported representation or leave the exact route unadmitted.
+**Admission implication:** `output_config.format` is outside the documented
+supported fields. Arany's [plain-text compaction contract](../specs/provider.md#structured-outcomes-and-tool-encoding)
+does not request it. The exact route must still pass all text, delegation,
+streaming, identity and usage checks before Workspace disclosure.
 
 Account concurrency exhaustion returns 429. The reviewed rate-limit and error
 pages specify no `Retry-After` contract; its presence or absence on live
@@ -83,9 +82,8 @@ owns normalization and disagreement rejection.
 
 Checked 2026-10-21: the official OpenAPI `MessagesRequest.output_config.format`
 accepts `{ "type": "json_schema", "schema": … }` and promises schema-constrained
-JSON. No additional `strict` flag is documented there. This matches Arany's
-existing compaction representation and makes the platform recipe eligible,
-conditional on unchanged exact conformance including the schema-only nonce.
+JSON. No additional `strict` flag is documented there. Schema support is not
+required by Arany's text-compaction contract; exact conformance remains required.
 ([Official OpenAPI definition](https://platform.kimi.ai/docs/openapi.json))
 
 The platform overview also names `kimi-k2.7-code-highspeed` and `kimi-k2.6`,
@@ -119,13 +117,10 @@ explains that `k3[1m]` is Claude Code syntax: other API clients use `k3`.
 Keep this client-specific suffix out of Arany model IDs.
 ([Code integration](https://www.kimi.com/code/docs/en/third-party-tools/claude-code))
 
-**S2 disposition: Code is UNAVAILABLE pending endpoint-specific strict-compaction
-evidence.** The reviewed Code documents establish console keys and Messages
-compatibility, but do not establish strict-schema enforcement. This is
-uncertainty, not proof of non-support. Platform evidence cannot be transferred
-to Code. Synthetic conformance proves adapter mechanics only; it does not
-promote the candidate. [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) owns the
-remaining live/platform checks.
+**Code admission:** the reviewed documents establish console keys and Messages
+compatibility, not successful Arany use. The endpoint needs its own exact
+text-compaction check; platform evidence cannot be transferred to Code.
+[NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first) owns live/platform checks.
 
 ### GLM: Standard API Key; subscription excluded
 
@@ -149,18 +144,16 @@ not proof that Arany's complete native wire contract works.
 GLM-5.3 uses forced reasoning with `low`/`high`/`max` effort. The thinking
 guide requires preservation of reasoning across tool rounds, but its concrete
 `reasoning_content` examples use Chat Completions. Exact mapping to Anthropic
-thinking blocks, signatures, strict compaction and usage is **unverified**.
+thinking blocks, signatures, text compaction and usage is **unverified**.
 Test the Messages wire itself; do not paste Chat-only fields into it.
 ([GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3),
 [thinking guide](https://docs.z.ai/guides/capabilities/thinking-mode))
 
-**S3 disposition: Standard API is UNAVAILABLE pending Messages-specific
-strict-compaction evidence.** Checked 2026-10-22: the structured-output guide
-uses Chat Completions `response_format: { "type": "json_object" }`, puts the
-expected structure in prompts and validates schemas client-side. That does not
-establish provider-enforced `output_config.format` schemas on Messages. This
-is missing evidence, not proof of non-support. Keep the schema-only nonce
-challenge unchanged; synthetic success cannot promote either GLM candidate.
+Checked 2026-10-22: the structured-output guide uses Chat Completions
+`response_format: { "type": "json_object" }`, prompt-defined structure and
+client-side schema validation. This does not establish provider-enforced
+Messages schemas, which Arany's text-compaction contract does not require.
+The Standard API candidates still need exact checks and live evidence.
 ([Structured-output guide](https://docs.z.ai/guides/capabilities/struct-output))
 
 The GLM Coding Plan tool page confines subscription use to its listed tools;
@@ -190,13 +183,13 @@ by itself, a third-party authorization grant for Arany.
 ## Admission implications
 
 The [Provider contract](../specs/provider.md#custom-destinations-and-routing)
-owns exact endpoint/model checks, strict compaction, usage, cancellation, bounds,
+owns exact endpoint/model checks, text compaction, usage, cancellation, bounds,
 key isolation and truthful client identity. The [setup recipes](../setup.md#anthropic-compatible-custom-routes)
 follow explicit Messages base/key selection, matching Kimi's
 [Claude Code](https://www.kimi.com/code/docs/en/third-party-tools/claude-code) and
 [OpenCode](https://www.kimi.com/code/docs/en/third-party-tools/opencode) integration
 recipes. Another client's successful chat cannot establish Arany's durable
-provenance or pre-disclosure strict-compaction admission.
+provenance or pre-disclosure text-compaction admission.
 
 Unresolved vendor, billing and native evidence and the owner-run procedures live
 only in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first). No live success,

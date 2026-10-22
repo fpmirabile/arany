@@ -796,17 +796,6 @@ impl<'a> StreamDecoder<'a> {
                             None => self.response_shape.unphased += 1,
                             _ => {}
                         }
-                        if let Some(content) = item.get("content").and_then(Value::as_array) {
-                            let text = content
-                                .iter()
-                                .filter(|part| {
-                                    part.get("type").and_then(Value::as_str) == Some("output_text")
-                                })
-                                .filter_map(|part| part.get("text").and_then(Value::as_str))
-                                .collect::<String>();
-                            self.response_shape.structured +=
-                                usize::from(wire::is_structured_text(&text));
-                        }
                     }
                 }
                 if !self.done_items.is_empty() {

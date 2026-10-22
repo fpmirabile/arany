@@ -115,7 +115,7 @@ fn hostile_repository_startup_does_not_activate_git_or_disclose_omitted_inputs()
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 => serde_json::json!(r#"synthetic summary"#),
                 _ => {
                     serde_json::json!("verified answer")
                 }
@@ -260,7 +260,7 @@ fn subdirectory_launch_follows_nested_instructions_root_first_and_replays_their_
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 => serde_json::json!(r#"synthetic summary"#),
                 _ => {
                     assert_eq!(body["input"][0]["role"], "user");
                     assert_eq!(
@@ -423,7 +423,7 @@ fn state_instructions_precede_project_rules_and_replay_only_digests() {
                     1 => {
                         serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"one read-only question","profile":null}]}})
                     }
-                    _ => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                    _ => serde_json::json!(r#"synthetic summary"#),
                 };
                 loopback::send_response(&mut stream, index, text);
                 continue;

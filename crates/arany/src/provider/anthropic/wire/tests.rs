@@ -529,7 +529,7 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
 }
 
 #[test]
-fn custom_messages_optional_effort_preserves_strict_compaction() {
+fn custom_messages_optional_effort_preserves_text_compaction() {
     let request = read_only_request("deepseek-flash");
     let conversation = render::conversation(&request).unwrap();
     let omitted = run_body_with_optional_effort(&request, &conversation, None).unwrap();
@@ -546,10 +546,7 @@ fn custom_messages_optional_effort_preserves_strict_compaction() {
     };
     let strict = compaction_body_with_optional_effort(&compact, None);
     assert!(strict["output_config"].get("effort").is_none());
-    assert_eq!(
-        strict["output_config"]["format"]["schema"],
-        summary_schema()
-    );
+    assert!(strict["output_config"].get("format").is_none());
     assert!(strict.get("thinking").is_none());
     for effort in Effort::ALL {
         assert_eq!(
@@ -630,7 +627,7 @@ fn anthropic_usage_reports_cache_read_and_creation_separately() {
             .unwrap();
             let streamed: Value = serde_json::from_slice(&streamed).unwrap();
             assert_eq!(decode(&request, &streamed).unwrap().usage, expected);
-            fixture["content"] = json!([text_block(r#"{"summary":"short"}"#)]);
+            fixture["content"] = json!([text_block(r#"short"#)]);
             assert_eq!(
                 decode_compaction(&serde_json::to_vec(&fixture).unwrap(), model, 1024)
                     .unwrap()
@@ -732,7 +729,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
             text_block(answer_text())
         ]),
     );
-    let answer = decode(&request, &finish).expect("schema-constrained finish");
+    let answer = decode(&request, &finish).expect("text compaction finish");
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
     assert!(matches!(
@@ -775,9 +772,9 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
         ProviderOutcome::Delegate(Delegate { children, agent: None }) if children.iter().map(|child| child.objective.as_str()).collect::<Vec<_>>() == ["a", "b"]
     ));
 
-    let compact = response("end_turn", json!([text_block(r#"{"summary":"short"}"#)]));
+    let compact = response("end_turn", json!([text_block(r#"short"#)]));
     let summary = decode_compaction(&serde_json::to_vec(&compact).unwrap(), MODEL, 1024)
-        .expect("schema-constrained compaction");
+        .expect("complete text compaction");
     assert_eq!(summary.summary, "short");
     assert_eq!(summary.usage.output_tokens, Some(8));
     assert_eq!(
@@ -786,11 +783,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     );
     assert!(
         decode_compaction(
-            &serde_json::to_vec(&response(
-                "tool_use",
-                json!([text_block(r#"{"summary":"short"}"#)])
-            ))
-            .unwrap(),
+            &serde_json::to_vec(&response("tool_use", json!([text_block(r#"short"#)]))).unwrap(),
             MODEL,
             1024
         )
@@ -798,7 +791,7 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
         "compaction never accepts a Tool stop"
     );
     for malformed in [json!({"type":"text"}), json!({"type":"text","text":null})] {
-        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"short"#)] {
             let fixture = response("end_turn", json!([malformed, text_block(valid)]));
             let accepted = if compaction {
                 decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL, 1024).is_ok()
@@ -856,18 +849,26 @@ fn inbound_end_turn_answers_in_text_and_delegation_is_a_tool() {
     assert!(
         matches!(decode(&request, &joined).unwrap().outcome, ProviderOutcome::Answer(Answer { text }) if text == "hola! 🚀")
     );
-    assert!(
-        decode_compaction(
-            &serde_json::to_vec(&response(
-                "end_turn",
-                json!([text_block(r#"{"summary":"ok","extra":1}"#)])
-            ))
-            .unwrap(),
-            MODEL,
-            1024,
-        )
-        .is_err()
-    );
+
+    for (text, accepted) in [
+        (String::new(), false),
+        (" \n\t".into(), false),
+        ("x".repeat(8 * 1024), true),
+        ("é".repeat(4 * 1024), true),
+        ("x".repeat(8 * 1024 + 1), false),
+        ("é".repeat(4 * 1024 + 1), false),
+        ("  summary\n".into(), true),
+        (r#"{"summary":"ok","extra":1}"#.into(), true),
+    ] {
+        let fixture = response("end_turn", json!([text_block(&text)]));
+        let decoded = decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL, 1024);
+        assert_eq!(decoded.is_ok(), accepted);
+        if let Ok(decoded) = decoded {
+            assert_eq!(decoded.summary, text);
+        }
+    }
+    let split = response("end_turn", json!([text_block("one"), text_block("two")]));
+    assert!(decode_compaction(&serde_json::to_vec(&split).unwrap(), MODEL, 1024).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
 }
 
@@ -1095,10 +1096,7 @@ fn outbound_messages_pin_schema_cap_and_disclosure_scope() {
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
-    assert_eq!(
-        compact_body["output_config"]["format"]["schema"],
-        summary_schema()
-    );
+    assert!(compact_body["output_config"].get("format").is_none());
 }
 
 fn sse(events: &[Value]) -> String {
