@@ -1340,9 +1340,7 @@ impl LivePty {
         screen_rows(&self.transcript[..end], LIVE_SIZE.0, LIVE_SIZE.1).join("\n")
     }
 
-    // Waits for a complete frame after `from` showing every needle and none of `absent`. A child
-    // view draws its hint row only once input is armed, so a step that sends keys right after a
-    // view switch must name that row, or the keys can precede the typeahead barrier and be dropped.
+    // After a view switch, name the armed hint row, or keys sent next can be dropped.
     fn frame(&mut self, from: usize, needles: &[&str], absent: &[&str]) -> usize {
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -1473,27 +1471,45 @@ fn live_pty(
 
 // Exits through `/exit` and checks that the terminal settings were restored.
 fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
-    let from = checkpoint_screen(
-        &mut pty.transcript,
-        &mut pty.answered,
-        &mut pty.history,
-        LIVE_SIZE,
-        pty.capture_from,
-    );
-    pty.input.write_all(b"/exit\r").expect("exit attached mode");
+    let refused = "unavailable while a Run is active";
     let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        pty.pump();
-        if attached.child().try_wait().expect("chat status").is_some() {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "{} live chat did not exit: {}",
-            pty.context,
-            tail(&pty.transcript[from..])
+    let mut from = pty.capture_from;
+    // A settling Run refuses `/exit`; resend only after a redraw without that notice.
+    'exit: loop {
+        from = checkpoint_screen(
+            &mut pty.transcript,
+            &mut pty.answered,
+            &mut pty.history,
+            LIVE_SIZE,
+            from,
         );
-        thread::yield_now();
+        pty.capture_from = from;
+        pty.input.write_all(b"/exit\r").expect("exit attached mode");
+        let mut was_refused = false;
+        loop {
+            pty.pump();
+            if attached.child().try_wait().expect("chat status").is_some() {
+                break 'exit;
+            }
+            if let Some(end) = pty.frame_ends(from).last().copied() {
+                let screen = pty.screen(end);
+                let shown = crate::process::pty_text_matches(screen.as_bytes(), refused.as_bytes())
+                    .next()
+                    .is_some();
+                if shown {
+                    was_refused = true;
+                } else if was_refused {
+                    continue 'exit;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{} live chat did not exit: {}",
+                pty.context,
+                tail(&pty.transcript[from..])
+            );
+            thread::yield_now();
+        }
     }
     let result = wait_product(attached.take());
     pty.pump();
