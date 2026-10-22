@@ -107,11 +107,11 @@ async fn budget_incident_failed_reads_then_next_action_has_distinct_terminal_fee
         command
             .env_clear()
             .current_dir(&workspace)
-            .args(["show", "--state-dir"])
+            .args(["show", "--output", "text", "--state-dir"])
             .arg(&state_path)
             .arg(result.session_id.to_string());
         let output = super::process_output_before_deadline(command);
-        assert!(output.status.success());
+        assert!(output.status.success(), "show failed: {output:?}");
         assert!(output.stderr.is_empty());
         assert_eq!(
             output.stdout,

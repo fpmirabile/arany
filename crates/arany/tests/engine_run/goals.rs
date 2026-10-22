@@ -3473,7 +3473,7 @@ async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
         let workspace = facts_workspace(temp.path(), "v1");
         let state_path = temp.path().join("state");
         let budget = arany::GoalBudget {
-            max_active_ms: Some(if after_read { 120_000 } else { 6_000 }),
+            max_active_ms: Some(120_000),
             ..arany::GoalBudget::default()
         };
         let mut plan = facts_plan(facts_digest("v2"));
@@ -3489,11 +3489,14 @@ async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
             .create_session(workspace.clone(), None)
             .await
             .expect("Session");
-        let gate = after_read.then(|| {
-            arany::FaultPlan::gate_goal_append_acknowledgment(session, |event| {
-                matches!(event, Event::ToolFinished { .. })
-            })
-        });
+        let (entered, release) = arany::FaultPlan::gate_goal_append_acknowledgment(
+            session,
+            if after_read {
+                |event| matches!(event, Event::ToolFinished { .. })
+            } else {
+                |event| matches!(event, Event::ProviderCallRecorded { record, .. } if record.disposition == ProviderCallDisposition::ToolRequested)
+            },
+        );
         let mut input = request(&workspace, AUTONOMOUS_OBJECTIVE);
         input.session_id = Some(session);
         input.title = None;
@@ -3510,16 +3513,16 @@ async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
                 },
             );
             tokio::pin!(running);
-            if let Some((entered, release)) = gate {
-                tokio::select! {
-                    result = &mut running => panic!("Run ended before the Read committed: {:?}", result.map(|outcome| outcome.run.status)),
-                    entered = entered => entered.expect("Read reached its acknowledgment"),
-                }
-                tokio::time::pause();
-                tokio::time::advance(Duration::from_secs(121)).await;
-                release.send(()).expect("release the Read acknowledgment");
-                tokio::time::resume();
+            tokio::select! {
+                result = &mut running => panic!("after_read={after_read}: Run ended before the budget gate: {:?}", result.map(|outcome| outcome.run.status)),
+                entered = entered => entered.expect("budget gate reached its acknowledgment"),
             }
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(121)).await;
+            release
+                .send(())
+                .expect("release the budget gate acknowledgment");
+            tokio::time::resume();
             running.await.expect("budget-stopped Run")
         };
         engine.close().await.expect("engine shutdown");
@@ -3527,11 +3530,13 @@ async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
         let (_, view) = replayed(&state_path, outcome.session_id).await;
         let run = &view.runs[0];
         assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
+        assert!(view.goals[0].budget_closed);
         let refusal = view.goals[0].budget_refusal.expect("Tool refusal receipt");
         assert_eq!(refusal.action, arany::BudgetAction::Tool);
         assert_eq!(refusal.dimension, arany::GoalLimit::ActiveTime);
         assert_eq!(refusal.run_id, Some(run.id));
         assert_eq!(refusal.agent_run_id, Some(run.agents[0].id));
+        assert_eq!(refusal.cause, arany::BudgetRefusalCause::Exhausted);
         if after_read {
             assert_eq!(run.tools.len(), 1);
             assert_eq!(
@@ -3542,7 +3547,8 @@ async fn active_time_stops_the_tool_step_with_a_tool_refusal() {
                     .disposition,
                 arany::ToolDisposition::Succeeded
             );
-            assert_eq!(refusal.cause, arany::BudgetRefusalCause::Exhausted);
+        } else {
+            assert!(run.tools.is_empty(), "the refused Read is never dispatched");
         }
         assert_eq!(
             provider.requests.lock().expect("requests").len(),
