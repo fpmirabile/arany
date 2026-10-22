@@ -3164,9 +3164,9 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         dispositions,
         [
             ProviderCallDisposition::ToolRequested,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
         ],
         "each unnarrowable plan call is refused and never recorded"
     );
@@ -3300,6 +3300,132 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
             assert_eq!(run.status, RunStatus::Failed);
             assert_eq!(run.failure, Some(arany::RunFailure::BudgetExhausted));
         }
+    }
+}
+
+#[tokio::test]
+async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_refusal_limit() {
+    for (cwd, attempts, valid) in [
+        ("docs/specs", 1, true),
+        ("./doc/spec", 1, false),
+        ("docs/specs/", 1, false),
+        ("./docs/specs", 1, false),
+        ("../outside", 1, false),
+        ("./doc/spec", 3, false),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        std::fs::create_dir_all(workspace.join("docs/specs")).expect("directory");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let command = arany::ToolCall::Command {
+            program: "rg".into(),
+            args: vec!["--glob=*.md,spec.md".into(), "x".repeat(543)],
+            cwd: cwd.into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            std::iter::once(crate::tool_outcome(facts_read()))
+                .chain((0..attempts).map(|_| crate::tool_outcome(command.clone())))
+                .chain([finish_with("The proposal was explained")])
+                .collect(),
+        ));
+        let mut input = request(&workspace, "Read, search the docs, and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("known refusal continuation");
+        let limited = attempts == 3;
+        assert_eq!(
+            outcome.run.status,
+            if limited {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            }
+        );
+        engine.close().await.expect("shutdown");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(
+            run.failure,
+            limited.then_some(arany::RunFailure::RefusalLimit)
+        );
+        assert_eq!(
+            run.tools.len(),
+            if valid { 2 } else { 1 },
+            "invalid arguments create no effect intent"
+        );
+        assert_eq!(
+            run.agents[0].provider_calls[1].disposition,
+            if valid {
+                ProviderCallDisposition::ToolRequested
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
+        if !valid {
+            assert_eq!(run.agents[0].provider_calls[1].output_tokens, Some(8));
+            assert!(
+                run.agents[0].provider_calls[1..1 + attempts]
+                    .iter()
+                    .all(|call| {
+                        call.refusal.as_ref().is_some_and(|refusal| {
+                            refusal.cause == arany::ProposalRefusalCause::InvalidPath
+                        }) && call.failure_reason
+                            == Some(arany::ProviderFailureReason::ProposalRefused)
+                    })
+            );
+            assert!(events.iter().all(|event| !matches!(&event.event, Event::ToolStarted { intent, .. } if intent.call == command)));
+            let requests = provider.requests.lock().expect("requests");
+            let step = &requests[2].input.tools.as_ref().expect("Tools").steps[1];
+            assert_eq!(
+                step.refusal.as_ref().expect("refused Tool result").cause,
+                arany::ProposalRefusalCause::InvalidPath
+            );
+            assert!(step.observations.is_empty());
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.input.outcome_correction),
+                "argument refusal does not spend the wire correction"
+            );
+            assert_eq!(requests.len(), if limited { 4 } else { 3 });
+        }
+        if limited {
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let recovered = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new user turn");
+            assert_eq!(recovered.run.status, RunStatus::Finished);
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, outcome.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let failure = requests[4]
+                .input
+                .previous_run_failure
+                .expect("committed failure cause");
+            assert_eq!(
+                failure.refusal_cause,
+                Some(arany::ProposalRefusalCause::InvalidPath)
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
     }
 }
 

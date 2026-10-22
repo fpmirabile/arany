@@ -272,6 +272,7 @@ impl RunLoop<'_> {
         };
         let mut narrowings = 0;
         let mut step = ToolStep {
+            refusal: None,
             plan: None,
             turn,
             requests: vec![request],

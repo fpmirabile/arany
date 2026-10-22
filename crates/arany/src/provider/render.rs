@@ -49,7 +49,14 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
     }
-    if let Some(refusal) = &input.last_answer_refused {
+    if let Some(refusal) = &input.last_answer_refused
+        && !input.tools.as_ref().is_some_and(|tools| {
+            tools
+                .steps
+                .last()
+                .is_some_and(|step| step.refusal.as_ref() == Some(refusal))
+        })
+    {
         let note = refusal_note(refusal);
         if note.to_string().len() > MAX_TOOL_CATALOG_BYTES {
             return Err(ProviderError::Rejected);
@@ -311,6 +318,18 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
             is_error: false,
         });
     }
+    if let Some(refusal) = &step.refusal {
+        let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
+        let output = json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
+        if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+        results.push(Block::ToolResult {
+            id: tool_request.id.clone(),
+            output,
+            is_error: true,
+        });
+    }
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
         let narrowed = step.narrowed(index);
@@ -360,7 +379,12 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     use crate::session::ProposalRefusalCause::*;
     let remediation = match refusal.cause {
-        InvalidArguments => "Send one call with valid arguments matching its schema.",
+        InvalidArguments => {
+            "Invalid Tool arguments; send one call matching the offered schema and its bounds."
+        }
+        InvalidPath => {
+            "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Omit leading ./ and trailing /; absolute paths, empty components, traversal and private paths are forbidden."
+        }
         Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
         PlanInvalid => "Send a valid arany_plan; do not replace a recorded contract.",
         PlanBudgetOutsideGoal => "The plan budget must not exceed the Goal budget.",

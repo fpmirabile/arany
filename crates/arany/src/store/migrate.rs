@@ -136,6 +136,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
+        EventStep {
+            kind: "ProviderCallRecorded",
+            from: 16,
+            transform: crate::session::provider_call_v16_to_v17,
+            canonical: crate::session::provider_call_v16_payload,
+        },
         variant_step!("ToolStarted", 15, crate::session::pre_multiedit_payload),
         variant_step!("ToolFinished", 21, crate::session::pre_multiedit_payload),
         variant_step!("HookStarted", 5, crate::session::pre_multiedit_payload),

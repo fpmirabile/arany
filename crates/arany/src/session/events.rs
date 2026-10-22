@@ -147,7 +147,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("MessageAccepted", 7),
     ("AgentSpawned", 13),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 16),
+    ("ProviderCallRecorded", 17),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -1450,6 +1450,31 @@ pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String>
         &["git_commit", "git_branch", "git_switch"],
         None,
     )
+}
+
+pub(crate) fn provider_call_v16_payload(payload: &str) -> Option<String> {
+    let mut record: ProviderCallRecord = parse(payload).ok()?;
+    let old = record.disposition;
+    if let Some(refusal) = &record.refusal {
+        if old != ProviderCallDisposition::InvalidResponse
+            || refusal.cause == ProposalRefusalCause::InvalidPath
+        {
+            return None;
+        }
+        record.disposition = ProviderCallDisposition::Rejected;
+    }
+    record.validate().ok()?;
+    record.disposition = old;
+    serialize(&record).ok()
+}
+
+pub(crate) fn provider_call_v16_to_v17(value: serde_json::Value) -> Option<serde_json::Value> {
+    let canonical = provider_call_v16_payload(&value.to_string())?;
+    let mut record: ProviderCallRecord = parse(&canonical).ok()?;
+    if record.refusal.is_some() {
+        record.disposition = ProviderCallDisposition::Rejected;
+    }
+    serde_json::to_value(record).ok()
 }
 
 pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {

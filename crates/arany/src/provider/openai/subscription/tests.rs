@@ -1530,6 +1530,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            refusal: None,
             plan: None,
             turn: decoded.turn,
             requests: match decoded.outcome {
@@ -1664,6 +1665,7 @@ fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            refusal: None,
             plan: Some(*plan),
             turn: decoded.turn,
             requests: Vec::new(),

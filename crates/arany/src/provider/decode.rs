@@ -106,14 +106,12 @@ pub(crate) fn tool_request(
         return Err(ProviderError::InvalidOutcome);
     }
     let call: ToolCall = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
-    if !call.valid()
-        || matches!(
-            call,
-            ToolCall::ApplyChangeset { .. }
-                | ToolCall::ParseAgentDefinition { .. }
-                | crate::tools::ToolCall::PrepareWorker { .. }
-        )
-    {
+    if matches!(
+        call,
+        ToolCall::ApplyChangeset { .. }
+            | ToolCall::ParseAgentDefinition { .. }
+            | crate::tools::ToolCall::PrepareWorker { .. }
+    ) {
         return Err(ProviderError::InvalidOutcome);
     }
     Ok(ToolRequest { id, call })

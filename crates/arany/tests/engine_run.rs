@@ -128,7 +128,14 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .any(|event| matches!(event.event, Event::ToolStarted { .. }))
         );
         let call = &view.runs[0].agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            call.disposition,
+            if known_reason {
+                ProviderCallDisposition::InvalidResponse
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
         assert_eq!(
             call.failure_reason,
             Some(if known_reason {
@@ -184,7 +191,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 "last_call": if known_reason {
                     serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
                 } else {
-                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_arguments"}})
+                    serde_json::json!({"disposition": "rejected", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_path"}})
                 },
             })
         );
@@ -1831,7 +1838,12 @@ fn bounded_answer_output_must_fit_canonical_json() {
             if !accepted {
                 assert!(view.runs[0].agents.iter().any(|agent| {
                     agent.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::InvalidResponse
+                        call.disposition
+                            == if child {
+                                ProviderCallDisposition::InvalidResponse
+                            } else {
+                                ProviderCallDisposition::Rejected
+                            }
                     })
                 }));
             }
@@ -1950,7 +1962,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
             outcome.run.agents[0]
                 .provider_calls
                 .iter()
-                .all(|call| { call.disposition == ProviderCallDisposition::InvalidResponse })
+                .all(|call| { call.disposition == ProviderCallDisposition::Rejected })
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -2028,7 +2040,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
         assert_eq!(outcome.run.agents[0].provider_calls.len(), 3);
         assert_eq!(
             outcome.run.agents[0].provider_calls[0].disposition,
-            ProviderCallDisposition::InvalidResponse
+            ProviderCallDisposition::Rejected
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -3428,7 +3440,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
                 outcome.run.agents[0]
                     .provider_calls
                     .iter()
-                    .all(|call| call.disposition == ProviderCallDisposition::InvalidResponse)
+                    .all(|call| call.disposition == ProviderCallDisposition::Rejected)
             );
             engine.close().await.expect("engine shutdown");
         }
@@ -3534,7 +3546,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         let calls = &outcome.run.agents[0].provider_calls;
         assert_eq!(calls.len(), 4);
         assert!(calls[1..].iter().all(|call| {
-            call.disposition == ProviderCallDisposition::InvalidResponse
+            call.disposition == ProviderCallDisposition::Rejected
                 && call.phase == AgentPhase::RootSynthesis
         }));
         assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
@@ -5879,7 +5891,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             }
         }
         let call = &run.agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(call.disposition, ProviderCallDisposition::Rejected);
         assert_eq!(
             call.failure_reason,
             Some(arany::ProviderFailureReason::ProposalRefused)

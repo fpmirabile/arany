@@ -4825,7 +4825,7 @@ mod goal_replay_tests {
                 };
                 let mut refusal = record(
                     AgentPhase::RootPlan,
-                    ProviderCallDisposition::InvalidResponse,
+                    ProviderCallDisposition::Rejected,
                     Some(0),
                 );
                 refusal.failure_reason =
@@ -4947,7 +4947,7 @@ mod goal_replay_tests {
                     if planned {
                         ProviderCallDisposition::PlanRecorded
                     } else {
-                        ProviderCallDisposition::InvalidResponse
+                        ProviderCallDisposition::Rejected
                     },
                     Some(0),
                 );

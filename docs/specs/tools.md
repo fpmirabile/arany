@@ -388,6 +388,8 @@ Native Linux and macOS lanes run the same executor code; a live attached journey
 
 ## Commands
 
+Tool path arguments use a canonical Workspace-relative spelling: at most 512 UTF-8 bytes, normal components separated by single `/`, with no absolute, traversal, `.` component, trailing separator, backslash, control character or excluded private component. Directory arguments such as command `cwd` also accept `.` or the empty string for the admitted root. Thus `docs/specs` is valid; `docs/specs/` and `./docs/specs` are refused without filesystem normalization. Home expansion never occurs. Command argv has at most 64 NUL-free strings of at most 4,096 bytes each, within the aggregate [argument ceiling](#limits-and-failure-behavior). Semantic refusals use the [correlated argument feedback](./execution.md#accepted-outcomes), so a spelling error grants no access and can be corrected within the normal Goal budget. Permission subjects, proposed targets and Guard pins keep the same lexical path.
+
 Command project copies exclude `.git`; the command description points to typed Git reads when they are cataloged. Following the Run's pinned catalog, a nonzero command exit whose kept stderr contains `not a git repository` receives a fixed hint in the model result's `hint` field when `git_status`, `git_diff` and `git_log` are available; the hint is derived deterministically from the recorded observation and omitted if adding it would put the complete model result above the [per-call result ceiling](#limits-and-failure-behavior).
 
 Each `commands` entry declares a reviewed executable and its SHA-256, whether it is an interpreter, and any additional pinned input files:

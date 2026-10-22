@@ -39,6 +39,7 @@ fn read(path: &str) -> ToolCall {
 
 fn step(id: &str, path: &str) -> ToolStep {
     ToolStep {
+        refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
         requests: vec![ToolRequest {
@@ -114,6 +115,7 @@ fn harness_failure_and_correction_feedback_is_closed_bounded_system_context() {
             failure,
             provider_disposition: Some(crate::session::ProviderCallDisposition::InvalidResponse),
             provider_failure: reason,
+            refusal_cause: Some(crate::session::ProposalRefusalCause::InvalidPath),
         });
         request.input.outcome_correction = true;
         let rendered = conversation(&request).expect("render");
@@ -732,6 +734,7 @@ fn command_git_hint_respects_the_complete_model_result_ceiling() {
 #[test]
 fn delegate_step_carries_child_results_once() {
     let mut delegated = request(vec![ToolStep {
+        refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
         requests: Vec::new(),
@@ -1048,6 +1051,7 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
     use crate::session::{ProposalRefusal, ProposalRefusalCause::*};
     for cause in [
         InvalidArguments,
+        InvalidPath,
         Phase,
         PlanInvalid,
         PlanBudgetOutsideGoal,

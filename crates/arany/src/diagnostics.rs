@@ -723,7 +723,7 @@ mod tests {
             record: crate::session::ProviderCallRecord {
                 delegation: None,
                 phase: crate::provider::AgentPhase::RootSynthesis,
-                disposition: crate::session::ProviderCallDisposition::InvalidResponse,
+                disposition: crate::session::ProviderCallDisposition::Rejected,
                 response_id: Some(CANARY.into()),
                 input_tokens: None,
                 output_tokens: None,
@@ -794,7 +794,7 @@ mod tests {
             "engine cause=Store",
             "filesystem kind=Other",
             "guard stage=execution",
-            r#"provider phase=RootSynthesis disposition=InvalidResponse reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanInvalid })"#,
+            r#"provider phase=RootSynthesis disposition=Rejected reason=Some(ProposalRefused) refusal=Some(ProposalRefusal { operation: "arany_write", cause: PlanInvalid })"#,
             "tool operation=edit disposition=Uncertain receipt=false stops_run=true",
             "run disposition=Failed cause=Some(ProposalRefused)",
         ] {

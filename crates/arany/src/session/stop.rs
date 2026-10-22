@@ -35,6 +35,7 @@ pub struct RunFailureFeedback {
     pub failure: RunFailure,
     pub provider_disposition: Option<super::ProviderCallDisposition>,
     pub provider_failure: Option<crate::provider::ProviderFailureReason>,
+    pub refusal_cause: Option<super::ProposalRefusalCause>,
 }
 
 impl SessionView {
@@ -62,6 +63,7 @@ impl SessionView {
             failure,
             provider_disposition: call.map(|call| call.disposition),
             provider_failure: call.and_then(|call| call.failure_reason),
+            refusal_cause: call.and_then(|call| call.refusal.as_ref().map(|refusal| refusal.cause)),
         })
     }
 

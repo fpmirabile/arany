@@ -441,6 +441,7 @@ pub enum RunFailure {
 #[serde(rename_all = "snake_case")]
 pub enum ProposalRefusalCause {
     InvalidArguments,
+    InvalidPath,
     Phase,
     PlanInvalid,
     PlanBudgetOutsideGoal,
@@ -723,6 +724,7 @@ impl ProviderCallRecord {
                         ProviderFailureReason::AccountAccess
                             | ProviderFailureReason::UsageLimit
                             | ProviderFailureReason::RateLimited
+                            | ProviderFailureReason::ProposalRefused
                     ) | (
                         ProviderCallDisposition::Unavailable,
                         ProviderFailureReason::UsageTemporarilyUnavailable
@@ -737,7 +739,6 @@ impl ProviderCallRecord {
                             | ProviderFailureReason::WorkerDelegateRefused
                             | ProviderFailureReason::WorkerToolRefused
                             | ProviderFailureReason::CriterionNotMetInView
-                            | ProviderFailureReason::ProposalRefused
                     )
                 )
             })
@@ -748,12 +749,13 @@ impl ProviderCallRecord {
                     | ProviderCallDisposition::ToolRequested
                     | ProviderCallDisposition::PlanRecorded
                     | ProviderCallDisposition::InvalidResponse
-            ) && (self.response_id.is_some()
-                || self.input_tokens.is_some()
-                || self.output_tokens.is_some()
-                || self.cache_read_input_tokens.is_some()
-                || self.cache_creation_input_tokens.is_some()
-                || self.wire_provenance.is_some()))
+            ) && self.refusal.is_none()
+                && (self.response_id.is_some()
+                    || self.input_tokens.is_some()
+                    || self.output_tokens.is_some()
+                    || self.cache_read_input_tokens.is_some()
+                    || self.cache_creation_input_tokens.is_some()
+                    || self.wire_provenance.is_some()))
         {
             return Err(ReplayError::InvalidPayload);
         }

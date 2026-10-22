@@ -645,6 +645,7 @@ impl RunLoop<'_> {
         }
         if let Some(tools) = root_request.input.tools.as_mut() {
             tools.steps.push(ToolStep {
+                refusal: None,
                 plan: None,
                 turn: delegate_turn.clone(),
                 requests: Vec::new(),
@@ -1288,6 +1289,7 @@ impl RunLoop<'_> {
             | PrimaryDecision::Finish(..)
             | PrimaryDecision::Delegate(..)
             | PrimaryDecision::Refused(_)
+            | PrimaryDecision::RefusedTool(..)
             | PrimaryDecision::CorrectOutcome
             | PrimaryDecision::Fail(_) => {
                 return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
@@ -2055,6 +2057,7 @@ impl RunLoop<'_> {
                     .is_none_or(|step| !step.requests.is_empty() || step.cleared)
                 {
                     tools.steps.push(ToolStep {
+                        refusal: None,
                         plan: None,
                         turn: ProviderTurn::scripted(),
                         requests: Vec::new(),

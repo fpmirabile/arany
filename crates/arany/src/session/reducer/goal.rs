@@ -410,6 +410,8 @@ impl SessionView {
                             .all(|call| {
                                 call.phase == AgentPhase::ToolReview
                                     && call.disposition == ProviderCallDisposition::Finished
+                                    || call.disposition == ProviderCallDisposition::Rejected
+                                        && call.refusal.is_some()
                             })
                         && pending_tool_requests(run) == Some(0)
                 });
