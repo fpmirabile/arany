@@ -2829,7 +2829,7 @@ mod tests {
             "setgid",
             "ignored/setgid",
         ] {
-            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
             let source = tempfile::tempdir().unwrap();
             let workspace = tempfile::tempdir().unwrap();
             let resources = tempfile::tempdir().unwrap();
@@ -2847,15 +2847,20 @@ mod tests {
             std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
             std::fs::write(&output_path, b"protected fixture content").unwrap();
             if !path.ends_with("config") {
-                std::fs::set_permissions(
-                    &output_path,
-                    std::fs::Permissions::from_mode(if path.ends_with("setuid") {
-                        0o4755
-                    } else {
-                        0o2755
-                    }),
-                )
-                .unwrap();
+                let mode = if path.ends_with("setuid") {
+                    0o4755
+                } else {
+                    0o2755
+                };
+                // Temporary files can inherit a group outside the caller's memberships on macOS.
+                rustix::fs::chown(&output_path, None, Some(rustix::process::getegid())).unwrap();
+                std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+                assert_eq!(
+                    std::fs::metadata(&output_path).unwrap().mode() & 0o6000,
+                    mode & 0o6000,
+                    "{path}: fixture must retain its set-ID bit"
+                );
             }
             let rejected = super::super::fs::selected_command_changeset(
                 workspace.path(),
