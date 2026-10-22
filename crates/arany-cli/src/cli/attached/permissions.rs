@@ -36,10 +36,11 @@ pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option
             None
         }
         Err(error) => {
+            // Serializing text to an in-memory JSON string has no fallible values or I/O.
+            let path = serde_json::to_string(query.as_deref().unwrap_or_default())
+                .expect("serializable path");
             composer.set_file_candidates(query, Vec::new());
-            Some(format!(
-                "File suggestions unavailable: {error}; type an exact @file path"
-            ))
+            Some(format!("Path suggestions for {path} failed: {error}"))
         }
     }
 }

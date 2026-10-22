@@ -66,7 +66,7 @@ impl Event {
                     paths.len() > crate::session::input::MAX_INCLUDES
                         || paths
                             .iter()
-                            .any(|path| !crate::tools::types::valid_relative(path, false))
+                            .any(|path| !crate::session::input::valid_include_path(path))
                 }) {
                     return Err(ReplayError::InvalidPayload);
                 }

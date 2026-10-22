@@ -3340,7 +3340,10 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let released = contender(Some(goal_id));
         assert!(!released.status.success());
         assert_eq!(released.stdout, b"");
-        assert_eq!(released.stderr, b"error: explicit include does not exist\n");
+        assert_eq!(
+            released.stderr,
+            b"error: \"missing.txt\": explicit include does not exist\n"
+        );
 
         let store =
             Store::open_read_only(StateRoot::open_existing(&state_path).expect("read-only state"))

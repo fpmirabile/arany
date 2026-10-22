@@ -2145,6 +2145,9 @@ mod payload_version_tests {
             serde_json::json!([""]),
             serde_json::json!(vec!["input.txt"; 17]),
             serde_json::json!(["x".repeat(513)]),
+            serde_json::json!([format!("{}/", "x".repeat(512))]),
+            serde_json::json!(["notes//"]),
+            serde_json::json!(["notes/.env/"]),
         ] {
             let mut invalid = current.clone();
             invalid["include_paths"] = paths;
@@ -2159,18 +2162,24 @@ mod payload_version_tests {
                 .is_err()
             );
         }
-        let mut longest = current.clone();
-        longest["include_paths"] = serde_json::json!(["x".repeat(512)]);
-        assert!(
-            Event::decode(
-                "GoalStarted",
-                started.version(),
-                &longest.to_string(),
-                None,
-                None
-            )
-            .is_ok()
-        );
+        for path in [
+            "x".repeat(512),
+            format!("{}/", "x".repeat(511)),
+            "notes/".into(),
+        ] {
+            let mut longest = current.clone();
+            longest["include_paths"] = serde_json::json!([path]);
+            assert!(
+                Event::decode(
+                    "GoalStarted",
+                    started.version(),
+                    &longest.to_string(),
+                    None,
+                    None
+                )
+                .is_ok()
+            );
+        }
         for (kind, payload) in [
             ("GoalStarted", &started_payload),
             ("GoalFinished", &payload),

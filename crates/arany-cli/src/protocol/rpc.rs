@@ -143,6 +143,7 @@ pub enum Reason {
 impl From<&arany::EngineError> for Reason {
     fn from(error: &arany::EngineError) -> Self {
         match error {
+            arany::EngineError::InputPath { source, .. } => Self::from(source.as_ref()),
             arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
             arany::EngineError::ConversationRewindLimit => Reason::ConversationRewindLimit,
             arany::EngineError::RewindBlocked => Reason::RewindBlocked,

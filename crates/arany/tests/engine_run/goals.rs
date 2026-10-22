@@ -8,6 +8,8 @@ async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths(
     let workspace = temp.path().join("workspace");
     std::fs::create_dir(&workspace).expect("workspace");
     std::fs::write(workspace.join("admitted.txt"), "Admitted facts").expect("include");
+    std::fs::create_dir(workspace.join("notes")).expect("directory include");
+    std::fs::write(workspace.join("notes/entry.txt"), "Directory file body").expect("entry");
     let state_path = temp.path().join("state");
     let engine = engine_support::open(
         StateRoot::admit(&state_path).unwrap(),
@@ -23,7 +25,7 @@ async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths(
         }),
     ]));
     let mut first = request(&workspace, "Read the admitted input");
-    first.include_paths = vec!["admitted.txt".into()];
+    first.include_paths = vec!["admitted.txt".into(), "notes/".into()];
     first.goal.finish_after_run = false;
     let first = run_to_end(&engine, &provider, first).await.unwrap();
     let mut next = request(&workspace, "Continue");
@@ -37,6 +39,8 @@ async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths(
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].input.includes, calls[0].input.includes);
         assert!(calls[1].input.includes[0].contains("Admitted facts"));
+        assert!(calls[1].input.includes[1].starts_with("Directory:"));
+        assert!(!calls[1].input.includes[1].contains("Directory file body"));
     }
     engine.close().await.unwrap();
     let (events, _) = replayed(&state_path, first.session_id).await;

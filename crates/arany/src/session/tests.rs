@@ -1,5 +1,98 @@
 use super::*;
 
+#[cfg(unix)]
+#[test]
+fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {
+    use sha2::{Digest, Sha256};
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let selected = workspace.join("docs/with spaces");
+    std::fs::create_dir_all(selected.join("nested")).unwrap();
+    std::fs::write(selected.join("a.txt"), "FILE_BODY_CANARY").unwrap();
+    std::fs::write(selected.join("nested/private.txt"), "NESTED_BODY_CANARY").unwrap();
+    std::fs::create_dir(selected.join(".git")).unwrap();
+    std::os::unix::fs::symlink(temp.path(), selected.join("outside")).unwrap();
+    std::fs::hard_link(selected.join("a.txt"), selected.join("alias.txt")).unwrap();
+    std::fs::write(selected.join("b.txt"), "FILE_BODY_CANARY").unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let load = |path: &str| input::WorkspaceInputs::load(&workspace, &state, None, &[path.into()]);
+    let content = "\"b.txt\"\n\"nested/\"\n";
+    for path in ["docs/with spaces", "docs/with spaces/"] {
+        let loaded = load(path).unwrap();
+        assert_eq!(loaded.includes[0].path, "docs/with spaces/");
+        assert_eq!(loaded.includes[0].content, content);
+        assert_eq!(
+            loaded.includes[0].digest,
+            <[u8; 32]>::from(Sha256::digest(content))
+        );
+        assert!(loaded.includes[0].model_include().starts_with("Directory:"));
+    }
+    for (path, reason) in [
+        ("docs/with spaces/.git", "protected path"),
+        ("docs/with spaces/.ENV/", "protected path"),
+        ("docs/../outside/", "path is outside workspace"),
+        ("docs/with spaces/outside", "path is a symbolic link"),
+        ("docs/with spaces/outside/", "path is a symbolic link"),
+        ("docs/with spaces/b.txt/", "not a directory"),
+        ("docs/with spaces/b.txt/child", "not a directory"),
+    ] {
+        assert_eq!(
+            load(path).err().expect("include rejected").to_string(),
+            format!("{path:?}: {reason}"),
+        );
+    }
+    let unicode = "docs/資料";
+    std::fs::create_dir(workspace.join(unicode)).unwrap();
+    std::fs::write(
+        workspace.join(unicode).join("résumé.md"),
+        "OMITTED_BODY_CANARY",
+    )
+    .unwrap();
+    for objective in ["Inspect @docs/資料", "Inspect @\"docs/資料/\""] {
+        let paths = crate::tools::mention_paths(objective).unwrap();
+        let loaded = input::WorkspaceInputs::load(&workspace, &state, None, &paths).unwrap();
+        assert_eq!(loaded.includes[0].path, "docs/資料/");
+        assert_eq!(loaded.includes[0].content, "\"résumé.md\"\n");
+    }
+    let missing = "docs/missing \"quoted\"path";
+    let paths = crate::tools::mention_paths(&format!(
+        "Inspect @\"docs/with spaces/\" @{}",
+        serde_json::to_string(missing).unwrap()
+    ))
+    .unwrap();
+    assert_eq!(
+        input::WorkspaceInputs::load(&workspace, &state, None, &paths)
+            .err()
+            .expect("second include rejected")
+            .to_string(),
+        format!("{missing:?}: explicit include does not exist"),
+    );
+    for (folder, count, name_len) in [
+        ("entry-cap", 70, 10),
+        ("exact-cap", 64, 10),
+        ("byte-cap", 64, 255),
+    ] {
+        let directory = workspace.join(folder);
+        std::fs::create_dir(&directory).unwrap();
+        for index in 0..count {
+            let name = format!("{index:03}{}", "a".repeat(name_len - 3));
+            std::fs::write(directory.join(name), "OMITTED_BODY_CANARY").unwrap();
+        }
+        let loaded = load(folder).unwrap();
+        let listing = &loaded.includes[0].content;
+        assert!(listing.len() <= 16 * 1024);
+        assert_eq!(listing.ends_with("[truncated]\n"), folder != "exact-cap");
+        let entries = listing.lines().filter(|line| line.starts_with('"')).count();
+        assert!(entries <= 64);
+        if folder != "byte-cap" {
+            assert_eq!(entries, 64);
+        } else {
+            assert!(entries < 64);
+        }
+        assert!(!listing.contains("OMITTED_BODY_CANARY"));
+    }
+}
+
 pub(crate) fn unanswered_run(status: RunStatus) -> RunView {
     RunView {
         skill: None,
