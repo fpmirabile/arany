@@ -42,7 +42,14 @@ async fn budget_incident_failed_reads_then_next_action_has_distinct_terminal_fee
             )
             .with_known_input_tokens(),
         );
-        let engine = arany::test_support::engine::open(state, EngineConfig::default()).unwrap();
+        let engine = arany::test_support::engine::open(
+            state,
+            EngineConfig {
+                guard_executable: Some(env!("CARGO_BIN_EXE_arany").into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let mut input = proposal_request(&workspace);
         input.include_paths.clear();
         input.goal = arany::GoalRequest::new(
