@@ -487,13 +487,14 @@ fn check_private(file: &File, metadata: &Metadata) -> Result<(), &'static str> {
 
 fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'static str> {
     use rustix::fs::{Mode, OFlags};
-    let flags = OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOFOLLOW;
+    let flags = OFlags::CLOEXEC | OFlags::NOFOLLOW;
     #[cfg(target_os = "linux")]
     {
         use rustix::fs::{ResolveFlags, openat2};
         let access = if directory {
-            OFlags::RDONLY | OFlags::DIRECTORY
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NONBLOCK
         } else {
+            // openat2 rejects O_NONBLOCK with O_PATH.
             OFlags::PATH
         };
         openat2(
@@ -511,6 +512,7 @@ fn metadata_file(dir: &Dir, name: &Path, directory: bool) -> Result<File, &'stat
     }
     #[cfg(target_os = "macos")]
     {
+        let flags = flags | OFlags::NONBLOCK;
         let access = if directory {
             OFlags::RDONLY | OFlags::DIRECTORY
         } else {
@@ -593,7 +595,11 @@ mod tests {
         )
         .expect("metadata report");
         assert!(!report.complete());
-        assert_eq!(report.subtotal.files, 4);
+        assert_eq!(
+            report.subtotal.files, 4,
+            "categories: {:?}",
+            report.categories
+        );
         assert_eq!(report.subtotal.directories, 3);
         assert!(report.subtotal.logical_bytes >= 16 * 1024 * 1024);
         assert!(
@@ -671,7 +677,11 @@ mod tests {
         )
         .expect("partial metadata report");
         assert!(!report.complete());
-        assert_eq!(report.subtotal.files, 2);
+        assert_eq!(
+            report.subtotal.files, 2,
+            "categories: {:?}",
+            report.categories
+        );
         assert!(
             report
                 .categories
