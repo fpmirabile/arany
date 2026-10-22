@@ -74,6 +74,15 @@ struct Wire {
 }
 
 impl Wire {
+    async fn shutdown(mut self) {
+        self.input.send(ClientMessage::Eof).await.unwrap();
+        tokio::time::timeout(self.timeout, async {
+            while self.output.recv().await.is_some() {}
+        })
+        .await
+        .expect("server closes output after EOF");
+    }
+
     async fn call(&mut self, id: i64, method: &str, params: Value) -> Value {
         self.input.send(request(id, method, params)).await.unwrap();
         loop {
@@ -113,7 +122,7 @@ async fn serve<F, Fut>(
 ) -> (tempfile::TempDir, std::path::PathBuf, arany::SessionId)
 where
     F: FnOnce(Wire, Value) -> Fut,
-    Fut: Future<Output = Value>,
+    Fut: Future<Output = (Wire, Value)>,
 {
     let root = tempfile::tempdir().unwrap();
     std::fs::create_dir(root.path().join("workspace")).unwrap();
@@ -130,7 +139,7 @@ async fn serve_in<F, Fut>(
 ) -> arany::SessionId
 where
     F: FnOnce(Wire, Value) -> Fut,
-    Fut: Future<Output = Value>,
+    Fut: Future<Output = (Wire, Value)>,
 {
     let workspace = root.join("workspace");
     let state = root.join("state");
@@ -173,9 +182,8 @@ where
                 .await["result"]["thread"]["id"]
                 .clone(),
         };
-        let input = wire.input.clone();
-        let thread = script(wire, thread).await;
-        input.send(ClientMessage::Eof).await.unwrap();
+        let (wire, thread) = script(wire, thread).await;
+        wire.shutdown().await;
         thread
     };
     let (result, thread) = tokio::join!(
@@ -263,7 +271,7 @@ async fn serve_defaults_complete_past_64_calls_and_30_active_minutes() {
             );
             assert_eq!(goal["usage"]["providerCalls"], if finite { 1 } else { 65 });
             assert_eq!(goal["status"], if finite { "failed" } else { "completed" });
-            wire.input.send(ClientMessage::Eof).await.unwrap();
+            wire.shutdown().await;
             serde_json::from_value::<arany::SessionId>(thread).unwrap()
         };
         let (result, id) = tokio::join!(
@@ -356,7 +364,7 @@ async fn malformed_and_unsafe_settings_refuse_thread_admission_before_dispatch()
                 )
                 .await;
             assert_eq!(reason(&refused), (&json!(-32000), &json!("invalidRequest")));
-            wire.input.send(ClientMessage::Eof).await.unwrap();
+            wire.shutdown().await;
         };
         let (result, ()) = tokio::join!(
             server::run_with_threads(engine(&state), state.clone(), inbound, outbound, threads),
@@ -417,7 +425,7 @@ async fn steer_note_is_journaled_once_and_refused_when_empty_oversized_or_full()
         gate.release.send(()).unwrap();
         let completed = wire.notification("turn/completed").await;
         assert_eq!(completed["params"]["turn"]["status"], "completed");
-        thread
+        (wire, thread)
     })
     .await;
     let (events, view) = closed_view(&state, id).await;
@@ -479,7 +487,7 @@ async fn steer_pause_and_resume_without_a_running_turn_or_goal_are_refused() {
             let refused = wire.call(id, method, params).await;
             assert_eq!(reason(&refused), (&json!(-32602), &json!("invalidParams")), "{method}");
         }
-        thread
+        (wire, thread)
     })
     .await;
     let (_, view) = closed_view(&state, id).await;
@@ -548,7 +556,7 @@ async fn pause_ends_the_turn_interrupted_and_goal_resume_continues_the_pinned_ob
             )
             .await;
         assert_eq!(reason(&again).1, &json!("goalUnavailable"));
-        thread
+        (wire, thread)
     })
     .await;
     let (events, view) = closed_view(&state, id).await;
@@ -630,7 +638,7 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
         let completed = wire.notification("turn/completed").await;
         assert_eq!(completed["params"]["turn"]["status"], "interrupted");
         *seen_goal.lock().unwrap() = turn["goalId"].clone();
-        thread
+        (wire, thread)
     })
     .await;
     let goal = goal.lock().unwrap().clone();
@@ -659,7 +667,7 @@ async fn resume_of_an_exhausted_goal_closes_it_failed_in_a_second_server() {
             let again = wire.call(41, "goal/resume", params).await;
             assert_eq!(reason(&again), (&json!(-32000), &json!("goalUnavailable")));
             assert!(wire.seen.iter().all(|m| m["method"] != "turn/started"));
-            thread
+            (wire, thread)
         },
     )
     .await;
