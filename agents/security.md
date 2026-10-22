@@ -2,7 +2,7 @@
 
 Load when touching authentication, authorization, secrets, provider APIs, external I/O, LLM cost, tool execution, child processes, MCP, sandboxing, file paths, memory, retrieval, remote transports, or rendering untrusted content, and for security audits.
 
-Plans, audits, and findings live under `docs/security/`. The [incident research](../docs/research/harness-security-lessons-and-controls.md) keeps the evidence behind these controls; this file is the concise working contract.
+Plans live under `planning/`; scoped audits and open findings live under `docs/security/`. The [incident research](../docs/research/harness-security-lessons-and-controls.md) keeps the evidence behind these controls; this file is the concise working contract.
 
 ## Trust bootstrap
 

@@ -1,417 +1,106 @@
-# Agentic coding teams
+# Team supervision and changeset review
 
 ## Metadata
 
-- Status: `In progress`
+- Status: `Draft`
 - Owner: Fernando Mirabile
-- Last updated: 2026-10-17
+- Last updated: 2026-10-22
 
-## Outcome
+## Outcome and scope
 
-Arany is a harness specialized in multi-task agentic teams. A team must be able
-to do ordinary coding work end to end: inspect, edit, build, test and integrate
-changes inside a project, while the harness detects agent misbehavior and
-narrows authority before it causes harm.
+Detect trajectory drift before integration or Finish and apply a journaled,
+narrowing response, with a read-only reviewer child at review points.
+The [Supervisor adapter](../../docs/specs/tools.md#supervisor-adapter) already
+implements pure shadow evaluation. This plan covers enforcement and review,
+not that completed implementation or worker command execution.
 
-This initiative holds the remaining Beta 1 team design.
-[Next steps](../../NEXT_STEPS.md#pursue-in-order) owns delivery priority, freezes
-and user-owned checks; this plan defines the remaining slices.
+## Research and current boundary
 
-## Using this plan
+- `crates/arany/src/supervisor.rs` and the Tools contract own the fixed,
+  Run-pinned evaluator. Production has no configuration file, model judge or
+  enforcement; replay recomputes verdicts without effects. Existing signals
+  are loop, probing and disproportion. Broader detection below is proposed.
+- Worker commands and the in-view Finish gate landed in `3243ac72` (#169),
+  following protocol `bf92c26f` (#151) and native targets `b8d27f7c` (#162).
+  [Execution](../../docs/specs/execution.md#worker-journal-protocol),
+  [Tools](../../docs/specs/tools.md#private-worker-targets-and-handover-transfer)
+  and [Goals](../../docs/specs/goals.md#worker-accounting-and-verification)
+  own handover, fresh per-command images and primary verification. The separate
+  [persistent assignment-view plan](../worker-assignment-views/README.md) retains
+  the future C3 lifetime/cache proposal; it does not change current behavior.
+- [Detection versus enforcement](../../docs/research/deterministic-harness-protection.md#33-detection-and-observability-are-not-enforcement)
+  explains why a judge cannot become an authority source. Peer/source research
+  for new judges remains with [judge adapters](../judge-adapters/README.md).
 
-- This plan owns remaining proposals. The [design rationale](./design-tree.md)
-  explains choices that still constrain that scope; implemented contracts live
-  in the specs linked below.
-- Follow the repository workflow in [AGENTS.md](../../AGENTS.md): load the
-  triggered rules, apply Ponytail, and specify each slice in its owning
-  contract under the [spec workflow](../../docs/specs/README.md) before
-  implementation.
-- Follow roadmap priority using the [slice boundaries](#execution). When a slice starts, set
-  Status to `In progress`; when it lands, move its accepted behavior to the
-  owning spec, remove it from this plan and update the next action, as the
-  [planning lifecycle](../README.md#lifecycle) requires.
-- Resolve material open decisions with the owner before their slice starts;
-  accepted behavior belongs in its spec when implemented.
+## Proposed direction
 
-## Current boundary and owners
+Extend the existing coordinator and narrowing hook adapters; add no daemon or
+subscriber. Scope drift, undeclared verification changes and injection suspicion
+are candidate signals requiring corpus evidence, not existing guarantees.
+Existing deterministic success receipts remain enforced independently.
 
-C1 read-only researchers and C2 edit-only workers are implemented; persistent command-capable views remain C3 scope.
-The [execution contract](../../docs/specs/execution.md#researcher-children)
-owns current child identity, grants, limits, failure and synthesis ordering.
-The [Goals contract](../../docs/specs/goals.md) owns lifecycle, plan contracts,
-success receipts, budgets, writer exclusion, steering and pause. The
-[Tools contract](../../docs/specs/tools.md) owns command changesets, runtime
-roots, build cache, finite resource profiles and typed Git reads on Linux and
-macOS. These are prerequisites, not remaining implementation slices.
+Responses escalate monotonically: annotate, require human approval, revoke the
+relevant capability, pause for a decision, then cancel. At integration and Finish,
+a read-only reviewer compares the trajectory/changeset with the approved task.
+A missing, uncertain, timed-out or over-budget evaluation asks the user.
+Per-effect judging requires explicit cost consent rather than running by default.
 
-[Per-role routing and fallback](../../docs/specs/provider.md#per-role-selection-and-fallback)
-are implemented for primary, child, review and compaction. Roster presets,
-assignment-selected profiles and judge-only adapters remain below. A child
-inherits the primary chain only when its role has no configured override.
+A private versioned `supervisor.json` selecting evaluators/thresholds and default
+probability bands (≥0.65 narrow, ≤0.35 clear, otherwise ask) are **future proposals**,
+not the current file-free evaluator contract. They require accepted schemas,
+finite judge budgets and Run-pinned policy before implementation. Model verdicts
+are observations; replay never repeats a judge call. Repository text cannot
+select evaluators or thresholds.
 
-Current human approval and per-action AI review narrow individual effects;
-trajectory evaluation and writable-team handover are still proposed here.
-[Detection is separate from enforcement](../../docs/research/deterministic-harness-protection.md#33-detection-and-observability-are-not-enforcement):
-Guard remains the effect boundary.
+A one-use user response follows the existing permission route, is journaled and
+can inform calibration without changing configuration or overriding Guard denial.
+The Supervisor itself never grants, retries or approves effects.
 
-## Chosen direction
+## Contract, scenarios and evidence
 
-Five workstreams (A–E). Sections are grouped by subject; the
-[execution](#execution) list defines remaining slices under roadmap priority; each leaves the
-harness coherent and safer than before. Every slice keeps the existing invariants: one router mediates
-effects, Policy only narrows, Guard enforces, replay never re-executes, and
-unsupported enforcement fails closed. Child authority remains
-`global policy ∩ parent effective authority ∩ explicit task grant`
-([security rules](../../agents/security.md)).
+Tools owns policy, evaluator admission and narrowing; Execution owns Event order,
+reviewer scheduling and replay; Goals owns pause/recovery; Terminal owns prompts
+and accessible notices; Telemetry owns privacy-reduced projection.
+Use the existing Supervisor corpus, Engine/reducer and Guard journeys under
+[testing rules](../../agents/testing.md), extending them for detection, exact
+response, reviewer refusal, exhausted budgets, cancellation, interrupted prefixes
+and replay without a second judge call. Linux/macOS share product policy; native
+Guard, terminal and OTLP claims require the [owner checks](../../NEXT_STEPS.md#pursue-in-order).
 
-### A. Registry fetch
+## Remaining slices
 
-6. **Registry fetch (A6).** Lets an agent add dependencies to the project it works
-   on (`npm install zod`, `cargo add serde`, `pip install requests`) without
-   giving project code the network.
-   - **Two phases.** A separate fetch phase reaches only an allowlist of
-     public registries through a Guard-owned proxy and writes only into the
-     persistent [cache](../../docs/specs/tools.md#persistent-workspace-build-cache);
-     lockfile and manifest changes return as a validated
-     [changeset](../../docs/specs/tools.md#command-changesets). Build and test
-     phases stay offline.
-   - **No project code with network.** Fetch runs only the fixed fetch
-     command of the admitted toolchain profile with install scripts
-     disabled, for example `cargo fetch`, `npm install --ignore-scripts` and
-     `pip download --only-binary=:all:`. Scripts and builds run later,
-     offline.
-   - **Proxy.** It admits HTTPS `CONNECT` only to allowlisted hosts, resolves
-     DNS itself and rejects loopback, private and link-local addresses
-     (SSRF), bounds bytes, connections and time per fetch, and carries no
-     credentials. Default allowlist: crates.io, the npm registry and PyPI
-     hosts; the user can add hosts in global settings. Private registries
-     with tokens are out of scope.
-   - **Approval.** Fetch is an effect and follows the mode: Ask and Accept
-     edits ask; Auto lets the Supervisor approve it inside the plan contract.
-   - **Platforms.** Linux routes a private network namespace only to the
-     proxy; macOS uses Seatbelt rules that allow only the proxy port. A
-     dedicated security pass under the
-     [network rules](../../agents/security.md) precedes this slice.
-
-### B. Supervisor: active misbehavior detection
-
-The Engine owns the Supervisor: it collects evidence from journaled Events,
-runs configured evaluators and applies their verdicts. It can only narrow:
-annotate, require human approval, revoke a capability, pause the agent for a
-decision or cancel. It never grants, retries or approves.
-
-Evaluators are configurable, not hard-wired. Built-in deterministic signals
-are always available; the user can add model-based judges for decisions that
-are not deterministic. A judge is any roster profile with the judge
-capability (D): an agent-capable Provider answering a strict structured
-verdict, or a typed-judge Provider (for example TypeSafe AI's Jev) answering
-Boolean, Choice or Score questions with calibrated probabilities. No judge
-vendor is built into the Supervisor; each typed-judge adapter ships only after
-a research note verifies its API from primary sources.
-
-- **Configuration.** A private, owner-only, versioned `supervisor.json` beside
-  `tools.json` with a closed schema selects evaluators, thresholds and
-  responses. Project files never configure the Supervisor. Without the file,
-  built-in signals run in their default mode.
-- **Triggers.** Judges run at review points (before changeset integration and
-  before Finish) and when a deterministic signal fires. Judging every effect
-  is an explicit per-evaluator opt-in.
-- **Verdicts.** Each evaluator maps probability bands to a response (default:
-  ≥0.65 applies its configured narrowing response, ≤0.35 clears, between asks
-  the user). A judge selects only among narrowing responses. Verdicts are
-  journaled observations; replay uses the recorded verdict and never calls
-  the judge again. Failure or timeout asks the user.
-- **Budget.** Judge calls have their own bounded per-Goal budget; exhaustion
-  asks the user instead of skipping evaluation.
-
-1. **Worker plan contracts.** Extend the existing
-   [Goal plan contract](../../docs/specs/goals.md#initial-plan-contract-and-success-receipt)
-   with the primary's mission, direction and scope per worker; a worker can only
-   narrow its assignment. Approval of prospective revisions follows B6 without
-   widening the pinned grant.
-2. **Deterministic signals.** Each signal has a fixed threshold and response:
-
-   | Signal | Detection | Default response |
-   |---|---|---|
-   | Scope drift | Effect outside declared paths/commands or team lease | Require approval |
-   | Verification tampering | Edits to test files, assertions, ignore/skip markers, lint or CI configuration when the plan did not declare them | Require approval |
-   | False completion | Finish claims success while the latest success-criterion receipt failed or is absent | Block Finish and report |
-   | Boundary probing | Repeated Guard or Policy rejections (network, excluded paths, unknown executables) | Revoke capability, then pause |
-   | Loop | Same failing intent repeated, or edit/revert oscillation on the same file | Pause |
-   | Disproportion | Changeset size or deletions far above the declared scope | Require approval |
-   | Injection suspicion | An observation containing instructions followed by an out-of-plan effect | Pause |
-
-   Signals start in shadow mode: they are recorded without a response until
-   corpus and real Runs calibrate their thresholds. False completion and the
-   Finish gate (B5) enforce from the first release because they are exact.
-3. **Graded escalation.** Annotate → switch the agent to Ask → revoke the offending capability → pause and ask the user → cancel the
-   agent or Goal. Escalation is monotonic within a Goal.
-4. **Review-point review.** Extend the existing AI review to judge the whole
-   trajectory and changeset against the task at review points (before
-   integration and before Finish), using the reviewer role's roster profile
-   (D2), which can differ from the worker's. Uncertainty or failure asks the
-   user, as today.
-5. **Worker Finish gate.** Extend the existing Goal success-receipt rule to
-   worker handover in C3; C2 requires primary verification after integration.
-6. **Modes.** Replace the current Auto edits / Request approvals / Auto
-   approval cycle with **RPI → Ask → Accept edits → Auto**, cycled with
-   Shift+Tab. No bypass mode exists in attached sessions; unattended work
-   uses `arany exec` with an upfront grant. The default mode is a user
-   setting; a fresh installation defaults to RPI.
-   - **RPI** runs Research → Plan → Implementation and the harness drives it
-     to completion, like a goal that knows how to work: it divides the work,
-     waits for whoever must act (the user at the Plan gate, workers,
-     escalations) and continues. Each phase is its own Run in the Session,
-     linked by its approved artifact, so approval waits hold no Run deadline
-     and recovery resumes at a phase boundary.
-     - Research is read-only and may use a team of read-only researchers; the
-       primary may skip it for a trivial task.
-     - Plan is read-only and may grill the user: bounded rounds of numbered
-       questions, each with a recommended answer, resolve open decisions
-       before the plan. Plan presents the plan contract and proposed team;
-       this is the only mandatory gate, and approval chooses the
-       implementation mode (Ask, Accept edits or Auto).
-     - Rejecting a plan with feedback returns to Plan without repeating
-       Research; asking for more research returns to Research. Revisions
-       count toward budgets.
-     - The research brief and plan are bounded Session artifacts, journaled
-       and visible in transcript and inspection, never repository files; the
-       user can export them.
-     - Extend the existing durable Goal with automatic phase advancement,
-       stopping at the Plan gate, grilling questions, Supervisor escalations,
-       paused profiles or cancellation. Split Implementation Runs by approved
-       milestone or team wave, preserving the existing recovery boundaries.
-     - The approved plan stays within the Goal's pinned budgets and resource
-       settings. Plan revisions and phase transitions consume bounded capacity.
-       The proposed pause-on-exhaustion behavior needs owner resolution against
-       the current terminal exhaustion contract before implementation (see
-       [open decisions](#open-questions)).
-     - Grilling is a typed "ask the user" outcome in the Plan phase: at most
-       12 questions per round and 6 rounds per Goal, each question with a
-       recommendation; answers are journaled Goal facts.
-     - Keep the existing Completed/Failed report, cancellation pause and
-       explicit resume semantics from the Goals contract. RPI may add its own
-       confirmation at a phase boundary.
-   - **Ask** asks before every effect.
-   - **Accept edits** integrates typed edits and in-scope changesets without
-     prompts; commands and MCP calls ask.
-   - **Auto** lets the Supervisor approve effects inside the plan contract;
-     out-of-scope, borderline or failed evaluation asks the user. It replaces
-     today's per-action AI review.
-
-   The proposed team (roles, profiles, missions, leases, budget) needs
-   approval in RPI and Ask; Accept edits and Auto start it without a prompt
-   when it fits the roster preset and budgets.
-
-### C. Coding teams
-
-The primary composes the team from the user's request: roles, profiles (D2),
-missions, direction and path leases. Use the admitted child role chain;
-assignment-specific selection waits for D.
-
-Topology is one level: workers cannot spawn workers or message each other,
-and everything flows through the primary. Concurrent workers are capped by a
-setting (default 4) and by each Provider's concurrency. A worker's grant is the
-intersection of the Goal grant and its assignment, which names its commands,
-Skills and MCP tools; workers never receive Git or network capabilities. The
-worker slices grant catalog listing only; MCP invocation is excluded
-([rationale](./design-tree.md#worker-ownership)).
-
-C2's implemented assignment identity, grants, leases, disposable private edits, handover eligibility, whole-batch conflicts and completion-order waves belong to the [Execution contract](../../docs/specs/execution.md#worker-journal-protocol). [Session](../../docs/specs/session.md#worker-identity-and-explicit-reassignment) owns explicit fresh-assignment ID resume and historical context; [Goals](../../docs/specs/goals.md#worker-accounting-and-verification) owns recovery admission and primary verification. The [ownership rationale](./design-tree.md#worker-ownership) retains the remaining C3 choices.
-
-- **C3 Command-capable views.** Each worker gets one persistent
-   private Guard view for its whole assignment: the Workspace at assignment plus
-   its own work. Its commands run there, and it must pass its own success
-   criterion inside the view before handover; the primary re-verifies after
-   integration. The build cache is read-only for workers: they read the archive
-   as of assignment and never publish; only primary commands publish.
-- **C4 Reviewer role.** A read-only reviewer child evaluates each changeset
-   before integration, feeding the Supervisor review point (B4).
-
-C3 extends the current C1/C2 collaboration contract. Its remaining gates and evidence owners are in [execution](#execution).
-
-### D. Provider roster and per-agent routing
-
-Named private presets now pin and admit all reachable routes for the four current roles (`primary`, `child`, `review`, `compaction`), with explicit `--profile`, bounded immutable Run metadata, same-selection Goal recovery and pinned compaction. The [Provider contract](../../docs/specs/provider.md#named-roster-presets) owns that behavior and its limits; current selected-account loaders and Tool-history adapter/account restrictions still apply.
-
-The primary can select an eligible, already admitted profile per typed child assignment, with journaled spawn references and actor-specific call/switch validation. Cancellation, crash, budget-refusal and Guard-continuity journeys are proven through both entry paths. Children remain read-only and bounded by the parent grant; model output cannot introduce a destination or another preset.
-
-Separately proposed D work, excluded from item 9 by decision O1: judge-only adapters and a durable per-agent pause/retry/switch lifecycle after exhausted routes. Those need accepted Events, dependency blocking, active-time and user-command contracts before implementation. Existing ordered HTTP-5xx fallback, failed-child → sibling drain → failed Run, shared budgets and explicit new-Run recovery remain authoritative. Worker/reviewer/judge taxonomy, writable workers, leases and handover belong to C2/C3 rather than this preset slice.
-
-### E. Goal lifecycle and terminal
-
-- **E2 Context.** Each phase Run receives the approved artifacts, Goal facts and
-   its own capsule, not the full transcript; workers receive only their
-   assignment capsule.
-- **E5 Supervisor override.** The user can override any Supervisor response
-   with a one-use approval; overrides are journaled, feed threshold
-   calibration and never change configuration.
-- **E6 Git writes.** Commit, branch and push run the user's host `git` with
-   fixed argument arrays, after Arany admits `.git/config` against a closed
-   allowlist of inert keys; any other key rejects with an explanation. Hooks
-   never run on the host (`--no-verify`); a per-folder setting can run the
-   declared hook scripts as Guard commands before the write. A dedicated
-   security pass precedes this slice.
-   - The model commits on its own only when the project rules ask for it and
-     the user enabled "project rules may authorize commits" for that trusted
-     folder; otherwise only on an explicit user request. Project rules always
-     guide conventions. Trusting a hostile repository is the user's decision.
-   - Push, branch deletion and anything touching a remote always need human
-     approval, even in Auto.
-   - Force-push, history rewriting and similar disruptive operations are
-     disabled; a global setting can enable them, and each one still needs
-     human approval in every mode, showing the exact remote, branch and lost
-     commits.
-   - The final report always includes a change summary and a suggested
-     commit message.
-- **E7 Goal view.** The terminal tells the story of the Goal instead of showing
-   a checklist (checklists spend tokens without adding much): what the team
-   is doing now, agents with their profiles, occasional progress messages
-   from each agent, budget use, Supervisor events and pending questions as a
-   picker. The [terminal contract](../../docs/specs/terminal.md) owns it.
-   - Activity lines are composed by the Engine from journaled events and
-     cost no tokens. Each agent outcome may carry a progress note of at most
-     160 characters; the primary adds a one-paragraph narration at phase
-     transitions.
-   - Each agent shows one live line with its latest note, replaced as new
-     notes arrive; the full history stays in agent inspection.
-   - Usage is shown as tokens and calls per profile, without cost estimates.
-   - Linear and screen-reader presentations carry the same facts as labeled
-     lines, as the terminal contract already requires for Runs.
-- **E8 Phase-artifact compaction.** Extend the current Goal-context reinjection
-   with approved RPI artifacts and grilling answers. Keep requests, decisions,
-   touched files and errors in the summary; drop raw Tool output.
-- **E9 Memory.** Each Goal starts from Session history and the repository;
-   cross-Session Memory stays an expansion decision.
-- **E10 Headless use.** `arany exec` stays as the scriptable product surface
-   (CI, scripts, API-style integration). It runs RPI only with an explicit
-   flag that approves the plan within the upfront grant and budgets; grilling
-   questions resolve to their recommended answers, recorded as assumptions in
-   the final report. Without the flag it goes straight to Implementation. Goal
-   progress and the final report use the existing JSONL channel.
-- **E12 Settings.** Extend the existing private, owner-only, versioned
-    user preferences through `/settings`; per-folder values live with
-    the folder-trust record; project files never set them. `tools.json`,
-    `supervisor.json` and the roster stay separate private files.
-    - Per folder: hook execution, commit authorization, toolchain profiles.
-    - Global: default mode, timeouts and maxima, worker cap, roster
-      selection and disruptive Git operations. Existing usage and timeout
-      settings retain their current contract.
-- **E13 Telemetry.** Extend opt-in OTLP for new phase, worker and Supervisor
-    facts under the existing [telemetry spec](../../docs/specs/telemetry.md);
-    current Goal/Agent spans already have that owner.
-
-## OS impact
-
-C2/C3 need equivalent disposable worker storage, isolation, cleanup and lease
-validation on Linux and macOS. C3 adds offline commands and read-only cache
-mounts in those views. A6 needs network-namespace routing to the proxy on Linux
-and proxy-only Seatbelt rules on macOS. Unsupported enforcement fails closed;
-[remaining native checks](../../NEXT_STEPS.md#beta-2-and-broader-release) precede
-support claims. Native Windows is out of scope; WSL2 needs its own evidence.
-
-## Security and resource model
-
-Each slice that crosses one of these boundaries runs the
-[security pass](../../agents/security.md#security-pass-triggers) before merge.
-
-- **Registry fetch (A6).** The only network path from a Tool: allowlisted
-  public registries through the Guard-owned proxy, with SSRF rejection,
-  install scripts disabled and no credentials.
-- **Git writes (E6).** Proposed host writes require closed allowlist admission
-  of `.git/config` with hooks disabled. Existing typed reads remain owned by
-  the Tools contract; this plan grants no host write path.
-- **Providers and judges (D, B).** Every roster profile and judge is an egress
-  destination with its own credential, usage consent and disclosure scope,
-  admitted before Workspace disclosure. Multiple credentials stay inside the
-  Engine and are never passed to Guard payloads.
-- **Authority.** The Supervisor, judges and project rules can only narrow,
-  except the explicit per-folder commit authorization and global
-  disruptive-Git setting, which the user owns.
-- **Bounds.** Changesets, progress
-  notes (160 characters), grilling (12 questions × 6 rounds), judge budgets,
-  concurrent workers (default 4) and settings maxima are declared with
-  overflow behavior. User-chosen unlimited usage applies only to Goal usage
-  dimensions; per-request Provider caps and Guard resource ceilings stay
-  finite, as [AGENTS.md rule 4](../../AGENTS.md#global-rules) already requires.
-
-## Execution
-
-[Next steps](../../NEXT_STEPS.md#pursue-in-order) sets priority and freezes;
-these are the remaining slice boundaries and dependencies. Each slice updates
-its owning contract and uses existing evidence under [testing rules](../../agents/testing.md).
-
-- **C3 command-capable views (roadmap 12).** After C2, add persistent private
-  assignment views, worker commands, the in-view success criterion and read-only
-  assignment-time build cache. Tools owns cache behavior; Tool journeys cover
-  worker cache outcomes and the Engine corpus covers cancellation/disposal.
-  MCP invocation and worker cache publication remain excluded.
-- **D roster (roadmap 9).** Presets and assignment selection have
-  cancellation, crash and Guard-continuity evidence through both entry paths.
-  Provider and credential contracts own admission. Judge-only adapters and
-  paused-agent recovery are separate work requiring accepted contracts and
-  primary-source API research.
-- **B6/E7/E12 modes and RPI (roadmap 6).** Extend permission modes and hook
-  wiring with phase Runs, grilling, plan/team approval, Goal presentation and
-  settings. Goals, Tools and Terminal own approval, recovery, bounds and
-  accessible presentation. Verify rejected/revised plans, phase cancellation,
-  explicit resume and bounded headless RPI.
-- **B2–B5/E5/C4 Supervisor and reviewer (roadmap 12).** Implement configurable
-  evaluators as narrowing hook adapters, shadow-mode signals, escalation,
-  worker Finish gate, one-use overrides and read-only changeset review. Keep
-  thresholds data-dependent; verify detection, journaled verdicts, timeout,
-  budget exhaustion and replay without another judge call.
-- **E2/E8/E10 remaining Goal workflows.** Add phase capsules/artifacts and headless RPI under the Goals and Terminal contracts.
-- **E6 Git writes.** A separate security-reviewed slice after the freeze;
-  verify inert repository configuration, exact approval, protected remote
-  operations and no authority from repository text alone.
-- **A6 registry fetch.** Remains frozen. Tools owns the two-phase proxy grant;
-  verify public-registry success followed by offline build, SSRF/host refusal,
-  disabled install scripts and byte/connection/time overflow.
-
-Next action: follow the roadmap prerequisites and C3 owner decisions. Dogfooding is
-owner-run and supplies Supervisor calibration; pending live/native checks do
-not block independent implementation. E13 telemetry lands with each new
-subject under the existing telemetry contract.
+1. After owner-accepted calibration, enforce a single existing signal end to end:
+   pinned policy → committed verdict → narrowing response → visible pause/approval
+   → explicit recovery. Update Tools/Execution/Terminal and replay evidence.
+2. Add bounded read-only changeset review at integration/Finish through admitted
+   roster profiles, with journaled verdicts and failure-to-human handling. Typed
+   judge vendors depend on the separate adapter plan.
+3. Add explicit one-use responses and their calibration facts, with no automatic
+   policy rewrite. Extend opt-in telemetry with the existing privacy contract.
 
 ## Open questions
 
-Owner: Fernando Mirabile. [Roadmap item 6](../../NEXT_STEPS.md#pursue-in-order)
-owns RPI exhaustion and Auto authority decisions; item 12 owns Supervisor
-threshold calibration. Resolve each before its corresponding slice.
-The [design rationale](./design-tree.md) explains the choices that remain live.
+Owner: Fernando Mirabile. Accept thresholds only after the [owner-run calibration
+criteria](../../NEXT_STEPS.md#pursue-in-order) pass. Decide evaluator
+configuration/schema, review budget/timeout/call caps, response eligibility and
+any new signal before its slice. Proposed probability bands are not calibrated
+thresholds. No enforcement slice is implementation-ready yet.
 
-## Contract owners
+## Related plans
 
-- [Goals](../../docs/specs/goals.md): lifecycle, phase artifacts, budgets and Goal facts.
-- [Execution](../../docs/specs/execution.md): Run admission, coordination, teams and recovery.
-- [Tools](../../docs/specs/tools.md): grants, effects, changesets, Guard and native differences.
-- [Terminal](../../docs/specs/terminal.md): interaction, Supervisor prompts and accessibility.
-- [Credentials](../../docs/specs/credentials.md): account scope, storage, recovery and roster accounts.
-- [Provider spec](../../docs/specs/provider.md): profile admission, capability classes and conformance.
-- [Diagnostics](../../docs/specs/diagnostics.md): bounded private failure inspection.
-- [System overview](../../docs/architecture/system-overview.md): ownership and data flow.
+<a id="e-goal-lifecycle-and-terminal"></a>
+
+Git authority belongs exclusively to the [Git write workflow](../git-write-workflow/README.md)
+and [typed Git contract](../../docs/specs/tools.md#typed-git-writes).
+[Goal RPI](../goal-rpi/README.md), [Goal progress](../goal-progress/README.md),
+[agent route recovery](../agent-route-recovery/README.md) and
+[registry fetch](../registry-fetch/README.md) have independent lifecycles.
+Cross-Session memory and multiple supervisors require a demonstrated need.
 
 ## Exit criteria
 
-- A team of a primary and writable workers completes a scripted coding task
-  (edit, format, build, test, integrate) on Linux and macOS with closed replay.
-- An RPI Goal runs Research → Plan (with grilling) → approved multi-Run
-  Implementation to Completed, and to Failed with a final report; Ctrl+C
-  pauses it until `/goal resume`, and restart resumes only through the
-  explicit user action in the Goal contract.
-- One Goal mixes at least two Providers across roles; an unadmittable or
-  failing profile names itself, pauses its agents or switches within the
-  admitted fallback boundary, without re-dispatching uncertain effects.
-- Teams beat or match a single-agent baseline on a local task corpus
-  (success, usage, elapsed time) before any claim that teams help.
-- Each Supervisor signal has a corpus case proving detection, the narrowing
-  response and replay equality; no signal ever widens authority.
-- A fetch adds a dependency through the proxy on Linux and macOS, then builds
-  offline; non-allowlisted hosts, private addresses and install-script
-  execution during fetch reject.
-- Rejected, oversized, conflicting and cancelled changesets leave the Workspace
-  unchanged or in a recorded uncertain state.
-- Unperformed native, live and user checks are reported without claiming
-  support. Accepted behavior moves to specs and tests, and completed
-  execution work is removed from this plan.
+Each enabled signal has accepted calibration and corpus proof of detection,
+narrowing, failure/recovery and replay equality; reviewers add no effect authority.
+Compare team success, usage and elapsed time with a single-agent corpus baseline
+before claiming a quality benefit. Keep missing native/live/assistive evidence in
+NEXT_STEPS and move accepted behavior to specs as slices land.
