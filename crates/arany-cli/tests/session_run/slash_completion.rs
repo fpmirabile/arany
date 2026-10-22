@@ -2189,7 +2189,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         }
         let outside = temp.path().join("outside.txt");
         std::fs::write(&outside, b"OUTSIDE_INPUT_CANARY").unwrap();
-        std::os::unix::fs::symlink(&outside, workspace.join("unsafe.txtZ")).unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("linkZ")).unwrap();
         let shell = "stty rows 24 cols 40; before=$(stty -g); printf 'TTY_BEFORE:%s\n' \"$before\"; \"$ARANY_TEST_EXE\" --classic --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --provider openai --model gpt-5.4 --no-color $ARANY_TEST_INCLUDES; exit_code=$?; after=$(stty -g); printf 'TTY_AFTER:%s\n' \"$after\"; exit \"$exit_code\"";
         let includes = if merged_overflow {
             (0..16)
@@ -2375,7 +2375,7 @@ fn inline_quick_selector_returns_to_the_same_draft_and_caret() {
         } else {
             vec![
                 ("Check @missing.txtZ", b"exist;".as_slice()),
-                ("Check @unsafe.txtZ", b"unavailable;".as_slice()),
+                ("Check @linkZ", b"symbolic".as_slice()),
             ]
         };
         for (draft, diagnostic) in cases {
