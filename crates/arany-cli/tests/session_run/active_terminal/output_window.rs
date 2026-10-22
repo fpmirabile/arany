@@ -37,7 +37,7 @@ fn sigterm_during_restored_output_preserves_receipt_and_terminal() {
                 1 => {
                     serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
                 }
-                2 => serde_json::json!(r#"{"summary":"synthetic summary"}"#),
+                2 => serde_json::json!(r#"synthetic summary"#),
                 _ => {
                     request_sender.send(()).expect("active Provider gate");
                     response_ready

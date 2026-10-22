@@ -274,7 +274,7 @@ fn outbound_documents_pin_privacy_schema_and_scope() {
     assert_eq!(compact_input["items"][1]["status"], "interrupted");
     assert!(compact_input.get("workspace_guidance").is_none());
     assert!(compact_input.get("session_id").is_none());
-    assert_eq!(compact_body["text"]["format"]["schema"], summary_schema());
+    assert!(compact_body.get("text").is_none());
     let native_compact = compaction_body_with_effort(&compact, Effort::Low);
     assert_eq!(native_compact["reasoning"]["effort"], "low");
 }
@@ -1282,7 +1282,7 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     assert_eq!(accepted.turn.items("openai").unwrap().len(), 1);
     for compaction in [false, true] {
         let text = if compaction {
-            r#"{"summary":"short"}"#
+            r#"short"#
         } else {
             answer_text()
         };
@@ -1385,15 +1385,33 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
             }
         }
     }
-    let compact_response = response("completed", json!([message(r#"{"summary":"short"}"#)]));
+    let compact_response = response("completed", json!([message(r#"short"#)]));
     let compact = decode_compaction(&serde_json::to_vec(&compact_response).unwrap(), MODEL)
         .expect("completed Responses compaction");
     assert_eq!(compact.summary, "short");
+    for (text, accepted) in [
+        (String::new(), false),
+        (" \n\t".into(), false),
+        ("x".repeat(8 * 1024), true),
+        ("é".repeat(4 * 1024), true),
+        ("x".repeat(8 * 1024 + 1), false),
+        ("é".repeat(4 * 1024 + 1), false),
+        ("  summary\n".into(), true),
+        (r#"{"summary":"ok","extra":1}"#.into(), true),
+    ] {
+        let fixture = response("completed", json!([message(&text)]));
+        let decoded = decode_compaction(&serde_json::to_vec(&fixture).unwrap(), MODEL);
+        assert_eq!(decoded.is_ok(), accepted);
+        if let Ok(decoded) = decoded {
+            assert_eq!(decoded.summary, text);
+        }
+    }
+
     for malformed in [
         json!({"type":"output_text"}),
         json!({"type":"output_text","text":null}),
     ] {
-        for (compaction, valid) in [(false, answer_text()), (true, r#"{"summary":"short"}"#)] {
+        for (compaction, valid) in [(false, answer_text()), (true, r#"short"#)] {
             let fixture = response(
                 "completed",
                 json!([
@@ -1478,7 +1496,6 @@ fn inbound_wire_corpus_requires_one_completed_structured_answer() {
     ] {
         assert!(structured_outcome(text).is_err(), "bad outcome shape");
     }
-    assert!(serde_json::from_str::<SummaryEnvelope>(r#"{"summary":"ok","extra":1}"#).is_err());
     assert!(encode_request(&json!({"oversize": "x".repeat(MAX_REQUEST_BYTES)})).is_err());
     let overhead = r#"{"oversize":""}"#.len();
     for (window, ceiling) in [
