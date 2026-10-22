@@ -993,12 +993,15 @@ fn function_call_raw(name: &str, arguments: &str) -> Value {
 #[test]
 fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() {
     use crate::session::{ProposalRefusal, ProposalRefusalCause};
-    for cwd in [
-        "docs/specs",
-        "./doc/spec",
-        "docs/specs/",
-        "./docs/specs",
-        "../outside",
+    for (cwd, expected, valid) in [
+        ("docs/specs", "docs/specs", true),
+        ("./doc/spec", "doc/spec", true),
+        ("docs/specs/", "docs/specs", true),
+        ("./docs/specs", "docs/specs", true),
+        ("././docs/specs/", "docs/specs", true),
+        ("../outside", "../outside", false),
+        ("/", "/", false),
+        ("docs/specs//", "docs/specs/", false),
     ] {
         let mut request = primary_request(MODEL);
         let arguments =
@@ -1011,8 +1014,9 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
         let ProviderOutcome::Tools(calls) = &parsed.outcome else {
             panic!("Command")
         };
-        assert_eq!(calls[0].call.valid(), cwd == "docs/specs");
-        if cwd.len() == 10 {
+        assert_eq!(calls[0].call.path_argument(), Some((expected, true)));
+        assert_eq!(calls[0].call.valid(), valid);
+        if cwd == "docs/specs" {
             assert_eq!(serde_json::to_vec(&calls[0].call).unwrap().len(), 634);
         }
         let shape = format!(
@@ -1022,7 +1026,7 @@ fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() 
         assert!(shape.contains("program_chars: Some(2)"));
         assert!(shape.contains("args_count: Some(2)"));
         assert!(shape.contains("largest_arg_bytes: Some(543)"));
-        if cwd == "docs/specs" {
+        if valid {
             continue;
         }
         assert_eq!(parsed.usage.input_tokens, Some(12));
@@ -1090,7 +1094,7 @@ fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
             Stage::OutcomeToolEmptyEdit,
         ),
         (
-            json!({"operation":"read","path":"./README.md","offset":null,"limit":null}),
+            json!({"operation":"read","path":"../README.md","offset":null,"limit":null}),
             Stage::OutcomeToolPath,
         ),
         (

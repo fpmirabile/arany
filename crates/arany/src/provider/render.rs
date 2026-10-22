@@ -67,19 +67,29 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
         )]));
     }
     let system = system_blocks(request);
+    let correction = input.outcome_correction.then(|| data_block(
+        "harness_outcome_correction",
+        json!({
+            "cause": "outcome_contract",
+            "remediation": "This is the single corrective call for the preceding rejected Provider outcome. Return a permitted native function call with valid arguments, or plain assistant text for the final answer. Rejected output was not accepted; never repeat prior effects.",
+        }),
+    ));
+    let correction_bytes = correction.as_ref().map_or(0, |block| match block {
+        Block::Text(text) => text.len(),
+        Block::Image { .. } | Block::AssistantTurn(_) | Block::ToolResult { .. } => 0,
+    });
     if system
         .iter()
-        .filter(|block| {
-            matches!(
-                block,
-                SystemBlock::PreviousRunFailure(_) | SystemBlock::OutcomeCorrection
-            )
-        })
+        .filter(|block| matches!(block, SystemBlock::PreviousRunFailure(_)))
         .map(|block| block.text().len())
         .sum::<usize>()
+        + correction_bytes
         > super::conversation::MAX_HARNESS_FEEDBACK_BYTES
     {
         return Err(ProviderError::Rejected);
+    }
+    if let Some(correction) = correction {
+        messages.push(user(vec![correction]));
     }
     Ok(Conversation {
         system,
@@ -132,9 +142,6 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
     }
     if let Some(failure) = request.input.previous_run_failure {
         system.push(SystemBlock::PreviousRunFailure(failure));
-    }
-    if request.input.outcome_correction {
-        system.push(SystemBlock::OutcomeCorrection);
     }
     system
 }
@@ -383,7 +390,7 @@ fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
             "Invalid Tool arguments; send one call matching the offered schema and its bounds."
         }
         InvalidPath => {
-            "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Omit leading ./ and trailing /; absolute paths, empty components, traversal and private paths are forbidden."
+            "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Leading ./ and one trailing directory / are normalized; file trailing /, absolute paths, empty components, traversal and private paths are forbidden."
         }
         Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
         PlanInvalid => "Send a valid arany_plan; do not replace a recorded contract.",

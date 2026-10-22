@@ -6,7 +6,8 @@ use crate::tools::{CacheUpdate, ToolDisposition};
 
 /// The Goal budget dimension that admitted no next Run.
 #[must_use]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum GoalLimit {
     Calls,
     Runs,
@@ -16,7 +17,8 @@ pub enum GoalLimit {
 
 /// Why a Run stopped short of completing its Goal, projected from committed facts.
 #[must_use]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RunStop {
     GoalExhausted(GoalLimit),
     /// The Goal waits at this Run for an explicit resume.
@@ -32,7 +34,7 @@ pub enum RunStop {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct RunFailureFeedback {
-    pub failure: RunFailure,
+    pub stop: RunStop,
     pub provider_disposition: Option<super::ProviderCallDisposition>,
     pub provider_failure: Option<crate::provider::ProviderFailureReason>,
     pub refusal_cause: Option<super::ProposalRefusalCause>,
@@ -41,26 +43,18 @@ pub struct RunFailureFeedback {
 impl SessionView {
     pub(crate) fn previous_run_failure(&self) -> Option<RunFailureFeedback> {
         let run = self.runs.last()?;
-        let failure = match self.run_stop(run) {
-            Some(RunStop::GoalExhausted(_)) => RunFailure::BudgetExhausted,
-            Some(RunStop::Failed(failure)) => failure,
-            None => run.failure?,
-            Some(
-                RunStop::Paused
-                | RunStop::Cancelled
-                | RunStop::StoppedByHook
-                | RunStop::Uncertain
-                | RunStop::Interrupted,
-            ) => return None,
-        };
-        let call = run
-            .primary()?
-            .provider_calls
-            .iter()
-            .rev()
-            .find(|call| call.phase != crate::provider::AgentPhase::ToolReview);
+        let stop = self
+            .run_stop(run)
+            .or_else(|| run.failure.map(RunStop::Failed))?;
+        let call = run.primary().and_then(|primary| {
+            primary
+                .provider_calls
+                .iter()
+                .rev()
+                .find(|call| call.phase != crate::provider::AgentPhase::ToolReview)
+        });
         Some(RunFailureFeedback {
-            failure,
+            stop,
             provider_disposition: call.map(|call| call.disposition),
             provider_failure: call.and_then(|call| call.failure_reason),
             refusal_cause: call.and_then(|call| call.refusal.as_ref().map(|refusal| refusal.cause)),
@@ -416,6 +410,77 @@ mod tests {
             Some(RunStop::Failed(RunFailure::ProposalRefused)),
             "a terminal receipt keeps its own outcome"
         );
+    }
+
+    #[test]
+    fn previous_run_feedback_preserves_closed_stops_even_without_a_primary_call() {
+        let fixture = crate::session::worker_protocol_fixture();
+        let mut view = SessionView::replay(fixture.session, &fixture.envelopes())
+            .unwrap()
+            .unwrap();
+        for (status, goal_status, unknown, expected) in [
+            (
+                RunStatus::Interrupted,
+                GoalStatus::Interrupted,
+                false,
+                Some(RunStop::Interrupted),
+            ),
+            (
+                RunStatus::Interrupted,
+                GoalStatus::Interrupted,
+                true,
+                Some(RunStop::Uncertain),
+            ),
+            (
+                RunStatus::Cancelled,
+                GoalStatus::Failed,
+                false,
+                Some(RunStop::Cancelled),
+            ),
+            (
+                RunStatus::Cancelled,
+                GoalStatus::Interrupted,
+                false,
+                Some(RunStop::Paused),
+            ),
+            (
+                RunStatus::StoppedByHook,
+                GoalStatus::Interrupted,
+                false,
+                Some(RunStop::StoppedByHook),
+            ),
+            (
+                RunStatus::Failed,
+                GoalStatus::Failed,
+                false,
+                Some(RunStop::Failed(RunFailure::ProposalRefused)),
+            ),
+            (RunStatus::Finished, GoalStatus::Completed, false, None),
+        ] {
+            let mut run = unanswered_run(status);
+            run.objective = "PRIVATE_OBJECTIVE".into();
+            if unknown {
+                run.tools.push(tool(None));
+            }
+            let mut goal = goal(goal_status, false);
+            goal.run_ids.push(run.id);
+            view.runs = vec![run];
+            view.goals = vec![goal];
+            let feedback = view.previous_run_failure();
+            assert_eq!(
+                feedback.map(|feedback| feedback.stop),
+                expected,
+                "{status:?}"
+            );
+            if let Some(feedback) = feedback {
+                assert_eq!(feedback.provider_disposition, None);
+                assert!(
+                    !serde_json::to_string(&feedback)
+                        .unwrap()
+                        .contains("PRIVATE_OBJECTIVE")
+                );
+            }
+        }
     }
 
     #[test]

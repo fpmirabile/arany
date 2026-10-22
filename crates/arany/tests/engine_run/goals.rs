@@ -3430,6 +3430,52 @@ async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_ref
 }
 
 #[tokio::test]
+async fn outcome_correction_notice_is_spent_after_the_corrective_tool_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let provider = ScriptedProvider::new(vec![
+        finish_with("rejected placeholder"),
+        crate::tool_outcome(facts_read()),
+        finish_with("The answer after correction"),
+    ]);
+    *provider
+        .responses
+        .lock()
+        .expect("responses")
+        .front_mut()
+        .expect("first") = Err(ProviderError::InvalidOutcomeContract);
+    let provider = Arc::new(provider);
+    let mut input = request(&workspace, "Read the facts and answer");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("corrective Tool continuation");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("shutdown");
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let requests = provider.requests.lock().expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.input.outcome_correction)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+    assert!(provider.responses.lock().expect("responses").is_empty());
+}
+
+#[tokio::test]
 async fn malformed_outcomes_get_one_journaled_correction_and_keep_the_failure_cause() {
     for failures in [1, 2] {
         let temp = tempfile::tempdir().expect("temporary root");
@@ -3538,7 +3584,10 @@ async fn malformed_outcomes_get_one_journaled_correction_and_keep_the_failure_ca
                 .input
                 .previous_run_failure
                 .expect("prior failure after Tools");
-            assert_eq!(feedback.failure, arany::RunFailure::ProviderCall);
+            assert_eq!(
+                feedback.stop,
+                arany::RunStop::Failed(arany::RunFailure::ProviderCall)
+            );
             assert_eq!(
                 feedback.provider_failure,
                 Some(arany::ProviderFailureReason::OutcomeContract)

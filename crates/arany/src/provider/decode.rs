@@ -105,6 +105,22 @@ pub(crate) fn tool_request(
     {
         return Err(ProviderError::InvalidOutcome);
     }
+    let (path_key, directory) = match operation {
+        "list" | "search" | "glob" => ("path", true),
+        "command" | "command_unguarded" => ("cwd", true),
+        "multiedit" => ("file_path", false),
+        _ => ("path", false),
+    };
+    if let Some(Value::String(path)) = fields.get_mut(path_key) {
+        let mut normalized = path.as_str();
+        while let Some(rest) = normalized.strip_prefix("./") {
+            normalized = rest;
+        }
+        if directory && normalized != "/" {
+            normalized = normalized.strip_suffix('/').unwrap_or(normalized);
+        }
+        *path = normalized.to_owned();
+    }
     let call: ToolCall = serde_json::from_value(Value::Object(fields)).map_err(invalid)?;
     if matches!(
         call,
@@ -151,6 +167,60 @@ pub(crate) fn review_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_tool_paths_normalize_only_peer_spelling_before_admission() {
+        for (operation, mut fields, expected, valid) in [
+            ("read", json!({"path":"././src/a"}), "src/a", true),
+            ("read", json!({"path":"./src/a/"}), "src/a/", false),
+            (
+                "write",
+                json!({"path":"./src/a/", "expected_digest":null, "content":"x"}),
+                "src/a/",
+                false,
+            ),
+            ("mkdir", json!({"path":"./src/"}), "src/", false),
+            ("list", json!({"path":"././src/"}), "src", true),
+            ("search", json!({"path":"./src/", "query":"x"}), "src", true),
+            ("glob", json!({"path":"./src/", "pattern":"*"}), "src", true),
+            (
+                "command",
+                json!({"cwd":"././src/", "program":"rg", "args":[]}),
+                "src",
+                true,
+            ),
+            ("list", json!({"path":"./"}), "", true),
+            ("read", json!({"path":"./"}), "", false),
+            ("list", json!({"path":"/"}), "/", false),
+            ("list", json!({"path":".//"}), "/", false),
+            ("list", json!({"path":"src//"}), "src/", false),
+            ("read", json!({"path":"./../outside"}), "../outside", false),
+            ("read", json!({"path":"./.env"}), ".env", false),
+            (
+                "list",
+                json!({"path":"src/./nested/"}),
+                "src/./nested",
+                false,
+            ),
+        ] {
+            if operation == "read" {
+                fields["offset"] = Value::Null;
+                fields["limit"] = Value::Null;
+            }
+            let request = super::tool_request(
+                super::ToolUseId::new("call_test").unwrap(),
+                operation,
+                fields,
+            )
+            .expect("bounded typed proposal");
+            assert_eq!(
+                request.call.path_argument().unwrap().0,
+                expected,
+                "{operation}"
+            );
+            assert_eq!(request.call.valid(), valid, "{operation}: {expected}");
+        }
+    }
 
     #[test]
     fn assignments_require_one_current_closed_object_form_and_bounded_payload() {

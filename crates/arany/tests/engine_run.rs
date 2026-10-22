@@ -169,7 +169,10 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
             .input
             .previous_run_failure
             .expect("committed failure cause");
-        assert_eq!(feedback.failure, first.run.failure.expect("failed Run"));
+        assert_eq!(
+            feedback.stop,
+            arany::RunStop::Failed(first.run.failure.expect("failed Run"))
+        );
         assert_eq!(feedback.provider_failure, call.failure_reason);
         assert_eq!(
             follow_up_request.input.objective,

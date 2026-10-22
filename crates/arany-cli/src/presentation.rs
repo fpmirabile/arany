@@ -1305,10 +1305,7 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
 fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     use arany::ProviderFailureReason;
     match (call.disposition, call.failure_reason) {
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::ProposalRefused),
-        ) => {
+        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::ProposalRefused)) => {
             return call
                 .refusal
                 .as_ref()

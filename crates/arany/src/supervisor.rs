@@ -882,7 +882,7 @@ fn subject(
             if matches!(
                 record.disposition,
                 crate::session::ProviderCallDisposition::InvalidResponse
-            ) =>
+            ) || record.refusal.is_some() =>
         {
             step.stall = true;
             Site::Stall

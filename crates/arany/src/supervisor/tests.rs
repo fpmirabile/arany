@@ -469,3 +469,65 @@ fn supervisor_one_crossing_journals_one_verdict_not_a_stream() {
     let capture = new_facts(evaluate(&window, None, &policy), Site::WorkerCapture, 2);
     assert!(capture.is_empty());
 }
+
+#[test]
+fn primary_proposal_refusals_are_stalls_without_marking_account_rejections() {
+    use crate::session::{ProposalRefusal, ProposalRefusalCause, ProviderCallDisposition};
+    let fixture = crate::session::worker_protocol_fixture();
+    let view = SessionView::replay(fixture.session, &fixture.envelopes())
+        .unwrap()
+        .unwrap();
+    let run = &view.runs[0];
+    let actor = run.primary().unwrap().id;
+    let original = fixture.envelopes().into_iter().find(|envelope| matches!(
+        &envelope.event, Event::ProviderCallRecorded { agent_run_id, .. } if *agent_run_id == actor
+    )).unwrap();
+    for (disposition, refused, stalled) in [
+        (ProviderCallDisposition::InvalidResponse, false, true),
+        (ProviderCallDisposition::Rejected, true, true),
+        (ProviderCallDisposition::Rejected, false, false),
+        (ProviderCallDisposition::Finished, false, false),
+    ] {
+        let mut envelope = original.clone();
+        let Event::ProviderCallRecorded { record, .. } = &mut envelope.event else {
+            unreachable!()
+        };
+        record.disposition = disposition;
+        record.delegation = None;
+        record.requested_tools = 0;
+        record.failure_reason =
+            refused.then_some(crate::provider::ProviderFailureReason::ProposalRefused);
+        record.refusal = refused.then(|| ProposalRefusal {
+            operation: "arany_read".into(),
+            cause: ProposalRefusalCause::InvalidPath,
+        });
+        record.response_id = None;
+        record.input_tokens = None;
+        record.output_tokens = None;
+        record.cache_read_input_tokens = None;
+        record.cache_creation_input_tokens = None;
+        record.wire_provenance = None;
+        envelope.event.payload().expect("current call record");
+        let boundary = subject(run, actor, &envelope);
+        assert_eq!(
+            boundary.is_some(),
+            stalled,
+            "{disposition:?}, refused {refused}"
+        );
+        if let Some((site, mut step, footprint)) = boundary {
+            assert_eq!(site, Site::Stall);
+            assert!(step.stall && !step.observation);
+            assert!(footprint.is_none());
+            step.sequence = 1;
+            let mut window = VecDeque::from([step.clone()]);
+            step.sequence = 2;
+            window.push_back(step);
+            assert_eq!(
+                looping(&evaluate(&window, None, &SupervisorPolicy::default()))
+                    .unwrap()
+                    .1,
+                Level::Notice
+            );
+        }
+    }
+}

@@ -97,36 +97,61 @@ fn serialized(messages: &[Message]) -> Vec<String> {
 }
 
 #[test]
-fn harness_failure_and_correction_feedback_is_closed_bounded_system_context() {
-    for (failure, reason) in [
+fn harness_feedback_is_bounded_and_correction_preserves_the_system_prefix() {
+    use crate::session::{GoalLimit, RunFailure, RunStop};
+    for (stop, reason) in [
         (
-            crate::session::RunFailure::ProviderCall,
+            RunStop::Failed(RunFailure::ProviderCall),
             Some(super::super::ProviderFailureReason::OutcomeContract),
         ),
-        (crate::session::RunFailure::ToolContextFull, None),
-        (crate::session::RunFailure::BudgetExhausted, None),
+        (RunStop::Failed(RunFailure::ToolContextFull), None),
+        (RunStop::GoalExhausted(GoalLimit::Tokens), None),
         (
-            crate::session::RunFailure::WorkersUnverified,
+            RunStop::Failed(RunFailure::WorkersUnverified),
             Some(super::super::ProviderFailureReason::UsageTemporarilyUnavailable),
         ),
+        (RunStop::Uncertain, None),
+        (RunStop::Interrupted, None),
+        (RunStop::Cancelled, None),
+        (RunStop::Paused, None),
+        (RunStop::StoppedByHook, None),
     ] {
         let mut request = request(vec![step("call_1", "src/lib.rs")]);
         request.input.previous_run_failure = Some(crate::session::RunFailureFeedback {
-            failure,
+            stop,
             provider_disposition: Some(crate::session::ProviderCallDisposition::InvalidResponse),
             provider_failure: reason,
             refusal_cause: Some(crate::session::ProposalRefusalCause::InvalidPath),
         });
+        let original = conversation(&request).expect("original request");
         request.input.outcome_correction = true;
         let rendered = conversation(&request).expect("render");
-        let feedback: String = rendered.system[2..].iter().map(SystemBlock::text).collect();
+        assert_eq!(original.system, rendered.system);
+        assert_eq!(
+            original.messages,
+            rendered.messages[..original.messages.len()]
+        );
+        assert_eq!(rendered.messages.len(), original.messages.len() + 1);
+        let correction = rendered.messages.last().expect("correction");
+        assert_eq!(correction.role, Role::User);
+        let mut feedback: String = rendered.system[2..].iter().map(SystemBlock::text).collect();
+        let [Block::Text(text)] = correction.blocks.as_slice() else {
+            panic!("harness data")
+        };
+        assert!(text.contains("harness_outcome_correction"));
+        assert!(text.contains("single corrective call"));
+        feedback.push_str(text);
+        request.input.outcome_correction = false;
+        let subsequent = conversation(&request).expect("subsequent request");
+        assert_eq!(original.system, subsequent.system);
+        assert_eq!(original.messages, subsequent.messages);
         assert!(
             feedback.len() <= crate::provider::conversation::MAX_HARNESS_FEEDBACK_BYTES,
             "feedback fits its reserved framing"
         );
         assert!(feedback.contains("committed Events"));
         assert!(feedback.contains("plain assistant text"));
-        assert!(feedback.contains(&serde_json::to_string(&failure).expect("failure")));
+        assert!(feedback.contains(&serde_json::to_string(&stop).expect("failure")));
         for canary in CANARIES {
             assert!(
                 !feedback.contains(canary),

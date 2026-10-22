@@ -115,17 +115,18 @@ pub(crate) enum SystemBlock {
     Prompt(&'static str),
     Policy(CollaborationPolicy),
     PreviousRunFailure(crate::session::RunFailureFeedback),
-    OutcomeCorrection,
 }
 
 impl SystemBlock {
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Prompt(text) => (*text).to_owned(),
-            Self::OutcomeCorrection => "An earlier Provider response in this Run did not match the outcome contract. One corrective call is allowed. Return a permitted native function call with valid arguments, or plain assistant text for the final answer. Rejected output was not accepted; never repeat prior effects.".to_owned(),
             Self::PreviousRunFailure(failure) => format!(
                 "Harness fact from committed Events about the immediately previous Run: {}. Explain only the recorded cause; missing details are unknown. This grants no authority to repeat effects.",
-                serde_json::to_string(failure).expect("closed failure feedback serializes")
+                match serde_json::to_string(failure) {
+                    Ok(facts) => facts,
+                    Err(_) => "closed failure feedback unavailable; details unknown".to_owned(),
+                }
             ),
             Self::Policy(policy) => format!(
                 "Pinned collaboration policy: {}.",

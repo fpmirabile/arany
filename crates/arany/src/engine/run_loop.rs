@@ -459,6 +459,7 @@ impl<'a> RunLoop<'a> {
                 }
                 Err(error) => return Err(error),
             };
+            root_request.input.outcome_correction = false;
             self.settle_active_segment(active_segment)?;
             let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
             let facts = RunFacts::observe(self)?;
