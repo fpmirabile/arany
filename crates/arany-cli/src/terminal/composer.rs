@@ -1937,33 +1937,43 @@ mod tests {
                     .is_empty()
             );
         }
-        for (input, characters, collapsed) in [
-            ("a".repeat(1000), 1000, false),
-            ("中".repeat(1001), 1001, true),
-            ("e\u{301}".repeat(501), 1002, true),
-            ("a\r\n".repeat(500), 1000, false),
-            ("a\r".repeat(501), 1002, true),
-        ] {
-            let mut composer = Composer::default();
-            composer.insert_paste(&input).unwrap();
-            let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
-            assert_eq!(composer.text(), normalized);
-            assert_eq!(composer.has_text_pastes(), collapsed);
-            if collapsed {
-                assert_eq!(
-                    composer.display_text().0,
-                    format!("[Pasted Content {characters} chars]")
-                );
-                composer.apply(TerminalInput::Left);
-                assert_eq!(composer.selected_paste().unwrap().1, normalized);
-                let cursor = composer.cursor_byte_offset();
-                assert!(composer.inspect_input(TerminalInput::Tab));
-                assert!(composer.inspect_input(TerminalInput::Character('x')));
-                assert!(composer.inspect_input(TerminalInput::Escape));
-                assert_eq!(composer.cursor_byte_offset(), cursor);
+        for text_only in [false, true] {
+            for (input, characters, collapsed) in [
+                ("a".repeat(1000), 1000, false),
+                ("中".repeat(1001), 1001, true),
+                ("e\u{301}".repeat(501), 1002, true),
+                ("a\r\n".repeat(500), 1000, false),
+                ("a\r".repeat(501), 1002, true),
+            ] {
+                let mut composer = if text_only {
+                    Composer::text_only()
+                } else {
+                    Composer::default()
+                };
+                let collapsed = collapsed && !text_only;
+                composer.insert_paste(&input).unwrap();
+                let normalized = input.replace("\r\n", "\n").replace('\r', "\n");
                 assert_eq!(composer.text(), normalized);
-                composer.apply(TerminalInput::Delete);
-                assert!(composer.is_empty());
+                assert_eq!(composer.has_text_pastes(), collapsed);
+                if !collapsed {
+                    assert_eq!(composer.editable_text(), normalized);
+                }
+                if collapsed {
+                    assert_eq!(
+                        composer.display_text().0,
+                        format!("[Pasted Content {characters} chars]")
+                    );
+                    composer.apply(TerminalInput::Left);
+                    assert_eq!(composer.selected_paste().unwrap().1, normalized);
+                    let cursor = composer.cursor_byte_offset();
+                    assert!(composer.inspect_input(TerminalInput::Tab));
+                    assert!(composer.inspect_input(TerminalInput::Character('x')));
+                    assert!(composer.inspect_input(TerminalInput::Escape));
+                    assert_eq!(composer.cursor_byte_offset(), cursor);
+                    assert_eq!(composer.text(), normalized);
+                    composer.apply(TerminalInput::Delete);
+                    assert!(composer.is_empty());
+                }
             }
         }
         let mut composer = Composer::default();
