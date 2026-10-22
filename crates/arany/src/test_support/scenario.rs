@@ -1005,15 +1005,17 @@ cargo test --locked --lib --verbose
                 assert!(stdout.contains("local_test_ipc ... FAILED"), "{result}");
                 assert!(stdout.contains("PermissionDenied"), "{result}");
             }
-            if matches!(case, "failed-test" | "forced-ipc") {
+            if case == "failed-test" {
                 assert!(
                     result["stdout"]
                         .as_str()
                         .unwrap()
-                        .contains("0 passed; 1 failed; 1 ignored")
-                        || case == "forced-ipc"
+                        .contains("0 passed; 1 failed; 1 ignored"),
+                    "{case}: {result}"
                 );
-                assert_eq!(result["exit_code"], 101);
+            }
+            if matches!(case, "failed-test" | "forced-ipc") {
+                assert_eq!(result["exit_code"], 101, "{case}: {result}");
             }
         }
         let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
