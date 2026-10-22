@@ -3784,6 +3784,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         );
         let expected_request = expected.clone();
         let (submit, submitted) = std::sync::mpsc::sync_channel(1);
+        let (requests_sent, requests) = std::sync::mpsc::sync_channel(4);
         let server = thread::spawn(move || {
             listener.set_nonblocking(true).unwrap();
             for index in 0..4 {
@@ -3823,9 +3824,19 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                     _ => serde_json::json!("Attachment received"),
                 };
                 send_response(&mut stream, index, response);
+                requests_sent
+                    .send(index)
+                    .expect("synthetic request completed");
             }
         });
         check_profile(&workspace, &state);
+        for index in 0..3 {
+            assert_eq!(
+                requests.recv_timeout(Duration::from_secs(10)).unwrap(),
+                index,
+                "conformance request order"
+            );
+        }
         let id = saved_conversation(&state, &workspace, SessionDefaults::default());
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -4018,8 +4029,13 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                          text: &str| {
             if linear {
                 wait_for_after(output, input, transcript, answered, from, text.as_bytes());
+                from + crate::process::pty_text_matches(&transcript[from..], text.as_bytes())
+                    .next()
+                    .expect("observed linear text")
+                    .end
             } else {
                 wait_for_screen(output, input, transcript, answered, (from, 120, 24), text);
+                transcript.len()
             }
         };
         wait_text(
@@ -4044,7 +4060,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         }
         let from = transcript.len();
         input.write_all(b"/goal continue\r").unwrap();
-        wait_text(
+        let refused = wait_text(
             &mut output,
             &mut input,
             &mut transcript,
@@ -4080,11 +4096,12 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 3,
             );
         } else {
-            wait_for(
+            wait_for_after(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
+                refused,
                 b"Input:\r\n",
             );
         }
@@ -4100,7 +4117,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 .unwrap();
         }
         let label = format!("[Pasted Content {} chars]", payload.chars().count());
-        wait_text(
+        let pasted = wait_text(
             &mut output,
             &mut input,
             &mut transcript,
@@ -4109,11 +4126,12 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             &label,
         );
         if linear {
-            wait_for(
+            wait_for_after(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
+                pasted,
                 b"Input:\r\n",
             );
         } else {
@@ -4143,7 +4161,7 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
         }
         submit.send(()).expect("arm attachment request deadline");
         input.write_all(b"\r").unwrap();
-        wait_text(
+        let answer = wait_text(
             &mut output,
             &mut input,
             &mut transcript,
@@ -4151,16 +4169,58 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
             from,
             "Attachment received",
         );
+        assert_eq!(
+            requests.recv_timeout(Duration::from_secs(10)).unwrap(),
+            3,
+            "attachment request order"
+        );
+        server.join().unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            let view = runtime.block_on(store.load_view(id)).unwrap().unwrap();
+            if view
+                .goals
+                .last()
+                .is_some_and(|goal| goal.status == arany::GoalStatus::Completed)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attachment Goal did not commit completion: {}",
+                tail(&transcript[from..])
+            );
+            thread::yield_now();
+        }
+        runtime.block_on(store.close()).unwrap();
         if linear {
+            let receipt = wait_text(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                answer,
+                "Status: finished\r\n",
+            );
             wait_for_after(
                 &mut output,
                 &mut input,
                 &mut transcript,
                 &mut answered,
-                from,
+                receipt,
                 b"Input:\r\n",
             );
         } else {
+            wait_for_screen(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (from, 120, 24),
+                "ready · custom:local/model-1",
+            );
             wait_for_caret(
                 &mut output,
                 &mut input,
@@ -4170,7 +4230,27 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 3,
             );
         }
-        input.write_all(b"/exit\r").unwrap();
+        let exit_from = transcript.len();
+        input.write_all(b"/exit").unwrap();
+        if !linear {
+            wait_for_screen(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (exit_from, 120, 24),
+                "> /exit",
+            );
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                exit_from,
+                8,
+            );
+        }
+        input.write_all(b"\r").unwrap();
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             pump(&mut output, &mut input, &mut transcript, &mut answered);
@@ -4178,10 +4258,13 @@ fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes()
                 assert!(status.success());
                 break;
             }
-            assert!(Instant::now() < deadline, "attachment journey did not exit");
+            assert!(
+                Instant::now() < deadline,
+                "attachment journey did not exit (linear={linear}, prefix={prefix:?}): {}",
+                tail(&transcript[exit_from..])
+            );
             thread::yield_now();
         }
-        server.join().unwrap();
         runtime.block_on(async {
             let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
             let view = store.load_view(id).await.unwrap().unwrap();
