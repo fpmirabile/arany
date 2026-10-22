@@ -4,8 +4,8 @@
 
 - Status: `In progress`
 - Owner: Fernando Mirabile
-- Last updated: `2026-10-21`
-- Next action: S3 after S2 review and CI; live/platform gaps remain in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
+- Last updated: `2026-10-22`
+- Next action: S3 review and CI; live/platform gaps remain in [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first).
 
 ## Outcome and scope
 
@@ -17,7 +17,8 @@ DeepSeek API profiles remain explicitly unavailable candidates because strict
 compaction evidence is missing. S2 adds Kimi platform API keys conditionally on
 exact conformance and retains
 Kimi Code console keys as an unavailable candidate pending endpoint-specific
-strict-compaction evidence. The remaining recipe covers GLM standard API keys.
+strict-compaction evidence. S3 adds GLM Standard-key candidates, explicitly
+unavailable pending Messages-specific provider-enforced strict-schema evidence.
 
 Kimi Code is included with Arany's honest User-Agent. GLM Coding Plan benefits
 are excluded unless Z.ai approves Arany; DeepSeek has no documented subscription
@@ -175,7 +176,7 @@ the [setup guide](../../docs/setup.md#anthropic-compatible-custom-routes) keeps
 the explicitly **UNAVAILABLE** DeepSeek candidates. No JSON repair, skipped
 compaction or alternative schema representation is authorized.
 
-1. **S2 — Kimi API and Kimi Code recipes (implemented; review/CI pending).**
+1. **S2 — Kimi API and Kimi Code recipes (merged in #257).**
    Platform is eligible after exact conformance: its OpenAPI documents the
    existing `output_config.format` schema shape. Code stays **UNAVAILABLE**
    pending endpoint-specific strict-compaction evidence; synthetic Code success
@@ -198,7 +199,14 @@ compaction or alternative schema representation is authorized.
    checks each eligible route with its own key after the documented capability
    gate. Any necessary typed Messages delta ships
    with these tests in this PR, preserving native Anthropic regression evidence.
-2. **S3 — GLM standard API-key recipe (one PR, after S2).** Base URL
+2. **S3 — GLM standard API-key candidates (implemented; review/CI pending).**
+   Standard API stays **UNAVAILABLE**: the [structured-output guide](https://docs.z.ai/guides/capabilities/struct-output)
+   establishes Chat JSON mode and client-side validation, not provider-enforced
+   Messages schemas. Synthetic success proves shared adapter mechanics only.
+   No new wire mapping, stored format, migration, dependency or native facility
+   is needed; strict nonce challenges and all existing bounds remain unchanged.
+   Newly issued Standard keys require owner-confirmed classification and billing;
+   Compatible and Coding Plan keys are excluded. Base URL
    `https://api.z.ai/api/anthropic`; Standard API Key and exact `glm-5.3` /
    `glm-5.3-flash` profiles. Cross profile/check → admitted adapter →
    Run/delegation/compaction → journal/show, with setup and Provider/credential

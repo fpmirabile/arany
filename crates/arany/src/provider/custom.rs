@@ -446,6 +446,22 @@ mod tests {
                 "x-api-key",
                 "ARANY_PROVIDER_KIMI_CODE_KEY",
             ),
+            (
+                "glm-api",
+                "https://api.z.ai/api/anthropic",
+                "https://api.z.ai/api/anthropic/v1/messages",
+                "glm-5.3",
+                "bearer",
+                "ARANY_PROVIDER_GLM_STANDARD_KEY",
+            ),
+            (
+                "glm-flash",
+                "https://api.z.ai/api/anthropic",
+                "https://api.z.ai/api/anthropic/v1/messages",
+                "glm-5.3-flash",
+                "bearer",
+                "ARANY_PROVIDER_GLM_STANDARD_KEY",
+            ),
         ] {
             let mut candidate: serde_json::Value = serde_json::from_str(&messages).unwrap();
             let row = &mut candidate["profiles"][0];
@@ -474,8 +490,13 @@ mod tests {
                 .push(candidate["profiles"][0].clone());
         }
         assert!(CustomProfile::parse_document(&serde_json::to_vec(&routes).unwrap()).is_ok());
-        routes["profiles"][1]["credential_env"] = "ARANY_PROVIDER_KIMI_API_KEY".into();
-        assert!(CustomProfile::parse_document(&serde_json::to_vec(&routes).unwrap()).is_err());
+        for index in 1..4 {
+            let mut conflicting = routes.clone();
+            conflicting["profiles"][index]["credential_env"] = "ARANY_PROVIDER_KIMI_API_KEY".into();
+            assert!(
+                CustomProfile::parse_document(&serde_json::to_vec(&conflicting).unwrap()).is_err()
+            );
+        }
         std::fs::write(state.path().join("provider-profiles.json"), VALID).unwrap();
         for base in [
             "https://example.com",

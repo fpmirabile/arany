@@ -251,6 +251,8 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
         "vendor.other/exact-1",
         "kimi-k3",
         "k3-256k",
+        "glm-5.3",
+        "glm-5.3-flash",
     ] {
         for signature in [None, Some(""), Some("opaque-signature")] {
             let request = primary_request(model);
@@ -1176,7 +1178,7 @@ fn overloaded_stream_after_tool_input_never_allows_fallback() {
 fn streamed_messages_require_closed_blocks_and_exclude_thinking_from_preview() {
     use crate::provider::{PreviewText, ResponsePreview};
     let outcome = "line one\nline two 🚀";
-    for model in ["model-1", "kimi-k3", "k3-256k"] {
+    for model in ["model-1", "kimi-k3", "k3-256k", "glm-5.3", "glm-5.3-flash"] {
         for signature in [None, Some(""), Some("signature")] {
             let mut start = message_start();
             start["message"]["model"] = json!(model);
@@ -1275,7 +1277,7 @@ fn streamed_tool_use_input_json_deltas_assemble_byte_stably_and_are_not_previewe
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"output_tokens":8}}),
         json!({"type":"message_stop"}),
     ]);
-    for model in ["model-1", "kimi-k3", "k3-256k"] {
+    for model in ["model-1", "kimi-k3", "k3-256k", "glm-5.3", "glm-5.3-flash"] {
         events[0]["message"]["model"] = json!(model);
         let wire = sse(&events);
         let (publisher, observed) = ResponsePreview::new();
@@ -1931,7 +1933,13 @@ fn assignment_objects_pin_eligible_names_and_reject_malformed_or_reflected_field
 
 #[test]
 fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
-    for model in ["deepseek-flash", "kimi-k3", "k3-256k"] {
+    for model in [
+        "deepseek-flash",
+        "kimi-k3",
+        "k3-256k",
+        "glm-5.3",
+        "glm-5.3-flash",
+    ] {
         for signature in [None, Some(""), Some("unchanged")] {
             let mut request = primary_request(model);
             request.collaboration = CollaborationPolicy::Auto {

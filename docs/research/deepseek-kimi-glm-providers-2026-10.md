@@ -1,6 +1,6 @@
 # DeepSeek, Kimi and GLM through Anthropic-compatible routes
 
-Source-check date: **2026-10-21**. Question: can Arany use these vendors with
+Source-check date: **2026-10-21**; GLM recheck: **2026-10-22**. Question: can Arany use these vendors with
 API keys and, where authorized, consumer coding subscriptions without adding
 another wire adapter or impersonating a vendor client?
 
@@ -155,6 +155,26 @@ thinking blocks, signatures, strict compaction and usage is **unverified**.
 Test the Messages wire itself; do not paste Chat-only fields into it.
 ([GLM-5.3](https://docs.z.ai/guides/llm/glm-5.3),
 [thinking guide](https://docs.z.ai/guides/capabilities/thinking-mode))
+
+**S3 disposition: Standard API is UNAVAILABLE pending Messages-specific
+strict-compaction evidence.** Checked 2026-10-22: the structured-output guide
+uses Chat Completions `response_format: { "type": "json_object" }`, puts the
+expected structure in prompts and validates schemas client-side. That does not
+establish provider-enforced `output_config.format` schemas on Messages. This
+is missing evidence, not proof of non-support. Keep the schema-only nonce
+challenge unchanged; synthetic success cannot promote either GLM candidate.
+([Structured-output guide](https://docs.z.ai/guides/capabilities/struct-output))
+
+S3's offline fixtures pin `/api/anthropic/v1/messages`, Bearer auth, exact
+`glm-5.3` / `glm-5.3-flash` identity and the honest Arany User-Agent through the
+shared adapter. They establish mechanics, key isolation and fail-closed
+conformance only. No documented Messages delta justifies a new field mapping:
+Chat `reasoning_content`, prompt-only JSON and client-side validation cannot
+replace the existing thinking/continuation or compaction contracts. Opaque key
+bytes provide no local proof of billing classification; the owner must reject
+Compatible and Coding Plan keys and confirm a newly issued Standard key in the
+console before any paid check. [NEXT_STEPS](../../NEXT_STEPS.md#daily-use-first)
+owns the remaining provider, billing and platform evidence.
 
 The GLM Coding Plan tool page confines subscription use to its listed tools;
 Arany is absent. Section 4 of the subscription terms limits quota to supported
