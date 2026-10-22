@@ -81,7 +81,12 @@ impl Window {
             return String::from_utf8_lossy(&stored).into_owned();
         }
         let head_len = keep.div_ceil(2).min(self.head.len());
-        let tail_len = (keep / 2).min(self.tail.len());
+        let tail_available = if self.total.bytes <= self.cap as u64 {
+            stored.len() - head_len
+        } else {
+            self.tail.len()
+        };
+        let tail_len = (keep / 2).min(tail_available);
         let mut head = &stored[..head_len];
         let mut tail = &stored[stored.len() - tail_len..];
         // Drop only the incomplete character at a window edge, before lossy decoding.
@@ -351,6 +356,18 @@ mod tests {
                 "cap={cap}"
             );
         }
+        let restored = Window::from_recorded(
+            "prefixword\n…[11 bytes, 0 lines omitted; 24 bytes, 1 lines total]…\nend",
+            OutputTotal {
+                bytes: 24,
+                lines: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restored.preview(12),
+            "prefix\n…[15 bytes, 0 lines omitted; 24 bytes, 1 lines total]…\nend"
+        );
         let mut window = Window::new(8);
         window.push(b"head\nmiddle\ntail", DRAIN_BYTES).unwrap();
         assert_eq!(
