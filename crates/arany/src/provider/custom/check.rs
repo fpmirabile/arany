@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v33";
+const CHECK_VERSION: &str = "custom-protocol-schema-challenge-conformance-effort-stream-v34";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -1000,7 +1000,7 @@ mod tests {
         let mut legacy = Sha256::new();
         for field in [
             env!("CARGO_PKG_VERSION"),
-            "custom-protocol-schema-challenge-conformance-effort-stream-v32",
+            "custom-protocol-schema-challenge-conformance-effort-stream-v33",
             profile.name(),
             profile.endpoint(),
             profile.model(),

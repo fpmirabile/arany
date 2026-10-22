@@ -110,7 +110,7 @@ leakage, stale-result rejection and deletion propagation before admitting a new
 Memory/retrieval path. Long-context and Memory benchmarks can supply cases but
 cannot replace project-specific adversarial and task evaluations.
 [Testing rules](../../agents/testing.md) own deterministic evidence;
-[evaluation research](./evaluation-and-quality-strategy.md) covers model quality;
+[evaluation research](./testing-strategy-for-rust-cli-harness.md#behavioral-evaluation) covers model quality;
 [next steps](../../NEXT_STEPS.md) owns current gaps.
 
 ## Long-lived canonical history
@@ -120,84 +120,15 @@ or an archive/new-Session policy before reaching its current admission bounds?
 **Source checked:** 2026-10-14. This is an evaluation; it authorizes no runtime
 change.
 
-**Conclusion:** The Store already reuses a bounded in-memory projection for
-consecutive appends to one direct Session while cumulative serialized payload
-stays at or below 128 MiB. Above that cache bound, each append cold-resolves the
-prefix even though the shared Store can hold up to 256 MiB. No quota-scale
-benchmark currently establishes whether that fallback needs a change. Cold
-replay reduces canonical Events into a `SessionView`. On Session switches or
-width/detail changes, terminal row indexing rebuilds rows from that loaded
-view.
-Measure those distinct paths before adding persisted snapshots or another
-index. Keep canonical Events and fork ancestry intact. A new Session in the
-same StateRoot avoids adding old Events to a separate Session's lineage, but it
-does not reclaim shared database bytes or make a fork's inherited Events
-disappear.
-
-### Current path and evidence
-
-The single SQLite-owner thread holds one `HotSession`: its reduced view, Event
-count and serialized payload-byte count, capped at 128 MiB. An append reuses it
-only for the same Session, unchanged `PRAGMA data_version`, and the next global
-sequence; it drops the cache for another Session, a fork, compaction, or a
-failed append. Once the serialized payload sum exceeds 128 MiB, it cannot be
-installed, so subsequent appends cold-resolve and reduce the persisted prefix.
-The view becomes the next cache only after the transaction commits. The Store
-replies to append only after commit, so the optimization preserves durable
-acknowledgement. [Store append path](../../crates/arany/src/store/journal.rs)
-and [Execution spec](../specs/execution.md#admission-persistence-and-recovery) own these constraints. SQLite defines
-`data_version` as connection-local: it changes on commits from other
-connections and does not change for that connection's own commits, so Arany also
-checks global sequence. It is an invalidation hint, not a durable revision
-identifier. [SQLite `data_version`](https://www.sqlite.org/pragma.html#pragma_data_version)
-
-Cold `load_session_events` currently filters by Session while scanning and
-decoding the journal in global sequence order. That scan checks contiguous
-global sequence and bounded, decodable envelopes. Fork resolution loads each
-ancestor, verifies the recorded committed boundary and SHA-256 prefix digest,
-then includes only committed Runs through that boundary; at most eight links
-and 10,000 combined Events are admitted. The schema already has
-`events_by_session(session_id, sequence)`, but replay does not use it. Replacing
-the global scan with a per-Session lookup alone would stop checking the global
-journal properties on that path. Keep canonical replay and its integrity checks
-as the source of truth. [Replay](../../crates/arany/src/store/replay.rs), [digest
-implementation](../../crates/arany/src/session/lineage.rs), and [Session spec](../specs/session.md)
-own this behavior.
-
-Terminal history is an ephemeral row-count/source-anchor index over the
-already-loaded `SessionView`; it does not retain another transcript or read
-State. A same-Session/same-width append replaces only the last Run's index.
-Session switches, width changes and detail-mode changes rebuild it; find scans
-its bounded rows synchronously. [History implementation](../../crates/arany-cli/src/terminal/history.rs)
-and [Terminal spec](../specs/terminal.md) own this boundary.
-
-**Smallest path, proposed:** Measure serialized Event payload, DB size, append
-latency and peak RSS through the 128 MiB cache boundary and toward the shared
-Store limit. If scans of unrelated Sessions dominate cold resume, evaluate the
-existing per-Session index only with an integrity path that retains current
-global sequence/envelope checks and strict selected-lineage replay; a direct
-indexed lookup alone would weaken validation. If reduction after that dominates
-above the hot-cache bound, compare a bounded in-memory continuation with a
-digest-bound rebuildable snapshot; do not raise the payload cap without an RSS
-bound or skip canonical validation. Add or persist a separate find index only if
-measured search latency misses its target at the admitted Event bound.
-
-The current limits remain: 10,000 Events across the selected fork lineage,
-256 MiB for the shared SQLite file, and 65,536 discovered Session heads. The
-Session lock namespace separately caps lock files at 65,536. A new ordinary
-Session starts a separate lineage count, but all its Events still consume the
-same SQLite file and it consumes a Session slot. Forks continue to count their
-inherited source Events. Event admission and append-byte preflight preserve the
-current rejection-before-disclosure and commit-before-acknowledgement rules;
-byte preflight is not a reservation against independent writers. The
-[execution contract](../specs/execution.md#admission-persistence-and-recovery)
-owns those public limits.
-
-History owner: [`crates/arany-cli/tests/session_run/active_terminal/tmux/history_latency.rs::active_keyboard_stays_visible_with_near_cap_history`](../../crates/arany-cli/tests/session_run/active_terminal/tmux/history_latency.rs), in `Linux Tests (release)` with `history_benchmark=true`.
-
-Its workload is 800 Runs across 50 Goal lifecycles, 8,901 Events and 32,764,000 objective/answer bytes, about half the former 65.5 MB intent and not the same workload. It checks strict replay, serialized payload and SQLite bytes, samples 100 fresh read-only Store loads, and measures resume-to-ready, input/delegation and product RSS/HWM. Fresh Store instances do not clear the OS page cache; Store replay and terminal history/input latency remain separate observations. This workload does not establish the exact 10,000-Event boundary, the 128 MiB HotSession limit, the 256 MiB shared-Store quota or near-quota fallback.
-
-Separate owners: [`crates/arany-cli/tests/session_run/performance.rs::show_replay_latency_on_named_host`](../../crates/arany-cli/tests/session_run/performance.rs) uses 100 Events; [`crates/arany/tests/engine_run.rs::database_capacity_is_admitted_before_provider_usage`](../../crates/arany/tests/engine_run.rs) pads a non-Event table to prove StorageFull admission and canonical reopen, rather than history latency. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release) owns named-host measurements and remaining gates.
+**Conclusion:** measure append, cold replay and terminal history separately
+before adding another index or persisted snapshot. [Execution](../specs/execution.md#admission-persistence-and-recovery)
+owns Store limits and hot-cache behavior; [Session](../specs/session.md) owns
+lineage and [Terminal](../specs/terminal.md) owns history projection. A per-Session
+lookup must preserve global journal validation. SQLite's connection-local
+[`data_version`](https://www.sqlite.org/pragma.html#pragma_data_version) is an
+invalidation hint, not a durable revision. [Next steps](../../NEXT_STEPS.md#beta-2-and-broader-release)
+owns the remaining quota-scale measurements; existing smaller workloads do not
+establish performance at every admission boundary.
 
 ### Proposed policy, not accepted behavior
 

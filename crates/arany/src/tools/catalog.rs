@@ -300,12 +300,26 @@ pub(crate) fn git_operations(write: bool) -> Vec<&'static str> {
 
 pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
 pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
-pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
+pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline without .git; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
+
+pub(crate) const COMMAND_PROJECT_COPY: &str = "The command's project copy has no .git";
+pub(crate) const COMMAND_GIT_HINT: [&str; 2] = [
+    COMMAND_PROJECT_COPY,
+    "; use git_status / git_diff / git_log for repository state and history.",
+];
+
+pub(crate) fn has_git_reads(calls: &[Value]) -> bool {
+    ["git_status", "git_diff", "git_log"].iter().all(|name| {
+        calls
+            .iter()
+            .any(|call| facts_of(call).is_some_and(|facts| facts.name == *name))
+    })
+}
 
 pub(crate) const COMMAND_CONTRACT: &str = if cfg!(target_os = "macos") {
-    "Explicit argv only. Private selected-project cwd; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded re-runs an identical failed command on the host only after the user approves it."
+    "Explicit argv only. Private selected-project cwd without .git; use ARANY_TOOL_WORKSPACE, ARANY_TOOL_INPUTS and ARANY_TOOL_SKILLS for paths inside shell strings. Standalone /workspace, /scratch, /inputs, /skills and /programs argv paths map to private native paths; checked system programs execute at their original paths. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. command_unguarded re-runs an identical failed command on the host only after the user approves it."
 } else {
-    "Explicit argv only. Private writable selected-project snapshot at /workspace; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded re-runs an identical failed command on the host only after the user approves it."
+    "Explicit argv only. Private writable selected-project snapshot at /workspace without .git; /scratch is bounded. No network, host home, credentials or state. Bounded regular-file changes return as a changeset; a separate applied integration receipt confirms Workspace publication. Skills available at /skills/NAME. command_unguarded re-runs an identical failed command on the host only after the user approves it."
 };
 pub(crate) const MCP_PROTOCOL: &str = "2025-11-25 stdio; use mcp_list before mcp_call";
 pub(crate) const RESEARCH_MCP_PROTOCOL: &str =

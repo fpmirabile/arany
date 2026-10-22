@@ -2,7 +2,7 @@
 
 ## Scope
 
-Telemetry is optional, lossy output. SQLite Events and replay alone determine Run state, presentation and exit class; export failure never changes them. Goal and Run segment semantics are owned by [Goals](./goals.md), and the research behind the design is in [OTLP observability](../research/otlp-observability.md).
+Telemetry is optional, lossy output. SQLite Events and replay alone determine Run state, presentation and exit class; export failure never changes them. Goal and Run segment semantics are owned by [Goals](./goals.md), and the research behind the design is in [D-14](../research/next-step-decision-register.md#d-14--otlp-is-optional-lossy-output).
 
 Editing constraints: [security rules](../../agents/security.md).
 

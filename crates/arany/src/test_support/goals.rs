@@ -440,7 +440,7 @@ impl ForegroundWorkerProvider {
         use crate::ToolCall;
         if request.phase == AgentPhase::ChildWork {
             let catalog: serde_json::Value =
-                serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog).unwrap();
+                serde_json::from_str(request.input.tools.as_ref().unwrap().catalog()).unwrap();
             self.check(
                 catalog["commands"]
                     .as_array()
@@ -574,7 +574,7 @@ impl ForegroundWorkerProvider {
 
     fn delegation(&self, request: &crate::ProviderRequest) -> crate::ProviderOutcome {
         let catalog: serde_json::Value =
-            serde_json::from_str(&request.input.tools.as_ref().unwrap().catalog).unwrap();
+            serde_json::from_str(request.input.tools.as_ref().unwrap().catalog()).unwrap();
         let digest = catalog["agents"]
             .as_array()
             .and_then(|agents| agents.iter().find(|a| a["name"] == "editor"))

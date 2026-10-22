@@ -7,7 +7,7 @@ pub(crate) const NAME_PREFIX: &str = "arany_";
 #[derive(Clone, Debug)]
 pub(crate) struct ToolSpec {
     pub(crate) name: String,
-    pub(crate) description: &'static str,
+    pub(crate) description: String,
     pub(crate) parameters: Value,
 }
 
@@ -30,12 +30,24 @@ pub(crate) fn specs(
     }
     let plan = (role == PromptRole::Primary).then(|| ToolSpec {
         name: name_of("plan"),
-        description: "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.",
+        description: "Optionally record a bounded Goal plan and exact success criterion. A recorded plan only narrows scope and cannot be replaced.".into(),
         parameters: plan_schema(&calls, pinned),
     });
+    let git_reads = crate::tools::catalog::has_git_reads(&calls);
     let mut specs: Vec<_> = calls
         .into_iter()
-        .map(|call| spec(call, "operation"))
+        .map(|call| {
+            let mut spec = spec(call, "operation");
+            if spec.name == name_of("command") {
+                spec.description.push(' ');
+                spec.description.push_str(&if git_reads {
+                    crate::tools::catalog::COMMAND_GIT_HINT.concat()
+                } else {
+                    format!("{}.", crate::tools::catalog::COMMAND_PROJECT_COPY)
+                });
+            }
+            spec
+        })
         .collect();
     specs.extend(plan);
     specs
@@ -72,7 +84,7 @@ fn spec(mut parameters: Value, discriminator: &str) -> ToolSpec {
     };
     ToolSpec {
         name: name_of(&operation),
-        description,
+        description: description.into(),
         parameters,
     }
 }
@@ -195,6 +207,33 @@ mod tests {
             .len()
                 <= 5
         );
+    }
+
+    #[test]
+    fn command_git_guidance_names_only_cataloged_git_reads() {
+        for (git, operations, offered) in [
+            (json!({}), Value::Null, true),
+            (json!("unavailable"), Value::Null, false),
+            (
+                json!({}),
+                json!(["command", "git_status", "git_diff"]),
+                false,
+            ),
+        ] {
+            let mut catalog = catalog();
+            catalog["git"] = git;
+            catalog["operations"] = operations;
+            let specs = specs(&catalog, PromptRole::Primary, &Default::default());
+            let description = &specs
+                .iter()
+                .find(|s| s.name == "arany_command")
+                .unwrap()
+                .description;
+            assert!(description.contains("no .git"));
+            for name in ["git_status", "git_diff", "git_log"] {
+                assert_eq!(description.contains(name), offered);
+            }
+        }
     }
 
     #[test]
