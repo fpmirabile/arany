@@ -214,6 +214,7 @@ mod tests {
                 "account-credentials.lock".to_owned(),
                 "everyone allow write",
             ),
+            ("provider-check.lock".to_owned(), "everyone allow write"),
             (format!("session-{id}.lock"), "everyone allow write"),
         ] {
             let file = path.join(&name);
@@ -258,6 +259,10 @@ mod tests {
                 ),
                 "account-credentials.lock" => matches!(
                     state.with_account_replacement_lock(&workspace, || ()),
+                    Err(StoreError::StateNotPrivate)
+                ),
+                "provider-check.lock" => matches!(
+                    state.lock_provider_check(),
                     Err(StoreError::StateNotPrivate)
                 ),
                 _ => matches!(state.lock_session(id), Err(StoreError::StateNotPrivate)),

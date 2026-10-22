@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProviderEvidenceRecord {
     pub name: String,
     pub digest: [u8; 32],
@@ -9,7 +9,7 @@ pub(crate) struct ProviderEvidenceRecord {
     pub expires_at_ms: i64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NativeEvidenceRecord {
     pub fingerprint: [u8; 32],
     pub checked_at_ms: i64,
@@ -17,11 +17,9 @@ pub(crate) struct NativeEvidenceRecord {
 }
 
 pub(crate) enum EvidenceOp {
-    ClearProvider(String),
-    RecordProvider(ProviderEvidenceRecord),
     LoadProvider(String),
+    #[cfg(test)]
     ClearNative([u8; 32]),
-    RecordNative(NativeEvidenceRecord),
     LoadNative([u8; 32]),
 }
 

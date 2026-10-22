@@ -244,6 +244,7 @@ fn bounded_result(id: RequestId, result: impl serde::Serialize) -> Result<Option
 fn receipt(goal: &arany::GoalView) -> ReceiptGetResult {
     ReceiptGetResult {
         goal: ReceiptGoal {
+            budget_refusal: goal.budget_refusal,
             id: goal.id,
             status: items::goal_summary(goal).status,
             objective: goal.objective.clone(),

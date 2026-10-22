@@ -98,9 +98,10 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         floor: 4,
         current: SCHEMA_VERSION,
         schema: SCHEMA_SQL,
-        steps: &[SchemaStep {
-            from: 4,
-            source: "CREATE TABLE events (
+        steps: &[
+            SchemaStep {
+                from: 4,
+                source: "CREATE TABLE events (
                 sequence INTEGER PRIMARY KEY,
                 session_id TEXT NOT NULL,
                 run_id TEXT,
@@ -124,7 +125,7 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 checked_at_ms INTEGER NOT NULL,
                 expires_at_ms INTEGER NOT NULL
             ) STRICT;",
-            sql: "CREATE TABLE migrations (
+                sql: "CREATE TABLE migrations (
                 id TEXT PRIMARY KEY CHECK (length(id) = 36),
                 from_schema INTEGER NOT NULL,
                 to_schema INTEGER NOT NULL,
@@ -132,7 +133,13 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 backup TEXT NOT NULL,
                 recorded_at_ms INTEGER NOT NULL
             ) STRICT;",
-        }],
+            },
+            SchemaStep {
+                from: 5,
+                source: include_str!("migrate/schema_v5.sql"),
+                sql: include_str!("migrate/schema_v6.sql"),
+            },
+        ],
     },
     event_floor: &EVENT_FLOOR,
     event_steps: &[
@@ -174,6 +181,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("HookStarted", 7, crate::session::pre_host_payload),
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
         variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
+        EventStep {
+            kind: "GoalFinished",
+            from: 7,
+            transform: crate::session::goal_finished_v7_to_v8,
+            canonical: crate::session::goal_finished_v7_payload,
+        },
         EventStep {
             kind: "ProviderCallRecorded",
             from: 18,

@@ -2,8 +2,9 @@ use super::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{GoalContextFacts, ProviderRole, Providers};
 use crate::session::{
-    Event, EventEnvelope, GoalBudget, GoalId, GoalPlanContract, GoalUsage, GoalView,
-    MAX_CHILD_TOOL_CALLS, MAX_DISPLAY_CHUNKS, SessionId, SessionView,
+    AgentRunId, BudgetAction, BudgetChargeBasis, BudgetRefusal, Event, EventEnvelope, GoalBudget,
+    GoalId, GoalLimit, GoalPlanContract, GoalUsage, GoalView, MAX_CHILD_TOOL_CALLS,
+    MAX_DISPLAY_CHUNKS, SessionId, SessionView,
 };
 use std::sync::Mutex;
 use std::time::Duration;
@@ -206,6 +207,7 @@ struct InFlight {
     origin: Option<Instant>,
     // The Run ended because the Goal budget ran out.
     budget_stopped: bool,
+    budget_refusal: Option<BudgetRefusal>,
 }
 
 impl InFlight {
@@ -412,9 +414,27 @@ impl GoalLedger {
     }
 
     // The admission guard is held until the reservation Event is appended.
-    pub(super) async fn reserve(&self, action: Action) -> Result<Reservation<'_>, EngineError> {
+    pub(super) async fn reserve(
+        &self,
+        action: Action,
+        actor: AgentRunId,
+    ) -> Result<Reservation<'_>, EngineError> {
         let admission = self.admission.lock().await;
         if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
+            self.capture_budget_refusal(
+                match action {
+                    Action::Compaction | Action::BoundaryCompaction { .. } => {
+                        BudgetAction::Compaction
+                    }
+                    Action::Delegation { .. } => BudgetAction::Delegation,
+                    Action::ProviderCall { .. }
+                    | Action::Child { .. }
+                    | Action::Tool
+                    | Action::Worker { .. }
+                    | Action::Review => BudgetAction::Provider,
+                },
+                Some(actor),
+            )?;
             return Err(EngineError::GoalBudgetExhausted);
         }
         Ok(Reservation {
@@ -549,7 +569,12 @@ impl GoalLedger {
         })
     }
 
-    pub(super) fn reserve_active(&self, action_ms: u64) -> Result<(Instant, u64), EngineError> {
+    pub(super) fn reserve_active(
+        &self,
+        action_ms: u64,
+        action: BudgetAction,
+        actor: Option<AgentRunId>,
+    ) -> Result<(Instant, u64), EngineError> {
         self.update(|goal, in_flight| {
             let now = Instant::now();
             let started = in_flight.origin.unwrap_or(now);
@@ -576,6 +601,13 @@ impl GoalLedger {
                 return Err(EngineError::CoordinatorFailed);
             }
             if reservation <= minimum_reservation {
+                if let Some(mut refusal) = refusal_at(goal, in_flight, action, actor) {
+                    if refusal.dimension == GoalLimit::ActiveTime {
+                        refusal.requested = Some(requested_ms);
+                        refusal.required_minimum = Some(minimum_reservation.saturating_add(1));
+                    }
+                    in_flight.budget_refusal.get_or_insert(refusal);
+                }
                 return Err(EngineError::GoalBudgetExhausted);
             }
             in_flight.reserved_ms = Some(reservation);
@@ -631,6 +663,22 @@ impl GoalLedger {
 
     pub(super) fn mark_budget_stopped(&self) {
         let _ = self.in_flight(|in_flight| in_flight.budget_stopped = true);
+    }
+
+    pub(super) fn capture_budget_refusal(
+        &self,
+        action: BudgetAction,
+        actor: Option<AgentRunId>,
+    ) -> Result<(), EngineError> {
+        self.update(|goal, in_flight| {
+            if in_flight.budget_refusal.is_none() {
+                in_flight.budget_refusal = refusal_at(goal, in_flight, action, actor);
+            }
+        })
+    }
+
+    pub(super) fn budget_refusal(&self) -> Result<Option<BudgetRefusal>, EngineError> {
+        self.in_flight(|in_flight| in_flight.budget_refusal)
     }
 
     pub(super) fn budget_stopped(&self) -> bool {
@@ -726,6 +774,27 @@ impl GoalLedger {
             _ => admitted.min(1),
         }
     }
+}
+
+fn refusal_at(
+    goal: &GoalView,
+    in_flight: &InFlight,
+    action: BudgetAction,
+    actor: Option<AgentRunId>,
+) -> Option<BudgetRefusal> {
+    let mut refusal = goal.effective_budget().refusal(
+        GoalUsage {
+            active_ms: in_flight.spent_ms(goal),
+            ..admission_usage(goal, in_flight, goal.run_ids.len())
+        },
+        action,
+    )?;
+    refusal.run_id = goal.active_run;
+    refusal.agent_run_id = actor.filter(|_| refusal.run_id.is_some());
+    if goal.uncertain_active_ms > 0 {
+        refusal.charge_basis = BudgetChargeBasis::Conservative;
+    }
+    Some(refusal)
 }
 
 fn tokens(input: Option<u32>, output: Option<u32>) -> u64 {

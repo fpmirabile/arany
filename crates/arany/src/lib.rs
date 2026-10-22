@@ -36,11 +36,17 @@ pub use engine::{
     EngineConfig, EngineError, GoalRequest, RewindBothResult, RewindFile, RewindIssue,
     RewindPreview, RewindRequest, RunCancellation, RunControls, RunFuture, RunHandle, RunHints,
     RunOutcome, RunPreview, RunRequest, RunResult, RunSteering, SteeringRefused, ToolGrant,
-    continue_session, create_session, fork_session, list_sessions, list_sessions_page,
-    rename_session, resume_session, set_session_defaults, validate_workspace_inputs,
+    budget_refusal_summary, continue_session, create_session, fork_session, list_sessions,
+    list_sessions_page, rename_session, resume_session, set_session_defaults,
+    validate_workspace_inputs,
 };
 #[cfg(feature = "test-support")]
 pub use fault::FaultPlan;
+pub(crate) use journal::check::CheckJournal;
+pub use journal::check::{
+    CHECK_FORMATS, CheckCallKind, CheckDisposition, CheckEvent, CheckId, CheckOpenError,
+    CheckProbe, CheckReceipt, CheckStart, CheckTarget, CheckUsage, CheckView,
+};
 pub use journal::{Subscription, Tapped};
 #[cfg(feature = "test-support")]
 pub use provider::semantic;
@@ -53,30 +59,31 @@ pub use provider::{
     LimitUnavailable, MAX_ANTHROPIC_WORKSPACE_ID_BYTES, MAX_IMAGE_BYTES, MAX_LIMIT_TIMESTAMP,
     MAX_MESSAGE_IMAGES, MAX_NATIVE_API_KEY_BYTES, MAX_PROVIDER_FALLBACKS, MAX_PROVIDER_RETRIES,
     MAX_PROVIDER_SWITCHES, ModelEntry, NamedProviderRoutes, NativeApiCredentials, NativeCheckError,
-    OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText, PromptRole, Provenance,
-    Provider, ProviderError, ProviderFailureReason, ProviderFallback, ProviderIdentity,
-    ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderRetry, ProviderRole,
-    ProviderRoutes, ProviderTurn, ProviderWireProvenance, Providers, RateLimitSlot, RateLimits,
-    ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot, RunInput, ToolUseId,
-    UnansweredStatus, Usage, UsedPercent, WorkspaceGuidance, admitted_context_window,
-    check_custom_profile, check_native_model_from_env, check_native_model_with_api_key,
-    check_native_model_with_credentials, list_native_models, list_native_models_with_api_key,
-    list_native_models_with_credentials, probe_chatgpt_model, resolve_native_effort,
-    resolve_native_effort_for_run, valid_profile_name, validate_native_api_key,
-    validate_native_model_id,
+    NativeCheckRequest, OpenAiProvider, OutputTokenBound, PlanRequest, PlanWindow, PreviewText,
+    PromptRole, Provenance, Provider, ProviderError, ProviderFailureReason, ProviderFallback,
+    ProviderIdentity, ProviderImage, ProviderOutcome, ProviderRequest, ProviderResponse,
+    ProviderRetry, ProviderRole, ProviderRoutes, ProviderTurn, ProviderWireProvenance, Providers,
+    RateLimitSlot, RateLimits, ResponsePreview, RetryCause, ReviewVerdict, RosterSnapshot,
+    RunInput, ToolUseId, UnansweredStatus, Usage, UsedPercent, WorkspaceGuidance,
+    admitted_context_window, check_custom_profile, check_custom_profile_with_cancellation,
+    check_native_model, check_native_model_from_env, list_native_models,
+    list_native_models_with_api_key, list_native_models_with_credentials, probe_chatgpt_model,
+    resolve_native_effort, resolve_native_effort_for_run, valid_profile_name,
+    validate_native_api_key, validate_native_model_id,
 };
 pub use session::{
-    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, ChildGrant,
-    CollaborationPolicy, CompactionFailure, CompactionRecord, CompactionStatus, CompactionView,
-    ContextUsage, DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget,
-    GoalId, GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding,
-    GoalStatus, GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource,
+    AgentDisposition, AgentRole, AgentRunId, AgentStatus, AgentView, BudgetAction,
+    BudgetChargeBasis, BudgetRefusal, BudgetRefusalCause, ChildGrant, CollaborationPolicy,
+    CompactionFailure, CompactionRecord, CompactionStatus, CompactionView, ContextUsage,
+    DisplayCategory, DisplayChunk, Event, EventEnvelope, ForkLineage, GoalBudget, GoalId,
+    GoalLimit, GoalMcpTool, GoalPhase, GoalPlanContract, GoalReport, GoalSkillBinding, GoalStatus,
+    GoalSuccessCriterion, GoalView, InstructionFile, InstructionSource, MAX_BUDGET_REFUSAL_BYTES,
     MAX_GOAL_ACTIVE_MS, MAX_GOAL_PLAN_MCP_TOOLS, MAX_GOAL_PLAN_SKILLS, MAX_GOAL_PROVIDER_CALLS,
     MAX_GOAL_REPORT_BYTES, MAX_GOAL_RUNS, PlanUsage, ProposalRefusal, ProposalRefusalCause,
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition,
     RunFailure, RunFailureFeedback, RunId, RunStatus, RunStop, RunView, SessionDefaults, SessionId,
     SessionListItem, SessionPage, SessionView, TokenCount, ToolView, UsageGroup, UsageView,
-    WorkspaceIdentity,
+    WorkspaceIdentity, escape_status_text,
 };
 pub use session::{Checkpoint, CheckpointReason, CheckpointStatus};
 pub use session::{rewind, worker};
