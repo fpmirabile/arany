@@ -6,9 +6,9 @@ use super::{CommandOutput, state_dir};
 use crate::accounts::{chatgpt, credentials};
 use crate::presentation::escape_terminal;
 use arany::{
-    CustomProfile, Effort, ModelEntry, NativeApiCredentials, NativeCheckError, NativeCheckRequest,
-    RunCancellation, StateRoot, check_custom_profile_with_cancellation, check_native_model,
-    list_native_models_with_credentials, validate_native_model_id,
+    CustomProfile, CustomProfileError, Effort, ModelEntry, NativeApiCredentials, NativeCheckError,
+    NativeCheckRequest, RunCancellation, StateRoot, check_custom_profile_with_cancellation,
+    check_native_model, list_native_models_with_credentials, validate_native_model_id,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -241,7 +241,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                 } else {
                     (
                         NativeApiCredentials::from_env(&profile)
-                            .map_err(|error| error.to_string())?,
+                            .map_err(|_| NativeCheckError::CredentialUnavailable.to_string())?,
                         None,
                     )
                 };
@@ -263,7 +263,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     }
                 };
                 let cancellation = RunCancellation::new();
-                let view = check_signalled(
+                let view = match check_signalled(
                     check_native_model(
                         root,
                         NativeCheckRequest {
@@ -278,7 +278,20 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     ),
                     cancellation,
                 )
-                .await?;
+                .await?
+                {
+                    Ok(view) => view,
+                    Err(NativeCheckError::Check { source, receipt }) => {
+                        return failed_check(*source, Some(receipt));
+                    }
+                    Err(NativeCheckError::Journal(error)) => {
+                        return failed_check(
+                            format!("Provider check could not start: {}", error.source),
+                            error.receipt,
+                        );
+                    }
+                    Err(error) => return Err(error.to_string()),
+                };
                 return Ok(CommandOutput {
                     stdout: format!(
                         "Provider: {profile}\nModel: {model}\nEffort: {effort}\nCredential: {}\nStatus: native synthetic conformance passed\nCheck: {}\nDisposition: {}\n",
@@ -297,7 +310,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             let root = StateRoot::open_existing(&state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
             let cancellation = RunCancellation::new();
-            let report = check_signalled(
+            let report = match check_signalled(
                 check_custom_profile_with_cancellation(
                     root,
                     profile.strip_prefix("custom:").unwrap_or(&profile),
@@ -305,7 +318,20 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                 ),
                 cancellation,
             )
-            .await?;
+            .await?
+            {
+                Ok(report) => report,
+                Err(CustomProfileError::Check { source, receipt }) => {
+                    return failed_check(*source, Some(receipt));
+                }
+                Err(CustomProfileError::Journal(error)) => {
+                    return failed_check(
+                        format!("Provider check could not start: {}", error.source),
+                        error.receipt,
+                    );
+                }
+                Err(error) => return Err(error.to_string()),
+            };
             Ok(CommandOutput {
                 stdout: format!(
                     "Provider: {}\nStatus: custom verified\n{}\n",
@@ -319,18 +345,33 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
     }
 }
 
-async fn check_signalled<T, E: std::fmt::Display>(
+async fn check_signalled<T, E>(
     check: impl std::future::Future<Output = Result<T, E>>,
     cancellation: RunCancellation,
-) -> Result<T, String> {
+) -> Result<Result<T, E>, String> {
     let mut signals = super::exec::StopSignals::install()
         .map_err(|_| "signal handling unavailable".to_owned())?;
     tokio::pin!(check);
-    tokio::select! {
+    Ok(tokio::select! {
         biased;
-        _ = signals.next() => { cancellation.cancel(); check.await.map_err(|error| error.to_string()) },
-        result = &mut check => result.map_err(|error| error.to_string()),
-    }
+        _ = signals.next() => { cancellation.cancel(); check.await },
+        result = &mut check => result,
+    })
+}
+
+fn failed_check(
+    reason: impl std::fmt::Display,
+    receipt: Option<arany::CheckReceipt>,
+) -> Result<CommandOutput, String> {
+    let reason = reason.to_string();
+    let Some(receipt) = receipt else {
+        return Err(reason);
+    };
+    Ok(CommandOutput {
+        stdout: String::new(),
+        stderr: format!("error: {}\n{receipt}\n", escape_terminal(&reason)),
+        success: false,
+    })
 }
 
 fn render_chatgpt_models(account_id: uuid::Uuid, models: &[chatgpt::ChatGptModel]) -> String {
@@ -401,6 +442,27 @@ fn render_models(profile: &str, models: &[ModelEntry], exact_custom: bool) -> St
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[test]
+    fn failed_check_receipts_preserve_layout_and_escape_the_reason() {
+        let id = "01900000-0000-7000-8000-000000000001".parse().unwrap();
+        for disposition in [Some(arany::CheckDisposition::Failed), None] {
+            let output = failed_check(
+                "synthetic\x1b[2J\nfailure",
+                Some(arany::CheckReceipt { id, disposition }),
+            )
+            .unwrap();
+            let status = disposition.map_or("unconfirmed".to_owned(), |value| value.to_string());
+            assert!(!output.success);
+            assert!(output.stdout.is_empty());
+            assert_eq!(
+                output.stderr,
+                format!(
+                    "error: synthetic\\u{{001b}}[2J\\u{{000a}}failure\nCheck: {id}\nDisposition: {status}\n"
+                )
+            );
+        }
+    }
 
     #[test]
     fn successful_chatgpt_check_receipt_describes_run_admission() {

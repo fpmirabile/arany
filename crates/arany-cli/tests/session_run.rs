@@ -1137,7 +1137,17 @@ fn unsupported_journal_versions_reject_without_changing_existing_data() {
         .enable_all()
         .build()
         .unwrap();
-    for version in [0, 1, 2, 3, 4, 6] {
+    let current = tempfile::tempdir().unwrap();
+    let root = StateRoot::admit(&current.path().join("state")).unwrap();
+    let database = root.path().join("events.sqlite3");
+    runtime
+        .block_on(Store::open(root).unwrap().close())
+        .unwrap();
+    let current_version: i64 = rusqlite::Connection::open(database)
+        .unwrap()
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .unwrap();
+    for version in (0..current_version).chain(std::iter::once(current_version + 1)) {
         let temp = tempfile::tempdir().expect("private test root");
         let state_path = temp.path().join("state");
         let workspace = temp.path().join("workspace");
