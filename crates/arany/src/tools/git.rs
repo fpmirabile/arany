@@ -183,7 +183,12 @@ const MAX_ROWS: usize = 256;
 const MAX_SUBJECT_CHARS: usize = 256;
 const MAX_FILTERED_LOG_COMMITS: u32 = 1000;
 const MAX_BRANCH_COUNT_COMMITS: usize = 1000;
-const MAX_BRANCH_ROW_RUNTIME: Duration = Duration::from_secs(1);
+// Semantic unit fixtures allow slow native spawns; production retains its row deadline.
+const MAX_BRANCH_ROW_RUNTIME: Duration = if cfg!(test) {
+    Duration::from_secs(10)
+} else {
+    Duration::from_secs(1)
+};
 const BRANCH_CLEANUP_RESERVE: Duration = Duration::from_secs(1);
 const ENVELOPE_BYTES: usize = 1024;
 const HEAD_BYTES: usize = 256;
@@ -821,13 +826,17 @@ async fn spawn_git_with(
         Ok(result) => result,
         Err(_) => {
             let _ = child.start_kill();
-            let _ = tokio::time::timeout(
-                Duration::from_secs(1),
-                super::guard::reap_owned_child(&mut child),
-            )
-            .await;
-            Err(ToolError::Timeout(String::new()))
+            Err(timeout_after_reap(super::guard::reap_owned_child(&mut child)).await)
         }
+    }
+}
+
+async fn timeout_after_reap(
+    reap: impl std::future::Future<Output = std::io::Result<std::process::ExitStatus>>,
+) -> ToolError {
+    match tokio::time::timeout(Duration::from_secs(1), reap).await {
+        Ok(Ok(_)) => ToolError::Timeout(String::new()),
+        Ok(Err(_)) | Err(_) => ToolError::Operation,
     }
 }
 
@@ -2479,6 +2488,28 @@ pub(super) mod tests {
             branch_counts(record.repeat(MAX_BRANCH_COUNT_COMMITS + 1).as_bytes()).unwrap(),
             None
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_git_requires_confirmed_reaping_before_continuation() {
+        use std::os::unix::process::ExitStatusExt;
+        let reaped = async { Ok(std::process::ExitStatus::from_raw(9)) };
+        assert!(matches!(
+            timeout_after_reap(reaped).await,
+            ToolError::Timeout(_)
+        ));
+        let failed = async { Err(std::io::Error::other("reap failed")) };
+        assert!(matches!(
+            timeout_after_reap(failed).await,
+            ToolError::Operation
+        ));
+        let start = tokio::time::Instant::now();
+        let pending = std::future::pending();
+        assert!(matches!(
+            timeout_after_reap(pending).await,
+            ToolError::Operation
+        ));
+        assert_eq!(start.elapsed(), Duration::from_secs(1));
     }
 
     #[tokio::test]
