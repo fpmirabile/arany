@@ -4,6 +4,7 @@ use super::{
 };
 use crate::accounts::chatgpt;
 use crate::cli::provider::select::ProviderArg;
+use crate::presentation::{format_bytes, format_duration};
 use crate::terminal::{
     AttachedTerminal, CommandAvailability, CommandParseError, CompletionLayout, Composer,
     InteractiveCommand, MouseMode, NewlineShortcut, PointerSettings, Submission, TerminalInput,
@@ -203,32 +204,35 @@ fn setting_rows(preferences: Preferences) -> Vec<String> {
         ),
         format!("Goal tokens: {}", show(preferences.goal_budget.max_tokens)),
         format!(
-            "Goal active milliseconds: {}",
-            show(preferences.goal_budget.max_active_ms)
+            "Goal active time: {}",
+            preferences
+                .goal_budget
+                .max_active_ms
+                .map_or_else(|| "unlimited".into(), format_duration)
         ),
         format!(
-            "Default command timeout ms: {}",
-            preferences.resources.default_command_timeout_ms
+            "Default command timeout: {}",
+            format_duration(u64::from(preferences.resources.default_command_timeout_ms))
         ),
         format!(
-            "Maximum command timeout ms: {}",
-            preferences.resources.max_command_timeout_ms
+            "Maximum command timeout: {}",
+            format_duration(u64::from(preferences.resources.max_command_timeout_ms))
         ),
         format!(
-            "Build memory bytes: {}",
-            preferences.resources.build_memory_bytes
+            "Build memory: {}",
+            format_bytes(preferences.resources.build_memory_bytes)
         ),
         format!(
             "Build processes/threads: {}",
             preferences.resources.build_processes
         ),
         format!(
-            "Build writable project bytes: {}",
-            preferences.resources.build_project_bytes
+            "Build writable project: {}",
+            format_bytes(preferences.resources.build_project_bytes)
         ),
         format!(
-            "Build cache bytes: {}",
-            preferences.resources.build_cache_bytes
+            "Build cache: {}",
+            format_bytes(preferences.resources.build_cache_bytes)
         ),
         format!("Mouse: {}", preferences.mouse.label()),
         format!("Copy on select: {}", on_off(preferences.copy_on_select)),
@@ -242,6 +246,12 @@ fn linear_setting_rows(preferences: Preferences) -> Vec<String> {
     rows[1].push_str(" (fullscreen|classic)");
     for row in &mut rows[2..5] {
         row.push_str(" (number or unlimited)");
+    }
+    for row in &mut rows[4..7] {
+        row.push_str(" (input in milliseconds)");
+    }
+    for index in [7, 9, 10] {
+        rows[index].push_str(" (input in bytes)");
     }
     rows[11].push_str(" (wheel and clicks|wheel only|off)");
     rows[12].push_str(" (on|off)");
@@ -580,7 +590,7 @@ pub(super) async fn settings(
                         .map_err(|error| error.to_string())?;
                 }
                 format!(
-                    "Settings saved · calls {} · active ms {} · command max {} ms{}",
+                    "Settings saved · calls {} · active {} · command max {}{}",
                     chosen
                         .goal_budget
                         .max_provider_calls
@@ -588,8 +598,8 @@ pub(super) async fn settings(
                     chosen
                         .goal_budget
                         .max_active_ms
-                        .map_or_else(|| "unlimited".into(), |value| value.to_string()),
-                    chosen.resources.max_command_timeout_ms,
+                        .map_or_else(|| "unlimited".into(), format_duration),
+                    format_duration(u64::from(chosen.resources.max_command_timeout_ms)),
                     if linear {
                         " · visual sessions"
                     } else if chosen.view != terminal.mode() {
@@ -1659,9 +1669,9 @@ mod tests {
         assert_eq!(rows[3], "Goal tokens: unlimited (number or unlimited)");
         assert_eq!(
             rows[4],
-            "Goal active milliseconds: unlimited (number or unlimited)"
+            "Goal active time: unlimited (number or unlimited) (input in milliseconds)"
         );
-        assert_eq!(rows[10], "Build cache bytes: 8589934592");
+        assert_eq!(rows[10], "Build cache: 8.0 GB (input in bytes)");
         assert_eq!(
             rows[11],
             "Mouse: wheel and clicks (wheel and clicks|wheel only|off)"

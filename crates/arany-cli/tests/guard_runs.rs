@@ -565,7 +565,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
             assert!(observed.stdout == expected.as_bytes(), "image show {output} bytes differ");
             if output == "text" {
                 let text = String::from_utf8(observed.stdout).unwrap();
-                assert!(text.contains("Image 1: PNG 1x1, 196608 bytes"));
+                assert!(text.contains("Image 1: PNG 1x1, 192.0 KB"));
                 assert!(!text.contains("iVBOR"), "human show leaked encoded image bytes");
             } else {
                 let lines = std::str::from_utf8(&observed.stdout).unwrap().lines().map(|line| serde_json::from_str::<serde_json::Value>(line).unwrap()).collect::<Vec<_>>();

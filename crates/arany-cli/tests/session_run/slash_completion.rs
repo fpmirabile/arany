@@ -304,13 +304,13 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
           Choice 2: Chat view: fullscreen (fullscreen|classic)\r\n\
           Choice 3: Goal provider calls: unlimited (number or unlimited)\r\n\
           Choice 4: Goal tokens: unlimited (number or unlimited)\r\n\
-          Choice 5: Goal active milliseconds: unlimited (number or unlimited)\r\n\
-          Choice 6: Default command timeout ms: 120000\r\n\
-          Choice 7: Maximum command timeout ms: 600000\r\n\
-          Choice 8: Build memory bytes: 4294967296\r\n\
+          Choice 5: Goal active time: unlimited (number or unlimited) (input in milliseconds)\r\n\
+          Choice 6: Default command timeout: 2 min (input in milliseconds)\r\n\
+          Choice 7: Maximum command timeout: 10 min (input in milliseconds)\r\n\
+          Choice 8: Build memory: 4.0 GB (input in bytes)\r\n\
           Choice 9: Build processes/threads: 256\r\n\
-          Choice 10: Build writable project bytes: 1073741824\r\n\
-          Choice 11: Build cache bytes: 8589934592\r\n\
+          Choice 10: Build writable project: 1.0 GB (input in bytes)\r\n\
+          Choice 11: Build cache: 8.0 GB (input in bytes)\r\n\
           Choice 12: Mouse: wheel and clicks (wheel and clicks|wheel only|off)\r\n\
           Choice 13: Copy on select: on (on|off)\r\n\
           Choice 14: Newline shortcut: Shift+Enter (shift+enter|alt+enter|ctrl+enter)\r\n\
@@ -353,7 +353,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
         &mut transcript,
         &mut answered,
         selected_at,
-        "Notice: Settings saved · calls unlimited · active ms unlimited · command max 600000 ms · visual sessions\r\nInput:\r\n".as_bytes(),
+        "Notice: Settings saved · calls unlimited · active unlimited · command max 10 min · visual sessions\r\nInput:\r\n".as_bytes(),
     );
     assert_eq!(
         StateRoot::open_existing(&state)
@@ -3046,7 +3046,7 @@ esac
                 "image/png\ntext/plain\n",
                 "success",
                 png.as_slice(),
-                "Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
+                "Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
                 "types\npayload\n",
             ),
         ] {
@@ -3192,7 +3192,7 @@ esac
             .write_all(b"/paste\r")
             .expect("retain previous image after rejections");
         wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Image 2: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
+            b"Image 2: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n");
         let from = transcript.len();
         input.write_all(b"\x03").expect("clear images explicitly");
         wait_for_after(
@@ -3363,7 +3363,7 @@ esac
         let from = transcript.len();
         input.write_all(b"/paste\r").expect("paste while preparing");
         wait_for_after(&mut output, &mut input, &mut transcript, &mut answered, from,
-            b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 0.1 KB\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\n");
+            b"Draft (not sent):\r\n  \r\n  Image 1: PNG 1x1, 69 B\r\nDraft: 0 characters; Enter submits when idle; Ctrl+C clears when idle\r\n");
         let pasted = String::from_utf8_lossy(&transcript[from..]);
         assert!(
             !pasted.contains("Error:"),
