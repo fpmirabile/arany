@@ -1474,7 +1474,7 @@ fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
     let refused = "unavailable while a Run is active";
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut from = pty.capture_from;
-    // A settling Run refuses `/exit`; resend only after a redraw without that notice.
+    // A settling Run refuses `/exit`; resend only after a frame without that notice.
     'exit: loop {
         from = checkpoint_screen(
             &mut pty.transcript,
@@ -1486,12 +1486,14 @@ fn exit_live(attached: &mut ChildGuard, pty: &mut LivePty) {
         pty.capture_from = from;
         pty.input.write_all(b"/exit\r").expect("exit attached mode");
         let mut was_refused = false;
+        let mut inspected = 0;
         loop {
             pty.pump();
             if attached.child().try_wait().expect("chat status").is_some() {
                 break 'exit;
             }
-            if let Some(end) = pty.frame_ends(from).last().copied() {
+            for end in pty.frame_ends(from).into_iter().skip(inspected) {
+                inspected += 1;
                 let screen = pty.screen(end);
                 let shown = crate::process::pty_text_matches(screen.as_bytes(), refused.as_bytes())
                     .next()
