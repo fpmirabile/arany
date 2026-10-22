@@ -65,6 +65,29 @@ pub(super) fn apply(
             config,
             active_deadline_ms,
         } => {
+            let previous_epoch = current.runs.iter().rev().find_map(|run| {
+                run.config
+                    .as_ref()
+                    .and_then(|config| config.tool_policy.as_ref())
+                    .and_then(|policy| policy.host_epoch)
+            });
+            if let Some(epoch) = config
+                .tool_policy
+                .as_ref()
+                .and_then(|policy| policy.host_epoch)
+                && current.runs.iter().any(|run| {
+                    (run.accepted_sequence <= current.host_epoch_floor
+                        || previous_epoch != Some(epoch))
+                        && run
+                            .config
+                            .as_ref()
+                            .and_then(|config| config.tool_policy.as_ref())
+                            .and_then(|policy| policy.host_epoch)
+                            == Some(epoch)
+                })
+            {
+                return Err(ReplayError::InvalidTransition);
+            }
             let workspace_identity = WorkspaceIdentity {
                 device: config.workspace_device,
                 inode: config.workspace_inode,

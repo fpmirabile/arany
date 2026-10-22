@@ -363,6 +363,7 @@ mod tests {
             inherited_title: None,
             workspace_identity: None,
             defaults: Default::default(),
+            host_epoch_floor: 0,
             created_sequence: 1,
             last_sequence: 1,
             lineage: None,
@@ -520,6 +521,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let intent = arany::EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id,
             run_id,
@@ -738,6 +740,7 @@ mod tests {
         let run = view.runs.last_mut().unwrap();
         let child_read = arany::EffectIntent {
             host: None,
+            host_command: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: run.id,
