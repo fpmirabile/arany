@@ -30,6 +30,7 @@ Neither a template nor an unresolved proposal expands the user's authorized scop
 ## Status
 
 - `Draft`
+- `Ready` (Research and Plan gates passed; no material open questions)
 - `In progress`
 - `Blocked`
 - `Done`
@@ -44,6 +45,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
 | [Git write workflow](./git-write-workflow/README.md) | Three slices: guarded local Git writes, user-owned typed prefix rules, human-approved host push and PR creation |
 | [Agentic coding teams](./agentic-teams/README.md) | C2 edit-only workers, C3 command-capable views, roster presets, RPI, Supervisor adapters and deferred Goal/fetch/Git workflows |
 
