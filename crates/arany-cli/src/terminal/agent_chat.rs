@@ -606,6 +606,12 @@ impl AttachedTerminal {
                     state: ChildOfferState::Waiting,
                 });
             }
+            // A new feedback event is announced even when its text repeats.
+            if let Some(chat) = self.agent_chat.as_mut()
+                && chat.target() == Some(target)
+            {
+                chat.last_child_notice = None;
+            }
         }
     }
 
@@ -630,6 +636,11 @@ impl AttachedTerminal {
                 }
                 .into(),
             );
+            if let Some(chat) = self.agent_chat.as_mut()
+                && chat.target() == Some(target)
+            {
+                chat.last_child_notice = None;
+            }
         }
     }
 
@@ -1375,6 +1386,42 @@ mod tests {
                 .unwrap();
             assert!(matches!(action, AgentChatInput::Handled), "{input:?}");
         }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repeated_child_feedback_is_announced_again() {
+        let view = active_child_view();
+        let (run, targets) = agent_targets(&view).unwrap();
+        let target = ChildSteeringTarget {
+            session_id: view.id,
+            run_id: run,
+            agent_run_id: targets[2].id,
+        };
+        let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
+        terminal.agent_chat = Some(AgentChat {
+            session: view.id,
+            run,
+            targets,
+            selected: 2,
+            transcript: None,
+            appended: Appended::default(),
+            history: History::agent(),
+            listing: false,
+            shown: true,
+            choice: String::new(),
+            invalid: false,
+            editable: true,
+            last_child_notice: Some("No room".into()),
+        });
+        let mut draft = filled_draft(run);
+        draft.target = target;
+        terminal.child_drafts = vec![draft];
+        terminal.child_note_feedback(target, "No room".into(), None);
+        assert_eq!(
+            terminal.agent_chat.as_ref().unwrap().last_child_notice,
+            None
+        );
     }
 
     #[cfg(unix)]

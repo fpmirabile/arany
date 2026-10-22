@@ -274,6 +274,7 @@ impl History {
                             text.clone(),
                             width,
                         );
+                        self.push_notices_after(Some(MessageSource::Steering(index, note)), width);
                     }
                 }
                 for (verdict_index, (_, verdict)) in run.supervisor.verdicts().iter().enumerate() {
@@ -1728,6 +1729,26 @@ fn message_row_count(text: &str, width: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_notice_after_a_steering_note_survives_a_rebuild() {
+        let mut view = crate::presentation::team_view();
+        let (run, child) = (view.runs[0].id, view.runs[0].agents[2].id);
+        view.runs[0].agents[2].steering_notes = vec!["guidance".into()];
+        let transcript =
+            crate::presentation::AgentTranscript::from_session(&view, run, child).unwrap();
+        let mut history = History::agent();
+        history.sync(&transcript.view, 80, 4096);
+        history.record_notice(super::super::TerminalNotice::History("After the note"));
+        history.dirty = true;
+        history.sync(&transcript.view, 80, 4096);
+        assert!(
+            history
+                .messages
+                .iter()
+                .any(|message| message.kind == MessageKind::Notice)
+        );
+    }
     use arany::{
         AgentDisposition, AgentRole, AgentRunId, CollaborationPolicy, Event, RunConfig,
         RunDisposition, RunStatus, RunView, SessionDefaults, WorkspaceIdentity,

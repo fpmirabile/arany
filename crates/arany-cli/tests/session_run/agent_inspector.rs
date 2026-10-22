@@ -1059,7 +1059,8 @@ fn gated_team_server(
                 targeted,
                 "only the selected child's request receives its note"
             );
-            assert!(!text.contains("late note") && !text.contains("queued note"));
+            let whole = input.to_string();
+            assert!(!whole.contains("late note") && !whole.contains("queued note"));
 
             let gate = |name| {
                 requested.send(name).expect("request observer");
