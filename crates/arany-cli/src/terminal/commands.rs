@@ -434,20 +434,48 @@ pub fn parse_submission(line: &str) -> Result<Submission<'_>, CommandParseError>
 }
 
 pub fn skill_invocation<'a>(text: &'a str, skills: &[String]) -> Option<(&'a str, &'a str)> {
-    let control = text.strip_prefix('/')?;
-    let (name, task) = control
-        .split_once(char::is_whitespace)
-        .unwrap_or((control, ""));
-    (skills.iter().any(|skill| skill == name) && !command_completions("/").contains(&name))
-        .then_some((name, task.trim()))
+    let token = slash_token(text, skills.iter().map(String::as_str))?;
+    (token.kind == "skill").then_some((&token.text[1..], text[token.text.len()..].trim()))
 }
 
-pub fn invoked_objective(name: &str, task: &str) -> String {
-    if task.is_empty() {
-        format!("/{name}")
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct SlashToken<'a> {
+    pub(super) text: &'a str,
+    pub(super) kind: &'static str,
+}
+
+pub(super) fn slash_token<'a, 's>(
+    text: &'a str,
+    skills: impl IntoIterator<Item = &'s str>,
+) -> Option<SlashToken<'a>> {
+    let control = text.strip_prefix('/')?;
+    let name = control
+        .split_once(char::is_whitespace)
+        .map_or(control, |(name, _)| name);
+    let command_control = control.trim_end();
+    let command_name = command_control
+        .split_once(' ')
+        .map_or(command_control, |(name, _)| name);
+    let (kind, name) = if COMMANDS.iter().any(|command| command.name == command_name) {
+        ("command", command_name)
+    } else if COMMANDS.iter().any(|command| command.name == name) {
+        return None;
+    } else if skills.into_iter().any(|skill| skill == name) {
+        ("skill", name)
     } else {
-        task.to_owned()
-    }
+        return None;
+    };
+    Some(SlashToken {
+        text: &text[..name.len() + 1],
+        kind,
+    })
+}
+
+pub(super) fn invoked_skill_token<'a>(
+    text: &'a str,
+    skill: Option<&str>,
+) -> Option<SlashToken<'a>> {
+    slash_token(text, [skill?]).filter(|token| token.kind == "skill")
 }
 
 pub fn command_completions(prefix: &str) -> Vec<&'static str> {

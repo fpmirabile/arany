@@ -115,6 +115,22 @@ pub async fn list_native_models_with_credentials(
     profile: &str,
     credentials: &NativeApiCredentials,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
+    list_selected_models(profile, credentials, None).await
+}
+
+pub(super) async fn list_native_models_checked(
+    profile: &str,
+    credentials: &NativeApiCredentials,
+    journal: &mut crate::CheckJournal,
+) -> Result<Vec<ModelEntry>, ProviderError> {
+    list_selected_models(profile, credentials, Some(journal)).await
+}
+
+async fn list_selected_models(
+    profile: &str,
+    credentials: &NativeApiCredentials,
+    journal: Option<&mut crate::CheckJournal>,
+) -> Result<Vec<ModelEntry>, ProviderError> {
     let endpoint = match profile {
         "openai" => OPENAI_MODELS,
         "anthropic" => ANTHROPIC_MODELS,
@@ -126,7 +142,7 @@ pub async fn list_native_models_with_credentials(
         .build()
         .map_err(|_| ProviderError::Unavailable)?;
     let endpoint = Url::parse(endpoint).map_err(|_| ProviderError::Unavailable)?;
-    list_at(&client, profile, endpoint, credentials).await
+    list_at(&client, profile, endpoint, credentials, journal).await
 }
 
 async fn list_at(
@@ -134,6 +150,7 @@ async fn list_at(
     profile: &str,
     endpoint: Url,
     credentials: &NativeApiCredentials,
+    mut journal: Option<&mut crate::CheckJournal>,
 ) -> Result<Vec<ModelEntry>, ProviderError> {
     credentials.require_profile(profile)?;
     let key = credentials.api_key();
@@ -167,73 +184,102 @@ async fn list_at(
             Some(id) => request.header("anthropic-workspace-id", id),
             None => request,
         };
-        let mut response = request
-            .send()
-            .await
-            .map_err(|_| ProviderError::Unavailable)?;
-        if response.url() != &url {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        if !response.status().is_success() {
-            return Err(
-                if response.status().is_server_error()
-                    || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
-                {
-                    ProviderError::Unavailable
+        let token = match journal.as_deref_mut() {
+            Some(journal) => Some(
+                journal
+                    .call_started(crate::CheckCallKind::Catalog)
+                    .await
+                    .map_err(|_| ProviderError::Unavailable)?,
+            ),
+            None => None,
+        };
+        let result = async {
+            let mut response = request
+                .send()
+                .await
+                .map_err(|_| ProviderError::Unavailable)?;
+            if response.url() != &url {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            if !response.status().is_success() {
+                return Err(
+                    if response.status().is_server_error()
+                        || response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+                    {
+                        ProviderError::Unavailable
+                    } else {
+                        ProviderError::Rejected
+                    },
+                );
+            }
+            let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
+            let kind = content_types
+                .next()
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.split(';').next())
+                .map(str::trim);
+            if content_types.next().is_some()
+                || !kind.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
+            {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
+            if bytes
+                .windows(key.len())
+                .any(|window| window == key.as_bytes())
+            {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            let (rows, next) = if profile == "openai" {
+                let page: OpenAiPage =
+                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+                (page.data, None)
+            } else {
+                let page: AnthropicPage =
+                    serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+                let next = if page.has_more {
+                    let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
+                    if !valid_model_id(&last)
+                        || cursor.as_deref() == Some(&last)
+                        || page.data.last().is_none_or(|row| row.id != last)
+                    {
+                        return Err(ProviderError::InvalidOutcome);
+                    }
+                    Some(last)
                 } else {
-                    ProviderError::Rejected
-                },
-            );
-        }
-        let mut content_types = response.headers().get_all(header::CONTENT_TYPE).iter();
-        let kind = content_types
-            .next()
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(';').next())
-            .map(str::trim);
-        if content_types.next().is_some()
-            || !kind.is_some_and(|kind| kind.eq_ignore_ascii_case("application/json"))
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
-        if bytes
-            .windows(key.len())
-            .any(|window| window == key.as_bytes())
-        {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        let (rows, next) = if profile == "openai" {
-            let page: OpenAiPage =
-                serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-            (page.data, None)
-        } else {
-            let page: AnthropicPage =
-                serde_json::from_slice(&bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-            let next = if page.has_more {
-                let last = page.last_id.ok_or(ProviderError::InvalidOutcome)?;
-                if !valid_model_id(&last)
-                    || cursor.as_deref() == Some(&last)
-                    || page.data.last().is_none_or(|row| row.id != last)
+                    None
+                };
+                (page.data, next)
+            };
+            if rows.len() > MAX_MODELS - entries.len() {
+                return Err(ProviderError::InvalidOutcome);
+            }
+            for row in rows {
+                if !valid_model_id(&row.id) || row.id.contains(key) || !seen.insert(row.id.clone())
                 {
                     return Err(ProviderError::InvalidOutcome);
                 }
-                Some(last)
-            } else {
-                None
-            };
-            (page.data, next)
-        };
-        if rows.len() > MAX_MODELS - entries.len() {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        for row in rows {
-            if !valid_model_id(&row.id) || row.id.contains(key) || !seen.insert(row.id.clone()) {
-                return Err(ProviderError::InvalidOutcome);
+                entries.push(ModelEntry::native(profile, row.id));
             }
-            entries.push(ModelEntry::native(profile, row.id));
+            Ok::<_, ProviderError>(next)
         }
-        match next {
+        .await;
+        if let (Some(journal), Some(token)) = (journal.as_deref_mut(), token) {
+            let disposition = match &result {
+                Ok(_) => crate::CheckDisposition::Succeeded,
+                Err(error) => super::native_check::disposition(error),
+            };
+            journal
+                .call_finished(
+                    token,
+                    disposition,
+                    None,
+                    result.as_ref().is_ok_and(Option::is_none),
+                )
+                .await
+                .map_err(|_| ProviderError::Unavailable)?;
+        }
+        match result? {
             None => {
                 entries.sort_by(|left, right| left.id.cmp(&right.id));
                 return Ok(entries);
@@ -374,7 +420,7 @@ mod tests {
         let credentials =
             NativeApiCredentials::new(profile, "fixture-key".into(), workspace.map(str::to_owned))
                 .unwrap();
-        let result = list_at(&client, profile, endpoint, &credentials).await;
+        let result = list_at(&client, profile, endpoint, &credentials, None).await;
         (result, server.await.expect("fixture server"))
     }
 

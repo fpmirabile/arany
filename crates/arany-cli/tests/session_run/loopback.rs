@@ -248,7 +248,10 @@ pub(super) fn check_profile_with_binary(workspace: &Path, state: &Path, executab
         .stderr(Stdio::piped());
     let result = wait_product(command.spawn().expect("provider check process"));
     assert!(result.status.success(), "data-free custom conformance");
-    assert_eq!(result.stdout, b"Provider: local\nStatus: custom verified\n");
+    assert_eq!(
+        crate::check_output(&result.stdout, state, arany::CheckDisposition::Succeeded),
+        b"Provider: local\nStatus: custom verified\n"
+    );
     assert_eq!(result.stderr, b"");
 }
 
