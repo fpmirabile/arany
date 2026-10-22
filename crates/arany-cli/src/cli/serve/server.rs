@@ -416,6 +416,7 @@ pub(in crate::cli) async fn run_configured(
                                 let (objective, images) = input.parts()?;
                                 let view = threads::load_view(&state, input.thread_id).await?;
                                 let goal = input.goal(loaded, &view)?;
+                                let submitted_goal = goal.id;
                                 let (approvals, inbox) = ToolApprovals::new(loaded.approval_mode);
                                 let approvals = approvals.once_only();
                                 let approvals =
@@ -516,6 +517,7 @@ pub(in crate::cli) async fn run_configured(
                                     result_done: false,
                                     pending_close: None,
                                     state: TurnState {
+                                        goal_id: submitted_goal,
                                         first_sequence: Some(first_sequence),
                                         ..Default::default()
                                     },
@@ -620,7 +622,22 @@ pub(in crate::cli) async fn run_configured(
                         && let Some(id) = turn.pending_start.take()
                     {
                         let error = result.expect_err("failed Run");
-                        send(&outbound, Fault::engine(error).message(Some(id))).await?;
+                        let committed_budget = matches!(error, EngineError::GoalBudgetExhausted);
+                        let mut fault = Fault::engine(error);
+                        if committed_budget
+                            && let Ok(view) = threads::load_view(&state, turn.thread_id).await
+                            && let Some(run) = view.runs.iter().rev().find(|run| {
+                                view.budget_stop_goal(run).is_some_and(|goal| {
+                                    Some(goal.id) == turn.state.goal_id
+                                        && goal.budget_refusal.is_some()
+                                })
+                            })
+                            && let Some(feedback) =
+                                crate::presentation::session_run_feedback(&view, run)
+                        {
+                            fault.message = feedback;
+                        }
+                        send(&outbound, fault.message(Some(id))).await?;
                     }
                     complete(turn, &state, &outbound, &opt_out, &ending).await?;
                     if let Some(id) = turn.pending_close.take() {
@@ -833,6 +850,7 @@ async fn complete(
                     GoalStatus::Running
                 },
                 stopped: None,
+                budget_refusal: None,
             });
         }
         emit(

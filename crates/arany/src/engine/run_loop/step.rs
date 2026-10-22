@@ -1645,7 +1645,11 @@ impl RunLoop<'_> {
             if let Some(pause) = queue_pause {
                 self.settle_active_pause(pause, None)?;
             }
-            let segment = match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
+            let segment = match self.reserve_active_segment(
+                tool_action_bound(runtime, &intent),
+                crate::session::BudgetAction::Tool,
+                intent.agent_run_id,
+            ) {
                 Ok(segment) => segment,
                 Err(EngineError::GoalBudgetExhausted) => {
                     return Ok(Answer {
@@ -1694,7 +1698,11 @@ impl RunLoop<'_> {
                 };
                 Box::pin(self.dispatch_guard(runtime, intent, queue_pause)).await?
             } else {
-                match self.reserve_active_segment(tool_action_bound(runtime, &intent)) {
+                match self.reserve_active_segment(
+                    tool_action_bound(runtime, &intent),
+                    crate::session::BudgetAction::Tool,
+                    intent.agent_run_id,
+                ) {
                     Ok(segment) => (
                         execute_cancellable(runtime, intent, &self.controls.cancellation).await,
                         Some(segment),
@@ -1749,6 +1757,7 @@ impl RunLoop<'_> {
             .saturating_add(crate::tools::worker::transfer_time(&intent));
         let action_bound = tool_action_bound(&runtime, &intent);
         let runtime_ms = intent.limits.runtime_ms;
+        let actor = intent.agent_run_id;
         let mut execution = Box::pin(runtime.execute(intent, worker_cancellation.clone()));
         let mut active_segment = None;
         let mut observation = loop {
@@ -1765,7 +1774,7 @@ impl RunLoop<'_> {
                         if let Some(pause) = queue_pause.take() {
                             self.settle_active_pause(pause, Some(admitted_at))?;
                         }
-                        match self.reserve_active_segment(action_bound) {
+                        match self.reserve_active_segment(action_bound, crate::session::BudgetAction::Tool, actor) {
                             Ok(segment) => {
                                 let window = active_window(&segment, cache_transfer, runtime_ms);
                                 active_segment = Some(segment);
@@ -2083,7 +2092,11 @@ impl RunLoop<'_> {
             },
         };
         let active_segment = if delegation_deadline.is_none() {
-            Some(self.reserve_active_segment(TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD)?)
+            Some(self.reserve_active_segment(
+                TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD,
+                crate::session::BudgetAction::Tool,
+                intent.agent_run_id,
+            )?)
         } else {
             None
         };
