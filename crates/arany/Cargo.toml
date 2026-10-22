@@ -54,11 +54,11 @@ cc.workspace = true
 
 [dev-dependencies]
 globset.workspace = true
+tempfile.workspace = true
 arany = { path = ".", features = ["test-support"] }
 opentelemetry-proto.workspace = true
 opentelemetry_sdk = { workspace = true, features = ["trace", "testing"] }
 prost.workspace = true
-tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util", "io-util"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]

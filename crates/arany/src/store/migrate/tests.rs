@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 28] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 34] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -29,17 +29,33 @@ const EVENT_FIXTURES: [EventFixture<'static>; 28] = [
     ),
     ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
     ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
-    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
+    ("ToolStarted", 16, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 22, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 6, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 11, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        9,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        16,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
+    ("ToolFinished", 23, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     (
         "ToolFinished",
-        22,
+        23,
         COMMAND_TOOLFINISHED,
         SELECTION_TOOLFINISHED,
     ),
     (
         "HookFinished",
-        11,
+        12,
         GLOB_HOOKFINISHED,
         SELECTION_HOOKFINISHED,
     ),
@@ -1132,13 +1148,13 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
     for (kind, version, input, expected) in [
         (
             "ToolFinished",
-            22,
+            crate::test_support::payload_version("ToolFinished") - 1,
             COMMAND_TOOLFINISHED,
             SELECTION_TOOLFINISHED,
         ),
         (
             "HookFinished",
-            11,
+            crate::test_support::payload_version("HookFinished") - 1,
             GLOB_HOOKFINISHED,
             SELECTION_HOOKFINISHED,
         ),
@@ -1168,8 +1184,16 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
 #[test]
 fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceiling() {
     for (kind, version, input) in [
-        ("ToolFinished", 22, COMMAND_TOOLFINISHED),
-        ("HookFinished", 11, GLOB_HOOKFINISHED),
+        (
+            "ToolFinished",
+            crate::test_support::payload_version("ToolFinished") - 1,
+            COMMAND_TOOLFINISHED,
+        ),
+        (
+            "HookFinished",
+            crate::test_support::payload_version("HookFinished") - 1,
+            GLOB_HOOKFINISHED,
+        ),
     ] {
         for shape in ["full", "balanced", "asymmetric"] {
             let mut value: Value = serde_json::from_str(input).unwrap();
@@ -1748,3 +1772,39 @@ const SELECTION_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation"
 
 const COMMAND_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"changeset\":{\"files\":[]},\"exit_code\":2,\"stderr\":\"blocked\",\"stderr_total\":{\"bytes\":7,\"lines\":1},\"stdout\":\"\",\"stdout_total\":{\"bytes\":0,\"lines\":0}}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable","checkpoint":null}"#;
 const SELECTION_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":{\"ignored_entries\":0,\"pruned_directories\":0,\"oversized_inputs\":0,\"discarded_outputs\":0}}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable","checkpoint":null}"#;
+
+#[test]
+fn host_git_migrations_reject_new_authority_in_old_rows() {
+    let step = REGISTRY.event_step("ToolStarted", 16).unwrap();
+    let source: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let mut multiedit = source.clone();
+    multiedit["intent"]["call"] = serde_json::json!({"operation":"multiedit","file_path":"src/lib.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"before","new_string":"after","replace_all":false}]});
+    assert!(
+        (REGISTRY.event_step("ToolStarted", 15).unwrap().transform)(multiedit.clone()).is_none()
+    );
+    assert_eq!((step.transform)(multiedit.clone()), Some(multiedit.clone()));
+    let canonical = (step.canonical)(&multiedit.to_string()).unwrap();
+    assert_eq!(
+        serde_json::from_str::<Value>(&canonical).unwrap(),
+        multiedit
+    );
+    for field in ["call", "host", "network"] {
+        let mut forged = source.clone();
+        match field {
+            "call" => {
+                forged["intent"]["call"] = serde_json::json!({"operation":"git_push", "remote":"https://github.com/o/r", "branch":"main"})
+            }
+            "host" => {
+                forged["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))})
+            }
+            "network" => forged["intent"]["limits"]["network"] = serde_json::json!("host"),
+            _ => unreachable!(),
+        }
+        assert!((step.canonical)(&forged.to_string()).is_none(), "{field}");
+        assert!((step.transform)(forged).is_none(), "{field}");
+    }
+    assert_eq!(
+        (step.canonical)(GLOB_TOOLSTARTED).unwrap(),
+        GLOB_TOOLSTARTED
+    );
+}

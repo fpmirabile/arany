@@ -2389,6 +2389,7 @@ done
         }
         ToolRuntime {
             git_writes_available: false,
+            host_authentication: Default::default(),
             worker: None,
             handover: None,
             definitions: Default::default(),
@@ -3878,6 +3879,7 @@ int main(int argc, char **argv) {
                     hook_stdin: None,
                     hidden: Default::default(),
                     intent: EffectIntent {
+                        host: None,
                         target: crate::session::worker::EffectTarget::Workspace,
                         id: uuid::Uuid::now_v7(),
                         run_id: crate::session::RunId::default(),

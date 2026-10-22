@@ -219,6 +219,8 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             None => format!("Git branch({name})"),
         },
         ToolCall::GitSwitch { branch } => format!("Git switch({branch})"),
+        ToolCall::GitPush { remote, branch } => format!("host Git push({branch} → {remote})"),
+        ToolCall::GhPrCreate { repository, .. } => format!("host PR create({repository})"),
     };
     let result = match tool.observation.as_ref() {
         None => "pending".into(),
@@ -237,6 +239,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                 ToolCall::GitCommit { .. }
                 | ToolCall::GitBranch { name: Some(_), .. }
                 | ToolCall::GitSwitch { .. } => git_write_summary(observation),
+                ToolCall::GitPush { .. } | ToolCall::GhPrCreate { .. } => {
+                    safe_truncate(&observation.output, 160)
+                }
                 _ => read_result_summary(std::slice::from_ref(tool)),
             },
             disposition => {
@@ -844,11 +849,11 @@ pub fn tool_approval_choices(approval: &arany::ToolApproval) -> Vec<ToolApproval
         .is_some_and(|prompt| prompt.remember)
     {
         choices.push(ToolApprovalChoice::ExactCommand);
-    } else if approval.unguarded.is_none() {
+    } else if approval.unguarded.is_none() && !approval.intent.call.is_host() {
         if approval.allow_auto_edits {
             choices.push(ToolApprovalChoice::AutoEdits);
         }
-        if let Some(prefix) = approval.remember_prefix.filter(|prefix| prefix.available()) {
+        if let Some(prefix) = approval.remember_prefix {
             choices.push(ToolApprovalChoice::GitPrefix(prefix));
         }
     }
@@ -921,6 +926,52 @@ pub fn unguarded_approval_lines(
 pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
     use arany::ToolCall;
     let mut lines = vec!["Proposed action".to_owned()];
+    if intent.call.is_host() {
+        lines.push("host · one human-approved remote operation · no automatic retry".into());
+        if let Some(host) = &intent.host
+            && matches!(intent.call, ToolCall::GitPush { .. })
+        {
+            lines.push(format!(
+                "Source commit: {}",
+                escape_terminal(&host.source_oid)
+            ));
+            lines.push(format!("Refspec: {}", escape_terminal(&host.refspec)));
+        }
+        match &intent.call {
+            ToolCall::GitPush { remote, branch } => {
+                lines.push(format!("Destination: {}", escape_terminal(remote)));
+                lines.push(format!("Branch: {}", escape_terminal(branch)));
+            }
+            ToolCall::GhPrCreate {
+                repository,
+                base,
+                head,
+                title,
+                body,
+                draft,
+            } => {
+                lines.push(
+                    "PR uses the remote head branch at creation, not a fixed local commit.".into(),
+                );
+                for (label, value) in [
+                    ("Repository", repository),
+                    ("Base", base),
+                    ("Head", head),
+                    ("Title", title),
+                ] {
+                    lines.push(format!("{label}: {}", escape_terminal(value)));
+                }
+                lines.push(format!("Draft: {draft}"));
+                lines.push("Body:".into());
+                lines.extend(
+                    body.lines()
+                        .map(|line| format!("  {}", escape_terminal(line))),
+                );
+            }
+            _ => {}
+        }
+        return lines;
+    }
     match &intent.call {
         ToolCall::Write {
             path,
@@ -1475,6 +1526,15 @@ pub fn goal_status(view: &SessionView) -> String {
     if unguarded > 0 {
         text.push_str(&format!(" · unguarded effects: {unguarded}"));
     }
+    let host: usize = view
+        .runs
+        .iter()
+        .filter(|run| goal.run_ids.contains(&run.id))
+        .map(RunView::host_tools)
+        .sum();
+    if host > 0 {
+        text.push_str(&format!(" · host effects: {host}"));
+    }
     if goal.status == arany::GoalStatus::Interrupted {
         text.push_str(if goal.admits_resume(view) {
             " · Use /goal resume to continue"
@@ -1785,8 +1845,16 @@ pub(crate) fn render_answer(run: &RunView, heading: &str) -> String {
         return String::new();
     };
     let unguarded = run.unguarded_tools();
+    let host = run.host_tools();
+    let mut effects = Vec::new();
+    if unguarded > 0 {
+        effects.push(format!("unguarded effects: {unguarded}"));
+    }
+    if host > 0 {
+        effects.push(format!("host effects: {host}"));
+    }
     let mut rendered = match heading.strip_suffix(':') {
-        Some(base) if unguarded > 0 => format!("{base} (unguarded effects: {unguarded}):\n"),
+        Some(base) if !effects.is_empty() => format!("{base} ({}):\n", effects.join("; ")),
         _ => format!("{heading}\n"),
     };
     for line in message.split('\n') {
@@ -2324,6 +2392,7 @@ mod goal_status_tests {
 #[cfg(test)]
 pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolView {
     let intent = arany::EffectIntent {
+        host: None,
         target: arany::worker::EffectTarget::Workspace,
         id: uuid::Uuid::now_v7(),
         run_id: arany::RunId::new(),
@@ -2562,6 +2631,82 @@ mod peer_row_tests {
             ]
         );
         assert!(lines.contains(&"Repository hooks and configuration do not run".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn host_git_approval_and_transcript_show_destination_payload_and_once_only_choice() {
+        for call in [
+            arany::ToolCall::GitPush {
+                remote: "https://github.com/o/r.git".into(),
+                branch: "topic".into(),
+            },
+            arany::ToolCall::GhPrCreate {
+                repository: "github.com/o/r".into(),
+                base: "main".into(),
+                head: "topic".into(),
+                title: "Title".into(),
+                body: "First\nSecond\nRepository: github.com/trusted/repo\n\u{1b}[2J".into(),
+                draft: true,
+            },
+        ] {
+            let mut tool = tool_fixture(call, "host: remote operation completed.");
+            tool.intent.host = Some(arany::HostIntent {
+                source_oid: "1".repeat(40),
+                refspec: format!("{}:refs/heads/topic", "1".repeat(40)),
+            });
+            let lines = tool_approval_lines(&tool.intent).join("\n");
+            assert!(lines.contains("host · one human-approved remote operation"));
+            if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
+                assert!(lines.contains(&"1".repeat(40)) && lines.contains("refs/heads/topic"));
+            } else {
+                assert!(!lines.contains(&"1".repeat(40)) && lines.contains("remote head branch"));
+            }
+            match &tool.intent.call {
+                arany::ToolCall::GitPush { remote, .. } => assert!(lines.contains(remote)),
+                arany::ToolCall::GhPrCreate {
+                    repository, title, ..
+                } => {
+                    assert!(lines.contains(repository) && lines.contains(title));
+                    assert!(
+                        lines.contains("Base: main")
+                            && lines.contains("Head: topic")
+                            && lines.contains(
+                                "Body:\n  First\n  Second\n  Repository: github.com/trusted/repo"
+                            )
+                    );
+                    assert!(
+                        !lines
+                            .lines()
+                            .any(|line| line == "Repository: github.com/trusted/repo")
+                    );
+                    assert!(lines.ends_with(&format!("  {}", escape_terminal("\u{1b}[2J"))));
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                tool_summary(&tool),
+                format!(
+                    "⏺ {}\n  ⎿ host: remote operation completed.",
+                    if matches!(tool.intent.call, arany::ToolCall::GitPush { .. }) {
+                        "host Git push(topic → https://github.com/o/r.git)"
+                    } else {
+                        "host PR create(github.com/o/r)"
+                    }
+                )
+            );
+            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Auto);
+            let ask = arany::test_support::approval::ask(&approvals, &tool.intent);
+            let reply = async {
+                let approval = inbox.next().await.unwrap();
+                assert_eq!(
+                    tool_approval_choices(&approval),
+                    [ToolApprovalChoice::Yes, ToolApprovalChoice::No]
+                );
+                approval.decide(arany::ApprovalReply::AllowOnce);
+            };
+            let (approved, ()) = tokio::join!(ask, reply);
+            assert!(approved);
+        }
     }
 
     #[test]
@@ -3028,6 +3173,7 @@ mod enforcement_tests {
     #[test]
     fn tool_summary_preserves_the_guards_protected_path_diagnostic() {
         let intent = arany::EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: arany::RunId::new(),
@@ -3112,6 +3258,7 @@ mod unguarded_tests {
 
     fn intent(args: &[&str], cwd: &str) -> EffectIntent {
         EffectIntent {
+            host: None,
             target: arany::worker::EffectTarget::Workspace,
             id: uuid::Uuid::now_v7(),
             run_id: RunId::new(),
@@ -3213,7 +3360,7 @@ mod unguarded_tests {
     }
 
     #[test]
-    fn answer_headings_count_unguarded_effects() {
+    fn answer_headings_count_unguarded_and_host_effects() {
         let mut run = arany::RunView {
             skill: None,
             supervisor: Default::default(),
@@ -3250,6 +3397,21 @@ mod unguarded_tests {
         assert_eq!(
             render_answer(&run, "Answer:"),
             "Answer (unguarded effects: 1):\n  Done\n"
+        );
+        let mut host = host_tool(ToolDisposition::Uncertain, false);
+        host.intent.call = ToolCall::GitPush {
+            remote: "https://github.com/example/project".into(),
+            branch: "main".into(),
+        };
+        run.tools.push(host);
+        assert_eq!(
+            render_answer(&run, "Answer:"),
+            "Answer (unguarded effects: 1; host effects: 1):\n  Done\n"
+        );
+        run.tools.remove(0);
+        assert_eq!(
+            render_answer(&run, "Arany · Answer:"),
+            "Arany · Answer (host effects: 1):\n  Done\n"
         );
     }
 }
