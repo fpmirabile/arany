@@ -10,6 +10,178 @@ fn config_value() -> Value {
 }
 
 #[test]
+fn multiedit_orders_and_bounds_the_whole_publication() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::tempdir().unwrap();
+    let file = temp.path().join("file");
+    let config: Config = serde_json::from_value(json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
+    let edit = |old: &str, new: &str, replace_all| LiteralEdit {
+        old_string: old.into(),
+        new_string: new.into(),
+        replace_all,
+    };
+    let call = |bytes: &[u8], edits| ToolCall::MultiEdit {
+        file_path: "file".into(),
+        expected_digest: hex_digest(bytes),
+        edits,
+    };
+    for (name, original, edits, expected) in [
+        (
+            "dependent",
+            "A",
+            vec![edit("A", "B", false), edit("B", "C", false)],
+            Some("C"),
+        ),
+        (
+            "all literal",
+            "aa aa",
+            vec![edit("aa", "$1\\é", true)],
+            Some("$1\\é $1\\é"),
+        ),
+        ("nonoverlap", "xxx", vec![edit("xx", "y", true)], Some("yx")),
+        (
+            "fidelity",
+            "é\r\nquote ‘x’\r\n",
+            vec![edit("é", "界", false), edit("‘x’", "", false)],
+            Some("界\r\nquote \r\n"),
+        ),
+        (
+            "late missing",
+            "A",
+            vec![edit("A", "B", false), edit("missing", "C", false)],
+            None,
+        ),
+        (
+            "late ambiguous",
+            "A B",
+            vec![edit("A", "B", false), edit("B", "C", false)],
+            None,
+        ),
+        ("missing all", "A", vec![edit("B", "C", true)], None),
+        (
+            "unchanged final",
+            "A",
+            vec![edit("A", "B", false), edit("B", "A", false)],
+            None,
+        ),
+    ] {
+        std::fs::write(&file, original).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let opened = std::fs::File::open(&file).unwrap();
+        let call = call(original.as_bytes(), edits);
+        assert!(call.valid(), "{name}");
+        let result = super::fs::native(temp.path(), &call, &config);
+        if let Some(expected) = expected {
+            let output: Value = serde_json::from_str(&result.unwrap()).unwrap();
+            assert_eq!(
+                output,
+                json!({"before":{"sha256":hex_digest(original.as_bytes()),"bytes":original.len(),"executable":true},"sha256":hex_digest(expected.as_bytes()),"bytes":expected.len(),"executable":true}),
+                "{name}"
+            );
+            assert_eq!(std::fs::read(&file).unwrap(), expected.as_bytes(), "{name}");
+        } else {
+            assert!(matches!(result, Err(super::ToolError::Conflict)), "{name}");
+            assert_eq!(std::fs::read(&file).unwrap(), original.as_bytes(), "{name}");
+        }
+        let mut original_inode = Vec::new();
+        std::io::Read::read_to_end(
+            &mut std::io::Read::take(opened, MAX_FILE_BYTES as u64),
+            &mut original_inode,
+        )
+        .unwrap();
+        assert_eq!(
+            original_inode,
+            original.as_bytes(),
+            "{name}: one fresh inode publication"
+        );
+    }
+    let ordered: Vec<_> = (0..MAX_MULTI_EDITS)
+        .map(|index| edit(&index.to_string(), &(index + 1).to_string(), false))
+        .collect();
+    std::fs::write(&file, "0").unwrap();
+    super::fs::native(temp.path(), &call(b"0", ordered), &config).unwrap();
+    assert_eq!(std::fs::read(&file).unwrap(), b"64");
+    let original = "a".repeat(MAX_FILE_BYTES);
+    std::fs::write(&file, &original).unwrap();
+    for (edits, accepted) in [
+        (vec![edit("a", "b", true)], true),
+        (vec![edit("a", "aa", true), edit("aa", "b", true)], false),
+    ] {
+        std::fs::write(&file, &original).unwrap();
+        let result = super::fs::native(temp.path(), &call(original.as_bytes(), edits), &config);
+        assert_eq!(result.is_ok(), accepted);
+        if !accepted {
+            assert!(matches!(result, Err(super::ToolError::Limit)));
+        }
+    }
+    std::fs::write(&file, &original).unwrap();
+    let overflowing = call(original.as_bytes(), vec![edit("a", "aa", true)]);
+    assert!(matches!(
+        super::fs::native(temp.path(), &overflowing, &config),
+        Err(super::ToolError::Limit)
+    ));
+    assert_eq!(std::fs::read(&file).unwrap(), original.as_bytes());
+    for bytes in [vec![0xff], vec![b'a'; MAX_FILE_BYTES + 1]] {
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(
+            super::fs::native(
+                temp.path(),
+                &call(&bytes, vec![edit("a", "b", false)]),
+                &config
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
+    }
+    std::fs::remove_file(&file).unwrap();
+    assert!(
+        super::fs::native(
+            temp.path(),
+            &call(b"", vec![edit("a", "b", false)]),
+            &config
+        )
+        .is_err()
+    );
+    assert!(!file.exists());
+    for (edits, accepted) in [
+        (vec![], false),
+        (vec![edit("a", "b", false); MAX_MULTI_EDITS], true),
+        (vec![edit("a", "b", false); MAX_MULTI_EDITS + 1], false),
+        (vec![edit("", "b", true)], false),
+        (vec![edit("a", "a", false)], false),
+        (
+            vec![edit("é", &"x".repeat(MAX_EDIT_CONTENT_BYTES - 2), false)],
+            true,
+        ),
+        (
+            vec![edit("é", &"x".repeat(MAX_EDIT_CONTENT_BYTES - 1), false)],
+            false,
+        ),
+        (
+            vec![
+                edit(
+                    &"x".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                    &"y".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                    false,
+                ),
+                edit("a", "b", false),
+            ],
+            false,
+        ),
+    ] {
+        assert_eq!(call(b"a", edits).valid(), accepted);
+    }
+    for path in ["/file", "../file", ".env", "nested/link"] {
+        let mut value = serde_json::to_value(call(b"a", vec![edit("a", "b", false)])).unwrap();
+        value["file_path"] = json!(path);
+        let denied: ToolCall = serde_json::from_value(value).unwrap();
+        assert!(
+            !config.allows(&denied) || super::fs::native(temp.path(), &denied, &config).is_err()
+        );
+    }
+}
+
+#[test]
 fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     use super::ToolRuntime;
     use super::config::Skill;
@@ -1250,7 +1422,7 @@ fn host_runtime_roots_can_only_come_from_remembered_folder_trust() {
 fn typed_tool_schema_and_receipts_have_exact_bounds() {
     let rows: Vec<Value> =
         serde_json::from_str(include_str!("../../tests/fixtures/tool-calls.json")).unwrap();
-    assert_eq!(rows.len(), 11);
+    assert_eq!(rows.len(), 12);
     let schema = jsonschema::options()
         .offline()
         .build(&json!({"anyOf": call_schemas()}))
@@ -1358,10 +1530,19 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             content: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES),
         },
         ToolCall::Edit {
-            path: escaped_path,
+            path: escaped_path.clone(),
             expected_digest: "0".repeat(64),
             old: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
             new: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+        },
+        ToolCall::MultiEdit {
+            file_path: escaped_path,
+            expected_digest: "0".repeat(64),
+            edits: vec![LiteralEdit {
+                old_string: "\u{1}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                new_string: "\u{2}".repeat(MAX_EDIT_CONTENT_BYTES / 2),
+                replace_all: false,
+            }],
         },
     ] {
         assert!(call.valid());

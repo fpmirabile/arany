@@ -380,7 +380,11 @@ pub(crate) fn publication_files(
         })
     };
     match &o.intent.call {
-        ToolCall::Write { path, .. } | ToolCall::Edit { path, .. } => {
+        ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => {
             let p: FilePublicationResult =
                 serde_json::from_str(&o.output).map_err(|_| ReplayError::InvalidPayload)?;
             let expected = match &o.intent.call {
@@ -388,6 +392,9 @@ pub(crate) fn publication_files(
                     expected_digest, ..
                 } => expected_digest.as_deref(),
                 ToolCall::Edit {
+                    expected_digest, ..
+                }
+                | ToolCall::MultiEdit {
                     expected_digest, ..
                 } => Some(expected_digest.as_str()),
                 _ => unreachable!(),

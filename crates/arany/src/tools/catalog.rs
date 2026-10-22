@@ -93,7 +93,7 @@ const fn git_write_row(name: &'static str, order: u8, description: &'static str)
 }
 
 // The same order for every request keeps the Tool prefix byte-stable for prompt caching.
-pub(crate) static ALL: [OperationFacts; 23] = [
+pub(crate) static ALL: [OperationFacts; 24] = [
     read_row(
         "list",
         Family::File,
@@ -227,11 +227,16 @@ pub(crate) static ALL: [OperationFacts; 23] = [
         20,
         "Switch to an existing local branch, updating the changed Workspace files. Refuses when it would overwrite local changes or untracked files, or during a merge or rebase. Asks approval.",
     ),
+    write_row(
+        "multiedit",
+        21,
+        "Apply 1 to 64 ordered literal replacements to one existing UTF-8 file under its current SHA-256. Each edit sees the preceding result; publish the complete result once or nothing. Empty searches and unchanged final content reject.",
+    ),
     OperationFacts {
         site: Site::Host,
         ..git_write_row(
             "git_push",
-            21,
+            22,
             "Push one local branch to the same remote branch at an explicit HTTPS or SSH URL. Always asks a human for this host operation; no force, deletion or automatic retry.",
         )
     },
@@ -239,7 +244,7 @@ pub(crate) static ALL: [OperationFacts; 23] = [
         site: Site::Host,
         ..git_write_row(
             "gh_pr_create",
-            22,
+            23,
             "Create a GitHub pull request with an explicit repository, base, head and payload. Always asks a human for this host operation; never pushes or forks.",
         )
     },
@@ -280,6 +285,7 @@ impl ToolCall {
             Self::Mkdir { .. } => &ALL[3],
             Self::Write { .. } => &ALL[4],
             Self::Edit { .. } => &ALL[5],
+            Self::MultiEdit { .. } => &ALL[21],
             Self::Command { .. } => &ALL[6],
             Self::ApplyChangeset { .. } => &ALL[7],
             Self::CommandUnguarded { .. } => &ALL[14],
@@ -294,8 +300,8 @@ impl ToolCall {
             Self::GitBranch { name: None, .. } => &GIT_BRANCH_LIST,
             Self::GitBranch { .. } => &ALL[19],
             Self::GitSwitch { .. } => &ALL[20],
-            Self::GitPush { .. } => &ALL[21],
-            Self::GhPrCreate { .. } => &ALL[22],
+            Self::GitPush { .. } => &ALL[22],
+            Self::GhPrCreate { .. } => &ALL[23],
         }
     }
 }
@@ -322,7 +328,7 @@ pub(crate) fn git_operations(write: bool, host: bool) -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication)";
 pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline without .git; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
 
@@ -668,6 +674,15 @@ mod tests {
             },
             ToolCall::GitSwitch {
                 branch: "topic".into(),
+            },
+            ToolCall::MultiEdit {
+                file_path: path(),
+                expected_digest: "0".repeat(64),
+                edits: vec![super::super::LiteralEdit {
+                    old_string: "a".into(),
+                    new_string: "b".into(),
+                    replace_all: false,
+                }],
             },
             ToolCall::GitPush {
                 remote: "https://github.com/o/r.git".into(),

@@ -654,6 +654,7 @@ impl Rule {
             "Bash" => Tool::Bash,
             "Read" => Tool::Read,
             "Edit" => Tool::Edit,
+            "MultiEdit" => Tool::Native("multiedit"),
             "Write" => Tool::Write,
             "Glob" => Tool::Glob,
             "Grep" => Tool::Grep,
@@ -734,8 +735,8 @@ impl Rule {
                 | Tool::Edit
                 | Tool::Grep
                 | Tool::Native(
-                    "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "git_status"
-                    | "git_diff" | "git_log",
+                    "list" | "read" | "search" | "glob" | "mkdir" | "write" | "edit" | "multiedit"
+                    | "git_status" | "git_diff" | "git_log",
                 ) => {
                     let (pattern, prefix) = path_glob(pattern, decision)?;
                     commit_prefix = prefix;
@@ -912,6 +913,9 @@ fn path_of(call: &ToolCall) -> Option<&str> {
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
         | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        }
         | ToolCall::GitStatus { path }
         | ToolCall::GitDiff { path, .. }
         | ToolCall::GitLog { path, .. } => Some(if path.is_empty() { "." } else { path }),
@@ -935,6 +939,7 @@ fn peer_operation_name(name: &str) -> &str {
         "search" => "Grep",
         "write" => "Write",
         "mkdir" | "edit" | "apply_changeset" => "Edit",
+        "multiedit" => "MultiEdit",
         "skill" => "Skill",
         _ => name,
     }

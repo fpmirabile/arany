@@ -138,16 +138,16 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("SessionRenamed", 6),
     ("GoalRunLinked", 6),
     ("GoalResumed", 6),
-    ("GoalPlanContractRecorded", 9),
+    ("GoalPlanContractRecorded", 10),
     ("GoalContextCompacted", 6),
     ("GoalSteeringNoteRecorded", 6),
     ("AgentSteeringNoteRecorded", 1),
     ("AssistantDisplayRecorded", 6),
     ("MessageCommitted", 6),
     ("MessageAccepted", 7),
-    ("AgentSpawned", 12),
+    ("AgentSpawned", 13),
     ("AgentFinished", 10),
-    ("ProviderCallRecorded", 16),
+    ("ProviderCallRecorded", 17),
     ("WorkerDataChunk", 1),
     ("WorkerDataSealed", 1),
     ("WorkerStopObserved", 1),
@@ -165,14 +165,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 5),
-    ("HookStarted", 6),
-    ("HookFinished", 11),
-    ("ToolFinished", 22),
-    ("RunStarted", 20),
+    ("HookStarted", 7),
+    ("HookFinished", 12),
+    ("ToolFinished", 23),
+    ("RunStarted", 21),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 16),
+    ("ToolStarted", 17),
     ("ContextCompacted", 7),
 ];
 
@@ -1468,6 +1468,20 @@ pub(crate) fn pre_git_write_payload(kind: &str, payload: &str) -> Option<String>
         &["git_commit", "git_branch", "git_switch"],
         None,
     )
+}
+
+pub(crate) fn pre_multiedit_payload(kind: &str, payload: &str) -> Option<String> {
+    let text = if kind == "RunStarted" {
+        serialize(&parse::<RunStartedPayload>(payload).ok()?).ok()?
+    } else {
+        before_operations(kind, payload, &["multiedit"], Some("multiedit"))?
+    };
+    (!mentions(
+        &serde_json::from_str(&text).ok()?,
+        &["multiedit"],
+        Some("multiedit"),
+    ))
+    .then_some(text)
 }
 
 // The typed text a verdict had before the typed prefix rule source existed, or `None` when it
