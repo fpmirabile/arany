@@ -760,11 +760,17 @@ pub(super) enum Inspection {
     Inconclusive,
 }
 
+pub(super) fn orphan_checkpoint_journal(root: &StateRoot) -> Result<bool, StoreError> {
+    let records = checkpoints::records(root)?;
+    let empty = records[0].as_ref().is_none_or(|file| file.len() == 0);
+    Ok(empty && checkpoint_journal_present(root)?)
+}
+
 pub(super) fn checkpoint_journal_present(root: &StateRoot) -> Result<bool, StoreError> {
     Ok(identity_of(&root.dir, checkpoints::FILES[1])?.is_some())
 }
 
-// The caller holds the exclusive history and checkpoint locks.
+// The caller holds the checkpoint lock; recovery also needs the exclusive history lock.
 pub(super) fn checkpoint_below_floor(root: &StateRoot) -> Result<bool, StoreError> {
     let records = checkpoints::records(root)?;
     if records[0].as_ref().is_none_or(|file| file.len() == 0) {

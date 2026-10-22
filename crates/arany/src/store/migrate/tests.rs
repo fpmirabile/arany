@@ -1426,6 +1426,34 @@ fn checkpoint_journal_that_survives_recovery_refuses_untouched() {
 }
 
 #[test]
+fn orphan_checkpoint_journal_refuses_untouched() {
+    for empty_database in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("state");
+        let History { root, sessions } = forked_history(&path);
+        let database = path.join(checkpoints::FILES[0]);
+        if empty_database {
+            create_private(&root.dir, checkpoints::FILES[0]).unwrap();
+        }
+        create_private(&root.dir, checkpoints::FILES[1]).unwrap();
+        std::fs::write(path.join(checkpoints::FILES[1]), b"orphan").unwrap();
+        let journal = std::fs::read(path.join(DATABASE_FILE)).unwrap();
+        assert!(matches!(
+            root.archive_incompatible_history(),
+            Err(StoreError::InvalidStateDirectory)
+        ));
+        assert_eq!(
+            std::fs::read(path.join(checkpoints::FILES[1])).unwrap(),
+            b"orphan"
+        );
+        assert_eq!(database.exists(), empty_database);
+        assert_eq!(std::fs::read(path.join(DATABASE_FILE)).unwrap(), journal);
+        assert!(!path.join("archive").exists() && !path.join(DIR).exists());
+        replays(&root, &sessions);
+    }
+}
+
+#[test]
 fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
     for case in ["newer", "malformed", "extra_trigger", "busy", "unsafe"] {
         let temp = tempfile::tempdir().unwrap();

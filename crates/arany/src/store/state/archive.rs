@@ -78,6 +78,9 @@ impl StateRoot {
             Some(plan) => plan,
             None => {
                 migrate::recover(self)?;
+                if migrate::orphan_checkpoint_journal(self)? {
+                    return Err(StoreError::InvalidStateDirectory);
+                }
                 match check_history(self) {
                     Err(StoreError::InvalidHistory) => {}
                     result => return result.map(|()| None),
