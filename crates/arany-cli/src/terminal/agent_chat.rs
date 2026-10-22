@@ -1339,8 +1339,9 @@ mod tests {
             TerminalInput::Character('\\'),
             TerminalInput::Submit,
         ] {
-            assert!(
-                matches!(terminal.edit_child(&view, input).await.unwrap(), AgentChatInput::ChildEdited(id) if id == target)
+            assert_eq!(
+                terminal.child_drafts[0].composer.apply(input),
+                ComposerEdit::Changed
             );
         }
         assert_eq!(terminal.child_drafts[0].composer.text(), "a\n");

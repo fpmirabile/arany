@@ -1975,7 +1975,9 @@ fn slash_argument_placeholder_is_visual_only_until_value_is_typed() {
                                 entry.name
                             );
                         }
-                        assert!(labels.iter().any(|row| row.contains("Newline shortcut")));
+                        assert!(labels.iter().any(|row| {
+                            row.contains("Slash menu, chat view and newline shortcut")
+                        }));
                     }
                     if !color {
                         assert!(buffer.content().iter().all(|cell| cell.fg == Color::Reset));
