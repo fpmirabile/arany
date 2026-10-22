@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Draft`
+- Status: `Ready`
 - Owner: repository owner (target and named-host decisions); implementing lead (corpus and verification)
 - Last updated: `2026-10-22`
 - Research baseline: `14384e1b080946346fe5391d2d0dfe462f6cf72d`
@@ -156,16 +156,14 @@ The owner records: date, exact revision, binary/toolchain/profile, host label, C
 ## RPI gates
 
 - **Research → Plan:** satisfied for current code/contract/peer facts above, including the lack of exact durable elapsed time in existing Events. Recheck endpoint call sites at implementation head. Proposed targets and host selection are recommendations, not researched measurements.
-- **Plan → Implement:** blocked only by the material owner choices below. Record accepted answers in this plan; no material assumption may remain. This documentation task does not authorize implementation.
+- **Plan → Implement:** passed 2026-10-22; the owner decisions below are recorded. Implementation follows the slices above.
 - **Per-slice implementation gate:** exact deterministic success/failure observations, relevant checks and complete final-head CI; stop and revise the plan if the real flow contradicts its timing boundary. Native performance evidence is a separate owner-run gate and never licenses weakened guarantees.
 
-## Open questions
+## Decisions (2026-10-22, owner)
 
-| Owner | Decision | Recommended answer |
-|---|---|---|
-| Repository owner | Accept a monotonic receipt-to-finish-acknowledgement metric, audited against closed journals, with replayable wall-time intervals reported separately? | Yes. Journal timestamps alone cannot measure the final commit cost; retain local sample reports rather than change the stored Event format. |
-| Repository owner | Accept provisional p95 objectives of Read 100 ms, Edit 250 ms and no-op command 500 ms, while retaining Read dispatch <= 50 ms separately? | Yes, as named-host reporting objectives. Record baseline misses and investigate; no CI wall-time gate or automatic threshold adjustment. |
-| Repository owner | Which named Linux host and storage device own the initial evidence, and is the fixed warm/no-op workload sufficient for item 11's first row? | Use the owner's ordinary native Linux development machine, idle on stable power and local disk, with three separately reported invocations. Accept that workload for this row; leave cold disk, long history, large snapshots and macOS explicitly unverified. The owner must supply the host label and device before any performance claim. |
+- Accepted the monotonic receipt-to-finish-acknowledgement metric, audited against closed journals, with replayable wall-time intervals reported separately. Retain local sample reports without changing the stored Event format.
+- Accepted provisional named-host p95 objectives of Read 100 ms, Edit 250 ms and no-op command 500 ms as a starting point, with Read dispatch <= 50 ms reported separately. Record and investigate baseline misses; no CI wall-time gate or automatic threshold adjustment.
+- Selected the owner's ordinary native Linux development machine, `asustuf` (kernel `7.2.10-zen1-1-zen`), idle on stable power and local disk, for three separately reported invocations. `/home` uses `/dev/nvme1n1p1`, ext4, on `nvme1n1` (`WD_BLACK SN770 2TB`, `ROTA=0`, `TRAN=nvme`). Accepted the fixed warm/no-op workload for item 11's first row; cold disk, long history, large snapshots and macOS remain explicitly unverified.
 
 ## Exit criteria
 
