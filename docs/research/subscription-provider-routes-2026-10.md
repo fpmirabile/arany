@@ -58,9 +58,9 @@ not a current vulnerability finding or a native-store result.
 
 ## Decision boundary for beta 1
 
-[Provider admission](../specs/provider.md#provider-support-summary) and
-[D-18](./next-step-decision-register.md#d-18--explicitly-accepted-chatgpt-plan-route-is-beta-scope)
-own Arany's choices. Native Claude-plan use needs prior Anthropic approval or a
+[Provider admission](../specs/provider.md#provider-support-summary) owns provider
+route choices; [D-18](./next-step-decision-register.md#d-18--explicitly-accepted-chatgpt-plan-route-is-beta-scope)
+owns acceptance of the weaker ChatGPT-plan guarantee. Native Claude-plan use needs prior Anthropic approval or a
 changed published route; the unmodified-binary path requires its own architecture
 and security decision. [Next steps](../../NEXT_STEPS.md#beta-1-final-user-owned-checks)
 owns live checks. Recheck authorization, billing and availability before use or
