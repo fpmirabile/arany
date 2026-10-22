@@ -1191,7 +1191,7 @@ fn classic_dialog_takes_its_content_height_and_closes_under_the_latest_history()
     std::fs::create_dir(&workspace).unwrap();
     let state = temp.path().join("state");
     let id = crate::seed_transcript_session(&state, &workspace);
-    let shell = "stty rows 50 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"";
+    let shell = "stty rows 50 cols 80; printf 'SHELL_PID:%s\\n' \"$$\"; \"$ARANY_TEST_EXE\" --classic --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume \"$ARANY_TEST_SESSION\"; result=$?; exit \"$result\"";
     let mut command = crate::isolation::account_isolated_script(temp.path());
     command
         .env_clear()
