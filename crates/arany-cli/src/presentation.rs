@@ -9,6 +9,7 @@ use unicode_width::UnicodeWidthStr;
 mod agents;
 mod model;
 pub mod rewind;
+pub mod storage;
 #[cfg(test)]
 pub(crate) use agents::tests::team_view;
 pub(crate) use agents::{

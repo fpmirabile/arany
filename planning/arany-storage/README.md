@@ -2,7 +2,8 @@
 
 ## Metadata
 
-- Status: `Ready` — Research and Plan gates passed; no material open question remains.
+- Status: `In progress` — S1 implemented locally; recorded native Guard storage (S2) remains.
+- Next action: implement S2 through the existing native ownership collectors; [accepted S1 contract](../../docs/specs/tools.md#local-storage-inventory).
 - Owner: Arany maintainer.
 - Last updated: 2026-10-22.
 - Delivery: Research → Plan → Implement; two vertical slices, independently implementable.
@@ -74,9 +75,8 @@ No new Run, Tool intent or filesystem effect occurs: this is a user-local metada
 - A read command repairs or cleans state as a side effect → use metadata-only owner entry points, and assert no changed fixture bytes/directory entries after success, failure and cancellation.
 - Metadata itself exposes private history or account details → category aggregation, fixed secret bucket, no payload reads and user-local delivery under the recorded S1 lead default.
 
-## Vertical slices
+## Remaining vertical slice
 
-1. **Known StateRoot and cache disk report.** `arany storage` and `/storage` → metadata-only owner operation → identity deduplication/size accounting → local text report with coverage and existing cache-clear hints. Include missing/corrupt state, secrets, overlaps, sparse/hard-linked data, bounded scans, cancellation and no-mutation/no-Provider scenarios. Update Tools/Terminal/Credentials contracts in this PR. Guard storage is explicitly “not yet included” until slice 2; no machine-total claim.
 2. **Recorded native Guard storage.** Extend the same report through existing Linux seed and macOS image ownership records → backing-byte accounting → live/retained/unknown labels and existing maintenance guidance. Include mounted-image non-traversal, unrecorded prefixes, stale boot, replaced roots, busy/changing records and aggregate overflow in native fixtures. Report the current absence of an owned-worktree registry explicitly; do not introduce worktree management. This PR completes the feature's declared coverage.
 
 ## Exit criteria

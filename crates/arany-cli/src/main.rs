@@ -34,6 +34,8 @@ enum ShowOutput {
 #[derive(Subcommand)]
 enum Command {
     Exec(ExecArgs),
+    #[command(about = "Report Arany-owned storage metadata")]
+    Storage(cli::storage::StorageArgs),
     Serve(cli::serve::ServeArgs),
     Acp(cli::acp::AcpArgs),
     Provider(ProviderArgs),
@@ -106,6 +108,9 @@ fn main() -> ExitCode {
         report_error(error);
         return ExitCode::from(2);
     }
+    if matches!(cli.command, Some(Command::Storage(_))) {
+        return run_cli(cli, Telemetry::disabled());
+    }
     let telemetry = match Telemetry::from_process(cli.otlp_endpoint.as_deref()) {
         Ok(telemetry) => telemetry,
         Err(error) => {
@@ -140,6 +145,7 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
         report_error("attached options cannot be used with a subcommand");
         return ExitCode::FAILURE;
     }
+    let storage = matches!(cli.command, Some(Command::Storage(_)));
     let serving = matches!(cli.command, Some(Command::Serve(_) | Command::Acp(_)));
     let result = runtime.block_on(run(cli.command.expect("checked subcommand"), telemetry));
     if serving {
@@ -155,7 +161,9 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
                     .write_all(output.stderr.as_bytes())
                     .is_err()
             {
-                arany::record_development_failure(arany::DevelopmentFailure::Output);
+                if !storage {
+                    arany::record_development_failure(arany::DevelopmentFailure::Output);
+                }
                 report_error("output failed");
                 ExitCode::FAILURE
             } else if output.success {
@@ -165,7 +173,9 @@ fn run_cli(cli: Cli, telemetry: Telemetry) -> ExitCode {
             }
         }
         Err(error) => {
-            arany::record_development_failure(arany::DevelopmentFailure::ExecExit);
+            if !storage {
+                arany::record_development_failure(arany::DevelopmentFailure::ExecExit);
+            }
             report_error(error);
             ExitCode::FAILURE
         }
@@ -182,6 +192,7 @@ async fn run(command: Command, telemetry: Telemetry) -> Result<CommandOutput, St
     match command {
         Command::Acp(args) => cli::acp::run(args, telemetry).await,
         Command::Serve(args) => cli::serve::run(args, telemetry).await,
+        Command::Storage(args) => cli::storage::run(args).await,
         Command::Exec(args) => cli::exec::run(args, telemetry).await,
         Command::Provider(args) => cli::provider::run(args).await,
         Command::GenerateSchema { out } => cli::generate_schema::run(out.as_deref()),

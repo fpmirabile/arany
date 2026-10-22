@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use std::io::{self, Read, Seek, Write};
 use std::path::{Component, Path};
 
-const DIRECTORY: &str = "build-cache";
+pub(super) const DIRECTORY: &str = "build-cache";
 const ARCHIVE_PREFIX: &str = "cache-";
 const PREVIOUS_PREFIX: &str = "previous-";
 const RESERVATION_PREFIX: &str = "reserve-";
@@ -28,7 +28,7 @@ const IDENTITY_FILE_KINDS: [(&str, &str); 8] = [
 ];
 const NAMESPACE_LOCK: &str = "namespace.lock";
 const AGGREGATE_LOCK: &str = "aggregate.lock";
-const MAX_IDENTITIES: usize = 128;
+pub(super) const MAX_IDENTITIES: usize = 128;
 const MEBIBYTE_BYTES: u64 = 1024 * 1024;
 pub(crate) const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 pub(crate) const DEFAULT_ARCHIVE_BYTES: u64 = 64 * 1024 * 1024;
@@ -1645,6 +1645,27 @@ fn remove_stale_candidates(dir: &Dir) -> Result<(), StoreError> {
         }
     }
     Ok(())
+}
+
+pub(super) fn inventory_record(name: &str) -> Option<(Option<&str>, bool)> {
+    if matches!(name, NAMESPACE_LOCK | AGGREGATE_LOCK) {
+        return Some((None, false));
+    }
+    let (prefix, token) = IDENTITY_FILE_KINDS
+        .into_iter()
+        .find_map(|(prefix, ending)| suffix(name, prefix, ending).map(|token| (prefix, token)))?;
+    validate_token(token).ok()?;
+    Some((
+        Some(token),
+        matches!(
+            prefix,
+            RESERVATION_PREFIX
+                | STAGING_PREFIX
+                | CANDIDATE_PREFIX
+                | TRANSACTION_PREFIX
+                | TRANSACTION_NEXT_PREFIX
+        ),
+    ))
 }
 
 fn identity_count(dir: &Dir) -> Result<usize, StoreError> {
