@@ -64,7 +64,7 @@ const fn read_row(
     description: &'static str,
 ) -> OperationFacts {
     OperationFacts {
-        site: if matches!(family, Family::File) {
+        site: if matches!(family, Family::File | Family::Skill) {
             Site::InProcess
         } else {
             Site::Guard
@@ -779,7 +779,7 @@ mod tests {
     }
 
     #[test]
-    fn only_file_reads_run_in_process() {
+    fn only_file_and_skill_reads_run_in_process() {
         assert!(
             ToolCall::CommandUnguarded {
                 program: "cargo".into(),
@@ -796,7 +796,7 @@ mod tests {
             .filter(|facts| facts.site == Site::InProcess)
             .map(|facts| facts.name)
             .collect();
-        assert_eq!(in_process, ["list", "read", "search", "glob"]);
+        assert_eq!(in_process, ["list", "read", "search", "skill", "glob"]);
         assert!(
             ALL.iter()
                 .filter(|facts| facts.site == Site::InProcess)

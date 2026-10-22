@@ -1,7 +1,7 @@
 use super::catalog::Family;
 use super::guard::GuardContext;
 use super::types::{EffectIntent, EnforcementCause, LimitCause, ToolCall, ToolDisposition};
-use super::{ToolError, fs, git, mcp, process, skills};
+use super::{ToolError, fs, git, mcp, process};
 
 pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let call = &site.intent.call;
@@ -13,7 +13,7 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         ),
         Family::File => fs::native(site.workspace, call, site.config),
         Family::Process => process::run(site).await,
-        Family::Skill => skills::run(call, site.skill.as_deref().ok_or(ToolError::Configuration)?),
+        Family::Skill => Err(ToolError::Configuration),
         Family::Mcp => {
             mcp::execute(
                 call,
