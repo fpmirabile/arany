@@ -1169,13 +1169,13 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
     for (kind, version, input, expected) in [
         (
             "ToolFinished",
-            crate::test_support::payload_version("ToolFinished") - 1,
+            24,
             COMMAND_TOOLFINISHED,
             SELECTION_TOOLFINISHED,
         ),
         (
             "HookFinished",
-            crate::test_support::payload_version("HookFinished") - 1,
+            13,
             GLOB_HOOKFINISHED,
             SELECTION_HOOKFINISHED,
         ),
@@ -1205,16 +1205,8 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
 #[test]
 fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceiling() {
     for (kind, version, input) in [
-        (
-            "ToolFinished",
-            crate::test_support::payload_version("ToolFinished") - 1,
-            COMMAND_TOOLFINISHED,
-        ),
-        (
-            "HookFinished",
-            crate::test_support::payload_version("HookFinished") - 1,
-            GLOB_HOOKFINISHED,
-        ),
+        ("ToolFinished", 24, COMMAND_TOOLFINISHED),
+        ("HookFinished", 13, GLOB_HOOKFINISHED),
     ] {
         for shape in ["full", "balanced", "asymmetric"] {
             let mut value: Value = serde_json::from_str(input).unwrap();
