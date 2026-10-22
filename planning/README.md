@@ -48,6 +48,8 @@ When implementation completes, accepted behavior moves into the owning spec and 
 
 | Plan | Remaining scope |
 |---|---|
+| [Provider check journal](./provider-check-journal/README.md) | `Ready`: C1 standalone custom/native check streams and SQLite migration; C2 ChatGPT checks and account-index migration; prerequisite for setup UI |
+| [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [MultiEdit](./multiedit/README.md) | `Ready`: one slice, atomic ordered edits to one existing file; MultiEdit freeze exception accepted |
 | [Attached-turn Goal defaults](./attached-turn-defaults/README.md) | Ready: one PR for peer defaults across attached, exec and serve, retaining durable accounting and finite action/storage bounds |
 | [Large draft attachments](./large-draft-attachments/README.md) | Ready: three PRs for durable pasted text, full-capacity typed/restored drafts and clipboard/path image chips |
