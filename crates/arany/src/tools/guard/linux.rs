@@ -157,22 +157,31 @@ pub(super) fn harden() -> Result<(), ToolError> {
             .map_err(|_| ToolError::ProtectionUnavailable)?
             .path()
             .join("status");
-        let mut status = String::new();
-        std::fs::File::open(path)
-            .and_then(|file| {
-                file.take(STATUS_BYTES_CAP as u64 + 1)
-                    .read_to_string(&mut status)
-            })
-            .map_err(|_| ToolError::ProtectionUnavailable)?;
-        if status.len() > STATUS_BYTES_CAP {
-            return Err(ToolError::ProtectionUnavailable);
+        if let Some(status) = thread_status(&path)? {
+            verify_hardened_status(&status)?;
         }
-        verify_hardened_status(&status)?;
     }
     if threads == 0 {
         return Err(ToolError::ProtectionUnavailable);
     }
     Ok(())
+}
+
+// A thread that exited after the directory listing is gone, not unfiltered: later threads inherit the filter.
+fn thread_status(path: &Path) -> Result<Option<String>, ToolError> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(ToolError::ProtectionUnavailable),
+    };
+    let mut status = String::new();
+    file.take(STATUS_BYTES_CAP as u64 + 1)
+        .read_to_string(&mut status)
+        .map_err(|_| ToolError::ProtectionUnavailable)?;
+    if status.len() > STATUS_BYTES_CAP {
+        return Err(ToolError::ProtectionUnavailable);
+    }
+    Ok(Some(status))
 }
 
 fn verify_hardened_status(status: &str) -> Result<(), ToolError> {
@@ -1444,6 +1453,22 @@ mod tests {
             assert!(verify_hardened_status(&status).is_err(), "{status}");
         }
         assert!(verify_hardened_status("").is_err());
+    }
+
+    #[test]
+    fn a_thread_that_exited_after_listing_has_no_status_to_verify() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("gone/status");
+        assert!(matches!(thread_status(&missing), Ok(None)));
+        let status = directory.path().join("status");
+        std::fs::write(&status, "Seccomp:\t2\n").unwrap();
+        assert_eq!(
+            thread_status(&status).unwrap().as_deref(),
+            Some("Seccomp:\t2\n")
+        );
+        std::fs::write(&status, vec![b'x'; STATUS_BYTES_CAP + 1]).unwrap();
+        assert!(thread_status(&status).is_err());
+        assert!(thread_status(directory.path()).is_err());
     }
 
     #[test]
