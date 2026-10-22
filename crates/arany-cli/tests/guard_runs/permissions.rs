@@ -465,6 +465,7 @@ impl Fixture {
         team: bool,
         goal_budget: arany::GoalBudget,
     ) -> (arany::RunOutcome, Vec<ProviderRequest>, usize) {
+        let _deadline = engine_support::deadline("permission dispatch", Duration::from_secs(180));
         let (approvals, mut inbox) = arany::ToolApprovals::new(mode.unwrap_or_default());
         let approvals = if self.restricted_approvals {
             approvals.without_human_only()

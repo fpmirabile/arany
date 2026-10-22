@@ -938,6 +938,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 if self.case == "time" {
                     tokio::time::pause();
                     tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+                    tokio::time::resume();
                 }
                 finish_with("Private changes ready")
             }

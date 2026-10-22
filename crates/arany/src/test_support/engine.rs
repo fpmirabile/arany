@@ -4,6 +4,39 @@ use crate::{
 };
 use std::sync::Arc;
 
+pub fn deadline(name: &str, duration: std::time::Duration) -> impl Drop {
+    struct Deadline {
+        stop: std::sync::mpsc::SyncSender<()>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+    impl Drop for Deadline {
+        fn drop(&mut self) {
+            let _ = self.stop.send(());
+            self.worker
+                .take()
+                .expect("deadline worker")
+                .join()
+                .expect("deadline worker joined");
+        }
+    }
+    let (stop, stopped) = std::sync::mpsc::sync_channel(1);
+    let name = name.to_owned();
+    // Like the serve watchdog, this also bounds a paused or blocked runtime during native teardown.
+    let worker = std::thread::spawn(move || {
+        if stopped.recv_timeout(duration) == Err(std::sync::mpsc::RecvTimeoutError::Timeout) {
+            eprintln!(
+                "{name} exceeded its {}-second wall-clock deadline",
+                duration.as_secs()
+            );
+            std::process::abort();
+        }
+    });
+    Deadline {
+        stop,
+        worker: Some(worker),
+    }
+}
+
 pub fn open(state: StateRoot, config: EngineConfig) -> Result<Engine, EngineError> {
     super::isolate_account_root();
     Engine::open(state, config)

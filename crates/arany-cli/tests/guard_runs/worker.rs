@@ -65,6 +65,7 @@ async fn closed_bundle(
 }
 
 pub(super) async fn worker_case(case: &'static str) {
+    let _deadline = engine_support::deadline(case, Duration::from_secs(180));
     let approval_timeout = case == "approval_timeout";
     let case = if approval_timeout { "denial" } else { case };
     // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
@@ -1103,7 +1104,6 @@ async fn worker_recovery_handoff_is_honest_at_each_lifecycle_point() {
     }
 }
 
-// The case advances the paused clock by an hour, so no wall-clock timeout can wrap it.
 #[tokio::test]
 async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team() {
     arany::test_support::worker_teams::run_case(
