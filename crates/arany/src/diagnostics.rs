@@ -548,6 +548,23 @@ mod tests {
         );
         assert!(shape_log.contains(&format!("old_bytes: Some({})", CANARY.len())));
         assert!(!shape_log.contains(CANARY));
+        let host = crate::tools::ToolCall::GhPrCreate {
+            repository: "github.com/example/project".into(),
+            base: "main".into(),
+            head: "topic".into(),
+            title: CANARY.into(),
+            body: CANARY.into(),
+            draft: false,
+        };
+        write_failure(
+            &root,
+            SubscriptionFailureStage::OutcomeToolDigest,
+            StreamCounts {
+                tool_arguments: Some(ToolArgumentShape::from_call(&host)),
+                ..StreamCounts::default()
+            },
+        );
+        tool_failure("host", &crate::tools::ToolError::Operation);
         record_development_failure(DevelopmentFailure::ProviderAdmission);
         engine_failure(&crate::engine::EngineError::Store(
             crate::store::StoreError::Io(std::io::Error::other(CANARY)),
@@ -582,6 +599,7 @@ mod tests {
                 enforcement_cause: None,
                 limit_cause: None,
                 intent: crate::tools::EffectIntent {
+                    host: None,
                     target: crate::session::worker::EffectTarget::Workspace,
                     id: uuid::Uuid::now_v7(),
                     run_id: Default::default(),

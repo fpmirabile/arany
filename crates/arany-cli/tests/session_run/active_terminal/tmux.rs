@@ -476,7 +476,7 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 1/22")
+                        if screen.contains("Commands 1/23")
                             && screen.contains("1. /help")
                             && screen.contains("Up/Dn Enter Esc")
                         {
@@ -492,8 +492,8 @@ fn inline_composer_tmux_case(executable: &Path, no_color_flag: bool, no_color_en
                 loop {
                     if let Some(screen) = capture_pane(&server) {
                         let screen = String::from_utf8_lossy(&screen);
-                        if screen.contains("Commands 22/22")
-                            && screen.contains("22. /exit")
+                        if screen.contains("Commands 23/23")
+                            && screen.contains("23. /exit")
                             && screen.contains("Exit Session")
                         {
                             break;
