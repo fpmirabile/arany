@@ -584,8 +584,6 @@
           },
           "max_count": {
             "description": "Returned ref rows: 1 through 256; null means 256. Symbolic remote aliases name their target and have no independent counts. Must be null for creation.",
-            "maximum": 256,
-            "minimum": 1,
             "type": [
               "integer",
               "null"

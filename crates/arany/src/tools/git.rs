@@ -164,7 +164,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
             ),
             (
                 "max_count",
-                json!({"type":["integer","null"], "minimum":1, "maximum":256, "description":"Returned ref rows: 1 through 256; null means 256. Symbolic remote aliases name their target and have no independent counts. Must be null for creation."}),
+                json!({"type":["integer","null"], "description":"Returned ref rows: 1 through 256; null means 256. Symbolic remote aliases name their target and have no independent counts. Must be null for creation."}),
             ),
         ],
         "git_switch" => vec![(
