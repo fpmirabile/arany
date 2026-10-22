@@ -658,31 +658,7 @@ fn repin(recorded: &mut [u8; 32], pins: Option<&Pins>) -> Result<(), StoreError>
 }
 
 fn repin_intents(value: &mut Value, pins: &HashMap<[u8; 32], [u8; 32]>) {
-    match value {
-        Value::Object(fields) => {
-            for (key, value) in fields {
-                if matches!(
-                    key.as_str(),
-                    "intent_digest"
-                        | "source_intent_digest"
-                        | "last_intent_digest"
-                        | "subject_digest"
-                ) && let Ok(old) = serde_json::from_value::<[u8; 32]>(value.clone())
-                    && let Some(new) = pins.get(&old)
-                {
-                    *value = serde_json::json!(new);
-                } else {
-                    repin_intents(value, pins);
-                }
-            }
-        }
-        Value::Array(values) => {
-            for value in values {
-                repin_intents(value, pins);
-            }
-        }
-        _ => {}
-    }
+    crate::session::rebind_intent_pins(value, &|old| pins.get(old).copied());
 }
 
 fn rewrite_events(

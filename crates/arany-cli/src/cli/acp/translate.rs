@@ -624,11 +624,31 @@ pub(super) async fn output(
             stopping.clone(),
         );
         tokio::pin!(projection);
-        loop {
+        let mut projected = false;
+        let mut withdrawal = None;
+        while !projected || withdrawal.is_some() {
             tokio::select! { biased;
-                result = &mut projection => { result?; break; },
+                permit = outbound.reserve(), if withdrawal.is_some() => {
+                    permit.map_err(|_| "ACP output closed")?
+                        .send(withdrawal.take().expect("pending withdrawal"));
+                },
+                result = &mut projection, if !projected => { result?; projected = true; },
                 message = inbound.recv(), if !closed => match message {
-                    Some(Message::Request(request)) => permission_request(&state, &serve, &outbound, request).await?,
+                    Some(Message::Request(request)) => {
+                        if withdrawal.is_some() {
+                            approval_response(&serve, request.id, "unavailable").await?;
+                        } else {
+                            permission_request(&state, &serve, &outbound, request).await?;
+                        }
+                    },
+                    Some(Message::Notification(note)) if note.method == "$/cancel_request" => {
+                        if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+                            && let Some(cancel) = withdraw_permission(&state, Some(&params.request_id), true)
+                        {
+                            // Admit no new permission until this withdrawal drains.
+                            withdrawal = Some(cancel);
+                        }
+                    },
                     Some(message) if pending.len() < crate::cli::serve::OUTBOUND_CAPACITY => pending.push_back(message),
                     Some(_) => return Err("ACP projection queue full; check Session history".into()),
                     None => closed = true,

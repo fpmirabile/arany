@@ -842,6 +842,7 @@ pub(super) async fn worker_case(case: &'static str) {
 fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
     for case in [
         "tool_deadline",
+        "approval_timeout",
         "hook_stop_last_turn",
         "hook_requested_stop_last_turn",
         "hook_stop_tokens",
@@ -882,7 +883,6 @@ async fn foreground_worker_guard_journey_budgets_denials_and_private_vs_publicat
         "calls",
         "tokens",
         "denial",
-        "approval_timeout",
         "no_channel",
         "integration_denial",
         "private_loss",

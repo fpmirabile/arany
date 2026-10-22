@@ -56,9 +56,9 @@ pub(crate) use events::{
 };
 pub(crate) use events::{
     expiring_intent_text, expiring_payload, intent_without_expiry, pre_git_write_payload,
-    pre_glob_payload, pre_multiedit_payload, pre_typed_prefix_payload, replace_intent_pin,
-    run_started_fits, run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
-    run_started_v19_to_v20,
+    pre_glob_payload, pre_multiedit_payload, pre_typed_prefix_payload, rebind_intent_pins,
+    replace_intent_pin, run_started_fits, run_started_v18_payload, run_started_v18_to_v19,
+    run_started_v19_payload, run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]

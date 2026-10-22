@@ -2748,6 +2748,26 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     assert!(!escape.output.contains("outside-canary"));
     assert!(escape.valid());
 
+    let mut invalid_intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        read("src/main.rs"),
+    );
+    let control = runtime
+        .execute(invalid_intent.clone(), super::Cancellation::new())
+        .await;
+    assert_eq!(control.disposition, ToolDisposition::Succeeded);
+    assert!(matches!(
+        control.attestation,
+        Some(Attestation::InProcess { .. })
+    ));
+    invalid_intent.use_count = 2;
+    let invalid = runtime
+        .execute(invalid_intent, super::Cancellation::new())
+        .await;
+    assert_eq!(invalid.disposition, ToolDisposition::Failed);
+    assert!(invalid.attestation.is_none());
+
     std::fs::rename(&workspace, temp.path().join("moved")).unwrap();
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     std::fs::write(workspace.join("src/main.rs"), "replacement").unwrap();
@@ -2761,18 +2781,6 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         replaced.output
     );
     assert!(!replaced.output.contains("replacement"));
-
-    let mut invalid_intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        read("src/main.rs"),
-    );
-    invalid_intent.use_count = 2;
-    let expired = runtime
-        .execute(invalid_intent, super::Cancellation::new())
-        .await;
-    assert_eq!(expired.disposition, ToolDisposition::Failed);
-    assert!(expired.attestation.is_none());
 }
 
 #[tokio::test]

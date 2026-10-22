@@ -2523,6 +2523,92 @@ async fn blocked_projection_refuses_deferred_event_overflow() {
 }
 
 #[tokio::test]
+async fn blocked_projection_retires_withdrawn_permission_before_accepting_late_answers() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.permission(&intent, 1).await;
+    let permission = adapter.next().await;
+    assert_eq!(permission["method"], "session/request_permission");
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        adapter
+            .outbound
+            .try_send(wire::response(RequestId::Integer(99), json!({})))
+            .unwrap();
+    }
+    adapter.item(&intent, None).await;
+    adapter
+        .events
+        .send(Message::Notification(Notification {
+            jsonrpc: Default::default(),
+            method: "$/cancel_request".into(),
+            params: Some(json!({"requestId":1})),
+        }))
+        .await
+        .unwrap();
+    adapter.permission(&intent, 2).await;
+    let Some(serve::server::ClientMessage::Message(Message::Error(error))) =
+        adapter.input.recv().await
+    else {
+        panic!("full output refuses the next permission without waiting")
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(2)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    let late = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        assert_eq!(adapter.next().await["id"], 99);
+    }
+    let messages = [adapter.next().await, adapter.next().await];
+    let withdrawal = messages
+        .iter()
+        .find(|message| message["method"] == "$/cancel_request")
+        .expect("withdrawal reaches the client after output drains");
+    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["method"] == "session/update")
+    );
+    adapter.permission(&intent, 3).await;
+    let next = adapter.next().await;
+    assert_eq!(next["method"], "session/request_permission");
+    assert_ne!(next["id"], permission["id"]);
+    let reply = json!({"jsonrpc":"2.0","id":next["id"],"result":{"outcome":{"outcome":"selected","optionId":"deny"}}});
+    translate::input(
+        wire::decode(&encode_line(&reply).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+        adapter.input.recv().await
+    else {
+        panic!("next permission accepts its own answer")
+    };
+    assert_eq!(reply.id, RequestId::Integer(3));
+    assert_eq!(reply.result["decision"], "decline");
+    adapter.close().await;
+}
+
+#[tokio::test]
 async fn permission_cancel_and_server_withdrawal_ignore_late_answers_without_private_state() {
     let _deadline = crate::cli::serve::tests::deadline();
     for cancel in ["client", "session", "server", "before_start_reply"] {

@@ -1465,6 +1465,13 @@ pub(crate) fn intent_without_expiry(mut value: serde_json::Value) -> Option<serd
 }
 
 pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], new: &[u8; 32]) {
+    rebind_intent_pins(value, &|digest| (digest == old).then_some(*new));
+}
+
+pub(crate) fn rebind_intent_pins(
+    value: &mut serde_json::Value,
+    lookup: &impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) {
     match value {
         serde_json::Value::Object(fields) => {
             for (key, value) in fields {
@@ -1474,20 +1481,18 @@ pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], 
                         | "source_intent_digest"
                         | "last_intent_digest"
                         | "subject_digest"
-                ) && serde_json::from_value::<[u8; 32]>(value.clone())
-                    .ok()
-                    .as_ref()
-                    == Some(old)
+                ) && let Ok(old) = serde_json::from_value::<[u8; 32]>(value.clone())
+                    && let Some(new) = lookup(&old)
                 {
                     *value = serde_json::json!(new);
                 } else {
-                    replace_intent_pin(value, old, new);
+                    rebind_intent_pins(value, lookup);
                 }
             }
         }
         serde_json::Value::Array(values) => {
             for value in values {
-                replace_intent_pin(value, old, new);
+                rebind_intent_pins(value, lookup);
             }
         }
         _ => {}
