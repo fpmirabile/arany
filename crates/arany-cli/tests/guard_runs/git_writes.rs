@@ -234,10 +234,16 @@ async fn git_writes_commit_branch_and_switch_through_the_guard_and_replay_withou
         ToolCall::GitBranch {
             name: Some("older".into()),
             start_point: Some("HEAD~2".into()),
+            scope: None,
+            base: None,
+            max_count: None,
         },
         ToolCall::GitBranch {
             name: None,
             start_point: None,
+            scope: None,
+            base: None,
+            max_count: None,
         },
         ToolCall::GitSwitch {
             branch: "older".into(),
