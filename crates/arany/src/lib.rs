@@ -17,8 +17,10 @@ mod session;
 mod store;
 pub mod supervisor;
 mod telemetry;
+mod timestamp;
 mod tools;
 
+pub use timestamp::utc_date;
 pub use tools::permissions;
 
 #[cfg(target_os = "macos")]
