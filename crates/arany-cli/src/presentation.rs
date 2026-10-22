@@ -1226,17 +1226,23 @@ pub fn session_run_feedback(view: &SessionView, run: &RunView) -> Option<String>
         let (dimension, used, limit) = match view.budget_stop_limit(run)? {
             arany::GoalLimit::Calls => (
                 "Provider calls",
-                u64::from(goal.provider_calls),
-                budget.max_provider_calls.map(u64::from),
+                goal.provider_calls.to_string(),
+                budget.max_provider_calls.map(|calls| calls.to_string()),
             ),
-            arany::GoalLimit::Tokens => ("tokens", goal.known_tokens, budget.max_tokens),
-            arany::GoalLimit::ActiveTime => {
-                ("active time (ms)", goal.active_ms, budget.max_active_ms)
-            }
+            arany::GoalLimit::Tokens => (
+                "tokens",
+                goal.known_tokens.to_string(),
+                budget.max_tokens.map(|tokens| tokens.to_string()),
+            ),
+            arany::GoalLimit::ActiveTime => (
+                "active time",
+                format_duration(goal.active_ms),
+                budget.max_active_ms.map(format_duration),
+            ),
             arany::GoalLimit::Runs => (
                 "Runs",
-                goal.run_ids.len() as u64,
-                Some(u64::from(budget.max_runs)),
+                goal.run_ids.len().to_string(),
+                Some(budget.max_runs.to_string()),
             ),
         };
         text.push_str(&format!("Run stopped at a budget boundary: {dimension}; committed usage {used}, pinned limit {}. Committed refused reservation detail is unavailable.", limit?));
@@ -2424,6 +2430,15 @@ mod goal_status_tests {
         assert_eq!(
             session_run_feedback(&view, &view.runs[0]).unwrap(),
             "Arany status: Run stopped at a budget boundary: Provider calls; committed usage 64, pinned limit 64. Committed refused reservation detail is unavailable.\nNo answer was committed; completed actions remain in the Session."
+        );
+        let mut active_view = view.clone();
+        let active_goal = &mut active_view.goals[0];
+        active_goal.budget.max_provider_calls = None;
+        active_goal.budget.max_active_ms = Some(90_500);
+        active_goal.active_ms = 90_501;
+        assert_eq!(
+            session_run_feedback(&active_view, &active_view.runs[0]).unwrap(),
+            "Arany status: Run stopped at a budget boundary: active time; committed usage 1 min 30.501 s, pinned limit 1 min 30.5 s. Committed refused reservation detail is unavailable.\nNo answer was committed; completed actions remain in the Session."
         );
         let goal = &mut view.goals[0];
         goal.budget_refusal = Some(arany::BudgetRefusal {
