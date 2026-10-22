@@ -137,6 +137,7 @@ fn outbound_conversation_renders_system_tools_and_native_tool_results() {
             "arany_git_commit",
             "arany_git_branch",
             "arany_git_switch",
+            "arany_multiedit",
             "arany_plan"
         ]
     );
@@ -1426,6 +1427,10 @@ fn native_tool_arguments_are_bounded_as_raw_text_before_parsing() {
             "edit",
             json!({"path":"src/main.rs","expected_digest":"0".repeat(64),"old":"x","new":"y"}),
         ),
+        (
+            "multiedit",
+            json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"x","new_string":"y"}]}),
+        ),
     ] {
         let name = format!("arany_{operation}");
         let limit = argument_limit(operation);
@@ -1446,6 +1451,59 @@ fn native_tool_arguments_are_bounded_as_raw_text_before_parsing() {
                 accepted,
                 "{case}"
             );
+        }
+    }
+}
+
+#[test]
+fn multiedit_defaults_and_content_bounds_hold_in_messages_and_streams() {
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = 128_000;
+    for (old, new, replace_all, accepted) in [
+        ("a".into(), "b".into(), None, true),
+        ("a".into(), "b".into(), Some(json!(null)), true),
+        ("a".into(), "b".into(), Some(json!(false)), true),
+        ("a".into(), "b".into(), Some(json!(true)), true),
+        ("\u{1}".repeat(32768), "\u{2}".repeat(32768), None, true),
+        ("a".into(), "b".repeat(65536), None, false),
+        ("a".into(), "b".into(), Some(json!("false")), false),
+    ] {
+        let mut edit = json!({"old_string":old,"new_string":new});
+        if let Some(option) = replace_all.clone() {
+            edit["replace_all"] = option;
+        }
+        let input =
+            json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[edit]});
+        let fixture = response(
+            "tool_use",
+            json!([tool_use("toolu_1", "arany_multiedit", input.clone())]),
+        );
+        assert_eq!(decode(&request, &fixture).is_ok(), accepted);
+        let streamed = streamed_tool_use("arany_multiedit", &input.to_string())
+            .unwrap()
+            .unwrap();
+        let decoded = decode_streamed_tool(&streamed, 128_000);
+        assert_eq!(decoded.is_ok(), accepted);
+        if accepted {
+            let ProviderOutcome::Tools(calls) = decoded.unwrap().outcome else {
+                panic!("MultiEdit call")
+            };
+            assert!(
+                matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if edits[0].replace_all == (replace_all == Some(json!(true))))
+            );
+        }
+        for unavailable in [read_only_request(MODEL), researcher_request(MODEL)] {
+            assert!(decode(&unavailable, &fixture).is_err());
+        }
+    }
+    let input = json!({"file_path":"src/main.rs","expected_digest":"0".repeat(64),"edits":[{"old_string":"a","new_string":"b"}]});
+    let text = input.to_string();
+    for len in [400 * 1024, 400 * 1024 + 1] {
+        let raw = format!("{text}{}", " ".repeat(len - text.len()));
+        let streamed = streamed_tool_use("arany_multiedit", &raw);
+        assert_eq!(streamed.is_ok(), len == 400 * 1024);
+        if let Ok(Some(bytes)) = streamed {
+            assert!(decode_streamed_tool(&bytes, 128_000).is_ok());
         }
     }
 }

@@ -815,7 +815,10 @@ fn subject(
                         hash(path.as_bytes()),
                         hash(crate::tools::types::hex_digest(content.as_bytes()).as_bytes()),
                     ));
-                } else if let ToolCall::Edit { path, .. } = &o.intent.call
+                } else if let ToolCall::Edit { path, .. }
+                | ToolCall::MultiEdit {
+                    file_path: path, ..
+                } = &o.intent.call
                     && let Ok(value) = serde_json::from_str::<serde_json::Value>(&o.output)
                     && let Some(digest) = value.get("sha256").and_then(|v| v.as_str())
                 {

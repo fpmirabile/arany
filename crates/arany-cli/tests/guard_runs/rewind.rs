@@ -74,10 +74,21 @@ async fn case(case: &str) {
     };
     let mut script = vec![
         arany::test_support::scenario::plan_outcome(plan),
-        tool_outcome(arany::ToolCall::Write {
-            path: "notes/facts.txt".into(),
-            expected_digest: Some(hash(b"original")),
-            content: "changed".into(),
+        tool_outcome(arany::ToolCall::MultiEdit {
+            file_path: "notes/facts.txt".into(),
+            expected_digest: hash(b"original"),
+            edits: vec![
+                arany::LiteralEdit {
+                    old_string: "original".into(),
+                    new_string: "intermediate".into(),
+                    replace_all: false,
+                },
+                arany::LiteralEdit {
+                    old_string: "intermediate".into(),
+                    new_string: "changed".into(),
+                    replace_all: false,
+                },
+            ],
         }),
         tool_outcome(arany::ToolCall::Write {
             path: "notes/new.txt".into(),
