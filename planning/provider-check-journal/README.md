@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: repository owner; prerequisite requested in the 2026-10-22 plan review
 - Last updated: `2026-10-22`
-- Research gate: passed; scoped peer findings and rationale in [D-25](../../docs/research/next-step-decision-register.md#d-25--standalone-provider-check-durability).
+- Research gate: passed; scoped peer findings and rationale in [D-26](../../docs/research/next-step-decision-register.md#d-26--standalone-provider-check-durability).
 - Plan gate: passed; owner decisions recorded below, no owner-only question remains.
 - Next action: C2. C1 custom/native implementation is complete; both slices precede S1 of [Provider setup UI](../provider-setup-ui/README.md).
 
@@ -61,5 +61,5 @@ Research → Plan → Implement gates apply; a contradictory finding stops the s
 
 - Every CLI check and callable UI interface enforce acknowledged intent, validated outcome and effect-free replay.
 - Account migration and crash scenarios prove evidence linkage without changing ordinary credential admission or adding legacy runtime readers.
-- Specs own implemented behavior, limits and recovery; D-25 owns rationale.
+- Specs own implemented behavior, limits and recovery; D-26 owns rationale.
 - After C2, unblock setup S1, remove this plan/index row and update its dependent link under the [planning lifecycle](../README.md#lifecycle).
