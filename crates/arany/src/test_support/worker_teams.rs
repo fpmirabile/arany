@@ -1243,7 +1243,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
     private(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
         "version":1,"workspace_paths":["notes"],"write":true,
         "commands":[{"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],
-        "skills":[],"mcp":[],"child_unguarded":"human_only"
+        "skills":[],"mcp":[],"child_unguarded":"denied"
     })).unwrap());
     std::fs::create_dir(state.join("agents")).unwrap();
     std::fs::set_permissions(state.join("agents"), std::fs::Permissions::from_mode(0o700)).unwrap();

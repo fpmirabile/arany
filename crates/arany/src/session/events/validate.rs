@@ -346,7 +346,7 @@ impl Event {
                         PermissionSource::Rule
                             | PermissionSource::Mode
                             | PermissionSource::PinnedGrant
-                            | PermissionSource::ExactCommandRule
+                            | PermissionSource::SessionApproval
                             | PermissionSource::Hook
                             | PermissionSource::TypedPrefixRule
                     )

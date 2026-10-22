@@ -126,6 +126,7 @@ pub(super) struct RunLoop<'a> {
 }
 
 pub(super) struct LoopControls<'a> {
+    pub(super) host_settings: &'a std::sync::Mutex<Option<super::HostSettings>>,
     pub(super) policy: CollaborationPolicy,
     pub(super) concurrency: u8,
     pub(super) goal_phase: GoalPhase,
