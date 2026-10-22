@@ -227,6 +227,7 @@ impl Provider for Journey {
                                     ToolCall::Command { .. }
                                         | ToolCall::Write { .. }
                                         | ToolCall::Edit { .. }
+                                        | ToolCall::MultiEdit { .. }
                                         | ToolCall::Mkdir { .. }
                                         | ToolCall::Skill { .. }
                                         | ToolCall::McpCall { .. }
@@ -608,11 +609,13 @@ async fn native_file_journey_helper() {
             offset: None,
             limit: None,
         },
-        ToolCall::Edit {
-            path: "src/main.txt".into(),
+        ToolCall::MultiEdit {
+            file_path: "src/main.txt".into(),
             expected_digest: hash(b"before\n"),
-            old: "before".into(),
-            new: "after".into(),
+            edits: vec![
+                arany::LiteralEdit { old_string: "before".into(), new_string: "middle".into(), replace_all: false },
+                arany::LiteralEdit { old_string: "middle".into(), new_string: "after".into(), replace_all: false },
+            ],
         },
         ToolCall::Mkdir {
             path: "src/generated".into(),

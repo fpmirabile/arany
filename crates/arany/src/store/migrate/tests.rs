@@ -11,7 +11,25 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One (kind, from, input, expected) row per production step. The glob and Git write steps keep
 // payload bytes; one shape is canonical for both source versions.
-const EVENT_FIXTURES: [EventFixture<'static>; 17] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 25] = [
+    ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
+    ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
+    ("HookFinished", 10, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
+    (
+        "GoalPlanContractRecorded",
+        8,
+        GLOB_GOALPLANCONTRACTRECORDED,
+        GLOB_GOALPLANCONTRACTRECORDED,
+    ),
+    (
+        "ProviderCallRecorded",
+        15,
+        GLOB_PROVIDERCALLRECORDED,
+        GLOB_PROVIDERCALLRECORDED,
+    ),
+    ("RunStarted", 20, GLOBAL_RUNSTARTED, GLOBAL_RUNSTARTED),
+    ("AgentSpawned", 12, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),

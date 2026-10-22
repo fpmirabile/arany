@@ -147,6 +147,9 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
         ToolCall::Mkdir { path } => format!("Create folder({path})"),
         ToolCall::Write { path, .. } => format!("Write({path})"),
         ToolCall::Edit { path, .. } => format!("Edit({path})"),
+        ToolCall::MultiEdit {
+            file_path, edits, ..
+        } => format!("MultiEdit({file_path}, {} edits)", edits.len()),
         ToolCall::Command { program, args, .. } => {
             format!("Command({program} {})", args.join(" "))
         }
@@ -185,6 +188,7 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
             ToolDisposition::Succeeded => match tool.intent.call {
                 ToolCall::Write { .. }
                 | ToolCall::Edit { .. }
+                | ToolCall::MultiEdit { .. }
                 | ToolCall::Mkdir { .. }
                 | ToolCall::ApplyChangeset { .. } => "applied".into(),
                 ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. } => {
@@ -877,6 +881,37 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
                 new.split('\n')
                     .map(|line| format!("+ {}", escape_terminal(line))),
             );
+        }
+        ToolCall::MultiEdit {
+            file_path, edits, ..
+        } => {
+            lines.push(format!(
+                "MultiEdit {} · only if the file is unchanged",
+                escape_terminal(file_path)
+            ));
+            for (index, edit) in edits.iter().enumerate() {
+                lines.push(format!(
+                    "Edit {} · {}",
+                    index + 1,
+                    if edit.replace_all {
+                        "all matches"
+                    } else {
+                        "one match"
+                    }
+                ));
+                lines.push("Remove:".into());
+                lines.extend(
+                    edit.old_string
+                        .split('\n')
+                        .map(|line| format!("- {}", escape_terminal(line))),
+                );
+                lines.push("Insert:".into());
+                lines.extend(
+                    edit.new_string
+                        .split('\n')
+                        .map(|line| format!("+ {}", escape_terminal(line))),
+                );
+            }
         }
         ToolCall::Mkdir { path } => lines.push(format!("Create folder {}", escape_terminal(path))),
         ToolCall::Command { program, args, cwd } => {

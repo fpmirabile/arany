@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready` (Research and Plan gates passed; implementation not started).
+- Status: `In progress` (Research and Plan gates passed; implementation underway).
 - Owner: Arany repository owner; implementation by the assigned Tools/Engine maintainer.
 - Last updated: `2026-10-22`.
 

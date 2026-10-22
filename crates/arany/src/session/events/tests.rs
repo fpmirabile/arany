@@ -865,8 +865,8 @@ mod account_default_tests {
             .unwrap()
             .remove("context_window_tokens");
         assert!(serde_json::from_value::<RunConfig>(missing_window).is_err());
-        assert_eq!(payload_version("RunStarted"), Some(20));
-        assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+        assert_eq!(payload_version("RunStarted"), Some(21));
+        assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
         assert_eq!(payload_version("GoalProviderCallReserved"), Some(7));
         config.output_token_cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
         assert!(config.validate().is_ok());
@@ -1533,7 +1533,7 @@ mod child_grant_tests {
                 unguarded: crate::tools::UnguardedGrant::Denied,
             }),
         );
-        assert_eq!(payload_version(child.kind()), Some(12));
+        assert_eq!(payload_version(child.kind()), Some(13));
         let payload = child.payload().expect("child payload");
         let mut named = child.clone();
         if let Event::AgentSpawned { profile, .. } = &mut named {
@@ -1739,7 +1739,7 @@ mod payload_version_tests {
             observation: read_observation(run, agent),
         };
         let payload = finished.payload().expect("payload");
-        assert_eq!(payload_version("ToolFinished"), Some(21));
+        assert_eq!(payload_version("ToolFinished"), Some(22));
         assert_eq!(
             Event::decode("ToolFinished", 21, &payload, Some(run), Some(agent)).expect("current"),
             finished
@@ -1841,7 +1841,7 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
-        assert_eq!(payload_version("ToolStarted"), Some(15));
+        assert_eq!(payload_version("ToolStarted"), Some(16));
         assert_eq!(payload_version("ToolPermissionDecided"), Some(5));
     }
 
@@ -2307,7 +2307,7 @@ fn supervisor_event_v1_is_closed_bounded_and_run_started_requires_the_pin() {
         Event::decode(event.kind(), 1, &padded, run, actor),
         Err(ReplayError::InvalidPayload)
     ));
-    assert_eq!(payload_version("RunStarted"), Some(20));
+    assert_eq!(payload_version("RunStarted"), Some(21));
 }
 
 #[test]
@@ -2315,7 +2315,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
     use crate::provider::ProviderFailureReason;
     let run_id = Some(RunId::new());
     let agent_id = Some(AgentRunId::new());
-    assert_eq!(payload_version("ProviderCallRecorded"), Some(15));
+    assert_eq!(payload_version("ProviderCallRecorded"), Some(16));
     assert_eq!(payload_version("RunFinished"), Some(9));
     let record = ProviderCallRecord {
         delegation: None,

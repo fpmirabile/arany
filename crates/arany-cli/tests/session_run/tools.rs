@@ -94,11 +94,13 @@ impl Provider for Journey {
                 offset: None,
                 limit: None,
             },
-            2 => ToolCall::Edit {
-                path: "src/main.c".into(),
+            2 => ToolCall::MultiEdit {
+                file_path: "src/main.c".into(),
                 expected_digest: hash(b"int main(void) { return 1; }\n"),
-                old: "return 1".into(),
-                new: "return 0".into(),
+                edits: vec![
+                    arany::LiteralEdit { old_string: "return 1".into(), new_string: "return 2".into(), replace_all: false },
+                    arany::LiteralEdit { old_string: "return 2".into(), new_string: "return 0".into(), replace_all: false },
+                ],
             },
             3 => ToolCall::Read {
                 path: "src/main.c".into(),

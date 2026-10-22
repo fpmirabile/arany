@@ -518,6 +518,7 @@ impl View {
                     ToolCall::Mkdir { .. }
                         | ToolCall::Write { .. }
                         | ToolCall::Edit { .. }
+                        | ToolCall::MultiEdit { .. }
                         | ToolCall::Command { .. }
                 ))
             || intent.call.mutates() && self.revision >= 16
@@ -1039,9 +1040,12 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
         return Ok(before.clone());
     }
     let path = match call {
-        ToolCall::Mkdir { path } | ToolCall::Write { path, .. } | ToolCall::Edit { path, .. } => {
-            path
-        }
+        ToolCall::Mkdir { path }
+        | ToolCall::Write { path, .. }
+        | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => path,
         _ => return Err(ToolError::Configuration),
     };
     if !before.entries.contains_key(path) && before.entries.len() >= WORKER_FILES {
@@ -1075,12 +1079,7 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
             };
             Entry::file(content.as_bytes(), executable)
         }
-        ToolCall::Edit {
-            expected_digest,
-            old: text,
-            new,
-            ..
-        } => {
+        ToolCall::Edit { .. } | ToolCall::MultiEdit { .. } => {
             let Some(Entry::File {
                 content,
                 executable,
@@ -1088,20 +1087,7 @@ fn edited_image(before: &Image, call: &ToolCall) -> Result<Image, ToolError> {
             else {
                 return Err(ToolError::Conflict);
             };
-            let bytes = content;
-            let content = std::str::from_utf8(bytes).map_err(|_| ToolError::Path)?;
-            if hex_digest(bytes) != *expected_digest || content.match_indices(text).count() != 1 {
-                return Err(ToolError::Conflict);
-            }
-            if content
-                .len()
-                .checked_sub(text.len())
-                .and_then(|n| n.checked_add(new.len()))
-                .is_none_or(|n| n > MAX_FILE_BYTES)
-            {
-                return Err(ToolError::Limit);
-            }
-            Entry::file(content.replacen(text, new, 1).as_bytes(), *executable)
+            Entry::file(fs::edited_content(content, call)?.as_bytes(), *executable)
         }
         _ => return Err(ToolError::Conflict),
     };
@@ -1235,7 +1221,10 @@ impl Transfer {
                 || handover_call(&intent.call, intent.agent_run_id))
             || !(matches!(
                 intent.call,
-                ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::Mkdir { .. }
+                ToolCall::Write { .. }
+                    | ToolCall::Edit { .. }
+                    | ToolCall::MultiEdit { .. }
+                    | ToolCall::Mkdir { .. }
             ) || command
                 || handover_call(&intent.call, intent.agent_run_id))
             || self.bytes == 0
@@ -1558,6 +1547,7 @@ mod tests {
                 WorkerTool::Glob,
                 WorkerTool::Write,
                 WorkerTool::Edit,
+                WorkerTool::MultiEdit,
                 WorkerTool::Mkdir,
             ],
             skills: vec![],
@@ -1748,11 +1738,21 @@ mod tests {
         let edit = intent(
             &runtime,
             &view,
-            ToolCall::Edit {
-                path: "owned/a".into(),
+            ToolCall::MultiEdit {
+                file_path: "owned/a".into(),
                 expected_digest: hex_digest(b"original"),
-                old: "original".into(),
-                new: "private".into(),
+                edits: vec![
+                    super::super::LiteralEdit {
+                        old_string: "original".into(),
+                        new_string: "middle".into(),
+                        replace_all: false,
+                    },
+                    super::super::LiteralEdit {
+                        old_string: "middle".into(),
+                        new_string: "private".into(),
+                        replace_all: false,
+                    },
+                ],
             },
         );
         let candidate = captured(&mut view, edit);

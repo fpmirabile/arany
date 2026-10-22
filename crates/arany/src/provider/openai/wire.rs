@@ -252,7 +252,10 @@ fn tool_failure_stage(
         ToolCall::Read { path, .. }
         | ToolCall::Mkdir { path }
         | ToolCall::Write { path, .. }
-        | ToolCall::Edit { path, .. } => Some((path, false)),
+        | ToolCall::Edit { path, .. }
+        | ToolCall::MultiEdit {
+            file_path: path, ..
+        } => Some((path, false)),
         ToolCall::Command { cwd, .. } | ToolCall::CommandUnguarded { cwd, .. } => Some((cwd, true)),
         _ => None,
     };
@@ -261,6 +264,9 @@ fn tool_failure_stage(
     }
     match call {
         ToolCall::Edit {
+            expected_digest, ..
+        }
+        | ToolCall::MultiEdit {
             expected_digest, ..
         } if !valid_digest(expected_digest) => Stage::OutcomeToolDigest,
         ToolCall::Write {

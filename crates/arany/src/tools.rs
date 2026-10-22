@@ -95,10 +95,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
     Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, LimitCause, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant, OutputTotal,
-    ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation, ToolPolicyReceipt,
-    ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings, ToolStep,
-    UnguardedGrant, UnguardedReceipt,
+    FileVersion, GuardReceipt, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS, NetworkGrant,
+    OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
+    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
+    ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -331,7 +331,7 @@ impl ToolRuntime {
             .try_acquire()
             .map_err(|_| ToolError::Operation)?;
         let files = match &intent.call {
-            ToolCall::Write { .. } | ToolCall::Edit { .. } => paths
+            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. } => paths
                 .iter()
                 .map(|(path, expected)| {
                     let bytes =
@@ -942,6 +942,7 @@ impl ToolRuntime {
                         WorkerTool::Mkdir,
                         WorkerTool::Write,
                         WorkerTool::Edit,
+                        WorkerTool::MultiEdit,
                         WorkerTool::Skill,
                         WorkerTool::McpList,
                         WorkerTool::Command,

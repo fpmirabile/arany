@@ -668,6 +668,7 @@ fn unit_command(
         intent.call,
         ToolCall::Write { .. }
             | ToolCall::Edit { .. }
+            | ToolCall::MultiEdit { .. }
             | ToolCall::Mkdir { .. }
             | ToolCall::ApplyChangeset { .. }
     ) || intent.call.is_git();

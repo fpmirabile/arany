@@ -4388,7 +4388,10 @@ mod goal_replay_tests {
     }
 
     fn observation_for(intent: EffectIntent, content: &[u8]) -> ToolObservation {
-        let output = if matches!(intent.call, ToolCall::Write { .. } | ToolCall::Edit { .. }) {
+        let output = if matches!(
+            intent.call,
+            ToolCall::Write { .. } | ToolCall::Edit { .. } | ToolCall::MultiEdit { .. }
+        ) {
             let expected = match &intent.call {
                 ToolCall::Write {
                     expected_digest, ..
