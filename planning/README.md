@@ -57,7 +57,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [Anthropic Tool turns](./anthropic-tool-stream/README.md) | `Ready`: S1 names Anthropic failure stages in `development.log`; S2 journals the closed reason; S3 fixes the cause after the owner's live re-run |
 | [Route output budget](./route-output-budget/README.md) | `Ready`: 1 raises the primary output cap to 32,768 tokens on ChatGPT and native OpenAI/Anthropic so 64 KiB Write and Edit fit; 2 gives private editor children the same cap |
-| [Clean-code refactor](./clean-code-refactor/README.md) | `Ready`: behavior-preserving slices in five tracks: closed refusal values in the run loop, test-support seams, one owner per shared limit, split orchestration functions, shared native adapter construction |
 | [Large draft attachments](./large-draft-attachments/README.md) | In progress: pasted-text slice implemented; typed/restored drafts and clipboard/path image chips remain |
 | [Composer newline keys](./composer-newline-keys/README.md) | In progress: remaining slice negotiates modifier keys with capability-aware guidance and terminal restoration |
 | [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |
