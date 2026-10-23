@@ -1,14 +1,12 @@
-use super::{Answer, tool_action_ms};
+use super::tool_action_ms;
 use crate::engine::ledger::{Action, Admission};
-use crate::engine::run_loop::{
-    ActivePause, CallResult, RunLoop, TOOL_REVIEW_DEADLINE, call_record,
-};
+use crate::engine::run_loop::{CallResult, RunLoop, TOOL_REVIEW_DEADLINE, call_record};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, PromptRole, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput,
 };
 use crate::session::{CollaborationPolicy, Event};
-use crate::tools::{EffectIntent, ToolCall};
+use crate::tools::EffectIntent;
 use tokio::time::Instant;
 
 #[must_use]
@@ -16,16 +14,6 @@ use tokio::time::Instant;
 pub(super) enum ToolReviewDecision {
     Approve,
     Deny,
-}
-
-#[must_use]
-pub(super) enum Verdict {
-    Dispatch {
-        intent: EffectIntent,
-        queue_pause: Option<ActivePause>,
-    },
-    Deny(Answer),
-    Narrow(Answer, ToolCall),
 }
 
 impl RunLoop<'_> {

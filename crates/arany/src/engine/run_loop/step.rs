@@ -27,9 +27,9 @@ mod review;
 use checkpoint::{CHECKPOINT_GO_MARGIN, CHECKPOINT_WAIT};
 use dispatch::{
     AfterAsk, Dispatch, DispatchFacts, DispatchSite, NotDispatched, Unguarded, UnguardedRefusal,
-    decide_dispatch, decide_queue_pause, not_dispatched, refuse, undispatched,
+    Verdict, decide_dispatch, decide_queue_pause, not_dispatched, refuse, undispatched,
 };
-use review::{ToolReviewDecision, Verdict};
+use review::ToolReviewDecision;
 
 use hooks::{HookFold, HookStop};
 

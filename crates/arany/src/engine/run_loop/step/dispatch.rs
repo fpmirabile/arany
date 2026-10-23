@@ -1,13 +1,22 @@
 use super::hooks::HookFold;
-use super::review::Verdict;
 use super::{ActiveTime, Answer, HookDenial, Permission, Resolution};
-use crate::engine::run_loop::RunLoop;
 use crate::engine::run_loop::stop::StopCause;
+use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
 use crate::tools::{
     ApprovalMode, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation,
     UnguardedPrompt,
 };
+
+#[must_use]
+pub(super) enum Verdict {
+    Dispatch {
+        intent: EffectIntent,
+        queue_pause: Option<ActivePause>,
+    },
+    Deny(Answer),
+    Narrow(Answer, ToolCall),
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum DispatchSite {
