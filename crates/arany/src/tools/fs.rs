@@ -11,6 +11,9 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::Path;
 
+mod command;
+pub(super) use command::{CommandSelection, prepare_command, selected_command_changeset};
+
 pub(super) fn valid(call: &ToolCall) -> bool {
     match call {
         ToolCall::List { path } => valid_relative(path, true),
@@ -305,11 +308,19 @@ fn command_collect(
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) fn command_changeset(
     workspace: &Path,
     before: &CommandSnapshot,
 ) -> Result<CommandChangeset, ToolError> {
     let after = command_snapshot(workspace)?;
+    compare_command_snapshots(before, &after)
+}
+
+fn compare_command_snapshots(
+    before: &CommandSnapshot,
+    after: &CommandSnapshot,
+) -> Result<CommandChangeset, ToolError> {
     if after.root_identity != before.root_identity {
         return Err(ToolError::ChangedInput);
     }

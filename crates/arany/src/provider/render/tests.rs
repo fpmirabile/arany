@@ -524,7 +524,7 @@ fn command_step(exit_code: Option<i32>, stdout: &str, stderr: &str) -> ToolStep 
         cwd: ".".into(),
     };
     let output = json!({
-        "exit_code": exit_code, "stdout": stdout, "stderr": stderr,
+        "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": exit_code, "stdout": stdout, "stderr": stderr,
         "stdout_total": {"bytes": stdout.len(), "lines": stdout.lines().count()},
         "stderr_total": {"bytes": stderr.len(), "lines": stderr.lines().count()},
         "changeset": crate::tools::CommandChangeset::default(),
