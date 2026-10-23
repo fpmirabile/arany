@@ -1,7 +1,7 @@
 use crate::protocol::EventLine;
 use arany::{
-    AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, RunStatus,
-    RunView, SessionView,
+    AgentStatus, Event, EventEnvelope, ProviderCallDisposition, ProviderCallRecord, ProviderKind,
+    RunStatus, RunView, SessionView,
 };
 use std::borrow::Cow;
 use unicode_width::UnicodeWidthStr;
@@ -944,12 +944,11 @@ fn escape_json_controls(value: &str) -> String {
 }
 
 pub(crate) fn session_access_label(defaults: &arany::SessionDefaults) -> &str {
-    match defaults.provider.as_deref() {
-        Some("chatgpt") => "ChatGPT plan",
-        Some("openai") => "OpenAI API",
-        Some("anthropic") => "Anthropic API",
-        Some(profile) => profile,
-        None => "User default",
+    match defaults.provider.as_deref().and_then(ProviderKind::parse) {
+        Some(ProviderKind::ChatGpt) => "ChatGPT plan",
+        Some(ProviderKind::OpenAi) => "OpenAI API",
+        Some(ProviderKind::Anthropic) => "Anthropic API",
+        Some(ProviderKind::Custom) | None => defaults.provider.as_deref().unwrap_or("User default"),
     }
 }
 

@@ -13,8 +13,8 @@ use crate::terminal::{
 #[cfg(test)]
 use arany::WorkspaceIdentity;
 use arany::{
-    CompactionFailure, CompactionRecord, CompactionStatus, RunOutcome, RunRequest, RunStatus,
-    SessionView,
+    CompactionFailure, CompactionRecord, CompactionStatus, ProviderKind, RunOutcome, RunRequest,
+    RunStatus, SessionView,
 };
 
 pub(super) enum CompactionOutcome {
@@ -158,7 +158,11 @@ pub(super) fn preflight_idle_run(
     };
     let Some(model) = view.defaults.model.as_deref() else {
         return Err(
-            match view.defaults.account_id.filter(|_| profile == "chatgpt") {
+            match view
+                .defaults
+                .account_id
+                .filter(|_| ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt))
+            {
                 Some(id) => match chatgpt::selected_reauthorization_target(id) {
                     Ok(target) if target.plan_permission_missing => {
                         chatgpt::AuthorizationError::PermissionMissing.to_string()
@@ -188,7 +192,7 @@ pub(super) fn preflight_idle_run(
                 .into(),
         );
     }
-    if has_images && profile.starts_with("custom:") {
+    if has_images && ProviderKind::parse(profile) == Some(ProviderKind::Custom) {
         return Err("Error: Image input is not admitted for custom Providers; clear these attachments first".into());
     }
     validate_local_selection(Selection {

@@ -68,7 +68,7 @@ pub(crate) use render::{history_refusal_block, history_tool_block, history_unans
 pub use streaming::{PreviewText, ResponsePreview};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ProviderKind {
+pub enum ProviderKind {
     OpenAi,
     Anthropic,
     ChatGpt,
@@ -76,7 +76,27 @@ pub(crate) enum ProviderKind {
 }
 
 impl ProviderKind {
-    pub(crate) fn parse(profile: &str) -> Option<Self> {
+    pub fn native_name(self) -> Option<&'static str> {
+        match self {
+            Self::OpenAi => Some("openai"),
+            Self::Anthropic => Some("anthropic"),
+            Self::ChatGpt => Some("chatgpt"),
+            Self::Custom => None,
+        }
+    }
+
+    pub fn is_native_api(self) -> bool {
+        match self {
+            Self::OpenAi | Self::Anthropic => true,
+            Self::ChatGpt | Self::Custom => false,
+        }
+    }
+
+    pub fn is_native(self) -> bool {
+        self.native_name().is_some()
+    }
+
+    pub fn parse(profile: &str) -> Option<Self> {
         match profile {
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
@@ -401,10 +421,8 @@ pub fn validate_native_model_id(model: &str) -> Result<(), ProviderError> {
 
 pub(crate) fn valid_saved_api_account_id(profile: &str, id: Option<Uuid>) -> bool {
     id.is_none_or(|id| {
-        matches!(
-            ProviderKind::parse(profile),
-            Some(ProviderKind::OpenAi | ProviderKind::Anthropic)
-        ) && id.get_version() == Some(Version::SortRand)
+        ProviderKind::parse(profile).is_some_and(ProviderKind::is_native_api)
+            && id.get_version() == Some(Version::SortRand)
     })
 }
 

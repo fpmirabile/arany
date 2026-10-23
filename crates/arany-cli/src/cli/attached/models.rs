@@ -6,8 +6,8 @@ use crate::terminal::{
     TerminalInput,
 };
 use arany::{
-    CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, SessionId,
-    SessionView, StateRoot, list_native_models_with_credentials, resolve_native_effort,
+    CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, ProviderKind,
+    SessionId, SessionView, StateRoot, list_native_models_with_credentials, resolve_native_effort,
 };
 use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
@@ -122,7 +122,7 @@ fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreference
         let mut models = HashSet::new();
         let valid_selection = match source.model.as_deref() {
             Some(model) if arany::validate_native_model_id(model).is_ok() => {
-                if source.profile == "chatgpt" {
+                if ProviderKind::parse(&source.profile) == Some(ProviderKind::ChatGpt) {
                     source.effort.is_some()
                 } else {
                     arany::resolve_native_effort_for_run(&source.profile, model, source.effort)
@@ -132,7 +132,7 @@ fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreference
             None => source.effort.is_none(),
             _ => false,
         };
-        if !matches!(source.profile.as_str(), "openai" | "anthropic" | "chatgpt")
+        if !ProviderKind::parse(source.profile.as_str()).is_some_and(ProviderKind::is_native)
             || source.account_id.get_version() != Some(uuid::Version::SortRand)
             || !sources.insert((&source.profile, source.account_id))
             || !valid_selection
@@ -264,7 +264,7 @@ pub(super) async fn remember_models(
     let Some(profile) = defaults
         .provider
         .as_deref()
-        .filter(|profile| matches!(*profile, "openai" | "anthropic" | "chatgpt"))
+        .filter(|profile| ProviderKind::parse(profile).is_some_and(ProviderKind::is_native))
     else {
         return Ok(());
     };
@@ -518,8 +518,8 @@ async fn load_catalog_inner(
     view: &SessionView,
     profile: &str,
 ) -> Result<(Vec<ModelEntry>, bool), String> {
-    let result = match profile {
-        "openai" | "anthropic" => {
+    let result = match ProviderKind::parse(profile) {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
             let key = match view.defaults.account_id {
                 Some(id) => credentials::load_selected(id, profile)
                     .await
@@ -533,7 +533,7 @@ async fn load_catalog_inner(
                 .map(|items| (items, false))
                 .map_err(|error| error.to_string())
         }
-        "chatgpt" => {
+        Some(ProviderKind::ChatGpt) => {
             let expected = view
                 .defaults
                 .account_id
@@ -556,7 +556,7 @@ async fn load_catalog_inner(
                 false,
             ))
         }
-        _ => {
+        Some(ProviderKind::Custom) | None => {
             let name = profile
                 .strip_prefix("custom:")
                 .ok_or_else(|| "invalid Provider profile".to_owned())?;

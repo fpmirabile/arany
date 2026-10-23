@@ -1,5 +1,5 @@
 use arany::{
-    Effort, NativeApiCredentials, StateRoot, StoreError, resolve_native_effort,
+    Effort, NativeApiCredentials, ProviderKind, StateRoot, StoreError, resolve_native_effort,
     validate_native_model_id,
 };
 use arany::{RecordFormat, RecordKind};
@@ -355,7 +355,7 @@ impl SavedAccount {
     fn validate(&self) -> Result<(), CredentialError> {
         if self.schema != SAVED_ACCOUNT_SCHEMA
             || self.id.get_version() != Some(Version::SortRand)
-            || !matches!(self.provider.as_str(), "openai" | "anthropic")
+            || !ProviderKind::parse(&self.provider).is_some_and(ProviderKind::is_native_api)
             || (resolve_native_effort(&self.provider, &self.model, self.effort).is_err()
                 && (self.effort.is_none() || validate_native_model_id(&self.model).is_err()))
             || self.credentials().is_err()
