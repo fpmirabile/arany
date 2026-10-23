@@ -231,7 +231,7 @@ fn retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 
 pub(crate) const MAX_REPORTED_INPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_REPORTED_OUTPUT_TOKENS: u32 = 1_000_000;
-pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 16_384;
+pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 32_768;
 pub(crate) const DEFAULT_OUTPUT_TOKEN_CAP: u32 = 4096;
 pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
@@ -1335,6 +1335,15 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
 mod tests {
     use super::*;
     use crate::session::AgentRunId;
+
+    #[test]
+    fn output_cap_covers_tool_content_and_answer_headroom() {
+        assert!(
+            crate::tools::types::MAX_EDIT_CONTENT_BYTES.div_ceil(3)
+                + DEFAULT_OUTPUT_TOKEN_CAP as usize
+                <= MAX_OUTPUT_TOKEN_CAP as usize
+        );
+    }
 
     fn request(
         role: PromptRole,

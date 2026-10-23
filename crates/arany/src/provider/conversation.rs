@@ -369,8 +369,12 @@ mod tests {
         assert_eq!(
             max_turn_bytes(16_384),
             192 * 1024,
-            "the native 16,384-token cap"
+            "a previously pinned 16,384-token cap"
         );
+        let cap = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+        assert_eq!(max_turn_bytes(cap), 320 * 1024);
+        assert!(ProviderTurn::new("openai", &filler(max_turn_bytes(cap)), SECRET, cap).is_err());
+        assert!(ProviderTurn::new("openai", &filler(319 * 1024), SECRET, cap).is_ok());
         assert_eq!(max_turn_bytes(u32::MAX), MAX_RESPONSE_BYTES);
         assert!(ProviderTurn::new("openai", &filler(90 * 1024), SECRET, 4096).is_ok());
         assert!(ProviderTurn::new("openai", &filler(97 * 1024), SECRET, 4096).is_err());

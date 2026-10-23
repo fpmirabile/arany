@@ -306,6 +306,86 @@ impl Provider for WaitingCompactionProvider {
     }
 }
 
+fn subscription_replay_provider(account_id: Uuid, fingerprint: [u8; 32]) -> Arc<ScriptedProvider> {
+    let cap = arany::ChatGptProvider::from_checked_account(
+        "model-a".into(),
+        Effort::High,
+        "synthetic-subscription-token".into(),
+        ChatGptProvenance {
+            account_id,
+            evidence_fingerprint: fingerprint,
+            admission: ChatGptAdmission::AccountConsent,
+        },
+    )
+    .expect("synthetic account")
+    .identity()
+    .limits
+    .max_output_tokens;
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "Synthetic answer".into(),
+    })])
+    .with_chatgpt_account(account_id, fingerprint)
+    .with_max_output_tokens(cap)
+    .with_reported_usage(arany::Usage {
+        input_tokens: Some(20),
+        output_tokens: Some(cap + 9_000),
+        ..Default::default()
+    })
+    .with_compactions(vec![Ok(CompactionResponse {
+        summary: "Compacted synthetic history".into(),
+        response_id: Some("resp_compact".into()),
+        usage: arany::Usage {
+            input_tokens: Some(20),
+            output_tokens: Some(3_000),
+            ..Default::default()
+        },
+        wire_provenance: Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
+    })]);
+    Arc::new(provider)
+}
+
+async fn assert_subscription_replay(state_path: &Path, outcome: &arany::RunOutcome) {
+    let config = outcome.run.config.as_ref().expect("Run provenance");
+    let store = Store::open_read_only(StateRoot::open_existing(state_path).unwrap())
+        .expect("read-only reopen");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("canonical Events");
+    let view = SessionView::replay(outcome.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    assert_eq!(view.runs[0].config.as_ref(), Some(config));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ContextCompacted { record, .. }
+            if record.chatgpt_provenance == config.chatgpt_provenance
+                && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
+                && record.output_tokens == Some(3_000)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ProviderCallRecorded { record, .. } if record.output_tokens == Some(config.output_token_cap + 9_000)
+    )));
+    store.close().await.expect("store shutdown");
+}
+
+fn assert_subscription_account(config: &arany::RunConfig, account_id: Uuid, fingerprint: [u8; 32]) {
+    assert_eq!(config.saved_api_account_id, None);
+    assert_eq!(
+        config.output_token_bound,
+        OutputTokenBound::LocalAcceptanceOnly
+    );
+    assert_eq!(
+        config.chatgpt_provenance,
+        Some(ChatGptProvenance {
+            account_id,
+            evidence_fingerprint: fingerprint,
+            admission: ChatGptAdmission::AccountConsent,
+        })
+    );
+}
+
 #[test]
 fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -320,29 +400,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let fingerprint = [7; 32];
-        // Reported totals include reasoning, above both caps; the adapter checked visible output.
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
-            text: "Synthetic answer".into(),
-        })])
-        .with_chatgpt_account(account_id, fingerprint)
-        .with_reported_usage(arany::Usage {
-            input_tokens: Some(20),
-            output_tokens: Some(9_000),
-            ..Default::default()
-        })
-        .with_compactions(vec![Ok(CompactionResponse {
-            summary: "Compacted synthetic history".into(),
-            response_id: Some("resp_compact".into()),
-            usage: arany::Usage {
-                input_tokens: Some(20),
-                output_tokens: Some(3_000),
-                ..Default::default()
-            },
-            wire_provenance: Some(
-                arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
-            ),
-        })]);
-        let provider = Arc::new(provider);
+        let provider = subscription_replay_provider(account_id, fingerprint);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
@@ -358,19 +416,15 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         assert_eq!(outcome.run.status, RunStatus::Finished);
         let config = outcome.run.config.as_ref().expect("Run provenance");
         assert_eq!(config.provider, "chatgpt");
-        assert_eq!(config.saved_api_account_id, None);
         assert_eq!(
-            config.output_token_bound,
-            OutputTokenBound::LocalAcceptanceOnly
+            config.output_token_cap,
+            provider.identity().limits.max_output_tokens
         );
         assert_eq!(
-            config.chatgpt_provenance,
-            Some(ChatGptProvenance {
-                account_id,
-                evidence_fingerprint: fingerprint,
-                admission: ChatGptAdmission::AccountConsent,
-            })
+            provider.requests.lock().unwrap()[0].max_output_tokens,
+            config.output_token_cap
         );
+        assert_subscription_account(config, account_id, fingerprint);
         let compaction = engine
             .compact_session(
                 &AdmittedProviders::single(provider.clone()),
@@ -390,28 +444,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         );
         engine.close().await.expect("engine shutdown");
 
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
-            .expect("read-only reopen");
-        let events = store
-            .load_session(outcome.session_id)
-            .await
-            .expect("canonical Events");
-        let view = SessionView::replay(outcome.session_id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert_eq!(view.runs[0].config.as_ref(), Some(config));
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::ContextCompacted { record, .. }
-                if record.chatgpt_provenance == config.chatgpt_provenance
-                    && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
-                    && record.output_tokens == Some(3_000)
-        )));
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::ProviderCallRecorded { record, .. } if record.output_tokens == Some(9_000)
-        )));
-        store.close().await.expect("store shutdown");
+        assert_subscription_replay(&state_path, &outcome).await;
     });
 }
 
@@ -2898,6 +2931,72 @@ fn team_cancellation_drains_active_and_queued_children() {
     });
 }
 
+fn output_cap_provider(
+    bound: OutputTokenBound,
+    cap: u32,
+    responses: Vec<ProviderOutcome>,
+) -> ScriptedProvider {
+    let provider = ScriptedProvider::new(responses).with_max_output_tokens(cap);
+    match bound {
+        OutputTokenBound::ProviderEnforced => provider.with_profile("openai", "gpt-5.4"),
+        OutputTokenBound::LocalAcceptanceOnly => {
+            provider.with_chatgpt_account(Uuid::now_v7(), [1; 32])
+        }
+    }
+}
+
+async fn assert_team_output_caps(workspace: &Path, state: &Path, provider: ScriptedProvider) {
+    let cap = provider.identity().limits.max_output_tokens;
+    let bound = provider.identity().limits.output_token_bound;
+    let requests = Arc::clone(&provider.requests);
+    let provider = Arc::new(provider);
+    let engine = engine_support::open(
+        StateRoot::admit(state).expect("private state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut team = request(workspace, "Question");
+    team.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let outcome = run_to_end(&engine, &provider, team)
+        .await
+        .expect("team Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let config = outcome.run.config.as_ref().expect("Run config");
+    assert_eq!(config.output_token_cap, cap);
+    assert_eq!(config.output_token_bound, bound);
+    let caps: Vec<_> = requests
+        .lock()
+        .expect("requests lock")
+        .iter()
+        .map(|call| (call.phase, call.max_output_tokens))
+        .collect();
+    assert_eq!(
+        caps,
+        [
+            (AgentPhase::RootPlan, cap),
+            (AgentPhase::ChildWork, 4096),
+            (AgentPhase::RootSynthesis, cap)
+        ]
+    );
+    engine.close().await.expect("engine shutdown");
+}
+
+async fn assert_output_cap_refused(workspace: &Path, state: &Path, provider: ScriptedProvider) {
+    let requests = Arc::clone(&provider.requests);
+    let provider = Arc::new(provider);
+    let engine = engine_support::open(
+        StateRoot::admit(state).expect("private state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let result = run_to_end(&engine, &provider, request(workspace, "Question")).await;
+    engine.close().await.expect("engine shutdown");
+    assert!(matches!(result, Err(EngineError::InvalidRequest)));
+    assert!(requests.lock().expect("requests lock").is_empty());
+}
+
 #[test]
 fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2909,126 +3008,51 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
-        let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect".into(),
-                    profile: None,
-                }],
-            }),
-            ProviderOutcome::Answer(Answer {
-                text: "Child answer".into(),
-            }),
-            ProviderOutcome::Answer(Answer {
-                text: "Answer".into(),
-            }),
-        ])
-        .with_max_output_tokens(16_384);
-        let requests = Arc::clone(&provider.requests);
-        let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("private state"),
-            EngineConfig::default(),
+        let state = temp.path().join("state");
+        let cap = arany::OpenAiProvider::from_api_key_with_effort(
+            "gpt-5.4".into(),
+            None,
+            "synthetic-openai-key".into(),
         )
-        .expect("engine");
-        let mut team = request(&workspace, "Question");
-        team.policy = CollaborationPolicy::Team {
-            max_active_children: 1,
-        };
-        let outcome = run_to_end(&engine, &provider, team)
-            .await
-            .expect("team Run");
-        assert_eq!(outcome.run.status, RunStatus::Finished);
-        assert_eq!(
-            outcome
-                .run
-                .config
-                .as_ref()
-                .expect("Run config")
-                .output_token_cap,
-            16_384
-        );
-        let caps: Vec<_> = requests
-            .lock()
-            .expect("requests lock")
-            .iter()
-            .map(|call| (call.phase, call.max_output_tokens))
-            .collect();
-        assert_eq!(
-            caps,
-            [
-                (AgentPhase::RootPlan, 16_384),
-                (AgentPhase::ChildWork, 4096),
-                (AgentPhase::RootSynthesis, 16_384)
-            ]
-        );
-        engine.close().await.expect("engine shutdown");
-
-        let oversized_provider =
-            Arc::new(ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_385));
-        let oversized = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert!(matches!(
-            run_to_end(
-                &oversized,
-                &oversized_provider,
-                request(&workspace, "Question")
-            )
-            .await,
-            Err(EngineError::InvalidRequest)
-        ));
-        oversized.close().await.expect("engine shutdown");
-
-        // A local-only ChatGPT route admits its cap and refuses anything above the 4,096 bound.
-        let chatgpt = |cap: u32, responses: Vec<ProviderOutcome>| {
-            ScriptedProvider::new(responses)
-                .with_chatgpt_account(Uuid::now_v7(), [1; 32])
-                .with_max_output_tokens(cap)
-        };
-        let local_over_provider = Arc::new(chatgpt(4097, Vec::new()));
-        let local_over = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert!(matches!(
-            run_to_end(
-                &local_over,
-                &local_over_provider,
-                request(&workspace, "Question")
-            )
-            .await,
-            Err(EngineError::InvalidRequest)
-        ));
-        local_over.close().await.expect("engine shutdown");
-
-        let local_cap_provider = Arc::new(chatgpt(
-            4096,
-            vec![ProviderOutcome::Answer(Answer { text: "ok".into() })],
-        ));
-        let local_cap = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert_eq!(
-            run_to_end(
-                &local_cap,
-                &local_cap_provider,
-                request(&workspace, "Question")
-            )
-            .await
-            .expect("a 4,096 local-only Run is admitted")
-            .run
-            .status,
-            RunStatus::Finished
-        );
-        local_cap.close().await.expect("engine shutdown");
+        .expect("synthetic native identity")
+        .identity()
+        .limits
+        .max_output_tokens;
+        assert_eq!(cap, 32_768);
+        for bound in [
+            OutputTokenBound::ProviderEnforced,
+            OutputTokenBound::LocalAcceptanceOnly,
+        ] {
+            let team = output_cap_provider(
+                bound,
+                cap,
+                vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect".into(),
+                            profile: None,
+                        }],
+                    }),
+                    ProviderOutcome::Answer(Answer {
+                        text: "Child answer".into(),
+                    }),
+                    ProviderOutcome::Answer(Answer {
+                        text: "Answer".into(),
+                    }),
+                ],
+            );
+            assert_team_output_caps(&workspace, &state, team).await;
+            let oversized = output_cap_provider(
+                bound,
+                cap + 1,
+                vec![ProviderOutcome::Answer(Answer {
+                    text: "Unexpected dispatch".into(),
+                })],
+            );
+            assert_output_cap_refused(&workspace, &state, oversized).await;
+        }
     });
 }
 
