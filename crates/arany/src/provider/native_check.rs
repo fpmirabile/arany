@@ -1,8 +1,9 @@
 use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
     MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PROBE_OUTPUT_CAP,
-    PROBE_TOTAL_DEADLINE, PromptRole, Provider, ProviderError, ProviderOutcome, ProviderRequest,
-    RunInput, catalog::valid_model_id, valid_saved_api_account_id, validate_native_api_key,
+    PROBE_TOTAL_DEADLINE, PromptRole, Provider, ProviderError, ProviderKind, ProviderOutcome,
+    ProviderRequest, RunInput, catalog::valid_model_id, valid_saved_api_account_id,
+    validate_native_api_key,
 };
 use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
@@ -51,7 +52,11 @@ pub async fn check_native_model_from_env(
     model: &str,
     effort: Effort,
 ) -> Result<CheckView, NativeCheckError> {
-    if !matches!(profile, "openai" | "anthropic") || !valid_model_id(model) {
+    if !matches!(
+        ProviderKind::parse(profile),
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic)
+    ) || !valid_model_id(model)
+    {
         return Err(NativeCheckError::InvalidSelection);
     }
     let credentials = NativeApiCredentials::from_env(profile)
@@ -208,7 +213,7 @@ fn start(target: CheckTarget, fingerprint: [u8; 32]) -> Result<CheckStart, Nativ
     })
     .collect();
     let destination = Sha256::digest(profile.as_bytes()).into();
-    let pages = if profile == "openai" { 1 } else { 16 };
+    let pages = target.catalog_pages();
     let model = match &target {
         CheckTarget::Native { model, .. } => model.clone(),
         _ => return Err(NativeCheckError::InvalidSelection),

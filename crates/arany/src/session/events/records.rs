@@ -1,5 +1,5 @@
 use super::*;
-use crate::provider::AgentPhase;
+use crate::provider::{AgentPhase, ProviderKind};
 use crate::validate::MAX_PATH_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -59,14 +59,25 @@ pub struct SessionDefaults {
 
 impl SessionDefaults {
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        match self.provider.as_deref().and_then(ProviderKind::parse) {
+            Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
+                if self.account_id.is_some() && self.model.is_none() {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+            Some(ProviderKind::ChatGpt) => {
+                if self.account_id.is_none() {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+            Some(ProviderKind::Custom) | None => {
+                if self.account_id.is_some() {
+                    return Err(ReplayError::InvalidPayload);
+                }
+            }
+        }
         if self.model.is_some() && self.provider.is_none()
             || self.effort.is_some() && self.model.is_none()
-            || self.account_id.is_some()
-                && (!matches!(
-                    self.provider.as_deref(),
-                    Some("openai" | "anthropic" | "chatgpt")
-                ) || self.provider.as_deref() != Some("chatgpt") && self.model.is_none())
-            || self.provider.as_deref() == Some("chatgpt") && self.account_id.is_none()
             || self
                 .account_id
                 .is_some_and(|id| id.get_version() != Some(Version::SortRand))
@@ -359,7 +370,8 @@ impl RunConfig {
                 .tool_policy
                 .as_ref()
                 .is_some_and(|policy| !policy.valid())
-            || self.provider.starts_with("custom:") && self.tool_policy.is_some()
+            || ProviderKind::parse(&self.provider) == Some(ProviderKind::Custom)
+                && self.tool_policy.is_some()
             || self.include_digests.len() > 16
             || !self.instruction_scope_valid()
             || self.history_run_ids.len() > super::MAX_HISTORY_RUNS
@@ -544,6 +556,7 @@ impl CompactionRecord {
     }
 
     pub(crate) fn validate(&self) -> Result<(), ReplayError> {
+        let chatgpt = ProviderKind::parse(&self.provider) == Some(ProviderKind::ChatGpt);
         if self
             .rate_limits
             .as_ref()
@@ -572,8 +585,8 @@ impl CompactionRecord {
                     self.output_tokens,
                 )
             })
-            || (self.provider == "chatgpt") != self.chatgpt_provenance.is_some()
-            || (self.provider == "chatgpt")
+            || chatgpt != self.chatgpt_provenance.is_some()
+            || chatgpt
                 != (self.output_token_bound
                     == crate::provider::OutputTokenBound::LocalAcceptanceOnly)
             || self

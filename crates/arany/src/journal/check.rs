@@ -1,4 +1,4 @@
-use crate::provider::Effort;
+use crate::provider::{Effort, ProviderKind};
 use crate::store::{StateRoot, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -67,6 +67,18 @@ pub enum CheckTarget {
     },
 }
 impl CheckTarget {
+    pub(crate) fn catalog_pages(&self) -> u8 {
+        match self {
+            Self::Custom { .. } => 0,
+            Self::Native { profile, .. } => match ProviderKind::parse(profile) {
+                Some(ProviderKind::OpenAi) => 1,
+                Some(ProviderKind::Anthropic | ProviderKind::ChatGpt | ProviderKind::Custom)
+                | None => 16,
+            },
+            Self::Chatgpt { .. } => 1,
+        }
+    }
+
     pub(crate) fn key(&self) -> Result<[u8; 32], StoreError> {
         let bytes = serde_json::to_vec(self).map_err(|_| StoreError::InvalidHistory)?;
         Ok(Sha256::digest(bytes).into())
@@ -87,11 +99,15 @@ impl CheckTarget {
                 workspace,
                 ..
             } => {
-                matches!(profile.as_str(), "openai" | "anthropic")
-                    && valid_model(model)
+                let Some(provider @ (ProviderKind::OpenAi | ProviderKind::Anthropic)) =
+                    ProviderKind::parse(profile)
+                else {
+                    return false;
+                };
+                valid_model(model)
                     && account.is_none_or(|id| id.get_version_num() == 7)
                     && workspace.as_ref().is_none_or(|value| {
-                        profile == "anthropic"
+                        provider == ProviderKind::Anthropic
                             && value.len() <= 128
                             && value.starts_with("wrkspc_")
                             && value
@@ -164,10 +180,9 @@ impl CheckStart {
         })
     }
     fn valid(&self) -> bool {
-        let (pages, maximum) = match &self.target {
-            CheckTarget::Custom { .. } => (0, 15),
-            CheckTarget::Native { profile, .. } => (if profile == "openai" { 1 } else { 16 }, 3),
-            CheckTarget::Chatgpt { .. } => (1, 3),
+        let maximum = match &self.target {
+            CheckTarget::Custom { .. } => 15,
+            CheckTarget::Native { .. } | CheckTarget::Chatgpt { .. } => 3,
         };
         self.target.valid()
             && valid_model(&self.model)
@@ -179,7 +194,7 @@ impl CheckStart {
             }
             && self.contract == 1
             && self.cost_consent
-            && self.catalog_pages == pages
+            && self.catalog_pages == self.target.catalog_pages()
             && self.started_at_ms >= 0
             && self.deadline_ms.checked_sub(self.started_at_ms) == Some(LIFETIME_MS as i64)
             && self.probes.len() >= 3

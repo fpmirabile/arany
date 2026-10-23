@@ -1,5 +1,5 @@
 use super::{AgentRunId, Event, ReplayError, RunId, SessionId, SessionView};
-use crate::provider::{ProviderRole, Usage};
+use crate::provider::{ProviderKind, ProviderRole, Usage};
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TokenCount {
@@ -177,10 +177,11 @@ pub(super) fn apply(view: &mut SessionView, event: &Event) -> Result<(), ReplayE
             }
         }
     };
-    if limits.is_some() && provider != "chatgpt" {
+    let chatgpt = ProviderKind::parse(&provider) == Some(ProviderKind::ChatGpt);
+    if limits.is_some() && !chatgpt {
         return Err(ReplayError::InvalidTransition);
     }
-    if provider == "chatgpt" {
+    if chatgpt {
         let run = view
             .runs
             .iter()
