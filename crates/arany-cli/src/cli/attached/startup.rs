@@ -665,7 +665,7 @@ mod tests {
                     assert_eq!(objective.prompt, expected_prompt);
                     assert_eq!(
                         objective.notice, expected_notice,
-                        "prompt={prompt:?}, resume={goal_resume:?}, session={session_id:?}, setup={setup_notice:?}"
+                        "prompt={prompt:?}, resume={goal_resume:?}, setup={setup_notice:?}"
                     );
                 }
             }
