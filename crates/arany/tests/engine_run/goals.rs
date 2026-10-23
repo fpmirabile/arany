@@ -8474,7 +8474,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let page = format!("{}\n", "x".repeat(99)).repeat(130);
     let workspace = facts_workspace(temp.path(), &page);
     for name in ["big1.txt", "big2.txt"] {
-        std::fs::write(workspace.join(name), "b".repeat(72 * 1024)).expect("include");
+        std::fs::write(workspace.join(name), "b".repeat(68 * 1024)).expect("include");
     }
     let state_path = temp.path().join("state");
     let command = arany::ToolCall::Command {
@@ -8521,7 +8521,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         .as_ref()
         .unwrap()
         .max_context_bytes;
-    assert!((220 * 1024..=224 * 1024).contains(&allowance));
+    assert!((228 * 1024..=232 * 1024).contains(&allowance));
     assert_eq!(run.tools.len(), 5);
     assert_eq!(run.tools[4].intent.call, command);
     assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
@@ -8531,6 +8531,14 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
+    assert!(requests.iter().all(|request| {
+        !request.input.outcome_correction
+            && request.input.previous_run_failure.is_none()
+            && request.input.last_answer_refused.is_none()
+    }));
+    assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
+    assert!(provider.compact_responses.lock().unwrap().is_empty());
+    assert!(provider.responses.lock().unwrap().is_empty());
     let context = requests[4].input.tools.as_ref().unwrap();
     assert_eq!(context.observation_count(), 4);
     assert!(context.steps[0].cleared);
@@ -8539,8 +8547,25 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let used = arany::test_support::tool_context_bytes(&uncleared);
     assert!((52 * 1024..=64 * 1024).contains(&used));
     let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
-    assert!(used + reserve > allowance as usize);
-    assert!(arany::test_support::tool_context_bytes(context) + reserve <= allowance as usize);
+    let margin = 2 * 1024;
+    assert!(used + reserve > allowance as usize + margin);
+    assert!(
+        arany::test_support::tool_context_bytes(context) + reserve + margin <= allowance as usize
+    );
+    let after_command = requests[5].input.tools.as_ref().unwrap();
+    assert_eq!(
+        after_command
+            .steps
+            .iter()
+            .filter(|step| step.cleared)
+            .count(),
+        1
+    );
+    assert!(
+        arany::test_support::tool_context_bytes(after_command) + reserve + margin
+            <= allowance as usize,
+        "the denied Command must leave continuation room on both platforms"
+    );
     let clearing = events
         .iter()
         .position(|event| {
