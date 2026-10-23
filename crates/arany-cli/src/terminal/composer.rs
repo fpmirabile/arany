@@ -1,3 +1,4 @@
+use super::input::KeyboardSupport;
 use super::{
     TerminalInput,
     commands::{
@@ -210,11 +211,11 @@ impl Composer {
         self.newline_shortcut = shortcut;
     }
 
-    pub(super) fn newline_hint(&self) -> &'static str {
-        if self.shortcut_received {
-            self.newline_shortcut.label()
-        } else {
-            "\\ then Enter"
+    pub(super) fn newline_hint(&self, keyboard: KeyboardSupport) -> &'static str {
+        match keyboard {
+            KeyboardSupport::Disambiguated => self.newline_shortcut.label(),
+            KeyboardSupport::Legacy if self.shortcut_received => self.newline_shortcut.label(),
+            KeyboardSupport::Legacy => "\\ then Enter",
         }
     }
 
@@ -1419,7 +1420,10 @@ mod tests {
         for selected in NewlineShortcut::ALL {
             let mut composer = Composer::default();
             composer.set_newline_shortcut(selected);
-            assert_eq!(composer.newline_hint(), "\\ then Enter");
+            assert_eq!(
+                composer.newline_hint(KeyboardSupport::Legacy),
+                "\\ then Enter"
+            );
             for received in NewlineShortcut::ALL {
                 composer.clear();
                 composer.apply(TerminalInput::Character('\\'));
@@ -1441,7 +1445,10 @@ mod tests {
             composer.clear();
             composer.apply(TerminalInput::Newline);
             assert_eq!(composer.text(), "\n");
-            assert_eq!(composer.newline_hint(), selected.label());
+            assert_eq!(
+                composer.newline_hint(KeyboardSupport::Legacy),
+                selected.label()
+            );
         }
     }
 

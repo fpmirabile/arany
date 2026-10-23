@@ -1069,6 +1069,8 @@ pub(super) mod cleanup_tests {
             history_area: None,
             selection_cue: None,
             bracketed_paste: None,
+            #[cfg(unix)]
+            keyboard: None,
             session_picker_area: None,
             agent_picker_area: None,
             linear,
