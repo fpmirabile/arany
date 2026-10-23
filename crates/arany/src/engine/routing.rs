@@ -95,7 +95,7 @@ pub(super) async fn back_off(
         biased;
         () = cancellation.cancelled() => Backoff::Cancelled,
         () = paused => Backoff::Paused,
-        () = wait(session_id, delay) => Backoff::Elapsed,
+        () = crate::fault::retry_backoff(session_id, delay) => Backoff::Elapsed,
     };
     if cancellation.is_cancelled() {
         Backoff::Cancelled
@@ -104,22 +104,6 @@ pub(super) async fn back_off(
     } else {
         ended
     }
-}
-
-async fn wait(session_id: SessionId, delay: Duration) {
-    #[cfg(any(test, feature = "test-support"))]
-    match crate::fault::FaultPlan::retry_backoff(session_id) {
-        Some(crate::fault::RetryBackoff::Immediate) => return,
-        Some(crate::fault::RetryBackoff::Gated(entered, release)) => {
-            let _ = entered.send(());
-            let _ = release.await;
-            return;
-        }
-        None => {}
-    }
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = session_id;
-    tokio::time::sleep(delay).await;
 }
 
 pub(super) struct CompactionOutcome {
@@ -256,33 +240,20 @@ impl CallRouter<'_> {
                 cancellation.clone(),
                 preview.clone(),
                 limits.clone(),
-                #[cfg(feature = "test-support")]
-                if role == ProviderRole::Primary {
-                    self.journal.tool_latency.get().map(|recorder| {
-                        let index = self
-                            .ledger
-                            .view(|view| {
-                                view.runs
-                                    .last()
-                                    .and_then(|run| {
-                                        run.agents
-                                            .iter()
-                                            .find(|agent| agent.id == scope.agent_run_id)
-                                    })
-                                    .map_or(0, |agent| agent.provider_calls.len())
-                            })
-                            .expect("live measurement scope");
-                        crate::test_support::latency::Receipt {
-                            recorder,
-                            session_id: scope.session_id,
-                            run_id: scope.run_id,
-                            agent_run_id: scope.agent_run_id,
-                            call_index: index,
-                        }
-                    })
-                } else {
-                    None
-                },
+                crate::fault::LatencyReceipt::new(&self.journal.tool_latency, &request, || {
+                    self.ledger
+                        .view(|view| {
+                            view.runs
+                                .last()
+                                .and_then(|run| {
+                                    run.agents
+                                        .iter()
+                                        .find(|agent| agent.id == scope.agent_run_id)
+                                })
+                                .map_or(0, |agent| agent.provider_calls.len())
+                        })
+                        .expect("live measurement scope")
+                }),
             )
             .await;
             let facts = self.attempt_facts(
@@ -757,7 +728,7 @@ pub(super) async fn invoke_attempt(
     cancellation: RunCancellation,
     preview: Option<ResponsePreview>,
     limits: RateLimitSlot,
-    #[cfg(feature = "test-support")] receipt: Option<crate::test_support::latency::Receipt<'_>>,
+    receipt: crate::fault::LatencyReceipt<'_>,
 ) -> AttemptResult {
     let (result, transient) = invoke_bounded_with_preview(
         provider,
@@ -766,7 +737,6 @@ pub(super) async fn invoke_attempt(
         cancellation,
         preview.clone(),
         limits,
-        #[cfg(feature = "test-support")]
         receipt,
     )
     .await;

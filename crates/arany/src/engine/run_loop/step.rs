@@ -1914,28 +1914,17 @@ impl RunLoop<'_> {
                 },
                 files,
             };
-            #[cfg(any(test, feature = "test-support"))]
-            let stalled = crate::fault::FaultPlan::checkpoint_stalled(self.session_id);
+            let stalled = crate::fault::checkpoint_stall(self.session_id);
             let store = self.journal.store();
             let stored = async {
-                #[cfg(any(test, feature = "test-support"))]
-                if stalled {
-                    std::future::pending::<()>().await;
-                }
+                stalled.wait().await;
                 store.capture_checkpoint(capture).await
             };
             let checkpoint = match tokio::time::timeout_at(deadline, stored).await {
                 Ok(Ok(checkpoint)) => checkpoint,
                 _ => Checkpoint::skipped(CheckpointReason::StoreUnavailable),
             };
-            #[cfg(any(test, feature = "test-support"))]
-            if checkpoint.status == crate::CheckpointStatus::Captured
-                && let Some((entered, release)) =
-                    crate::fault::FaultPlan::checkpoint_gate(self.session_id)
-            {
-                let _ = entered.send(());
-                let _ = tokio::time::timeout_at(deadline, release).await;
-            }
+            crate::fault::checkpoint_captured(self.session_id, &checkpoint, deadline).await;
             Ok(checkpoint)
         })
     }

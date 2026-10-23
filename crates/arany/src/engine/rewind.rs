@@ -15,6 +15,8 @@ use crate::worker::{ChangesetSource, WorkerChangeset};
 use std::path::PathBuf;
 use std::time::Duration;
 
+const REWIND_TIMEOUT: Duration = Duration::from_secs(120);
+
 #[derive(Debug)]
 pub struct ConversationRewind {
     pub session_id: Option<SessionId>,
@@ -281,13 +283,12 @@ impl Engine {
             .state
             .lock_workspace(identity)
             .map_err(workspace_error)?;
-        Ok(tokio::time::timeout(
-            Duration::from_secs(120),
-            self.prepare_rewind(request, &view),
+        Ok(
+            tokio::time::timeout(REWIND_TIMEOUT, self.prepare_rewind(request, &view))
+                .await
+                .map_err(|_| EngineError::Tool(crate::tools::ToolError::Limit))??
+                .preview,
         )
-        .await
-        .map_err(|_| EngineError::Tool(crate::tools::ToolError::Limit))??
-        .preview)
     }
 
     pub async fn rewind(
@@ -354,12 +355,10 @@ impl Engine {
         };
         let expected = preview.started;
         let permissions_digest = preview.permissions_digest;
-        let prepared = tokio::time::timeout(
-            Duration::from_secs(120),
-            self.prepare_rewind(preview.request, &view),
-        )
-        .await
-        .map_err(|_| EngineError::Tool(crate::tools::ToolError::Limit))??;
+        let prepared =
+            tokio::time::timeout(REWIND_TIMEOUT, self.prepare_rewind(preview.request, &view))
+                .await
+                .map_err(|_| EngineError::Tool(crate::tools::ToolError::Limit))??;
         let restorable = prepared.preview.can_restore();
         let mut started = prepared.preview.started;
         if !restorable
@@ -472,11 +471,7 @@ impl Engine {
             .and_then(Result::ok)
             .unwrap_or_else(|| Checkpoint::skipped(CheckpointReason::StoreUnavailable))
         };
-        #[cfg(any(test, feature = "test-support"))]
-        if let Some((entered, release)) = crate::fault::FaultPlan::checkpoint_gate(session) {
-            let _ = entered.send(());
-            let _ = tokio::time::timeout(Duration::from_secs(120), release).await;
-        }
+        crate::fault::rewind_checkpoint(session, REWIND_TIMEOUT).await;
         let mut finished = RewindFinished {
             rewind_id: started.rewind_id,
             outcome: RewindOutcome::Failed,

@@ -1245,8 +1245,7 @@ impl RunLoop<'_> {
                 cancellation,
                 preview,
                 limits,
-                #[cfg(feature = "test-support")]
-                None,
+                crate::fault::LatencyReceipt::default(),
             )
             .await
         });
@@ -2593,8 +2592,7 @@ impl RunLoop<'_> {
                 cancellation,
                 preview,
                 limits,
-                #[cfg(feature = "test-support")]
-                None,
+                crate::fault::LatencyReceipt::default(),
             )
             .await
         });
