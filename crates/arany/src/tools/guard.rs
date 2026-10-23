@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt};
 use tokio::process::{Child, Command};
 
-const CAPTURE_BYTES: usize = 48 * 1024;
+const GUARD_CAPTURE_BYTES: usize = 48 * 1024;
 const RUST_GUARD_FLAGS: &str = "--cfg\x1farany_guard";
 pub(super) const TASK_BYTES_CAP: usize = 1024 * 1024;
 // Only a task carrying one base64 agent definition file may exceed the common cap.

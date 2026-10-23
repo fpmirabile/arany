@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, Write};
 
-pub const MAX_LINE_BYTES: usize = 1 << 20;
+pub const MAX_RPC_LINE_BYTES: usize = 1 << 20;
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq, Eq, Default)]
 pub enum Version {
@@ -223,7 +223,7 @@ pub fn encode_line(message: &impl Serialize) -> Result<Vec<u8>, CodecError> {
     }
     impl Write for BoundedLine {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            if bytes.len() > MAX_LINE_BYTES - 1 - self.bytes.len() {
+            if bytes.len() > MAX_RPC_LINE_BYTES - 1 - self.bytes.len() {
                 self.full = true;
                 return Err(io::Error::other("protocol message limit"));
             }
@@ -250,7 +250,7 @@ pub fn encode_line(message: &impl Serialize) -> Result<Vec<u8>, CodecError> {
 }
 
 pub fn decode_line(line: &[u8]) -> Result<Message, CodecError> {
-    if line.len() > MAX_LINE_BYTES {
+    if line.len() > MAX_RPC_LINE_BYTES {
         return Err(CodecError::TooLarge);
     }
     let line = line.strip_suffix(b"\n").unwrap_or(line);

@@ -66,7 +66,7 @@ pub(super) struct AcpErrorObject {
 }
 
 pub(super) fn decode(line: &[u8]) -> Result<Input, CodecError> {
-    if line.len() > MAX_LINE_BYTES {
+    if line.len() > MAX_RPC_LINE_BYTES {
         return Err(CodecError::TooLarge);
     }
     serde_json::from_slice(line).map_err(|_| CodecError::Parse)

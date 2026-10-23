@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 pub(super) mod wire;
 
-const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
+const ANTHROPIC_ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
 
 pub struct AnthropicProvider {
     client: Client,
@@ -179,7 +179,7 @@ impl AnthropicProvider {
     fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
         let request = native::json_request(
             &self.client,
-            ENDPOINT,
+            ANTHROPIC_ENDPOINT,
             &self.key,
             wire::encode_request(&request)?,
         )
@@ -377,7 +377,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        assert_eq!(request.url().as_str(), ENDPOINT);
+        assert_eq!(request.url().as_str(), ANTHROPIC_ENDPOINT);
         assert_eq!(
             request
                 .headers()

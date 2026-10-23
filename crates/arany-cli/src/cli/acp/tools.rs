@@ -2,10 +2,12 @@ use arany::{RunId, SessionId, ToolCall};
 use arany_cli::protocol::{methods::*, rpc::encode_line};
 use serde_json::{Value, json};
 
-pub(super) const UNKNOWN: &str = "Outcome unknown: Arany could not confirm whether this effect happened. It was not retried; inspect the Workspace before continuing.";
+pub(super) const UNKNOWN_ACP_TOOL_OUTCOME: &str = "Outcome unknown: Arany could not confirm whether this effect happened. It was not retried; inspect the Workspace before continuing.";
+
+const MAX_TOOL_CONTENT_BYTES: usize = 64 * 1024;
 
 pub(super) fn content(text: &str, session: SessionId) -> Value {
-    let text = bounded(text, 64 * 1024, session);
+    let text = bounded(text, MAX_TOOL_CONTENT_BYTES, session);
     fenced(&text)
 }
 
@@ -196,7 +198,7 @@ pub(super) fn project(item: &Item, cwd: &str, session: SessionId, started: bool)
         let text = format!(
             "{}{}{}",
             if uncertain {
-                UNKNOWN
+                UNKNOWN_ACP_TOOL_OUTCOME
             } else {
                 disposition.as_str().unwrap_or("failed")
             },

@@ -83,11 +83,11 @@ async fn events_subscribe_pages_strictly_after_since_and_streams_live_commits_in
         next(&mut output).await;
         let constrained = Message::Request(Request {
             jsonrpc: Default::default(),
-            id: RequestId::String("i".repeat(MAX_LINE_BYTES - 2048)),
+            id: RequestId::String("i".repeat(MAX_RPC_LINE_BYTES - 2048)),
             method: "events/subscribe".into(),
             params: Some(json!({"threadId":thread,"since":0})),
         });
-        assert!(encode_line(&constrained).unwrap().len() <= MAX_LINE_BYTES);
+        assert!(encode_line(&constrained).unwrap().len() <= MAX_RPC_LINE_BYTES);
         input
             .send(ClientMessage::Message(constrained))
             .await
@@ -245,11 +245,11 @@ async fn receipt_get_matches_goal_finished_report_and_bounds_the_entire_response
         let params = json!({"threadId":thread,"goalId":goal});
         let oversized = Message::Request(Request {
             jsonrpc: Default::default(),
-            id: RequestId::String("i".repeat(MAX_LINE_BYTES - 256)),
+            id: RequestId::String("i".repeat(MAX_RPC_LINE_BYTES - 256)),
             method: "receipt/get".into(),
             params: Some(params.clone()),
         });
-        assert!(encode_line(&oversized).unwrap().len() <= MAX_LINE_BYTES);
+        assert!(encode_line(&oversized).unwrap().len() <= MAX_RPC_LINE_BYTES);
         input.send(ClientMessage::Message(oversized)).await.unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],
@@ -714,11 +714,11 @@ async fn thread_fork_checks_the_reply_size_before_persisting_a_fork() {
         finish_turn(&input, &mut output, thread, "Hi").await;
         let oversized = Message::Request(Request {
             jsonrpc: Default::default(),
-            id: RequestId::String("i".repeat(MAX_LINE_BYTES - 256)),
+            id: RequestId::String("i".repeat(MAX_RPC_LINE_BYTES - 256)),
             method: "thread/fork".into(),
             params: Some(json!({"threadId":thread,"cwd":workspace})),
         });
-        assert!(encode_line(&oversized).unwrap().len() <= MAX_LINE_BYTES);
+        assert!(encode_line(&oversized).unwrap().len() <= MAX_RPC_LINE_BYTES);
         input.send(ClientMessage::Message(oversized)).await.unwrap();
         assert_eq!(
             next(&mut output).await["error"]["data"]["reason"],

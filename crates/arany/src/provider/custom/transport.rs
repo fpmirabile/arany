@@ -78,7 +78,7 @@ impl CustomTransport {
         {
             return Err(TransportError::Rejected);
         }
-        if !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens) {
+        if !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
             return Err(TransportError::InvalidOutcome);
         }
         let conversation = render::conversation(request).map_err(|_| TransportError::Rejected)?;
