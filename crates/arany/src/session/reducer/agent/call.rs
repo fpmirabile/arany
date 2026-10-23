@@ -53,7 +53,7 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
     }
     let primary_call = run.agents[index].role == AgentRole::Primary;
     run.agents[index].provider_calls.push(record.clone());
-    account_for_call(current, goal_id, *agent_run_id, record, primary_call)?;
+    charge_goal_call(current, goal_id, *agent_run_id, record, primary_call)?;
     Ok(())
 }
 
@@ -303,7 +303,7 @@ fn validate_display(
     Ok(())
 }
 
-fn account_for_call(
+fn charge_goal_call(
     current: &mut SessionView,
     goal_id: GoalId,
     agent_run_id: AgentRunId,
