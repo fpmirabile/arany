@@ -1,5 +1,5 @@
 use super::{
-    Admission, AttachedArgs, EntryMode, PromptEntry,
+    Admission, AttachedArgs, EntryMode, Feedback, PromptEntry,
     active::{self, GoalStart},
     admit_startup, append_notice, authorize_or_notice, controls, final_startup_notice,
     materialize_session, models, permissions,
@@ -7,7 +7,7 @@ use super::{
     preflight_prompt, refresh_runtime_skills, require_access, restore_failure_notice,
     seed_setup_catalog,
     session::{AttachedSession, SessionParts},
-    setup, start_session,
+    setup, start_session, startup_progress_notice,
 };
 use crate::accounts::chatgpt;
 use crate::cli::provider::{roster::SelectedRoster, select::ProviderArg};
@@ -38,6 +38,34 @@ enum SavedAccess {
 enum AccessCheck {
     Required,
     Completed,
+}
+
+struct StartupObjective {
+    prompt: String,
+    notice: String,
+}
+
+impl StartupObjective {
+    fn new(
+        prompt: Option<String>,
+        goal_resume: Option<arany::GoalId>,
+        session_id: Option<SessionId>,
+        setup_notice: Option<String>,
+        archive_notice: Option<&str>,
+    ) -> Option<Self> {
+        // `--resume-goal` is the explicit confirmation: without a prompt it resumes at once.
+        let prompt = prompt.or_else(|| goal_resume.map(|_| String::new()))?;
+        let notice =
+            startup_progress_notice(objective_notice(session_id, setup_notice), archive_notice);
+        Some(Self { prompt, notice })
+    }
+}
+
+fn objective_notice(session_id: Option<SessionId>, setup_notice: Option<String>) -> String {
+    setup_notice.unwrap_or_else(|| match session_id {
+        None => "New conversation · /help for commands".into(),
+        Some(id) => format!("Session {id} · /help for commands"),
+    })
 }
 
 pub(super) async fn start(
@@ -426,7 +454,7 @@ impl Startup {
         }
     }
 
-    fn notice(&mut self, view: &SessionView, session_id: SessionId) -> Option<String> {
+    fn take_setup_notice(&mut self) -> Option<String> {
         if self.setup_notice.is_some() {
             self.setup_notice.take()
         } else if self.admission.setup_requested
@@ -435,13 +463,7 @@ impl Startup {
         {
             Some("ChatGPT account saved; use /model to select a model and effort".into())
         } else {
-            (self.terminal.is_linear() || self.admission.prompt.is_some()).then(|| {
-                if view.created_sequence == 0 {
-                    "New conversation · /help for commands".into()
-                } else {
-                    format!("Session {session_id} · /help for commands")
-                }
-            })
+            None
         }
     }
 
@@ -456,22 +478,14 @@ impl Startup {
         {
             return Err("selected Session does not contain that interrupted Goal".into());
         }
-        // `--resume-goal` is the explicit confirmation: without a prompt it resumes at once.
-        let startup_objective = self
-            .admission
-            .prompt
-            .clone()
-            .or_else(|| goal_resume.map(|_| String::new()));
+        let has_objective = self.admission.prompt.is_some() || goal_resume.is_some();
         let startup_goal = if goal_resume.is_some() {
             GoalStart::Resume
         } else {
             GoalStart::Plain
         };
 
-        if let ControlFlow::Break(()) = self
-            .authorize_existing(&view, startup_objective.is_some())
-            .await?
-        {
+        if let ControlFlow::Break(()) = self.authorize_existing(&view, has_objective).await? {
             return Ok(ControlFlow::Break(()));
         }
         let engine = self.open_engine()?;
@@ -494,12 +508,30 @@ impl Startup {
             &view.defaults,
             self.setup_catalog.as_deref(),
         );
-        let notice = self.notice(&view, session_id);
+        let setup_notice = self.take_setup_notice();
+        let saved_session_id = (view.created_sequence != 0).then_some(session_id);
         let archive_notice = self
             .archived_history
             .as_ref()
             .map(|archived| super::super::archived_history_notice(archived.path()));
-        let notice = final_startup_notice(notice, archive_notice.as_deref());
+        let startup_objective = StartupObjective::new(
+            self.admission.prompt.clone(),
+            goal_resume,
+            saved_session_id,
+            setup_notice.clone(),
+            archive_notice.as_deref(),
+        );
+        let notice = match &startup_objective {
+            Some(objective) => Some(Feedback::History(objective.notice.clone())),
+            None => final_startup_notice(
+                setup_notice.or_else(|| {
+                    self.terminal
+                        .is_linear()
+                        .then(|| objective_notice(saved_session_id, None))
+                }),
+                archive_notice.as_deref(),
+            ),
+        };
         let mut parts = SessionParts {
             engine,
             view,
@@ -513,18 +545,19 @@ impl Startup {
             archived_history: self.archived_history,
             archive_notice,
         };
-        if let Some(prompt) = startup_objective {
-            Self::submit_startup(&mut parts, prompt, startup_goal, self.access).await?;
+        if let Some(objective) = startup_objective {
+            Self::submit_startup(&mut parts, objective, startup_goal, self.access).await?;
         }
         Ok(ControlFlow::Continue(AttachedSession::new(parts)))
     }
 
     async fn submit_startup(
         parts: &mut SessionParts,
-        prompt: String,
+        objective: StartupObjective,
         startup_goal: GoalStart,
         access: SavedAccess,
     ) -> Result<(), String> {
+        let StartupObjective { prompt, notice } = objective;
         let startup_skill = (startup_goal == GoalStart::Plain)
             .then(|| match parts.composer.parse_submission(&prompt) {
                 Ok(Submission::Skill { name, .. }) => Some(name.to_owned()),
@@ -539,10 +572,7 @@ impl Startup {
         materialize_session(&parts.admission, &mut parts.session_id, &mut parts.view).await?;
         parts
             .terminal
-            .draw_progress(
-                &parts.view,
-                parts.notice.as_deref().expect("startup notice exists"),
-            )
+            .draw_progress(&parts.view, &notice)
             .map_err(|error| error.to_string())?;
         parts.notice = active::PendingSubmission {
             engine: &parts.engine,
@@ -555,5 +585,53 @@ impl Startup {
         .submit(&mut parts.terminal, &mut parts.view, &mut parts.composer)
         .await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn startup_objectives_include_promptless_goal_resume_notices() {
+        let session_id = SessionId::from_str("01900000-0000-7000-8000-000000000001").unwrap();
+        let goal_id = arany::GoalId::new();
+        for (session_id, expected_notice) in [
+            (None, "New conversation · /help for commands"),
+            (
+                Some(session_id),
+                "Session 01900000-0000-7000-8000-000000000001 · /help for commands",
+            ),
+        ] {
+            for (prompt, goal_resume, expected_prompt) in [
+                (None, Some(goal_id), ""),
+                (Some("Continue the task"), None, "Continue the task"),
+                (
+                    Some("Continue the task"),
+                    Some(goal_id),
+                    "Continue the task",
+                ),
+            ] {
+                for (setup_notice, expected_notice) in [
+                    (None, expected_notice),
+                    (Some("Setup ready"), "Setup ready"),
+                ] {
+                    let objective = StartupObjective::new(
+                        prompt.map(str::to_owned),
+                        goal_resume,
+                        session_id,
+                        setup_notice.map(str::to_owned),
+                        None,
+                    )
+                    .expect("startup objective missing");
+                    assert_eq!(objective.prompt, expected_prompt);
+                    assert_eq!(
+                        objective.notice, expected_notice,
+                        "prompt={prompt:?}, resume={goal_resume:?}, setup={setup_notice:?}"
+                    );
+                }
+            }
+        }
+        assert!(StartupObjective::new(None, None, None, None, None).is_none());
     }
 }

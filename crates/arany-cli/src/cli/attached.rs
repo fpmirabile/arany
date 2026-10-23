@@ -842,11 +842,18 @@ async fn preflight_prompt(
 }
 
 // Appended after every setup branch so none can replace the archive path before it is drawn.
-fn final_startup_notice(mut notice: Option<String>, archive: Option<&str>) -> Option<Feedback> {
-    if let Some(archive) = archive {
-        append_notice(&mut notice, archive);
+fn final_startup_notice(notice: Option<String>, archive: Option<&str>) -> Option<Feedback> {
+    match notice {
+        Some(notice) => Some(Feedback::History(startup_progress_notice(notice, archive))),
+        None => archive.map(|archive| Feedback::History(archive.to_owned())),
     }
-    notice.map(Feedback::History)
+}
+
+fn startup_progress_notice(notice: String, archive: Option<&str>) -> String {
+    match archive {
+        Some(archive) => format!("{archive}; {notice}"),
+        None => notice,
+    }
 }
 
 fn archive_notice_drawn(notice: Option<&Feedback>, archive: Option<&str>) -> bool {
