@@ -274,5 +274,5 @@ where
 }
 
 fn bounded_keys<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Jwk>, D::Error> {
-    crate::cli::bounded_list::<D, Jwk, MAX_KEYS>(deserializer, "too many keys")
+    crate::files::bounded_list::<D, Jwk, MAX_KEYS>(deserializer, "too many keys")
 }
