@@ -1,6 +1,8 @@
 use super::commands::{Submission, help_entry, help_len};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind, native_marker};
-use super::{Composer, TerminalMode, backend::TerminalBackend, input::CursorQuery};
+#[cfg(test)]
+use super::input::KeyboardSupport;
+use super::{Composer, TerminalMode, backend::TerminalBackend, input::TerminalQueries};
 use crate::presentation::{
     AgentInspectorModel, DraftAction, MAX_ROW_WIDTH, PresentationModel, model_id_preview,
     safe_truncate,
@@ -658,9 +660,9 @@ fn slash_spans(text: String, cells: usize, style: Style, palette: Palette) -> Ve
 
 pub(super) fn screen_terminal(
     mode: TerminalMode,
-    cursor: Option<CursorQuery>,
+    queries: Option<TerminalQueries>,
 ) -> io::Result<Terminal<TerminalBackend>> {
-    let mut backend = TerminalBackend::new(mode, cursor);
+    let mut backend = TerminalBackend::new(mode, queries);
     let screen = backend.size()?;
     if mode == TerminalMode::Classic {
         // Let inline initialization scroll to reserve rows without moving above shell output.
@@ -1089,7 +1091,15 @@ pub(super) fn draw_frame(
     notice: Option<&str>,
     palette: Palette,
 ) {
-    draw_frame_with_history(frame, model, composer, notice, palette, &[], None);
+    draw_frame_with_history(
+        frame,
+        model,
+        composer,
+        notice,
+        ComposerHints::new(palette, composer.newline_hint(KeyboardSupport::Legacy)),
+        &[],
+        None,
+    );
 }
 
 pub(super) fn draw_history_rows(
@@ -1205,10 +1215,11 @@ pub(super) fn draw_frame_with_history(
     model: &PresentationModel,
     composer: &Composer,
     notice: Option<&str>,
-    palette: Palette,
+    hints: ComposerHints<'_>,
     history_rows: &[HistoryRow],
     history_status: Option<&str>,
 ) -> Rect {
+    let palette = hints.palette;
     let area = frame.area();
     if area.width == 0 || area.height == 0 {
         return Rect::default();
@@ -1400,10 +1411,11 @@ pub(super) fn draw_frame_with_history(
         frame,
         model,
         composer,
-        palette,
         composer_area,
-        menu_height,
-        false,
+        ComposerHints {
+            menu_height,
+            ..hints
+        },
     );
     let preview = (!composer.text().contains('\n'))
         .then(|| composer.command_preview(model.draft_action == DraftAction::InspectRun))
@@ -1561,15 +1573,38 @@ pub(super) fn draw_session_picker_frame(
     }
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct ComposerHints<'a> {
+    palette: Palette,
+    menu_height: u16,
+    picker_focused: bool,
+    newline: &'a str,
+}
+
+impl<'a> ComposerHints<'a> {
+    pub(super) fn new(palette: Palette, newline: &'a str) -> Self {
+        Self {
+            palette,
+            menu_height: 0,
+            picker_focused: false,
+            newline,
+        }
+    }
+}
+
 fn draw_composer(
     frame: &mut Frame,
     model: &PresentationModel,
     composer: &Composer,
-    palette: Palette,
     composer_area: Rect,
-    menu_height: u16,
-    picker_focused: bool,
+    hints: ComposerHints<'_>,
 ) {
+    let ComposerHints {
+        palette,
+        menu_height,
+        picker_focused,
+        newline,
+    } = hints;
     let area = composer_area;
     let draft_rows = wrapped_composer(composer, usize::from(area.width.saturating_sub(2)));
     let draft = composer.text();
@@ -1765,12 +1800,9 @@ fn draw_composer(
             24.. if agents_hint => " Alt+←/→ agents ",
             _ => hint,
         };
-        let hint = if composer_area.width >= 40 && composer.newline_hint() != "\\ then Enter" {
-            hint.replace(
-                "\\ then Enter newline",
-                &format!("{} / \\ Enter", composer.newline_hint()),
-            )
-            .replace("Enter keeps draft", "Enter keeps")
+        let hint = if composer_area.width >= 40 && newline != "\\ then Enter" {
+            hint.replace("\\ then Enter newline", &format!("{} / \\ Enter", newline))
+                .replace("Enter keeps draft", "Enter keeps")
         } else {
             hint.to_owned()
         };
@@ -2136,8 +2168,9 @@ pub(super) fn draw_model_catalog_frame(
     armed: bool,
     composer: &Composer,
     model: &PresentationModel,
-    palette: Palette,
+    hints: ComposerHints<'_>,
 ) {
+    let palette = hints.palette;
     let full = frame.area();
     if full.height < 8 || full.width < 16 {
         frame.render_widget(Paragraph::new("Resize or Esc").style(palette.error()), full);
@@ -2151,7 +2184,16 @@ pub(super) fn draw_model_catalog_frame(
         draft_height,
     );
     frame.render_widget(ratatui::widgets::Clear, composer_area);
-    draw_composer(frame, model, composer, palette, composer_area, 0, true);
+    draw_composer(
+        frame,
+        model,
+        composer,
+        composer_area,
+        ComposerHints {
+            picker_focused: true,
+            ..hints
+        },
+    );
     let available = full.height.saturating_sub(1 + draft_height);
     let height = available.min(12);
     let area = Rect::new(

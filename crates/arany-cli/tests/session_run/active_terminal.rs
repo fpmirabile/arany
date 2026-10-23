@@ -360,6 +360,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let reader = thread::spawn(move || {
         let mut declined = false;
         let mut answered = 0;
+        let mut keyboard_answered = 0;
         let mut bytes = Vec::new();
         let mut paste_sender = expect_draft.then_some(paste_sender);
         let mut patterns: Vec<&[u8]> = vec![
@@ -454,6 +455,11 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 &mut *reader_input.lock().expect("fixture input"),
                 &bytes,
                 &mut answered,
+            );
+            keyboard::answer_supported_queries(
+                &mut *reader_input.lock().expect("fixture input"),
+                &bytes,
+                &mut keyboard_answered,
             );
             if paste_sender.is_some()
                 && super::session_picker::screen_contains(
@@ -893,6 +899,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     );
     assert_eq!(result.status.success(), expect_idle, "attached exit class");
     assert_eq!(result.stderr, b"");
+    keyboard::assert_keyboard_restored(&output, inline);
     let transcript = String::from_utf8(output).expect("PTY transcript UTF-8");
     let restored = transcript.rfind("\x1b[?25h").unwrap_or(0);
     assert!(
@@ -1607,3 +1614,6 @@ fn explicit_classic_uses_native_scrollback_and_dumps_bounded_details() {
         transcript_field(&text, "TTY_AFTER:")
     );
 }
+
+#[path = "active_terminal/keyboard.rs"]
+mod keyboard;

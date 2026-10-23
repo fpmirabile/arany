@@ -70,7 +70,7 @@ struct UsagePanel {
     visible: usize,
 }
 
-pub const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
+const NEWLINE_SHORTCUT_GUIDANCE: &str = "\\ then Enter adds a newline. Widen for setup. Visual sessions negotiate modifier support. Terminals or tmux may lose/intercept modifiers; plain CR submits. Manual setup: send CSI-u ESC [ 13 ; M u (2 Shift, 3 Alt, 5 Ctrl); enable extended keys in tmux.";
 
 const MIN_INTERACTIVE_HEIGHT: u16 = 8;
 // Button, drag and SGR reporting only; any-motion (1003) and urxvt (1015) stay off.
@@ -81,6 +81,10 @@ const MOUSE_CAPTURE: [&[u8]; 2] = [
 const ALTERNATE_SCROLL: [&[u8]; 2] = [b"\x1b[?1007h", b"\x1b[?1007l"];
 #[cfg(unix)]
 const BRACKETED_PASTE: [&[u8]; 2] = [b"\x1b[?2004h", b"\x1b[?2004l"];
+#[cfg(unix)]
+const KEYBOARD_DISAMBIGUATION: [&[u8]; 2] = [b"\x1b[>1u", b"\x1b[<u"];
+#[cfg(unix)]
+const KEYBOARD_QUERY: &[u8] = b"\x1b[?u\x1b[c";
 static SELECTION_HINT_SHOWN: AtomicBool = AtomicBool::new(false);
 
 pub fn report_error(message: impl std::fmt::Display) {
@@ -434,6 +438,16 @@ fn pointer_modes(
     .map(Some)
 }
 
+#[cfg(unix)]
+fn keyboard_mode(input: &TerminalReader) -> io::Result<Option<ModeGuard>> {
+    match input.probe_keyboard(&mut io::stderr())? {
+        input::KeyboardSupport::Disambiguated => {
+            ModeGuard::acquire(KEYBOARD_DISAMBIGUATION).map(Some)
+        }
+        input::KeyboardSupport::Legacy => Ok(None),
+    }
+}
+
 pub struct AttachedTerminal {
     newline_shortcut: NewlineShortcut,
     waiting_tool: Option<uuid::Uuid>,
@@ -459,6 +473,8 @@ pub struct AttachedTerminal {
     selection_cue: Option<String>,
     #[cfg(unix)]
     bracketed_paste: Option<ModeGuard>,
+    #[cfg(unix)]
+    keyboard: Option<ModeGuard>,
     session_picker_area: Option<Rect>,
     agent_picker_area: Option<Rect>,
     linear: Option<LinearState>,
@@ -761,6 +777,8 @@ impl AttachedTerminal {
             .then(|| ModeGuard::acquire(BRACKETED_PASTE))
             .transpose()?;
         let pointer_modes = pointer_modes(mode, mode_label.is_some(), pointer.mouse.effective())?;
+        #[cfg(unix)]
+        let keyboard = keyboard_mode(&input)?;
         Ok(Self {
             terminal,
             newline_shortcut: NewlineShortcut::default(),
@@ -784,6 +802,8 @@ impl AttachedTerminal {
             selection_cue: None,
             #[cfg(unix)]
             bracketed_paste,
+            #[cfg(unix)]
+            keyboard,
             session_picker_area: None,
             agent_picker_area: None,
             linear: mode_label.map(LinearState::new),
@@ -812,6 +832,25 @@ impl AttachedTerminal {
             #[cfg(unix)]
             terminate,
         })
+    }
+
+    fn keyboard_support(&self) -> input::KeyboardSupport {
+        #[cfg(unix)]
+        if self.keyboard.is_some() {
+            return input::KeyboardSupport::Disambiguated;
+        }
+        input::KeyboardSupport::Legacy
+    }
+
+    pub fn newline_shortcut_guidance(&self) -> String {
+        if self.is_linear() {
+            return NEWLINE_SHORTCUT_GUIDANCE.to_owned();
+        }
+        let status = match self.keyboard_support() {
+            input::KeyboardSupport::Legacy => "Enhanced keys unavailable.",
+            input::KeyboardSupport::Disambiguated => "Enhanced keys negotiated.",
+        };
+        format!("{status} {NEWLINE_SHORTCUT_GUIDANCE}")
     }
 
     pub fn set_newline_shortcut(&mut self, shortcut: NewlineShortcut) {
@@ -1083,6 +1122,10 @@ impl AttachedTerminal {
         if let Some(mut modes) = self.pointer_modes.take() {
             modes.release()?;
         }
+        #[cfg(unix)]
+        if let Some(mut keyboard) = self.keyboard.take() {
+            keyboard.release()?;
+        }
         self.scrollback_dump = true;
         if let Some(mut alternate) = self.alternate.take() {
             alternate.release()?;
@@ -1101,6 +1144,10 @@ impl AttachedTerminal {
         }
         self.alternate = Some(AlternateScreen::acquire()?);
         self.scrollback_dump = false;
+        #[cfg(unix)]
+        {
+            self.keyboard = keyboard_mode(self.reader())?;
+        }
         self.pointer_modes = pointer_modes(self.mode, false, self.pointer.mouse.effective())?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
         let terminal = self.owned();
@@ -1855,18 +1902,26 @@ impl AttachedTerminal {
         let palette = self.palette();
         let armed = self.dialog_armed;
         let mut history_area = Rect::default();
+        let newline_hint = composer.newline_hint(self.keyboard_support());
         self.draw_frame(height, |frame, _| {
             history_area = draw_frame_with_history(
                 frame,
                 &model,
                 composer,
                 status_notice,
-                palette,
+                view::ComposerHints::new(palette, newline_hint),
                 &history_rows,
                 history_status.as_deref(),
             );
             if let Some(picker) = picker {
-                draw_model_catalog_frame(frame, picker, armed, composer, &model, palette);
+                draw_model_catalog_frame(
+                    frame,
+                    picker,
+                    armed,
+                    composer,
+                    &model,
+                    view::ComposerHints::new(palette, newline_hint),
+                );
             }
         })?;
         self.history_area = (self.mode == TerminalMode::Fullscreen).then_some(history_area);
@@ -2728,6 +2783,12 @@ impl AttachedTerminal {
         self.selection_cue = None;
         if let Some(mut modes) = self.pointer_modes.take()
             && let Err(error) = modes.release()
+        {
+            first_error.get_or_insert(error);
+        }
+        #[cfg(unix)]
+        if let Some(mut keyboard) = self.keyboard.take()
+            && let Err(error) = keyboard.release()
         {
             first_error.get_or_insert(error);
         }

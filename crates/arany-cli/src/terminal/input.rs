@@ -38,6 +38,8 @@ type Observed<T> = (u64, io::Result<T>);
 const INPUT_QUEUE_CAPACITY: usize = 32;
 const INPUT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 #[cfg(unix)]
+const KEYBOARD_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+#[cfg(unix)]
 mod raw;
 // Stay below canonical buffers so discarded suffixes cannot become accepted input.
 #[cfg(target_os = "linux")]
@@ -128,6 +130,17 @@ pub(super) enum TerminalReader {
 }
 
 impl TerminalReader {
+    #[cfg(unix)]
+    pub(super) fn probe_keyboard(
+        &self,
+        output: &mut impl io::Write,
+    ) -> io::Result<KeyboardSupport> {
+        match self {
+            Self::Keys(reader) => reader.queries.probe_keyboard(output),
+            Self::Lines(_) => Ok(KeyboardSupport::Legacy),
+        }
+    }
+
     pub(super) fn set_chat_input(&mut self, chat: bool, child: bool) {
         #[cfg(unix)]
         if let Self::Lines(reader) = self {
@@ -138,9 +151,9 @@ impl TerminalReader {
         let _ = (chat, child);
     }
 
-    pub(super) fn cursor_query(&self) -> Option<CursorQuery> {
+    pub(super) fn cursor_query(&self) -> Option<TerminalQueries> {
         match self {
-            Self::Keys(reader) => Some(reader.cursor.clone()),
+            Self::Keys(reader) => Some(reader.queries.clone()),
             #[cfg(unix)]
             Self::Lines(_) => None,
         }
@@ -595,13 +608,40 @@ enum ReaderEvent {
     Paste(Result<String, &'static str>),
     #[cfg(unix)]
     CursorPosition(u16, u16),
+    #[cfg(unix)]
+    KeyboardReply(KeyboardReply),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum KeyboardSupport {
+    Legacy,
+    Disambiguated,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+enum KeyboardReply {
+    Flags,
+    DeviceAttributes,
+}
+
+#[cfg(unix)]
+#[derive(Default, PartialEq)]
+enum KeyboardProbe {
+    #[default]
+    Idle,
+    Waiting(Instant),
+    Supported,
+    Unsupported,
 }
 
 #[derive(Clone, Default)]
-pub(super) struct CursorQuery(Arc<(Mutex<CursorState>, Condvar)>);
+pub(super) struct TerminalQueries(Arc<(Mutex<QueryState>, Condvar)>);
 
 #[derive(Default)]
-struct CursorState {
+struct QueryState {
+    #[cfg(unix)]
+    keyboard: KeyboardProbe,
     #[cfg(unix)]
     waiting: bool,
     #[cfg(unix)]
@@ -609,13 +649,85 @@ struct CursorState {
     closed: bool,
 }
 
-impl CursorQuery {
+impl TerminalQueries {
+    #[cfg(unix)]
+    fn probe_keyboard(&self, output: &mut impl io::Write) -> io::Result<KeyboardSupport> {
+        self.probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT)
+    }
+
+    #[cfg(unix)]
+    fn probe_keyboard_within(
+        &self,
+        output: &mut impl io::Write,
+        timeout: Duration,
+    ) -> io::Result<KeyboardSupport> {
+        let (state, ready) = &*self.0;
+        let mut state = state
+            .lock()
+            .map_err(|_| io::Error::other("input owner failed"))?;
+        if state.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed",
+            ));
+        }
+        let deadline = Instant::now() + timeout;
+        state.keyboard = KeyboardProbe::Waiting(deadline);
+        if let Err(error) = output
+            .write_all(super::KEYBOARD_QUERY)
+            .and_then(|()| output.flush())
+        {
+            state.keyboard = KeyboardProbe::Idle;
+            return Err(error);
+        }
+        let (mut state, _) = ready
+            .wait_timeout_while(
+                state,
+                deadline.saturating_duration_since(Instant::now()),
+                |state| matches!(state.keyboard, KeyboardProbe::Waiting(_)) && !state.closed,
+            )
+            .map_err(|_| io::Error::other("input owner failed"))?;
+        let support = match state.keyboard {
+            KeyboardProbe::Supported => KeyboardSupport::Disambiguated,
+            KeyboardProbe::Idle | KeyboardProbe::Waiting(_) | KeyboardProbe::Unsupported => {
+                KeyboardSupport::Legacy
+            }
+        };
+        state.keyboard = KeyboardProbe::Idle;
+        if state.closed {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed",
+            ));
+        }
+        Ok(support)
+    }
+
+    #[cfg(unix)]
+    fn keyboard_reply(&self, reply: KeyboardReply) {
+        let (state, ready) = &*self.0;
+        if let Ok(mut state) = state.lock()
+            && let KeyboardProbe::Waiting(deadline) = state.keyboard
+        {
+            state.keyboard = if Instant::now() < deadline {
+                match reply {
+                    KeyboardReply::Flags => KeyboardProbe::Supported,
+                    KeyboardReply::DeviceAttributes => KeyboardProbe::Unsupported,
+                }
+            } else {
+                KeyboardProbe::Unsupported
+            };
+            ready.notify_one();
+        }
+    }
+
     #[cfg(unix)]
     fn waiting(&self) -> bool {
         let (state, _) = &*self.0;
-        state
-            .lock()
-            .is_ok_and(|state| state.waiting && state.position.is_none())
+        state.lock().is_ok_and(|state| {
+            (state.waiting && state.position.is_none())
+                || matches!(state.keyboard, KeyboardProbe::Waiting(_))
+        })
     }
 
     #[cfg(unix)]
@@ -679,7 +791,7 @@ pub(super) struct InputReader {
     shutdown: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     paste: Option<Result<String, &'static str>>,
-    cursor: CursorQuery,
+    queries: TerminalQueries,
     epoch: u64,
     #[cfg(unix)]
     admission: InputAdmission,
@@ -690,9 +802,9 @@ impl InputReader {
         let (sender, receiver) = mpsc::channel(INPUT_QUEUE_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let should_stop = Arc::clone(&shutdown);
-        let cursor = CursorQuery::default();
+        let queries = TerminalQueries::default();
         #[cfg(unix)]
-        let (thread, admission) = raw::start(sender, should_stop, cursor.clone())?;
+        let (thread, admission) = raw::start(sender, should_stop, queries.clone())?;
         #[cfg(not(unix))]
         let thread = std::thread::Builder::new()
             .name("arany-terminal-input".into())
@@ -720,7 +832,7 @@ impl InputReader {
             shutdown,
             thread: Some(thread),
             paste: None,
-            cursor,
+            queries,
             epoch: 0,
             #[cfg(unix)]
             admission,
@@ -729,7 +841,7 @@ impl InputReader {
 
     pub(super) fn stop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        self.cursor.close();
+        self.queries.close();
         self.receiver.close();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -775,6 +887,8 @@ impl InputReader {
                 }
                 #[cfg(unix)]
                 ReaderEvent::CursorPosition(_, _) => {}
+                #[cfg(unix)]
+                ReaderEvent::KeyboardReply(_) => {}
             }
         }
     }
@@ -912,7 +1026,7 @@ mod tests {
             shutdown: Arc::new(AtomicBool::new(false)),
             thread: None,
             paste: None,
-            cursor: CursorQuery::default(),
+            queries: TerminalQueries::default(),
             epoch: 1,
             admission: InputAdmission::new(&Poll::new().unwrap()).unwrap().0,
         });
@@ -1677,7 +1791,7 @@ mod tests {
                         ReaderEvent::Event(event) => map_input(event).expect("admitted raw key"),
                         ReaderEvent::Pointer(input) => input,
                         ReaderEvent::Paste(_) => panic!("ordinary sequence became a paste"),
-                        ReaderEvent::CursorPosition(_, _) => {
+                        ReaderEvent::CursorPosition(_, _) | ReaderEvent::KeyboardReply(_) => {
                             panic!("ordinary sequence became a cursor response")
                         }
                     })

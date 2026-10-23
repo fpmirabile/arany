@@ -1,4 +1,4 @@
-use super::{TerminalMode, TerminalOutput, input::CursorQuery};
+use super::{TerminalMode, TerminalOutput, input::TerminalQueries};
 use ratatui::{
     backend::{Backend, ClearType, CrosstermBackend, WindowSize},
     buffer::Cell,
@@ -8,17 +8,17 @@ use std::{io, ops::Range};
 
 pub(super) struct TerminalBackend {
     inner: CrosstermBackend<TerminalOutput>,
-    cursor: Option<CursorQuery>,
+    queries: Option<TerminalQueries>,
     mode: TerminalMode,
     area: Rect,
     position: Position,
 }
 
 impl TerminalBackend {
-    pub(super) fn new(mode: TerminalMode, cursor: Option<CursorQuery>) -> Self {
+    pub(super) fn new(mode: TerminalMode, queries: Option<TerminalQueries>) -> Self {
         Self {
             inner: CrosstermBackend::new(TerminalOutput(Some(io::stderr()))),
-            cursor,
+            queries,
             mode,
             area: Rect::default(),
             position: Position::default(),
@@ -46,7 +46,7 @@ impl TerminalBackend {
 
     pub(super) fn detach(&mut self) {
         self.inner = CrosstermBackend::new(TerminalOutput(None));
-        self.cursor = None;
+        self.queries = None;
     }
 }
 
@@ -78,7 +78,7 @@ impl Backend for TerminalBackend {
         #[cfg(unix)]
         {
             let (column, row) = self
-                .cursor
+                .queries
                 .as_ref()
                 .ok_or_else(|| io::Error::other("cursor input owner unavailable"))?
                 .query(&mut self.inner)?;

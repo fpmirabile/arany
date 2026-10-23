@@ -134,7 +134,9 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         let mut suspended = false;
         let mut continued = false;
         let mut resumed_at = 0;
+        let mut suspended_at = 0;
         let mut queries = 0;
+        let mut keyboard_queries = 0;
         // Fullscreen captures the mouse from acquisition; Classic never enables it.
         let captures = usize::from(fullscreen);
         let output = crate::process::capture_terminal(
@@ -149,6 +151,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                     assert!(bytes.windows(4).filter(|part| *part == b"\x1b[6n").count() <= 128);
                     super::reply_positioned_cursor_queries(&mut input, bytes, &mut queries);
                 }
+                keyboard::answer_supported_queries(&mut input, bytes, &mut keyboard_queries);
                 crate::process::decline_workspace_consent(&mut input, bytes, &mut declined);
                 let enabled = bytes
                     .windows(8)
@@ -162,6 +165,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                 let frame_complete = armed_with(0);
                 if !signalled && enabled == captures && frame_complete {
                     assert_ne!(crate::process::terminal_settings(&probe), before);
+                    suspended_at = bytes.len();
                     kill_process(pid, if suspend { Signal::TSTP } else { signal }).unwrap();
                     signalled = true;
                 }
@@ -184,6 +188,23 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
                         return;
                     }
                     assert_eq!(disabled, captures);
+                    if fullscreen {
+                        let suspension = &bytes[suspended_at..];
+                        let Some(screen_release) = suspension
+                            .windows(b"\x1b[?1049l".len())
+                            .position(|part| part == b"\x1b[?1049l")
+                        else {
+                            return;
+                        };
+                        let pop = suspension
+                            .windows(b"\x1b[<u".len())
+                            .position(|part| part == b"\x1b[<u")
+                            .expect("suspend pops keyboard mode");
+                        assert!(
+                            pop < screen_release,
+                            "suspend pops keyboard mode before screen release"
+                        );
+                    }
                     resumed_at = bytes.len();
                     kill_process(pid, Signal::CONT).unwrap();
                     suspended = true;
@@ -204,6 +225,7 @@ fn native_resume_picker_restores_mouse_and_terminal_without_changing_history() {
         assert_eq!(output.status.code(), Some(1));
         assert!(output.stdout.is_empty());
         restored(&probe, &before);
+        keyboard::assert_keyboard_restored(&output.stderr, true);
         let count = if suspend { 2 * captures } else { captures };
         for sequence in [b"\x1b[?1000h", b"\x1b[?1000l"] {
             assert_eq!(
@@ -1610,3 +1632,6 @@ fn native_copy_round_trips_non_ascii_answer_through_pbcopy() {
     assert!(pasted.status.success());
     assert_eq!(String::from_utf8(pasted.stdout).unwrap(), ANSWER);
 }
+
+#[path = "active_terminal/keyboard.rs"]
+mod keyboard;

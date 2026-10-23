@@ -442,7 +442,7 @@ fn narrow_classic_history_cue_keeps_export_action_visible() {
                 &model,
                 &Composer::default(),
                 None,
-                Palette { color: false },
+                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
                 &[],
                 Some(status),
             );
@@ -808,6 +808,25 @@ fn newline_hint_recommends_a_received_preference_with_the_portable_fallback() {
             let footer = buffer_row(terminal.backend().buffer(), 6);
             assert!(footer.contains("\\ then Enter"));
             assert!(!footer.contains(shortcut.label()));
+            terminal
+                .draw(|frame| {
+                    draw_frame_with_history(
+                        frame,
+                        &model,
+                        &composer,
+                        None,
+                        ComposerHints::new(
+                            Palette { color: false },
+                            composer.newline_hint(KeyboardSupport::Disambiguated),
+                        ),
+                        &[],
+                        None,
+                    );
+                })
+                .unwrap();
+            let footer = buffer_row(terminal.backend().buffer(), 6);
+            assert!(footer.contains(shortcut.label()), "{width}: {footer}");
+            assert!(footer.contains("\\ Enter"), "{width}: {footer}");
             composer.apply(TerminalInput::ModifiedEnter(shortcut));
             terminal
                 .draw(|frame| draw_frame(frame, &model, &composer, None, Palette { color: false }))
@@ -989,7 +1008,7 @@ fn empty_session_has_a_quiet_welcome_without_obscuring_the_composer() {
                     &model,
                     &Composer::default(),
                     None,
-                    Palette { color: false },
+                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
                     &[HistoryRow {
                         slash_cells: 0,
                         text: "You:".into(),
@@ -1357,7 +1376,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 &model,
                 &Composer::default(),
                 None,
-                Palette { color: false },
+                ComposerHints::new(Palette { color: false }, "\\ then Enter"),
                 &rows,
                 Some("History · Ctrl+L live"),
             );
@@ -1417,7 +1436,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 &wide_model,
                 &Composer::default(),
                 None,
-                Palette { color },
+                ComposerHints::new(Palette { color }, "\\ then Enter"),
                 &rows,
                 Some("History · Ctrl+L live"),
             );
@@ -1437,7 +1456,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 &wide_model,
                 &Composer::default(),
                 None,
-                Palette { color },
+                ComposerHints::new(Palette { color }, "\\ then Enter"),
                 &feedback_rows,
                 Some("History · Ctrl+L live"),
             );
@@ -1469,7 +1488,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                 &model,
                 &Composer::default(),
                 None,
-                Palette { color: true },
+                ComposerHints::new(Palette { color: true }, "\\ then Enter"),
                 &rows,
                 None,
             );
@@ -1491,7 +1510,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -1554,7 +1573,7 @@ fn full_height_history_keeps_chat_above_activity_and_the_bottom_composer() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &conversation,
                         None,
                     );
@@ -2920,7 +2939,10 @@ fn model_catalog_keeps_selected_row_visible_and_hostile_ids_inert() {
                                 true,
                                 &composer,
                                 &model,
-                                Palette { color },
+                                ComposerHints::new(
+                                    Palette { color },
+                                    composer.newline_hint(KeyboardSupport::Legacy),
+                                ),
                             );
                         })
                         .expect("chat model panel");
@@ -3025,7 +3047,10 @@ fn inline_custom_model_catalog_shows_declared_efforts() {
                         true,
                         &composer,
                         &model,
-                        Palette { color: false },
+                        ComposerHints::new(
+                            Palette { color: false },
+                            composer.newline_hint(KeyboardSupport::Legacy),
+                        ),
                     );
                 })
                 .expect("custom model panel");
@@ -3626,7 +3651,7 @@ fn fullscreen_history_cue_stays_visible_behind_a_long_state() {
                     &model,
                     &Composer::default(),
                     None,
-                    Palette { color: false },
+                    ComposerHints::new(Palette { color: false }, "\\ then Enter"),
                     &[],
                     Some("History · Ctrl+L live"),
                 );
@@ -3880,7 +3905,7 @@ fn supervisor_detail_frame_is_dim_and_labelled_with_or_without_color() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -3956,7 +3981,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -3992,7 +4017,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -4022,7 +4047,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -4056,7 +4081,7 @@ fn peer_tool_row_frames_at_80_and_120_columns() {
                         &model,
                         &Composer::default(),
                         None,
-                        Palette { color },
+                        ComposerHints::new(Palette { color }, "\\ then Enter"),
                         &rows,
                         None,
                     );
@@ -4313,7 +4338,10 @@ fn empty_composer_names_agent_keys_only_when_the_run_has_children() {
                     &model,
                     &composer,
                     None,
-                    Palette { color: false },
+                    ComposerHints::new(
+                        Palette { color: false },
+                        composer.newline_hint(KeyboardSupport::Legacy),
+                    ),
                     &[],
                     None,
                 );
@@ -4399,10 +4427,11 @@ fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
                     frame,
                     &model,
                     &composer,
-                    Palette { color: false },
                     frame.area(),
-                    0,
-                    false,
+                    ComposerHints::new(
+                        Palette { color: false },
+                        composer.newline_hint(KeyboardSupport::Legacy),
+                    ),
                 );
             })
             .unwrap();

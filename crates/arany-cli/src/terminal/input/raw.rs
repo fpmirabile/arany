@@ -1,6 +1,6 @@
 use super::{
-    CursorQuery, INPUT_POLL_INTERVAL, InputAdmission, MAX_PASTE_BYTES, ReaderEvent, TerminalInput,
-    admit_input, map_input, pointer_input, terminal_input,
+    INPUT_POLL_INTERVAL, InputAdmission, MAX_PASTE_BYTES, ReaderEvent, TerminalInput,
+    TerminalQueries, admit_input, map_input, pointer_input, terminal_input,
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEventKind,
@@ -34,7 +34,7 @@ const MULTI_CLICK: Duration = Duration::from_millis(500);
 pub(super) fn start(
     sender: mpsc::Sender<super::Observed<ReaderEvent>>,
     shutdown: Arc<AtomicBool>,
-    cursor: CursorQuery,
+    queries: TerminalQueries,
 ) -> io::Result<(JoinHandle<()>, InputAdmission)> {
     let mut input = terminal_input()?;
     let mut poll = Poll::new()?;
@@ -53,11 +53,13 @@ pub(super) fn start(
                 &mut poll,
                 &mut input,
                 &mut outbox,
-                &shutdown,
-                &cursor,
-                &mut requests,
+                &mut ReaderControl {
+                    shutdown: &shutdown,
+                    queries: &queries,
+                    requests: &mut requests,
+                },
             );
-            cursor.close();
+            queries.close();
             if let Err(error) = result {
                 let _ = sender.blocking_send((0, Err(error)));
             }
@@ -65,7 +67,7 @@ pub(super) fn start(
     Ok((thread, admission))
 }
 
-// A cursor reply must not wait behind a full event queue while the owner waits for that reply.
+// Protocol replies bypass a full event queue while the terminal owner waits for them.
 struct Outbox<'a> {
     sender: &'a mpsc::Sender<super::Observed<ReaderEvent>>,
     backlog: VecDeque<(u64, ReaderEvent)>,
@@ -102,9 +104,7 @@ fn read(
     poll: &mut Poll,
     input: &mut File,
     outbox: &mut Outbox<'_>,
-    shutdown: &AtomicBool,
-    cursor: &CursorQuery,
-    requests: &mut mpsc::Receiver<tokio::sync::oneshot::Sender<u64>>,
+    control: &mut ReaderControl<'_>,
 ) -> io::Result<()> {
     let fd = input.as_raw_fd();
     let mut events = Events::with_capacity(4);
@@ -112,12 +112,14 @@ fn read(
     let mut decoder = Decoder::default();
     let mut geometry = crossterm::terminal::size().ok();
     let mut epoch = 0;
-    while !shutdown.load(Ordering::Acquire) {
-        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
+    while !control.shutdown.load(Ordering::Acquire) {
+        admit_input(input, control.requests, &mut epoch, || {
+            decoder = Decoder::default()
+        })?;
         if !outbox.flush() {
             return Ok(());
         }
-        if outbox.backlog.len() >= OUTBOX_LIMIT && !cursor.waiting() {
+        if outbox.backlog.len() >= OUTBOX_LIMIT && !control.queries.waiting() {
             std::thread::sleep(OUTBOX_RETRY);
             continue;
         }
@@ -147,37 +149,88 @@ fn read(
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
             Err(error) => return Err(error),
         }
-        admit_input(input, requests, &mut epoch, || decoder = Decoder::default())?;
-        match input.read(&mut bytes) {
-            Ok(0) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::UnexpectedEof,
-                    "terminal input closed",
-                ));
-            }
-            Ok(len) => {
-                let now = Instant::now();
-                for &byte in &bytes[..len] {
-                    if shutdown.load(Ordering::Acquire) {
-                        return Ok(());
-                    }
-                    if let Some(event) = decoder.feed(byte, now) {
-                        if let ReaderEvent::CursorPosition(column, row) = event {
-                            cursor.respond(column, row);
-                        } else if !outbox.push(event, epoch)? {
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err(error),
+        admit_input(input, control.requests, &mut epoch, || {
+            decoder = Decoder::default()
+        })?;
+        match read_ready(
+            input,
+            &mut bytes,
+            &mut decoder,
+            outbox,
+            ReadContext {
+                shutdown: control.shutdown,
+                queries: control.queries,
+                epoch,
+            },
+        )? {
+            ReadProgress::Continue => {}
+            ReadProgress::Stop => return Ok(()),
         }
         poll.registry()
             .reregister(&mut SourceFd(&fd), Token(0), Interest::READABLE)?;
     }
     Ok(())
+}
+
+struct ReaderControl<'a> {
+    shutdown: &'a AtomicBool,
+    queries: &'a TerminalQueries,
+    requests: &'a mut mpsc::Receiver<tokio::sync::oneshot::Sender<u64>>,
+}
+
+struct ReadContext<'a> {
+    shutdown: &'a AtomicBool,
+    queries: &'a TerminalQueries,
+    epoch: u64,
+}
+
+enum ReadProgress {
+    Continue,
+    Stop,
+}
+
+fn read_ready(
+    input: &mut File,
+    bytes: &mut [u8],
+    decoder: &mut Decoder,
+    outbox: &mut Outbox<'_>,
+    context: ReadContext<'_>,
+) -> io::Result<ReadProgress> {
+    let len = match input.read(bytes) {
+        Ok(0) => {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "terminal input closed",
+            ));
+        }
+        Ok(len) => len,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+            ) =>
+        {
+            return Ok(ReadProgress::Continue);
+        }
+        Err(error) => return Err(error),
+    };
+    let now = Instant::now();
+    for &byte in &bytes[..len] {
+        if context.shutdown.load(Ordering::Acquire) {
+            return Ok(ReadProgress::Stop);
+        }
+        match decoder.feed(byte, now) {
+            Some(ReaderEvent::CursorPosition(column, row)) => context.queries.respond(column, row),
+            Some(ReaderEvent::KeyboardReply(reply)) => context.queries.keyboard_reply(reply),
+            Some(event) => {
+                if !outbox.push(event, context.epoch)? {
+                    return Ok(ReadProgress::Stop);
+                }
+            }
+            None => {}
+        }
+    }
+    Ok(ReadProgress::Continue)
 }
 
 #[derive(Default)]
@@ -554,17 +607,30 @@ fn codepoint(value: u32) -> Option<KeyCode> {
     }
 }
 
-fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
-    let end = *bytes.last()?;
-    let text = std::str::from_utf8(&bytes[2..bytes.len() - 1]).ok()?;
-    if bytes.starts_with(b"\x1bO") && text.is_empty() && (b'P'..=b'S').contains(&end) {
-        return key(
-            KeyCode::F(end - b'P' + 1),
-            KeyModifiers::NONE,
-            KeyEventKind::Press,
-        );
+fn reply_or_mouse(text: &str, end: u8) -> Option<ReaderEvent> {
+    if let Some(parameters) = text.strip_prefix('?') {
+        let mut parts = parameters.split(';');
+        let first = parts.next()?;
+        if first.is_empty() || !first.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        first.parse::<u32>().ok()?;
+        let reply = match end {
+            b'u' if parts.next().is_none() => super::KeyboardReply::Flags,
+            b'c' => {
+                for part in parts {
+                    if part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()) {
+                        return None;
+                    }
+                    part.parse::<u32>().ok()?;
+                }
+                super::KeyboardReply::DeviceAttributes
+            }
+            _ => return None,
+        };
+        return Some(ReaderEvent::KeyboardReply(reply));
     }
-    if end == b'R' && bytes.starts_with(b"\x1b[") {
+    if end == b'R' {
         let (row, column) = text.split_once(';')?;
         if !row.bytes().all(|byte| byte.is_ascii_digit())
             || !column.bytes().all(|byte| byte.is_ascii_digit())
@@ -576,15 +642,31 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
             row.parse::<u16>().ok()?.checked_sub(1)?,
         ));
     }
-    if text.starts_with('<') && matches!(end, b'M' | b'm') {
-        let mut parts = text[1..].split(';');
-        let button = parts.next()?.parse().ok()?;
-        let column = parts.next()?.parse().ok()?;
-        let row = parts.next()?.parse().ok()?;
-        if parts.next().is_some() {
-            return None;
-        }
-        return mouse(button, column, row, end == b'm');
+    let mut parts = text.strip_prefix('<')?.split(';');
+    let button = parts.next()?.parse().ok()?;
+    let column = parts.next()?.parse().ok()?;
+    let row = parts.next()?.parse().ok()?;
+    if parts.next().is_some() || !matches!(end, b'M' | b'm') {
+        return None;
+    }
+    mouse(button, column, row, end == b'm')
+}
+
+fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
+    let end = *bytes.last()?;
+    let text = std::str::from_utf8(&bytes[2..bytes.len() - 1]).ok()?;
+    if bytes == b"\x1bOM" {
+        return key(KeyCode::Enter, KeyModifiers::SHIFT, KeyEventKind::Press);
+    }
+    if bytes.starts_with(b"\x1bO") && text.is_empty() && (b'P'..=b'S').contains(&end) {
+        return key(
+            KeyCode::F(end - b'P' + 1),
+            KeyModifiers::NONE,
+            KeyEventKind::Press,
+        );
+    }
+    if bytes.starts_with(b"\x1b[") && (end == b'R' || text.starts_with(['<', '?'])) {
+        return reply_or_mouse(text, end);
     }
     if !text
         .bytes()
@@ -623,33 +705,33 @@ fn sequence_event(bytes: &[u8]) -> Option<ReaderEvent> {
             }
             _ => return None,
         },
-        b'u' if third.is_none() => {
-            let mut points = first.split(':');
-            let base = points.next()?.parse().ok()?;
-            let shifted = points.next();
-            if let Some(layout) = points.next() {
-                layout.parse::<u32>().ok()?;
-            }
-            if points.next().is_some() {
-                return None;
-            }
-            if modifiers.contains(KeyModifiers::SHIFT)
-                && shifted.is_some_and(|value| !value.is_empty())
-            {
-                codepoint(shifted?.parse().ok()?)?
-            } else {
-                let mut code = codepoint(base)?;
-                if modifiers.contains(KeyModifiers::SHIFT)
-                    && let KeyCode::Char(character) = &mut code
-                {
-                    *character = character.to_ascii_uppercase();
-                }
-                code
-            }
-        }
+        b'u' if third.is_none() => kitty_code(first, modifiers)?,
         _ => return None,
     };
     key(code, modifiers, kind)
+}
+
+fn kitty_code(first: &str, modifiers: KeyModifiers) -> Option<KeyCode> {
+    let mut points = first.split(':');
+    let base = points.next()?.parse().ok()?;
+    let shifted = points.next();
+    if let Some(layout) = points.next() {
+        layout.parse::<u32>().ok()?;
+    }
+    if points.next().is_some() {
+        return None;
+    }
+    if modifiers.contains(KeyModifiers::SHIFT) && shifted.is_some_and(|value| !value.is_empty()) {
+        codepoint(shifted?.parse().ok()?)
+    } else {
+        let mut code = codepoint(base)?;
+        if modifiers.contains(KeyModifiers::SHIFT)
+            && let KeyCode::Char(character) = &mut code
+        {
+            *character = character.to_ascii_uppercase();
+        }
+        Some(code)
+    }
 }
 
 fn mouse(button: u16, column: u16, row: u16, release: bool) -> Option<ReaderEvent> {
@@ -692,6 +774,186 @@ mod tests {
     use super::*;
     use rustix::fs::OFlags;
     use std::{io::Write, os::fd::OwnedFd, os::unix::net::UnixStream};
+
+    const KEYBOARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+    #[test]
+    fn enter_encodings_preserve_newline_and_submission_identity() {
+        for (bytes, expected) in [
+            (
+                b"\x1bOM".as_slice(),
+                TerminalInput::ModifiedEnter(super::super::NewlineShortcut::ShiftEnter),
+            ),
+            (
+                b"\x1b[13;2u",
+                TerminalInput::ModifiedEnter(super::super::NewlineShortcut::ShiftEnter),
+            ),
+            (
+                b"\x1b[27;2;13~",
+                TerminalInput::ModifiedEnter(super::super::NewlineShortcut::ShiftEnter),
+            ),
+            (b"\x1bOA", TerminalInput::Up),
+            (b"\r", TerminalInput::Submit),
+            (b"\n", TerminalInput::Newline),
+        ] {
+            let mut decoder = Decoder::default();
+            let events: Vec<_> = bytes
+                .iter()
+                .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+                .collect();
+            assert!(
+                matches!(events.as_slice(), [ReaderEvent::Event(event)] if map_input(event.clone()) == Some(expected))
+            );
+        }
+    }
+
+    #[test]
+    fn keyboard_replies_are_bounded_and_paste_keeps_protocol_bytes_literal() {
+        for (bytes, replies) in [
+            (b"\x1b[?0u\x1b[?1;2c".as_slice(), 2),
+            (b"\x1b[?31u", 1),
+            (b"\x1b[?u\x1b[?1;2u\x1b[?4294967296u\x1b[?;c\x1b[?1;;c", 0),
+        ] {
+            let mut decoder = Decoder::default();
+            let events: Vec<_> = bytes
+                .iter()
+                .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+                .collect();
+            assert_eq!(events.len(), replies);
+            assert!(
+                events
+                    .iter()
+                    .all(|event| matches!(event, ReaderEvent::KeyboardReply(_)))
+            );
+        }
+        let mut decoder = Decoder::default();
+        let mut oversized = b"\x1b[?".to_vec();
+        oversized.extend([b'1'; MAX_KEY_SEQUENCE_BYTES]);
+        oversized.extend_from_slice(b"u\r");
+        let events: Vec<_> = oversized
+            .iter()
+            .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+            .collect();
+        assert!(
+            matches!(events.as_slice(), [ReaderEvent::Event(event)] if map_input(event.clone()) == Some(TerminalInput::Submit))
+        );
+        let mut decoder = Decoder::default();
+        let events: Vec<_> = b"\x1b[200~\x1b[?1u\x1b[?1;2c\x1b[201~"
+            .iter()
+            .filter_map(|&byte| decoder.feed(byte, Instant::now()))
+            .collect();
+        assert!(
+            matches!(events.as_slice(), [ReaderEvent::Paste(Ok(text))] if text == "\x1b[?1u\x1b[?1;2c")
+        );
+    }
+
+    struct ProbeWriter {
+        peer: UnixStream,
+        start: Option<std::sync::mpsc::SyncSender<()>>,
+        reply: &'static [u8],
+        request: Vec<u8>,
+    }
+
+    impl Write for ProbeWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.request.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.peer.write_all(self.reply)?;
+            self.start.take().unwrap().send(()).unwrap();
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn keyboard_probe_bypasses_full_queue_and_preserves_interleaved_input() {
+        use super::super::KeyboardSupport::{Disambiguated, Legacy};
+        for (reply, expected) in [
+            (b"\x1b[?0u\x1b[?1;2c".as_slice(), Disambiguated),
+            (b"\x1b[?1;2c", Legacy),
+            (b"\x1b[?1;2u\x1b[?1;2c", Legacy),
+        ] {
+            keyboard_probe_case(reply, expected);
+        }
+        let queries = TerminalQueries::default();
+        assert_eq!(
+            queries
+                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO)
+                .unwrap(),
+            Legacy
+        );
+        queries.0.0.lock().unwrap().keyboard = super::super::KeyboardProbe::Waiting(Instant::now());
+        queries.keyboard_reply(super::super::KeyboardReply::Flags);
+        assert!(queries.0.0.lock().unwrap().keyboard == super::super::KeyboardProbe::Unsupported);
+    }
+
+    fn keyboard_probe_case(reply: &'static [u8], expected: super::super::KeyboardSupport) {
+        let (mut peer, input) = UnixStream::pair().unwrap();
+        input.set_nonblocking(true).unwrap();
+        let mut input = File::from(OwnedFd::from(input));
+        let mut poll = Poll::new().unwrap();
+        let fd = input.as_raw_fd();
+        poll.registry()
+            .register(&mut SourceFd(&fd), Token(0), Interest::READABLE)
+            .unwrap();
+        let (_admission, mut requests) = InputAdmission::new(&poll).unwrap();
+        let (sender, _receiver) = mpsc::channel(1);
+        let event = || key(KeyCode::Char('x'), KeyModifiers::NONE, KeyEventKind::Press).unwrap();
+        sender.try_send((0, Ok(event()))).unwrap();
+        peer.write_all(b"a\x1b[200~literal\x1b[201~b").unwrap();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let stop = shutdown.clone();
+        let queries = TerminalQueries::default();
+        let reader_queries = queries.clone();
+        let (start, ready) = std::sync::mpsc::sync_channel(1);
+        let reader = std::thread::spawn(move || {
+            ready.recv().unwrap();
+            let mut outbox = Outbox {
+                sender: &sender,
+                backlog: (0..OUTBOX_LIMIT).map(|_| (0, event())).collect(),
+            };
+            read(
+                &mut poll,
+                &mut input,
+                &mut outbox,
+                &mut ReaderControl {
+                    shutdown: &stop,
+                    queries: &reader_queries,
+                    requests: &mut requests,
+                },
+            )
+            .unwrap();
+            outbox.backlog
+        });
+        let mut output = ProbeWriter {
+            peer,
+            start: Some(start),
+            reply,
+            request: Vec::new(),
+        };
+        assert_eq!(
+            queries
+                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(output.request, b"\x1b[?u\x1b[c");
+        queries.keyboard_reply(super::super::KeyboardReply::Flags);
+        assert!(
+            queries.0.0.lock().unwrap().keyboard == super::super::KeyboardProbe::Idle,
+            "late reply ignored"
+        );
+        shutdown.store(true, Ordering::Release);
+        let mut backlog = reader.join().unwrap();
+        assert_eq!(backlog.len(), OUTBOX_LIMIT + 3);
+        backlog.drain(..OUTBOX_LIMIT);
+        assert!(
+            matches!(backlog.as_slices(), ([(_, ReaderEvent::Event(a)), (_, ReaderEvent::Paste(Ok(text))), (_, ReaderEvent::Event(b))], [])
+            if map_input(a.clone()) == Some(TerminalInput::Character('a')) && text == "literal" && map_input(b.clone()) == Some(TerminalInput::Character('b')))
+        );
+    }
 
     async fn next_input(reader: &mut TerminalReader) -> TerminalInput {
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -784,8 +1046,8 @@ mod tests {
                 assert_eq!(sender.capacity(), 0);
                 // XNU blocks PTY writers near its 1024-byte input queue, so the unread bytes stay small.
                 master.write_all(&b"1\r".repeat(64)).unwrap();
-                let cursor = CursorQuery::default();
-                let query = cursor.clone();
+                let queries = TerminalQueries::default();
+                let query = queries.clone();
                 let thread = std::thread::spawn(move || {
                     ready.recv().unwrap();
                     let mut outbox = Outbox {
@@ -796,9 +1058,11 @@ mod tests {
                         &mut poll,
                         &mut input,
                         &mut outbox,
-                        &should_stop,
-                        &query,
-                        &mut requests,
+                        &mut ReaderControl {
+                            shutdown: &should_stop,
+                            queries: &query,
+                            requests: &mut requests,
+                        },
                     )
                     .unwrap();
                 });
@@ -807,7 +1071,7 @@ mod tests {
                     shutdown,
                     thread: Some(thread),
                     paste: None,
-                    cursor,
+                    queries,
                     epoch: 0,
                     admission,
                 })
@@ -928,10 +1192,10 @@ mod tests {
             assert!(sender.try_send((observed, Ok(event()))).is_ok());
         }
         let shutdown = Arc::new(AtomicBool::new(false));
-        let cursor = CursorQuery::default();
+        let queries = TerminalQueries::default();
         peer.write_all(b"x\x1b[3;5R").unwrap();
         let stopped = Arc::clone(&shutdown);
-        let query = cursor.clone();
+        let query = queries.clone();
         let reader = std::thread::spawn(move || {
             let mut outbox = Outbox {
                 sender: &sender,
@@ -941,9 +1205,11 @@ mod tests {
                 &mut poll,
                 &mut input,
                 &mut outbox,
-                &stopped,
-                &cursor,
-                &mut requests,
+                &mut ReaderControl {
+                    shutdown: &stopped,
+                    queries: &queries,
+                    requests: &mut requests,
+                },
             );
             (result, outbox.backlog)
         });

@@ -133,7 +133,7 @@ struct Setting {
     value: fn(&Preferences) -> String,
     apply: fn(&mut Preferences, &str) -> Option<()>,
     cycle: fn(&mut Preferences, bool),
-    guidance: Option<&'static str>,
+    guidance: Option<fn(&AttachedTerminal) -> String>,
 }
 
 const SETTINGS: &[Setting] = &[
@@ -377,7 +377,7 @@ const SETTINGS: &[Setting] = &[
         cycle: |p, forward| {
             p.newline = step(p.newline, &NewlineShortcut::ALL, forward);
         },
-        guidance: Some(crate::terminal::NEWLINE_SHORTCUT_GUIDANCE),
+        guidance: Some(AttachedTerminal::newline_shortcut_guidance),
     },
 ];
 
@@ -669,6 +669,32 @@ async fn save_settings(admission: &Admission, preferences: Preferences) -> Resul
     .map_err(|_| SaveError::Failed("display settings unavailable"))?
 }
 
+fn settings_notice(
+    terminal: &AttachedTerminal,
+    selected_row: usize,
+    invalid: &mut bool,
+    linear_guidance: &mut bool,
+) -> Option<String> {
+    let linear = terminal.is_linear();
+    if std::mem::take(invalid) {
+        Some(
+            if linear {
+                "Type NUMBER VALUE from the list; q cancels"
+            } else {
+                "The selected settings could not be saved"
+            }
+            .to_owned(),
+        )
+    } else if std::mem::take(linear_guidance) {
+        Some("Modified newline shortcuts apply only to visual sessions; use backslash then Enter here".to_owned())
+    } else {
+        SETTINGS
+            .get(selected_row)
+            .and_then(|setting| setting.guidance)
+            .map(|guidance| guidance(terminal))
+    }
+}
+
 async fn choose_settings(
     terminal: &mut AttachedTerminal,
     mut chosen: Preferences,
@@ -681,28 +707,14 @@ async fn choose_settings(
     let mut linear_guidance = linear;
     terminal.begin_dialog();
     loop {
-        let notice = if std::mem::take(&mut invalid) {
-            Some(if linear {
-                "Type NUMBER VALUE from the list; q cancels"
-            } else {
-                "The selected settings could not be saved"
-            })
-        } else if std::mem::take(&mut linear_guidance) {
-            Some(
-                "Modified newline shortcuts apply only to visual sessions; use backslash then Enter here",
-            )
-        } else {
-            SETTINGS
-                .get(selected_row)
-                .and_then(|setting| setting.guidance)
-        };
+        let notice = settings_notice(terminal, selected_row, &mut invalid, &mut linear_guidance);
         let rows = if linear {
             linear_setting_rows(chosen)
         } else {
             setting_rows(chosen)
         };
         terminal
-            .draw_settings(&rows, selected_row, notice, view)
+            .draw_settings(&rows, selected_row, notice.as_deref(), view)
             .map_err(|error| error.to_string())?;
         if terminal
             .arm_dialog()
