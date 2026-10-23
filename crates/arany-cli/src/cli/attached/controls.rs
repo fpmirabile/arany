@@ -11,8 +11,8 @@ use crate::terminal::{
     TerminalMode, transcript_agents,
 };
 use arany::{
-    CollaborationPolicy, CustomProfile, Effort, SessionId, SessionView, StateRoot, fork_session,
-    rename_session, resume_session, validate_native_model_id,
+    CollaborationPolicy, CustomProfile, Effort, ProviderKind, SessionId, SessionView, StateRoot,
+    fork_session, rename_session, resume_session, validate_native_model_id,
 };
 use arany::{RecordFormat, RecordKind, RecordStep};
 use serde_json::Value;
@@ -843,24 +843,29 @@ fn typed_model_selection<'a>(
         .provider
         .as_deref()
         .ok_or("Select /provider first")?;
+    let provider = ProviderKind::parse(profile);
     let (model, chosen) = parse_model_argument(argument)?;
     let effort = chosen.unwrap_or_else(|| {
         if view.defaults.model.as_deref() == Some(model) {
             view.defaults.effort
-        } else if profile.starts_with("custom:") {
+        } else if provider == Some(ProviderKind::Custom) {
             None
         } else {
             Some(Effort::Low)
         }
     });
-    if profile == "chatgpt" && effort.is_none() {
-        return Err("ChatGPT requires an explicit effort");
-    }
-    if !profile.starts_with("custom:")
-        && profile != "chatgpt"
-        && arany::resolve_native_effort_for_run(profile, model, effort).is_err()
-    {
-        return Err("invalid native model/effort; choose a model and effort with /model");
+    match provider {
+        Some(ProviderKind::ChatGpt) => {
+            if effort.is_none() {
+                return Err("ChatGPT requires an explicit effort");
+            }
+        }
+        Some(ProviderKind::Custom) => {}
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) | None => {
+            if arany::resolve_native_effort_for_run(profile, model, effort).is_err() {
+                return Err("invalid native model/effort; choose a model and effort with /model");
+            }
+        }
     }
     Ok((model, effort))
 }
@@ -890,7 +895,7 @@ pub(super) async fn select_model(
         if effort.is_some_and(|effort| !custom.efforts().contains(&effort)) {
             return Ok("Error: Effort unavailable for the selected Provider/model".into());
         }
-    } else if profile == "chatgpt" {
+    } else if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
         if effort.is_none() {
             return Ok("Error: ChatGPT requires an explicit effort".into());
         }
@@ -1203,7 +1208,7 @@ pub(super) async fn handle_command(
         }
         InteractiveCommand::Provider => match argument {
             Some(profile) if ProviderArg::from_str(profile).is_ok() => {
-                let account_id = if profile == "chatgpt" {
+                let account_id = if ProviderKind::parse(profile) == Some(ProviderKind::ChatGpt) {
                     match chatgpt::selected_account_id() {
                         Ok(id) => Some(id),
                         Err(chatgpt::AuthorizationError::NoSelectedAccount) => {

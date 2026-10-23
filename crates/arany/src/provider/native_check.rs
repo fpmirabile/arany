@@ -52,10 +52,8 @@ pub async fn check_native_model_from_env(
     model: &str,
     effort: Effort,
 ) -> Result<CheckView, NativeCheckError> {
-    if !matches!(
-        ProviderKind::parse(profile),
-        Some(ProviderKind::OpenAi | ProviderKind::Anthropic)
-    ) || !valid_model_id(model)
+    if !ProviderKind::parse(profile).is_some_and(ProviderKind::is_native_api)
+        || !valid_model_id(model)
     {
         return Err(NativeCheckError::InvalidSelection);
     }

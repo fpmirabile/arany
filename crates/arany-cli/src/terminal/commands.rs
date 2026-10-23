@@ -1,4 +1,4 @@
-use arany::{Effort, MAX_CATALOG_MODELS, ModelEntry, resolve_native_effort};
+use arany::{Effort, MAX_CATALOG_MODELS, ModelEntry, ProviderKind, resolve_native_effort};
 use uuid::Uuid;
 
 const MAX_INPUT_BYTES: usize = 8 * 1024;
@@ -323,7 +323,7 @@ impl CommandChoices {
         let Some(profile) = self.profile.as_deref() else {
             return Vec::new();
         };
-        let mut values = if profile.starts_with("custom:") {
+        let mut values = if ProviderKind::parse(profile) == Some(ProviderKind::Custom) {
             if self.exact_custom {
                 self.catalog
                     .iter()
@@ -334,7 +334,7 @@ impl CommandChoices {
             } else {
                 Vec::new()
             }
-        } else if matches!(profile, "openai" | "anthropic" | "chatgpt") {
+        } else if ProviderKind::parse(profile).is_some_and(ProviderKind::is_native) {
             let reviewed = resolve_native_effort(profile, model, None).is_ok();
             Effort::ALL
                 .into_iter()
@@ -356,7 +356,7 @@ impl CommandChoices {
         let Some(profile) = self.profile.as_deref() else {
             return false;
         };
-        if profile.starts_with("custom:") {
+        if ProviderKind::parse(profile) == Some(ProviderKind::Custom) {
             self.exact_custom && self.catalog.iter().any(|entry| entry.id == model)
         } else {
             resolve_native_effort(profile, model, None).is_ok()

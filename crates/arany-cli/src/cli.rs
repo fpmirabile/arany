@@ -1,5 +1,5 @@
 use crate::presentation::Output;
-use arany::{Effort, ProviderError, StateRoot, resolve_native_effort_for_run};
+use arany::{Effort, ProviderError, ProviderKind, StateRoot, resolve_native_effort_for_run};
 use clap::ValueEnum;
 use std::path::PathBuf;
 
@@ -109,10 +109,12 @@ pub(crate) fn admit_headless_history(state: &StateRoot) -> Result<(), String> {
 }
 
 pub(crate) fn native_api_key_from_env(profile: &str) -> Result<String, ProviderError> {
-    let name = match profile {
-        "openai" => "OPENAI_API_KEY",
-        "anthropic" => "ANTHROPIC_API_KEY",
-        _ => return Err(ProviderError::Rejected),
+    let name = match ProviderKind::parse(profile) {
+        Some(ProviderKind::OpenAi) => "OPENAI_API_KEY",
+        Some(ProviderKind::Anthropic) => "ANTHROPIC_API_KEY",
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
+            return Err(ProviderError::Rejected);
+        }
     };
     std::env::var(name).map_err(|_| ProviderError::Unavailable)
 }

@@ -1,7 +1,7 @@
 use super::select::{ProviderArg, Selection, SelectionError, select_provider};
 use arany::{
-    AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderRole, Providers,
-    RecordFormat, RecordKind, StateRoot,
+    AdmittedProviders, Effort, MAX_PROVIDER_FALLBACKS, Provider, ProviderKind, ProviderRole,
+    Providers, RecordFormat, RecordKind, StateRoot,
 };
 use serde::Deserialize;
 use std::{path::Path, str::FromStr, sync::Arc};
@@ -139,7 +139,9 @@ pub(crate) async fn configured_providers(
     let mut providers = Providers::all(vec![Arc::clone(&primary)]);
     if let Some(chain) = &config.providers.primary {
         let selected = &chain[0];
-        let effort = if matches!(selected.provider.as_str(), "openai" | "anthropic") {
+        let effort = if ProviderKind::parse(selected.provider.as_str())
+            .is_some_and(ProviderKind::is_native_api)
+        {
             Some(
                 arany::resolve_native_effort_for_run(
                     &selected.provider,
