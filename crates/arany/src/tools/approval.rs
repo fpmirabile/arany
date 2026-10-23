@@ -47,6 +47,7 @@ pub struct ApprovalInbox(mpsc::Receiver<ToolApproval>);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ApprovalReply {
     Deny,
+    Unavailable,
     AllowOnce,
     AllowForSession,
     AllowPrefixInFolder,
@@ -133,8 +134,14 @@ impl ToolApprovals {
         self.mode.send_replace(mode);
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) async fn ask(&self, intent: &EffectIntent) -> bool {
-        self.ask_local(intent, false, None).await != ApprovalReply::Deny
+        matches!(
+            self.ask_local(intent, false, None).await,
+            ApprovalReply::AllowOnce
+                | ApprovalReply::AllowForSession
+                | ApprovalReply::AllowPrefixInFolder
+        )
     }
 
     pub(crate) async fn ask_local(
@@ -175,9 +182,9 @@ impl ToolApprovals {
             .await
             .is_err()
         {
-            return ApprovalReply::Deny;
+            return ApprovalReply::Unavailable;
         }
-        response.await.unwrap_or(ApprovalReply::Deny)
+        response.await.unwrap_or(ApprovalReply::Unavailable)
     }
 }
 

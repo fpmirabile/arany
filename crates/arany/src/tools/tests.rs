@@ -424,17 +424,21 @@ fn checked_tool_files_reject_links_traversal_and_special_objects() {
         git: None,
         git_identity: None,
     };
-    for (case, drift) in [("fresh", false), ("changed-input", true)] {
+    for case in ["fresh", "changed-input", "changed-executable"] {
         let target = temp.path().join(case);
         std::fs::create_dir_all(target.join("project")).unwrap();
         std::fs::create_dir(target.join("runtime")).unwrap();
         let project = super::fs::open_directory(&target.join("project")).unwrap();
         let resources = super::fs::open_directory(&target.join("runtime")).unwrap();
-        if drift {
+        std::fs::write(&input, b"pinned input").unwrap();
+        if case == "changed-input" {
             std::fs::write(&input, b"changed after admission").unwrap();
         }
+        if case == "changed-executable" {
+            std::fs::write(&copied, b"replaced executable").unwrap();
+        }
         let result = super::fs::snapshot_into(&root, &snapshot_config, Some(&project), &resources);
-        if drift {
+        if case != "fresh" {
             assert!(
                 matches!(result, Err(super::ToolError::ChangedInput)),
                 "{case}"
@@ -1566,7 +1570,6 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
             path: "src/new".into(),
         },
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     assert!(intent.valid());
@@ -1610,6 +1613,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         disposition: ToolDisposition::Succeeded,
         output: "observed".into(),
         attestation: Some(Attestation::Guard(guard)),
+        approval_cause: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     };
     assert!(observation.valid());
@@ -1656,6 +1660,7 @@ fn typed_tool_schema_and_receipts_have_exact_bounds() {
         output: r#"{"exit_code":0,"stdout":"build complete","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
             .into(),
         attestation: Some(Attestation::Guard(command_guard)),
+        approval_cause: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert!(uncertain_cache.valid());
@@ -1820,7 +1825,6 @@ fn guard_error_after_dispatch_marks_only_a_selected_command_cache_not_attempted(
         workspace_inode: 2,
         call: command,
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let observation = super::uncertain_observation(
@@ -1849,7 +1853,6 @@ fn guard_failures_record_their_stage_and_check_per_intent_for_tests_in_every_bui
         workspace_inode: 2,
         call,
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let command = ToolCall::Command {
@@ -1967,7 +1970,6 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: u64::MAX,
             use_count: 1,
         };
         intent.limits.cache_requested_bytes = cache_requested_bytes;
@@ -1988,6 +1990,7 @@ async fn cache_receipt_states_preserve_success_without_publication_uncertainty()
                 changeset: Default::default(),
             })
             .unwrap(),
+            approval_cause: None,
             cache_update: CacheUpdate::NotAttempted,
         }
     }
@@ -2759,6 +2762,32 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         }) > std::time::Duration::ZERO
     );
 
+    for pin in ["grant", "enforcement"] {
+        let intent = runtime.intent(
+            crate::session::RunId::new(),
+            crate::session::AgentRunId::new(),
+            read("src/main.rs"),
+        );
+        let presented = intent.clone();
+        tokio::time::pause();
+        tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+        tokio::time::resume();
+        let mut changed = runtime.clone();
+        if pin == "grant" {
+            changed.config.write = true;
+        } else {
+            changed.enforcement_digest = [9; 32];
+        }
+        let refused = changed.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(
+            refused.intent, presented,
+            "original approval pins stay fixed"
+        );
+        assert_eq!(refused.disposition, ToolDisposition::Failed, "{pin}");
+        assert!(refused.attestation.is_none(), "{pin}");
+        assert!(!refused.output.contains("fn main"), "{pin}");
+    }
+
     let secret = run_in_process(&runtime, read("src/.env")).await;
     assert_eq!(secret.disposition, ToolDisposition::Denied);
     assert!(secret.attestation.is_none());
@@ -2798,6 +2827,26 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
     assert!(!escape.output.contains("outside-canary"));
     assert!(escape.valid());
 
+    let mut invalid_intent = runtime.intent(
+        crate::session::RunId::new(),
+        crate::session::AgentRunId::new(),
+        read("src/main.rs"),
+    );
+    let control = runtime
+        .execute(invalid_intent.clone(), super::Cancellation::new())
+        .await;
+    assert_eq!(control.disposition, ToolDisposition::Succeeded);
+    assert!(matches!(
+        control.attestation,
+        Some(Attestation::InProcess { .. })
+    ));
+    invalid_intent.use_count = 2;
+    let invalid = runtime
+        .execute(invalid_intent, super::Cancellation::new())
+        .await;
+    assert_eq!(invalid.disposition, ToolDisposition::Failed);
+    assert!(invalid.attestation.is_none());
+
     std::fs::rename(&workspace, temp.path().join("moved")).unwrap();
     std::fs::create_dir_all(workspace.join("src")).unwrap();
     std::fs::write(workspace.join("src/main.rs"), "replacement").unwrap();
@@ -2811,18 +2860,6 @@ async fn in_process_reads_attest_and_refuse_secrets_links_and_a_replaced_workspa
         replaced.output
     );
     assert!(!replaced.output.contains("replacement"));
-
-    let mut expired_intent = runtime.intent(
-        crate::session::RunId::new(),
-        crate::session::AgentRunId::new(),
-        read("src/main.rs"),
-    );
-    expired_intent.expires_at_ms = 1;
-    let expired = runtime
-        .execute(expired_intent, super::Cancellation::new())
-        .await;
-    assert_eq!(expired.disposition, ToolDisposition::Failed);
-    assert!(expired.attestation.is_none());
 }
 
 #[tokio::test]

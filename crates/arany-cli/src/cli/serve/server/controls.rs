@@ -150,7 +150,9 @@ mod tests {
             result: worker.abort_handle(),
             events: engine.subscribe(),
             cancel: arany::RunCancellation::new(),
-            approvals: crate::cli::serve::approvals::Approvals::empty_for_test(),
+            approvals: std::sync::Arc::new(
+                crate::cli::serve::approvals::Approvals::empty_for_test(),
+            ),
             approval_mode: arany::ToolApprovals::new(arany::ApprovalMode::Request).0,
             steering: arany::RunSteering::new(),
             pending_start: None,
@@ -172,6 +174,40 @@ mod tests {
             json!({"turnId":run_id})
         );
         assert_eq!(turn.steering.withdraw_note().as_deref(), Some("next Run"));
+        let mut control = crate::cli::serve::server::OutputControl::from(&turn);
+        control.pending_completion = false;
+        for (method, params, expected) in [
+            (
+                "turn/interrupt",
+                json!({"threadId":thread_id,"turnId":run_id}),
+                true,
+            ),
+            (
+                "turn/interrupt",
+                json!({"threadId":SessionId::new(),"turnId":run_id}),
+                false,
+            ),
+            (
+                "turn/interrupt",
+                json!({"threadId":thread_id,"turnId":RunId::new()}),
+                false,
+            ),
+            ("turn/interrupt", json!({"threadId":thread_id}), false),
+            ("thread/unsubscribe", json!({"threadId":thread_id}), true),
+            (
+                "thread/unsubscribe",
+                json!({"threadId":SessionId::new()}),
+                false,
+            ),
+        ] {
+            let request = arany_cli::protocol::rpc::Request {
+                jsonrpc: Default::default(),
+                id: arany_cli::protocol::rpc::RequestId::Integer(1),
+                method: method.into(),
+                params: Some(params),
+            };
+            assert_eq!(control.interrupt(&request), expected, "{method}");
+        }
         drop(turn);
         engine.close().await.unwrap();
     }

@@ -784,12 +784,12 @@ mod tests {
                     workspace_inode: 1,
                     call,
                     limits: Default::default(),
-                    expires_at_ms: 1,
                     use_count: 1,
                 },
                 disposition: crate::tools::ToolDisposition::Uncertain,
                 output: CANARY.into(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             },
         });

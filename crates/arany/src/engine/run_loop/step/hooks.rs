@@ -852,7 +852,6 @@ impl RunLoop<'_> {
         plans.iter().all(|plan| {
             let mut probe = runtime.intent(self.run_id, agent_run_id, plan.call.clone());
             probe.limits.runtime_ms = u32::MAX;
-            probe.expires_at_ms = u64::MAX;
             runtime.hook_task_fits(&probe)
         })
     }
@@ -955,7 +954,6 @@ impl RunLoop<'_> {
         limits.cache_bytes = 0;
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;
-        hook_intent.expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
         let clock = match deadline {
             Some(deadline) => HookClock::Deadline(deadline),
             None => HookClock::Pause(match self.reserve_active_pause() {

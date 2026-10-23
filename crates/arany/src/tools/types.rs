@@ -675,7 +675,6 @@ pub struct EffectIntent {
     pub workspace_inode: u64,
     pub call: ToolCall,
     pub limits: ToolLimits,
-    pub expires_at_ms: u64,
     pub use_count: u8,
 }
 
@@ -707,7 +706,6 @@ impl EffectIntent {
             && self.policy_digest != [0; 32]
             && self.enforcement_digest != [0; 32]
             && self.workspace_inode > 0
-            && self.expires_at_ms > 0
             && self.use_count == 1
             && self.call.valid()
             && (self.limits.network == NetworkGrant::Host) == self.call.is_host()
@@ -1121,6 +1119,16 @@ pub enum LimitCause {
     Resource,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApprovalCause {
+    Cancelled,
+    Paused,
+    ChannelUnavailable,
+    Declined,
+    ChildTimeout,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {
@@ -1133,6 +1141,8 @@ pub struct ToolObservation {
     pub output: String,
     #[serde(deserialize_with = "Option::deserialize")]
     pub attestation: Option<Attestation>,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub approval_cause: Option<ApprovalCause>,
     pub cache_update: CacheUpdate,
 }
 
@@ -1196,6 +1206,10 @@ impl ToolObservation {
         let private_command = matches!(self.intent.target, EffectTarget::WorkerView { .. })
             && matches!(self.intent.call, ToolCall::Command { .. });
         self.intent.valid()
+            && (self.approval_cause.is_none()
+                || self.disposition == ToolDisposition::Denied
+                    && self.attestation.is_none()
+                    && self.cache_update == CacheUpdate::NotApplicable)
             && (self.limit_cause.is_some() == (self.disposition == ToolDisposition::Limit))
             && (private_command
                 || !matches!(
@@ -1724,7 +1738,6 @@ mod model_call_tests {
                 workspace_inode: 2,
                 call,
                 limits: ToolLimits::default(),
-                expires_at_ms: 1,
                 use_count: 1,
             };
             let mut o = ToolObservation {
@@ -1732,6 +1745,7 @@ mod model_call_tests {
                 intent,
                 disposition: ToolDisposition::Succeeded,
                 output: json!({"sha256":hex_digest(b"new"),"bytes":3}).to_string(),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
                 enforcement_cause: None,
                 limit_cause: None,
@@ -1764,7 +1778,6 @@ mod unguarded_vocabulary_tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -1853,6 +1866,7 @@ mod unguarded_vocabulary_tests {
             })
             .unwrap(),
             attestation: Some(attestation),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert!(observation.valid());
@@ -1877,6 +1891,7 @@ mod unguarded_vocabulary_tests {
             limit_cause: None,
             output: String::new(),
             attestation: Some(Attestation::Unguarded(unguarded_receipt(&host))),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         assert_eq!(
