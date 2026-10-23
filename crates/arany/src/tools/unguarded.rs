@@ -973,7 +973,6 @@ mod tests {
             workspace_inode: fixture.identity.inode,
             call: host_call(&[]),
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         std::os::unix::fs::symlink(&fixture.program.executable, root.join("alias")).unwrap();

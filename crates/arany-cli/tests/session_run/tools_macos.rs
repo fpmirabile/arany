@@ -2630,14 +2630,6 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     ] {
         let mut intent = admitted.clone();
         intent.id = uuid::Uuid::now_v7();
-        intent.expires_at_ms = u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_millis(),
-        )
-        .unwrap()
-            + 60_000;
         intent.policy_digest = Sha256::digest(config_bytes).into();
         intent.call = ToolCall::Write {
             path: "src/never-dispatched.txt".into(),

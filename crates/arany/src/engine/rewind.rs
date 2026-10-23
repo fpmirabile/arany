@@ -431,12 +431,12 @@ impl Engine {
             },
         );
         intent.id = started.rewind_id;
-        intent.expires_at_ms =
-            u64::try_from(started.expires_at_ms).map_err(|_| EngineError::InvalidRequest)?;
         if !started.valid() {
             return Err(EngineError::RewindTooLarge);
         }
-        if crate::tools::now_ms() >= intent.expires_at_ms {
+        if crate::tools::now_ms()
+            >= u64::try_from(started.expires_at_ms).map_err(|_| EngineError::InvalidRequest)?
+        {
             return Err(EngineError::RewindPreviewExpired);
         }
         self.journal.admit(session, 2, 0).await?;

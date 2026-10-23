@@ -30,7 +30,6 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             cwd: ".".into(),
         },
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let command_observation = crate::tools::ToolObservation {
@@ -51,6 +50,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
         })
         .to_string(),
+        approval_cause: None,
         cache_update: CacheUpdate::Failed,
     };
     let mut tools = vec![ToolView {
@@ -81,7 +81,6 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 limit: None,
             },
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         let observation = crate::tools::ToolObservation {
@@ -94,6 +93,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 "sha256": crate::tools::types::hex_digest(b"evidence")
             })
             .to_string(),
+            approval_cause: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         };
         ToolView {
@@ -580,7 +580,6 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             cwd: ".".into(),
         },
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let uncertain_observation = crate::tools::ToolObservation {
@@ -600,6 +599,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             .expect("valid Command result")
             .output
             .clone(),
+        approval_cause: None,
         cache_update: CacheUpdate::Uncertain,
     };
     assert!(uncertain_observation.valid());
@@ -681,7 +681,6 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             limit: None,
         },
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let failed_observation = crate::tools::ToolObservation {
@@ -691,6 +690,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         disposition: ToolDisposition::Denied,
         output: String::new(),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert!(failed_observation.valid());
@@ -778,7 +778,6 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                     limit: None,
                 },
                 limits: ToolLimits::default(),
-                expires_at_ms: 1,
                 use_count: 1,
             };
             let observation = crate::tools::ToolObservation {
@@ -788,6 +787,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
                 disposition: ToolDisposition::Denied,
                 output: String::new(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
             assert!(observation.valid());
@@ -862,6 +862,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
         disposition: ToolDisposition::Limit,
         output: crate::tools::types::command_timeout_limit_message(2_000, 1_000),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert!(timeout_observation.valid());
@@ -939,7 +940,6 @@ fn read_intent(call: &ToolCall) -> EffectIntent {
         workspace_inode: 2,
         call: call.clone(),
         limits: ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     }
 }
@@ -962,6 +962,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     };
     assert_eq!(
@@ -1163,6 +1164,7 @@ fn many_worker_lines_never_displace_unguarded_or_unknown_facts() {
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: serde_json::json!({"exit_code": 0, "stdout": "", "stderr": "", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}}).to_string(),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         }),
         intent,

@@ -17,10 +17,6 @@
     "ApprovalParams": {
       "additionalProperties": false,
       "properties": {
-        "expiresAtMs": {
-          "format": "int64",
-          "type": "integer"
-        },
         "intent": {
           "additionalProperties": true,
           "type": "object"
@@ -50,7 +46,6 @@
         "turnId",
         "itemId",
         "startedAtMs",
-        "expiresAtMs",
         "intent",
         "lines"
       ],

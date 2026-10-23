@@ -1295,7 +1295,7 @@ async fn translator_latches_cancel_reconciles_and_remaps_failures_without_privat
             "busy Session never reaches serve"
         );
     }
-    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":1,"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
+    events.send(reply(6, json!({"events":[{"sequence":20,"session_id":session.to_string(),"run_id":run.to_string(),"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"run_id":run,"text":"Recovered"},"created_at_ms":0}],"nextSince":null}))).await.unwrap();
     let recovered = output.recv().await.unwrap();
     validate(&recovered);
     assert_eq!(
@@ -1697,14 +1697,13 @@ impl Adapter {
             workspace_inode: 2,
             call,
             limits: arany::ToolLimits::default(),
-            expires_at_ms: arany::now_ms().saturating_add(60_000),
             use_count: 1,
         }
     }
 
     async fn permission(&self, intent: &arany::EffectIntent, id: i64) {
         self.events.send(Message::Request(Request { jsonrpc:Default::default(),id:RequestId::Integer(id),method:"item/tool/requestApproval".into(),params:Some(json!({
-            "threadId":self.session,"turnId":self.run,"itemId":intent.id,"startedAtMs":0,"expiresAtMs":intent.expires_at_ms,"intent":intent,
+            "threadId":self.session,"turnId":self.run,"itemId":intent.id,"startedAtMs":0,"intent":intent,
             "lines":["Review <script>unsafe</script>\u{001b}[2J", "```\n![untrusted](https://invalid.example)"]
         })) })).await.unwrap();
     }
@@ -1804,7 +1803,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
             });
         }
         let event = json!({"sequence":10,"session_id":adapter.session,"run_id":adapter.run,
-            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":1,
+            "agent_run_id":null,"kind":"GoalPlanContractRecorded","event_version":arany::test_support::payload_version("GoalPlanContractRecorded"),
             "payload":{"goal_id":goal,"run_id":adapter.run,"contract":contract},"created_at_ms":0});
         let mut preview = event.clone();
         preview["kind"] = json!("AssistantDisplayRecorded");
@@ -1884,7 +1883,7 @@ async fn optional_surfaces_use_closed_budget_reasons_and_bounded_committed_plans
         adapter.events.send(Message::Response(Response {
             jsonrpc:Default::default(),id:request.id,
             result:json!({"events":[event, {"sequence":11,"session_id":adapter.session,
-                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":1,
+                "run_id":adapter.run,"agent_run_id":null,"kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),
                 "payload":{"run_id":adapter.run,"text":"Committed answer"},"created_at_ms":0}],"nextSince":null}),
         })).await.unwrap();
         let answer = adapter.next().await;
@@ -2220,7 +2219,7 @@ async fn load_and_resume_translate_pinned_schema_without_private_state() {
 }
 
 #[tokio::test]
-async fn tools_permissions_and_expiry_validate_without_private_state() {
+async fn tools_permissions_wait_and_withdraw_without_private_state() {
     let _deadline = crate::cli::serve::tests::deadline();
     let mut adapter = Adapter::new().await;
     adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
@@ -2259,10 +2258,20 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         (
             12,
             json!({"outcome":"selected","optionId":"allow_always"}),
-            "decline",
+            "unavailable",
         ),
-        (13, json!({"outcome":"selected"}), "decline"),
-        (14, Value::Null, "decline"),
+        (13, json!({"outcome":"selected"}), "unavailable"),
+        (14, Value::Null, "unavailable"),
+        (
+            15,
+            json!({"outcome":"selected","optionId":"reject_once"}),
+            "unavailable",
+        ),
+        (
+            16,
+            json!({"outcome":"selected","optionId":"unknown"}),
+            "unavailable",
+        ),
     ] {
         adapter.permission(&intent, index).await;
         let request = adapter.next().await;
@@ -2293,13 +2302,18 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         )
         .await
         .unwrap();
-        let Some(serve::server::ClientMessage::Message(Message::Response(response))) =
-            adapter.input.recv().await
-        else {
-            panic!("approval reply")
-        };
-        assert_eq!(response.id, RequestId::Integer(index));
-        assert_eq!(response.result["decision"], decision);
+        match adapter.input.recv().await.unwrap() {
+            serve::server::ClientMessage::Message(Message::Response(response)) => {
+                assert_eq!(response.id, RequestId::Integer(index));
+                assert_eq!(response.result["decision"], decision);
+            }
+            serve::server::ClientMessage::Message(Message::Error(error)) => {
+                assert_eq!(decision, "unavailable");
+                assert_eq!(error.id, Some(RequestId::Integer(index)));
+                assert_eq!(error.error.message, "Approval channel unavailable");
+            }
+            _ => panic!("approval reply"),
+        }
         // Duplicate and unknown IDs cannot resolve another intent.
         for id in [request["id"].clone(), json!(999)] {
             let reply = json!({"jsonrpc":"2.0","id":id,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
@@ -2318,10 +2332,9 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     adapter.permission(&intent, 20).await;
     let permission = adapter.next().await;
     tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(61)).await;
-    let withdrawal = adapter.next().await;
-    assert_eq!(withdrawal["method"], "$/cancel_request");
-    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    tokio::time::advance(Duration::from_secs(3600)).await;
+    tokio::time::resume();
+    assert!(adapter.output.try_recv().is_err());
     let late = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
     translate::input(
         wire::decode(&encode_line(&late).unwrap()).unwrap(),
@@ -2332,29 +2345,59 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     )
     .await
     .unwrap();
-    assert!(adapter.input.try_recv().is_err());
-    tokio::time::resume();
+    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+        adapter.input.recv().await
+    else {
+        panic!("late allow")
+    };
+    assert_eq!(reply.result["decision"], "accept");
     for _ in 0..256 {
         adapter
             .outbound
             .try_send(wire::response(RequestId::Integer(99), json!({})))
             .unwrap();
     }
-    adapter.permission(&intent, 21).await;
-    drop(adapter.events.reserve_many(256).await.unwrap());
-    tokio::time::pause();
-    tokio::time::advance(Duration::from_secs(61)).await;
+    let blocked = adapter.intent(intent.call.clone());
+    adapter.item(&blocked, None).await;
+    adapter.permission(&blocked, 21).await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), adapter.input.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let serve::server::ClientMessage::Message(Message::Error(error)) = reply else {
+        panic!("unsent approval must be unavailable");
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(21)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    assert_eq!(adapter.outbound.capacity(), 0);
+    let late = json!({"jsonrpc":"2.0","id":permission["id"].as_i64().unwrap()+1,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
     for _ in 0..256 {
-        adapter.output.recv().await.unwrap();
+        assert_eq!(adapter.output.recv().await.unwrap()["id"], 99);
     }
-    tokio::time::resume();
+    let update = adapter.next().await;
+    assert_eq!(update["params"]["update"]["sessionUpdate"], "tool_call");
+    assert_eq!(
+        update["params"]["update"]["toolCallId"],
+        blocked.id.to_string()
+    );
+    assert!(adapter.output.try_recv().is_err());
     let fresh = adapter.intent(intent.call.clone());
     adapter.permission(&fresh, 22).await;
     let permission = adapter.next().await;
     assert_eq!(
         permission["params"]["toolCall"]["rawInput"]["id"],
         fresh.id.to_string(),
-        "an unsent expired request must never reach the client"
+        "an unavailable request must free the permission slot"
     );
     let error = json!({"jsonrpc":"2.0","id":permission["id"],"error":{"code":-32603,"message":"Client refused"}});
     translate::input(
@@ -2366,12 +2409,12 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
     )
     .await
     .unwrap();
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("client error denies")
+        panic!("client error is unavailable")
     };
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.id, Some(RequestId::Integer(22)));
     let observation = arany::ToolObservation {
         intent: intent.clone(),
         disposition: arany::ToolDisposition::Uncertain,
@@ -2379,6 +2422,7 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         limit_cause: None,
         output: "````\n<script>data</script>\u{001b}[2J".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -2404,7 +2448,7 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events:Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     adapter
         .respond(json!({"events":events,"nextSince":null}))
@@ -2414,6 +2458,166 @@ async fn tools_permissions_and_expiry_validate_without_private_state() {
         response["error"]["data"]["reason"], "effectUncertain",
         "reconciliation must suppress duplicate Tool phases and preserve uncertainty"
     );
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn closed_permission_output_reports_unavailable_without_a_client_reply() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    adapter.output.close();
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.permission(&intent, 1).await;
+    let reply = tokio::time::timeout(Duration::from_secs(5), adapter.input.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let serve::server::ClientMessage::Message(Message::Error(error)) = reply else {
+        panic!("unavailable permission")
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(1)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    let late = json!({"jsonrpc":"2.0","id":1,"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
+    adapter.close().await;
+}
+
+#[tokio::test]
+async fn blocked_projection_refuses_deferred_event_overflow() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        adapter
+            .outbound
+            .try_send(wire::response(RequestId::Integer(99), json!({})))
+            .unwrap();
+    }
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.item(&intent, None).await;
+    for _ in 0..=serve::OUTBOUND_CAPACITY {
+        adapter
+            .events
+            .send(Message::Notification(Notification {
+                jsonrpc: Default::default(),
+                method: "events/resync".into(),
+                params: None,
+            }))
+            .await
+            .unwrap();
+    }
+    assert!(
+        adapter
+            .worker
+            .await
+            .unwrap()
+            .unwrap_err()
+            .contains("ACP projection queue full")
+    );
+    assert_eq!(adapter.outbound.capacity(), 0);
+}
+
+#[tokio::test]
+async fn blocked_projection_retires_withdrawn_permission_before_accepting_late_answers() {
+    let _deadline = crate::cli::serve::tests::deadline();
+    let mut adapter = Adapter::new().await;
+    adapter.prompt(json!([{"type":"text","text":"Read"}])).await;
+    let intent = adapter.intent(arany::ToolCall::Read {
+        path: "file".into(),
+        offset: None,
+        limit: Some(32),
+    });
+    adapter.permission(&intent, 1).await;
+    let permission = adapter.next().await;
+    assert_eq!(permission["method"], "session/request_permission");
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        adapter
+            .outbound
+            .try_send(wire::response(RequestId::Integer(99), json!({})))
+            .unwrap();
+    }
+    adapter.item(&intent, None).await;
+    adapter
+        .events
+        .send(Message::Notification(Notification {
+            jsonrpc: Default::default(),
+            method: "$/cancel_request".into(),
+            params: Some(json!({"requestId":1})),
+        }))
+        .await
+        .unwrap();
+    adapter.permission(&intent, 2).await;
+    let Some(serve::server::ClientMessage::Message(Message::Error(error))) =
+        adapter.input.recv().await
+    else {
+        panic!("full output refuses the next permission without waiting")
+    };
+    assert_eq!(error.id, Some(RequestId::Integer(2)));
+    assert_eq!(error.error.message, "Approval channel unavailable");
+    let late = json!({"jsonrpc":"2.0","id":permission["id"],"result":{"outcome":{"outcome":"selected","optionId":"allow_once"}}});
+    translate::input(
+        wire::decode(&encode_line(&late).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    assert!(adapter.input.try_recv().is_err());
+    for _ in 0..serve::OUTBOUND_CAPACITY {
+        assert_eq!(adapter.next().await["id"], 99);
+    }
+    let messages = [adapter.next().await, adapter.next().await];
+    let withdrawal = messages
+        .iter()
+        .find(|message| message["method"] == "$/cancel_request")
+        .expect("withdrawal reaches the client after output drains");
+    assert_eq!(withdrawal["params"]["requestId"], permission["id"]);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message["method"] == "session/update")
+    );
+    adapter.permission(&intent, 3).await;
+    let next = adapter.next().await;
+    assert_eq!(next["method"], "session/request_permission");
+    assert_ne!(next["id"], permission["id"]);
+    let reply = json!({"jsonrpc":"2.0","id":next["id"],"result":{"outcome":{"outcome":"selected","optionId":"deny"}}});
+    translate::input(
+        wire::decode(&encode_line(&reply).unwrap()).unwrap(),
+        &adapter.config,
+        &adapter.shared,
+        &adapter.serve,
+        &adapter.outbound,
+    )
+    .await
+    .unwrap();
+    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+        adapter.input.recv().await
+    else {
+        panic!("next permission accepts its own answer")
+    };
+    assert_eq!(reply.id, RequestId::Integer(3));
+    assert_eq!(reply.result["decision"], "decline");
     adapter.close().await;
 }
 
@@ -2661,6 +2865,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         limit_cause: None,
         output: "é`\u{001b}".repeat(64 * 1024),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -2677,13 +2882,13 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         cwd: ".".into(),
     };
     adapter.permission(&big, 100).await;
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("oversized approval denies")
+        panic!("oversized approval is unavailable")
     };
-    assert_eq!(reply.id, RequestId::Integer(100));
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.id, Some(RequestId::Integer(100)));
+    assert_eq!(reply.error.message, "Approval channel unavailable");
     assert!(
         adapter.output.try_recv().is_err(),
         "oversized approval must never be sent"
@@ -2695,12 +2900,12 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
         justification: "untrusted".into(),
     });
     adapter.permission(&unguarded, 101).await;
-    let Some(serve::server::ClientMessage::Message(Message::Response(reply))) =
+    let Some(serve::server::ClientMessage::Message(Message::Error(reply))) =
         adapter.input.recv().await
     else {
-        panic!("human-only approval denies")
+        panic!("human-only approval is unavailable")
     };
-    assert_eq!(reply.result["decision"], "decline");
+    assert_eq!(reply.error.message, "Approval channel unavailable");
     assert!(adapter.output.try_recv().is_err());
     adapter.close().await;
 }
@@ -3439,6 +3644,7 @@ async fn close_cancels_pending_permissions_and_preserves_unknown_effects_without
         limit_cause: None,
         output: "Outcome unknown".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter.item(&intent, Some(&observation)).await;
@@ -3520,6 +3726,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         limit_cause: None,
         output: "Outcome unknown".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     adapter
@@ -3533,7 +3740,7 @@ async fn close_defers_unload_until_tap_loss_reconciliation_recovers_the_uncertai
         .unwrap();
     adapter.events.send(Message::Notification(Notification { jsonrpc:Default::default(),method:"turn/completed".into(),params:Some(json!({"threadId":adapter.session,"turn":{"id":adapter.run,"goalId":arany::GoalId::new(),"status":"failed","items":[],"goal":{"status":"failed"}}})) })).await.unwrap();
     let events: Vec<Value> = [("ToolStarted",json!({"intent":intent})),("ToolFinished",{let mut p=serde_json::to_value(&observation).unwrap();p["checkpoint"]=Value::Null;p})].into_iter().enumerate().map(|(index,(kind,payload))| json!({
-        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":1,"payload":payload,"created_at_ms":0
+        "sequence":index+1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":intent.agent_run_id,"kind":kind,"event_version":arany::test_support::payload_version(kind),"payload":payload,"created_at_ms":0
     })).collect();
     let recover = adapter.request().await;
     assert_eq!(
@@ -3770,7 +3977,7 @@ async fn expiry_during_blocked_reconciliation_drops_the_resumed_completion() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await
@@ -3845,7 +4052,7 @@ async fn reused_client_prompt_id_is_not_consumed_by_expired_blocked_work() {
             id: recover.id,
             result: json!({"events":[{
                 "sequence":1,"session_id":adapter.session,"run_id":adapter.run,"agent_run_id":null,
-                "kind":"MessageCommitted","event_version":1,"payload":{"text":"Late"},"created_at_ms":0
+                "kind":"MessageCommitted","event_version":arany::test_support::payload_version("MessageCommitted"),"payload":{"text":"Late"},"created_at_ms":0
             }],"nextSince":null}),
         }))
         .await
