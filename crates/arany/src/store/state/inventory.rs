@@ -1,4 +1,5 @@
 use crate::private_fs::{self, PrivateDirectory};
+use crate::validate::MAX_PATH_BYTES;
 use cap_std::fs::Dir;
 use std::collections::BTreeSet;
 use std::fs::{File, Metadata};
@@ -12,7 +13,6 @@ use std::time::{Duration, Instant};
 
 const MAX_ENTRIES: usize = 16_384;
 const MAX_DEPTH: usize = 32;
-const MAX_PATH_BYTES: usize = 4096;
 const MAX_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
 static INVENTORY: Mutex<()> = Mutex::new(());

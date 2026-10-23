@@ -1,7 +1,8 @@
 use super::ToolError;
 use super::catalog::string;
 use super::guard::{GuardContext, capture, capture_command, payload, spawn_before};
-use super::types::{CommandResult, ToolCall, valid_name, valid_relative};
+use super::types::{CommandResult, ToolCall};
+use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
 
 const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
@@ -23,7 +24,7 @@ pub(super) fn valid(call: &ToolCall) -> bool {
         } => {
             (valid_name(program)
                 || (std::path::Path::new(program).is_absolute()
-                    && program.len() <= 4096
+                    && program.len() <= MAX_PATH_BYTES
                     && !program.chars().any(char::is_control)))
                 && valid_command("host", args, cwd)
                 && (1..=512).contains(&justification.len())

@@ -3,6 +3,7 @@ use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
 use crate::tools::{ToolError, ToolRuntime};
+use crate::validate::MAX_PATH_BYTES;
 use cap_std::fs::MetadataExt as _;
 use core_foundation::{base::CFType, dictionary::CFDictionary, string::CFString};
 use nix::libc;
@@ -682,7 +683,7 @@ fn attachments(bytes: &[u8], root: &Path) -> Result<Vec<Attachment>, ToolError> 
             .downcast::<CFString>()
             .ok_or(ToolError::ProtectionUnavailable)?
             .to_string();
-        if image_path.len() > 4096 {
+        if image_path.len() > MAX_PATH_BYTES {
             return Err(ToolError::Limit);
         }
         let Some(name) = STORAGE_NAMES

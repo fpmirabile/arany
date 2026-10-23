@@ -143,7 +143,7 @@ impl Event {
             } => {
                 if skill
                     .as_deref()
-                    .is_some_and(|name| !crate::tools::types::valid_name(name))
+                    .is_some_and(|name| !crate::validate::valid_name(name))
                 {
                     return Err(ReplayError::InvalidPayload);
                 }
@@ -206,7 +206,7 @@ impl Event {
                     (AgentRole::Child, Some(_))
                         if (1..=8).contains(ordinal)
                             && definition.as_ref().is_none_or(|name| {
-                                name.len() <= 64 && crate::tools::types::valid_name(name)
+                                name.len() <= 64 && crate::validate::valid_name(name)
                             }) =>
                     {
                         if (matches!(*grant, Some(ChildGrant::EditOnly { .. })))

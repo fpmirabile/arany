@@ -1,11 +1,10 @@
 use super::{ConfigError, Decision, MAX_CONFIG_BYTES};
 use crate::store::{RecordKind, StateRoot, StoreError};
-use crate::tools::{ToolCall, types::digest};
+use crate::tools::ToolCall;
+use crate::validate::{MAX_PATH_BYTES, digest};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use std::path::Path;
-
-const MAX_PATH_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum TypedGitPrefix {

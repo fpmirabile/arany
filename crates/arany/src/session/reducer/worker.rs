@@ -479,7 +479,7 @@ fn validate_request(
         || !definition.editor()
         || definition.background && request.mode != WorkerMode::Background
         || request.definition_digest
-            != crate::tools::types::digest(
+            != crate::validate::digest(
                 &serde_json::to_vec(definition).map_err(|_| ReplayError::InvalidPayload)?,
             )
         || request.max_turns > definition.max_turns
@@ -1541,7 +1541,7 @@ pub(super) fn apply(
                 || p.chunks != s.data.chunks
                 || sequence != s.data.seal_sequence
                 || p.bytes.len() != s.data.bytes as usize
-                || crate::tools::types::digest(&p.bytes) != s.data.sha256
+                || crate::validate::digest(&p.bytes) != s.data.sha256
             {
                 return Err(ReplayError::InvalidTransition);
             }
@@ -1701,7 +1701,7 @@ pub(super) fn apply(
             let released = w.released.ok_or(ReplayError::InvalidTransition)?;
             let criterion = &w.pins.request.criterion;
             if v.criterion_digest
-                != crate::tools::types::digest(
+                != crate::validate::digest(
                     &serde_json::to_vec(criterion).map_err(|_| ReplayError::InvalidPayload)?,
                 )
                 || w.verification

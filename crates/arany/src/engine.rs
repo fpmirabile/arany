@@ -2037,7 +2037,7 @@ impl Engine {
             return Err(crate::tools::ToolError::ChangedInput.into());
         }
         if request.skill.as_ref().is_some_and(|name| {
-            !crate::tools::types::valid_name(name)
+            !crate::validate::valid_name(name)
                 || tools
                     .as_ref()
                     .is_none_or(|runtime| !runtime.allows_skill(name))

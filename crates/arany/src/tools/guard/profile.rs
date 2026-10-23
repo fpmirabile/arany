@@ -1,4 +1,5 @@
-use crate::tools::{ToolError, types::digest};
+use crate::tools::ToolError;
+use crate::validate::digest;
 use nix::libc;
 use seccompiler::{
     BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition, SeccompFilter,
