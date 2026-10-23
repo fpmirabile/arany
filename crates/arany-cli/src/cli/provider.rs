@@ -7,8 +7,9 @@ use crate::accounts::{chatgpt, credentials};
 use crate::presentation::{escape_terminal, format_tokens};
 use arany::{
     CustomProfile, CustomProfileError, Effort, ModelEntry, NativeApiCredentials, NativeCheckError,
-    NativeCheckRequest, RunCancellation, StateRoot, check_custom_profile_with_cancellation,
-    check_native_model, list_native_models_with_credentials, validate_native_model_id,
+    NativeCheckRequest, ProviderKind, RunCancellation, StateRoot,
+    check_custom_profile_with_cancellation, check_native_model,
+    list_native_models_with_credentials, validate_native_model_id,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -57,7 +58,7 @@ enum ProviderAction {
 pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
     match args.action {
         ProviderAction::Logout { profile } => {
-            if profile != "chatgpt" {
+            if ProviderKind::parse(&profile) != Some(ProviderKind::ChatGpt) {
                 return Err("logout is available only for the selected ChatGPT account".into());
             }
             let workspace = std::env::current_dir()
@@ -88,7 +89,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             saved_account,
             profile,
         } => {
-            if profile == "chatgpt" {
+            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
                 if saved_account || selected_state_dir.is_some() {
                     return Err(
                         "ChatGPT models use the selected user account; omit --saved-account and --state-dir"
@@ -107,8 +108,8 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     success: true,
                 });
             }
-            let (models, exact_custom) = match profile.as_str() {
-                "openai" | "anthropic" => {
+            let (models, exact_custom) = match ProviderKind::parse(&profile) {
+                Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
                     let key = if saved_account {
                         let account = credentials::load()
                             .await
@@ -129,7 +130,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                         .map_err(|error| error.to_string())?;
                     (models, false)
                 }
-                _ => {
+                Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
                     if saved_account {
                         return Err("--saved-account requires a native Provider".into());
                     }
@@ -168,7 +169,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             accept_cost,
             saved_account,
         } => {
-            if profile == "chatgpt" {
+            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
                 if saved_account || selected_state_dir.is_some() {
                     return Err(
                         "ChatGPT checks use the selected user account; omit --saved-account and --state-dir"
@@ -194,7 +195,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     success: true,
                 });
             }
-            let native = matches!(profile.as_str(), "openai" | "anthropic");
+            let native = ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native_api);
             if native && !accept_cost {
                 return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
             }

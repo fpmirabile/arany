@@ -3,7 +3,9 @@ use crate::terminal::{AttachedTerminal, Composer, ProfileSelection, TerminalInpu
 use arany::permissions::{
     Decision, PermissionSettings, SettingsError, TypedGitPrefix, TypedPrefixEdit,
 };
-use arany::{ApprovalMode, StateRoot, WorkspacePermissions, native_protection_supported};
+use arany::{
+    ApprovalMode, ProviderKind, StateRoot, WorkspacePermissions, native_protection_supported,
+};
 use std::path::Path;
 
 pub(super) enum PermissionChoice {
@@ -46,7 +48,10 @@ pub(super) fn refresh_files(workspace: &Path, composer: &mut Composer) -> Option
 }
 
 pub(super) fn supports_tools(profile: Option<&str>) -> bool {
-    native_protection_supported() && matches!(profile, Some("openai" | "anthropic" | "chatgpt"))
+    native_protection_supported()
+        && profile
+            .and_then(ProviderKind::parse)
+            .is_some_and(ProviderKind::is_native)
 }
 
 pub(super) fn refresh_mode(

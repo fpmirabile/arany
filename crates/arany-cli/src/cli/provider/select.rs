@@ -2,7 +2,7 @@ use crate::accounts::{chatgpt, credentials};
 use crate::cli::native_run_key_from_env;
 use arany::{
     AnthropicProvider, CustomProvider, Effort, NativeApiCredentials, OpenAiProvider, Provider,
-    StateRoot, resolve_native_effort_for_run, validate_native_model_id,
+    ProviderKind, StateRoot, resolve_native_effort_for_run, validate_native_model_id,
 };
 use std::{
     path::{Path, PathBuf},
@@ -21,12 +21,13 @@ pub(crate) enum ProviderArg {
 
 impl ProviderArg {
     pub(crate) fn profile_label(&self) -> String {
-        match self {
-            Self::Openai => "openai".into(),
-            Self::Anthropic => "anthropic".into(),
-            Self::Chatgpt => "chatgpt".into(),
-            Self::Custom(name) => format!("custom:{name}"),
-        }
+        let provider = match self {
+            Self::Openai => ProviderKind::OpenAi,
+            Self::Anthropic => ProviderKind::Anthropic,
+            Self::Chatgpt => ProviderKind::ChatGpt,
+            Self::Custom(name) => return format!("custom:{name}"),
+        };
+        provider.native_name().expect("native Provider name").into()
     }
 }
 
@@ -34,11 +35,11 @@ impl FromStr for ProviderArg {
     type Err = &'static str;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value {
-            "openai" => Ok(Self::Openai),
-            "anthropic" => Ok(Self::Anthropic),
-            "chatgpt" => Ok(Self::Chatgpt),
-            _ => {
+        match ProviderKind::parse(value) {
+            Some(ProviderKind::OpenAi) => Ok(Self::Openai),
+            Some(ProviderKind::Anthropic) => Ok(Self::Anthropic),
+            Some(ProviderKind::ChatGpt) => Ok(Self::Chatgpt),
+            Some(ProviderKind::Custom) | None => {
                 let name = value.strip_prefix("custom:").ok_or("invalid Provider")?;
                 if !arany::valid_profile_name(name) {
                     return Err("invalid custom Provider name");
@@ -113,14 +114,14 @@ pub(crate) struct Selection<'a> {
 }
 
 pub(crate) fn validate_local_selection(selection: Selection<'_>) -> Result<(), &'static str> {
-    match selection.profile {
-        "openai" | "anthropic" => {
+    match ProviderKind::parse(selection.profile) {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
             resolve_native_effort_for_run(selection.profile, selection.model, selection.effort)
                 .map_err(
                     |_| "invalid native model/effort; choose a model and effort with /model",
                 )?;
         }
-        "chatgpt" => {
+        Some(ProviderKind::ChatGpt) => {
             if selection.account_id.is_none() {
                 return Err("select a ChatGPT account with /setup first");
             }
@@ -128,7 +129,7 @@ pub(crate) fn validate_local_selection(selection: Selection<'_>) -> Result<(), &
                 return Err("ChatGPT requires a model effort; use /model");
             }
         }
-        _ => {}
+        Some(ProviderKind::Custom) | None => {}
     }
     Ok(())
 }
@@ -149,8 +150,8 @@ async fn select_provider_inner(
     selection: Selection<'_>,
 ) -> Result<Arc<dyn Provider>, SelectionError> {
     validate_local_selection(selection).map_err(SelectionError::InvalidLocalSelection)?;
-    match selection.profile {
-        "openai" => {
+    match ProviderKind::parse(selection.profile) {
+        Some(ProviderKind::OpenAi) => {
             let key = native_key(selection.profile, selection.account_id)
                 .await?
                 .into_api_key();
@@ -170,7 +171,7 @@ async fn select_provider_inner(
             .map_err(|_| SelectionError::OpenAiKeyUnavailable)?;
             Ok(Arc::new(provider))
         }
-        "anthropic" => {
+        Some(ProviderKind::Anthropic) => {
             let credentials = native_key(selection.profile, selection.account_id).await?;
             let provider = AnthropicProvider::from_credentials_with_effort(
                 selection.model.to_owned(),
@@ -181,7 +182,7 @@ async fn select_provider_inner(
             .map_err(|_| SelectionError::AnthropicKeyUnavailable)?;
             Ok(Arc::new(provider))
         }
-        "chatgpt" => {
+        Some(ProviderKind::ChatGpt) => {
             let account_id = selection
                 .account_id
                 .ok_or(SelectionError::ChatGptAccountRequired)?;
@@ -198,7 +199,7 @@ async fn select_provider_inner(
             .map_err(SelectionError::ChatGpt)?;
             Ok(Arc::new(provider))
         }
-        _ => {
+        Some(ProviderKind::Custom) | None => {
             if selection.account_id.is_some() {
                 return Err(SelectionError::SavedAccountRequiresNative);
             }
@@ -236,10 +237,12 @@ pub(crate) async fn authenticate(
     effort: Option<Effort>,
     account_id: Option<Uuid>,
 ) -> bool {
-    match profile {
-        "openai" | "anthropic" => native_key(profile, account_id).await.is_ok(),
-        "chatgpt" => chatgpt::authenticate(account_id).await.is_ok(),
-        _ => {
+    match ProviderKind::parse(profile) {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
+            native_key(profile, account_id).await.is_ok()
+        }
+        Some(ProviderKind::ChatGpt) => chatgpt::authenticate(account_id).await.is_ok(),
+        Some(ProviderKind::Custom) | None => {
             let Some(name) = profile.strip_prefix("custom:") else {
                 return false;
             };
@@ -262,11 +265,15 @@ pub(crate) async fn select_env_provider(
 ) -> Result<Arc<dyn Provider>, SelectionError> {
     let provider: Arc<dyn Provider> = match provider {
         ProviderArg::Openai => Arc::new(
-            native_run_key_from_env("openai", model, effort)
-                .and_then(|key| {
-                    OpenAiProvider::from_api_key_with_effort(model.to_owned(), effort, key)
-                })
-                .map_err(|_| SelectionError::OpenAiEnvKeyUnavailable)?,
+            native_run_key_from_env(
+                ProviderKind::OpenAi
+                    .native_name()
+                    .expect("native Provider name"),
+                model,
+                effort,
+            )
+            .and_then(|key| OpenAiProvider::from_api_key_with_effort(model.to_owned(), effort, key))
+            .map_err(|_| SelectionError::OpenAiEnvKeyUnavailable)?,
         ),
         ProviderArg::Anthropic => Arc::new(
             AnthropicProvider::from_env_with_effort(model.to_owned(), effort).map_err(|error| {

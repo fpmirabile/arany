@@ -13,7 +13,7 @@ use crate::accounts::chatgpt;
 use crate::cli::provider::{roster::SelectedRoster, select::ProviderArg};
 use crate::terminal::{AttachedTerminal, Composer, Submission, TerminalMode};
 use arany::{
-    Engine, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry,
+    Engine, ProviderKind, SessionDefaults, SessionId, SessionView, StateRoot, Telemetry,
     native_protection_supported,
 };
 use std::{io::Write, ops::ControlFlow, str::FromStr};
@@ -179,7 +179,13 @@ impl Startup {
     }
 
     fn restore_chatgpt_account(&mut self) {
-        if self.admission.defaults.provider.as_deref() == Some("chatgpt")
+        if self
+            .admission
+            .defaults
+            .provider
+            .as_deref()
+            .and_then(ProviderKind::parse)
+            == Some(ProviderKind::ChatGpt)
             && self.admission.defaults.account_id.is_none()
         {
             match chatgpt::selected_account_id() {
@@ -324,7 +330,13 @@ impl Startup {
 
     async fn preflight_new(&mut self) -> Result<(), String> {
         if self.admission.prompt.is_some()
-            && self.admission.defaults.provider.as_deref() == Some("chatgpt")
+            && self
+                .admission
+                .defaults
+                .provider
+                .as_deref()
+                .and_then(ProviderKind::parse)
+                == Some(ProviderKind::ChatGpt)
             && self.admission.defaults.model.is_none()
         {
             return Err(
@@ -458,7 +470,13 @@ impl Startup {
         if self.setup_notice.is_some() {
             self.setup_notice.take()
         } else if self.admission.setup_requested
-            && self.admission.defaults.provider.as_deref() == Some("chatgpt")
+            && self
+                .admission
+                .defaults
+                .provider
+                .as_deref()
+                .and_then(ProviderKind::parse)
+                == Some(ProviderKind::ChatGpt)
             && self.admission.defaults.model.is_none()
         {
             Some("ChatGPT account saved; use /model to select a model and effort".into())
