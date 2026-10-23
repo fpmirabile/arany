@@ -497,6 +497,24 @@ pub struct ProfileSelection<'a> {
 }
 
 impl AttachedTerminal {
+    fn owned(&mut self) -> &mut Terminal<TerminalBackend> {
+        Self::owned_terminal(&mut self.terminal)
+    }
+
+    fn owned_terminal(
+        terminal: &mut Option<Terminal<TerminalBackend>>,
+    ) -> &mut Terminal<TerminalBackend> {
+        terminal.as_mut().expect("owned terminal")
+    }
+
+    fn reader(&mut self) -> &mut TerminalReader {
+        Self::active_reader(&mut self.input)
+    }
+
+    fn active_reader(input: &mut Option<TerminalReader>) -> &mut TerminalReader {
+        input.as_mut().expect("active terminal input")
+    }
+
     pub fn set_waiting_tool(&mut self, id: Option<uuid::Uuid>) {
         self.waiting_tool = id;
     }
@@ -587,12 +605,7 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let mut progress = view::PermissionFrameProgress { more: true, page };
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
+        let width = self.owned().size()?.width;
         let height = view::permission_height(&lines, width, false, profile_start);
         self.draw_frame(height, |frame, area| {
             if area.width >= 16 && area.height >= 8 {
@@ -631,11 +644,7 @@ impl AttachedTerminal {
         Ok((progress.more, progress.page))
     }
     pub async fn discard_approval_typeahead(&mut self) -> Result<(), TerminalError> {
-        self.input
-            .as_mut()
-            .expect("active terminal input")
-            .discard_typeahead()
-            .await
+        self.reader().discard_typeahead().await
     }
 
     pub fn draw_tool_approval(
@@ -660,11 +669,11 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io)?;
             return Ok(false);
         }
-        let screen = self.terminal.as_mut().expect("owned terminal").size()?;
+        let screen = self.owned().size()?;
         let height = view::tool_approval_height(&lines, &choices, screen.width).min(screen.height);
         self.prepare_frame_height(height)?;
         let palette = self.palette();
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = Self::owned_terminal(&mut self.terminal);
         let history = &mut self.history;
         let mut more = true;
         let mut history_area = None;
@@ -838,7 +847,7 @@ impl AttachedTerminal {
         let clipboard_ready = self.input.as_ref().is_some_and(TerminalReader::paste_ready);
         #[cfg(unix)]
         let input = tokio::select! {
-            input = self.input.as_mut().expect("active terminal input").recv() => input?,
+            input = Self::active_reader(&mut self.input).recv() => input?,
             signal = self.interrupt.recv() => {
                 signal.ok_or(TerminalError::InputClosed)?;
                 TerminalInput::Interrupt
@@ -868,7 +877,7 @@ impl AttachedTerminal {
         };
         #[cfg(not(unix))]
         let input = tokio::select! {
-            input = self.input.as_mut().expect("active terminal input").recv() => input?,
+            input = Self::active_reader(&mut self.input).recv() => input?,
             paste = async {
                 match self.clipboard.as_mut() {
                     Some(read) => read.recv().await,
@@ -945,7 +954,7 @@ impl AttachedTerminal {
     ) -> Result<(), TerminalError> {
         self.history_adjacent = true;
         let palette = self.palette();
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = self.owned();
         let width = terminal.get_frame().area().width;
         let rows = history::display_rows(kind, text, usize::from(width), skill);
         let viewport = terminal.get_frame().area();
@@ -980,14 +989,7 @@ impl AttachedTerminal {
             return Ok(());
         }
         if self.native.session != Some(session.id) {
-            let width = usize::from(
-                self.terminal
-                    .as_mut()
-                    .expect("owned terminal")
-                    .get_frame()
-                    .area()
-                    .width,
-            );
+            let width = usize::from(self.owned().get_frame().area().width);
             let projection = history::classic_projection(session, width);
             self.native = NativeTranscript {
                 session: Some(session.id),
@@ -1011,7 +1013,7 @@ impl AttachedTerminal {
             }
             if !self.native.objectives.contains(&run.id) {
                 if self.native.objectives.is_empty() {
-                    let terminal = self.terminal.as_mut().expect("owned terminal");
+                    let terminal = self.owned();
                     let area = terminal.get_frame().area();
                     if history_top_padding(terminal.size()?.height.saturating_sub(area.height)) > 0
                     {
@@ -1085,10 +1087,7 @@ impl AttachedTerminal {
         if let Some(mut alternate) = self.alternate.take() {
             alternate.release()?;
         }
-        self.terminal
-            .as_mut()
-            .expect("owned terminal")
-            .show_cursor()?;
+        self.owned().show_cursor()?;
         // Raw mode turns off output processing, so the text carries its own carriage returns.
         let mut output = io::stderr().lock();
         output.write_all(text.as_bytes())?;
@@ -1104,7 +1103,7 @@ impl AttachedTerminal {
         self.scrollback_dump = false;
         self.pointer_modes = pointer_modes(self.mode, false, self.pointer.mouse.effective())?;
         // A Fullscreen resize clears and invalidates the frame; `Terminal::clear` would query the cursor.
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = self.owned();
         let area = Rect::from((ratatui::layout::Position::ORIGIN, terminal.size()?));
         terminal.resize(area)?;
         terminal.backend_mut().set_area(area);
@@ -1429,10 +1428,7 @@ impl AttachedTerminal {
     }
 
     pub fn discard_draft_input(&mut self) {
-        self.input
-            .as_mut()
-            .expect("active terminal input")
-            .reset_draft();
+        self.reader().reset_draft();
     }
 
     pub fn take_paste(&mut self) -> Result<String, &'static str> {
@@ -1496,9 +1492,7 @@ impl AttachedTerminal {
         match composer.insert_paste(&text)? {
             ComposerEdit::AtCapacity => Err("paste is too large; paste a smaller section"),
             edit => {
-                self.input
-                    .as_mut()
-                    .expect("active terminal input")
+                self.reader()
                     .restore_input_capacity(composer.input_capacity())
                     .expect("admitted Composer input capacity");
                 self.clipboard_preview = self.is_linear() && edit == ComposerEdit::Changed;
@@ -1508,9 +1502,7 @@ impl AttachedTerminal {
     }
 
     pub fn restore_draft_input(&mut self, capacity: usize) -> Result<(), TerminalError> {
-        self.input
-            .as_mut()
-            .expect("active terminal input")
+        self.reader()
             .restore_input_capacity(capacity)
             .map_err(TerminalError::Io)
     }
@@ -1562,11 +1554,7 @@ impl AttachedTerminal {
         resumed.agent_panel = panel;
         resumed.help_selected = help_selected;
         resumed.usage_panel = usage_panel;
-        resumed
-            .input
-            .as_mut()
-            .expect("active terminal input")
-            .restore_input_capacity(input_capacity)?;
+        resumed.reader().restore_input_capacity(input_capacity)?;
         self.replace_released(resumed);
         if reading_panel {
             self.transcript_open = true;
@@ -1602,20 +1590,14 @@ impl AttachedTerminal {
     }
 
     fn prepare_frame(&mut self) -> Result<(), TerminalError> {
-        let height = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .get_frame()
-            .area()
-            .height;
+        let height = self.owned().get_frame().area().height;
         self.prepare_frame_height(height)
     }
 
     fn prepare_frame_height(&mut self, height: u16) -> Result<(), TerminalError> {
         // A dialog such as a Tool approval needs the screen, so it ends a scrollback dump.
         self.end_scrollback_dump()?;
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = Self::owned_terminal(&mut self.terminal);
         if self.mode == TerminalMode::Classic {
             let offset = terminal.backend().cursor_offset();
             let before = terminal.get_frame().area();
@@ -1646,7 +1628,7 @@ impl AttachedTerminal {
         render: impl FnOnce(&mut ratatui::Frame<'_>, Rect),
     ) -> Result<(), TerminalError> {
         self.prepare_frame_height(height)?;
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = self.owned();
         terminal.draw(|frame| render(frame, frame.area()))?;
         let area = terminal.get_frame().area();
         terminal.backend_mut().set_area(area);
@@ -1666,11 +1648,7 @@ impl AttachedTerminal {
         if self.dialog_armed {
             return Ok(false);
         }
-        self.input
-            .as_mut()
-            .expect("active terminal input")
-            .discard_typeahead()
-            .await?;
+        self.reader().discard_typeahead().await?;
         self.dialog_armed = true;
         if let Some(linear) = &mut self.linear {
             linear.arm(&mut io::stderr())?;
@@ -1688,7 +1666,7 @@ impl AttachedTerminal {
         let palette = self.palette();
         let session = session.filter(|_| self.mode == TerminalMode::Fullscreen);
         let history = &mut self.history;
-        let terminal = self.terminal.as_mut().expect("owned terminal");
+        let terminal = Self::owned_terminal(&mut self.terminal);
         let mut area = Rect::default();
         let classic = self.mode == TerminalMode::Classic;
         let mut history_area = None;
@@ -1754,10 +1732,7 @@ impl AttachedTerminal {
         });
         let cue = self.selection_cue.clone();
         let notice = notice.or_else(|| cue.as_deref().map(TerminalNotice::Transient));
-        let screen = Rect::from((
-            ratatui::layout::Position::ORIGIN,
-            self.terminal.as_mut().expect("owned terminal").size()?,
-        ));
+        let screen = Rect::from((ratatui::layout::Position::ORIGIN, self.owned().size()?));
         if let Some((label, text, scroll)) = composer.paste_detail() {
             let palette = self.palette();
             return self.draw_frame(screen.height, |frame, area| {
@@ -2013,12 +1988,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
+        let width = self.owned().size()?.width;
         self.draw_frame(if width < 20 { 8 } else { 7 }, |frame, area| {
             draw_setup_frame(
                 frame,
@@ -2048,12 +2018,7 @@ impl AttachedTerminal {
                 .map_err(TerminalError::Io);
         }
         let palette = self.palette();
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
+        let width = self.owned().size()?.width;
         self.draw_frame(if width < 20 { 8 } else { 7 }, |frame, area| {
             draw_setup_text_frame(frame, area, title, instruction, draft, notice, palette)
         })?;
@@ -2123,12 +2088,7 @@ impl AttachedTerminal {
         let palette = self.palette();
         let mut has_more = false;
         let mut visible = false;
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
+        let width = self.owned().size()?.width;
         let height = view::setup_warning_height(warning, width);
         self.draw_frame(height, |frame, area| {
             visible = area.width >= 16 && area.height >= 8;
@@ -2321,12 +2281,7 @@ impl AttachedTerminal {
         }
         let palette = self.palette();
         let armed = self.dialog_armed;
-        let width = self
-            .terminal
-            .as_mut()
-            .expect("owned terminal")
-            .size()?
-            .width;
+        let width = self.owned().size()?.width;
         let max_rows = if self.mode == TerminalMode::Classic {
             view::SELECTOR_ROWS
         } else {
