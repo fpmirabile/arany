@@ -212,6 +212,25 @@ impl From<ReplayError> for StoreError {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionKind {
+    Operation,
+    // Reserve the objective and image envelopes.
+    RunStart,
+    // The allowance budgets its own sealed-data chunks, so it is not headroom for later Events.
+    SealedData,
+}
+
+impl AdmissionKind {
+    pub(crate) fn for_chunks(chunks: usize) -> Self {
+        if chunks > 0 {
+            Self::SealedData
+        } else {
+            Self::Operation
+        }
+    }
+}
+
 enum Request {
     Check {
         op: Box<CheckOp>,
@@ -221,12 +240,11 @@ enum Request {
         session_id: SessionId,
         reply: oneshot::Sender<Result<String, crate::supervisor::CorpusError>>,
     },
-    AdmitOperation {
+    Admit {
         session_id: SessionId,
         event_slots: usize,
         tool_observations: usize,
-        run_start: bool,
-        sealed_data: bool,
+        kind: AdmissionKind,
         reply: oneshot::Sender<Result<(), StoreError>>,
     },
     Append {
@@ -362,24 +380,22 @@ impl Store {
                 let mut hot_session = None::<HotSession>;
                 while let Some(request) = receiver.blocking_recv() {
                     match request {
-                        Request::AdmitOperation {
+                        Request::Admit {
                             session_id,
                             event_slots,
                             tool_observations,
-                            run_start,
-                            sealed_data,
+                            kind,
                             reply,
                         } => {
                             let result = if read_only {
                                 Err(StoreError::ReadOnly)
                             } else {
-                                journal::admit_operation(
+                                journal::admit(
                                     &mut connection,
                                     session_id,
                                     event_slots,
                                     tool_observations,
-                                    run_start,
-                                    sealed_data,
+                                    kind,
                                 )
                             };
                             let _ = reply.send(result);
@@ -698,50 +714,18 @@ impl Store {
         self.call(|reply| Request::Load { session_id, reply }).await
     }
 
-    pub(crate) async fn admit_operation(
+    pub(crate) async fn admit(
         &self,
         session_id: SessionId,
         event_slots: usize,
         tool_observations: usize,
+        kind: AdmissionKind,
     ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, tool_observations, false, false)
-            .await
-    }
-
-    // The allowance budgets its own sealed-data chunks, so it is not headroom for later Events.
-    pub(crate) async fn admit_sealed_data(
-        &self,
-        session_id: SessionId,
-        event_slots: usize,
-        tool_observations: usize,
-    ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, tool_observations, false, true)
-            .await
-    }
-
-    // Reserve objective and image envelopes before the first GoalStarted and MessageAccepted.
-    pub(crate) async fn admit_run_start(
-        &self,
-        session_id: SessionId,
-        event_slots: usize,
-    ) -> Result<(), StoreError> {
-        self.admit(session_id, event_slots, 0, true, false).await
-    }
-
-    async fn admit(
-        &self,
-        session_id: SessionId,
-        event_slots: usize,
-        tool_observations: usize,
-        run_start: bool,
-        sealed_data: bool,
-    ) -> Result<(), StoreError> {
-        self.call(|reply| Request::AdmitOperation {
+        self.call(|reply| Request::Admit {
             session_id,
             event_slots,
             tool_observations,
-            run_start,
-            sealed_data,
+            kind,
             reply,
         })
         .await
