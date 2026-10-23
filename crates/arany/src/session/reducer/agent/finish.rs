@@ -1,7 +1,14 @@
 use super::super::{AgentStatus, RunView, SessionView, active_run, active_run_goal, worker};
 use crate::session::events::{
-    AgentDisposition, AgentRole, Event, ProviderCallDisposition, ReplayError,
+    AgentDisposition, AgentRole, AgentRunId, Event, ProviderCallDisposition, ReplayError,
 };
+
+struct Finish<'a> {
+    agent_run_id: AgentRunId,
+    disposition: AgentDisposition,
+    summary: &'a Option<String>,
+    result: &'a Option<String>,
+}
 
 pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), ReplayError> {
     let Event::AgentFinished {
@@ -29,7 +36,13 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
         .iter()
         .position(|agent| agent.id == *agent_run_id)
         .ok_or(ReplayError::InvalidTransition)?;
-    validate_finish(run, index, event, over_token_cap)?;
+    let finish = Finish {
+        agent_run_id: *agent_run_id,
+        disposition: *disposition,
+        summary,
+        result,
+    };
+    validate_finish(run, index, &finish, over_token_cap)?;
     let agent = &mut run.agents[index];
     agent.status = match disposition {
         AgentDisposition::StoppedByHook => AgentStatus::StoppedByHook,
@@ -45,23 +58,14 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
 fn validate_finish(
     run: &RunView,
     index: usize,
-    event: &Event,
+    finish: &Finish<'_>,
     over_token_cap: bool,
 ) -> Result<(), ReplayError> {
-    let Event::AgentFinished {
-        disposition,
-        summary,
-        result,
-        ..
-    } = event
-    else {
-        return Err(ReplayError::InvalidTransition);
-    };
     if run.agents[index].status != AgentStatus::Active {
         return Err(ReplayError::InvalidTransition);
     }
     if run.agents[index].role == AgentRole::Primary
-        && *disposition == AgentDisposition::Finished
+        && finish.disposition == AgentDisposition::Finished
         && run
             .agents
             .iter()
@@ -70,13 +74,16 @@ fn validate_finish(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if result.as_deref().is_some_and(|text| {
-        summary.as_deref() != Some(crate::session::answer_summary(text).as_str())
+    if finish.result.as_deref().is_some_and(|text| {
+        finish.summary.as_deref() != Some(crate::session::answer_summary(text).as_str())
     }) {
         return Err(ReplayError::InvalidTransition);
     }
     if run.agents[index].role == AgentRole::Child
-        && result.as_ref().is_some_and(|text| text.len() > 16 * 1024)
+        && finish
+            .result
+            .as_ref()
+            .is_some_and(|text| text.len() > 16 * 1024)
     {
         return Err(ReplayError::InvalidTransition);
     }
@@ -85,7 +92,7 @@ fn validate_finish(
             .tools
             .iter()
             .any(|tool| tool.observation.is_none())
-            || *disposition == AgentDisposition::Finished
+            || finish.disposition == AgentDisposition::Finished
                 && run.agents[index].tools.iter().any(|tool| {
                     tool.observation
                         .as_ref()
@@ -94,7 +101,7 @@ fn validate_finish(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if *disposition == AgentDisposition::Finished
+    if finish.disposition == AgentDisposition::Finished
         && run.tools.iter().any(|tool| {
             tool.observation.is_none()
                 || tool
@@ -105,26 +112,17 @@ fn validate_finish(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    validate_completion(run, index, event, over_token_cap)?;
+    validate_completion(run, index, finish, over_token_cap)?;
     Ok(())
 }
 
 fn validate_completion(
     run: &RunView,
     index: usize,
-    event: &Event,
+    finish: &Finish<'_>,
     over_token_cap: bool,
 ) -> Result<(), ReplayError> {
-    let Event::AgentFinished {
-        agent_run_id,
-        disposition,
-        result,
-        ..
-    } = event
-    else {
-        return Err(ReplayError::InvalidTransition);
-    };
-    if *disposition == AgentDisposition::Finished
+    if finish.disposition == AgentDisposition::Finished
         && run.agents[index].provider_calls.last().is_none_or(|call| {
             call.disposition != ProviderCallDisposition::Finished
                 || call.phase == crate::provider::AgentPhase::ToolReview
@@ -132,33 +130,35 @@ fn validate_completion(
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if *disposition == AgentDisposition::Finished
+    if finish.disposition == AgentDisposition::Finished
         && (!run.hooks_settled()
-            || run.stop_blocked(*agent_run_id)
+            || run.stop_blocked(finish.agent_run_id)
             || run.hook_stop_reason().is_some())
     {
         return Err(ReplayError::InvalidTransition);
     }
-    if *disposition == AgentDisposition::Finished && over_token_cap {
+    if finish.disposition == AgentDisposition::Finished && over_token_cap {
         return Err(ReplayError::InvalidTransition);
     }
-    if *disposition == AgentDisposition::Finished && run.agents[index].role == AgentRole::Primary {
+    if finish.disposition == AgentDisposition::Finished
+        && run.agents[index].role == AgentRole::Primary
+    {
         let call = run.agents[index].provider_calls.len().saturating_sub(1);
         for chunk in run.display.iter().filter(|chunk| {
             chunk.category == crate::session::events::DisplayCategory::Answer
                 && usize::try_from(chunk.call_index).ok() == Some(call)
         }) {
             let start = chunk.offset as usize;
-            if result.as_ref().is_none_or(|text| {
+            if finish.result.as_ref().is_none_or(|text| {
                 text.get(start..start + chunk.text.len()) != Some(chunk.text.as_str())
             }) {
                 return Err(ReplayError::InvalidTransition);
             }
         }
     }
-    if *disposition == AgentDisposition::StoppedByHook
+    if finish.disposition == AgentDisposition::StoppedByHook
         && (!run.hooks_settled()
-            || (!run.actor_stopped_by_hook(*agent_run_id)
+            || (!run.actor_stopped_by_hook(finish.agent_run_id)
                 && run.agents[index].role != AgentRole::Primary)
             || run.hook_stop_reason().is_none())
     {

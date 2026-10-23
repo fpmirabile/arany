@@ -192,13 +192,7 @@ pub(super) fn fallback(current: &mut SessionView, event: &Event) -> Result<(), R
     let chain = run
         .provider_chain(*agent_run_id, fallback.role)
         .ok_or(ReplayError::InvalidTransition)?;
-    let previous = run
-        .provider_fallbacks
-        .iter()
-        .rev()
-        .find(|(actor, prior)| actor == agent_run_id && prior.role == fallback.role)
-        .map(|(_, prior)| &prior.to)
-        .unwrap_or(&chain[0]);
+    let previous = run.current_identity(*agent_run_id, fallback.role, &chain[0]);
     let next = chain
         .iter()
         .position(|identity| identity == previous)
