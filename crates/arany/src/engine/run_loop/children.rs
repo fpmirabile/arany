@@ -1,7 +1,8 @@
 use super::stop::{PrimaryEnd, RunFacts, StepEnd, StopCause};
 use super::{
-    Action, ActiveSegment, Admission, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite,
-    RunLoop, call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
+    Action, ActiveSegment, Admission, CallFailure, CallResult, Grant, HookRefusal, LifecycleHook,
+    PrimaryDecision, PrimarySite, RunLoop, call_record, decide_primary_call, primary_admitted,
+    valid_answer, wave_deferred,
 };
 use crate::engine::routing::{CallScope, decide_attempt};
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
@@ -16,6 +17,7 @@ use crate::session::{
 use crate::tools::{ToolCall, ToolContext, ToolRequest, ToolStep};
 use crate::worker::WorkerCause;
 use std::collections::{HashMap, VecDeque};
+use std::ops::ControlFlow;
 use std::time::Duration;
 use tokio::task::{Id, JoinError, JoinSet};
 use tokio::time::Instant;
@@ -89,6 +91,41 @@ struct ChildWave<'a> {
 enum ChildProgress {
     Refilled,
     Settled(Option<AgentDisposition>),
+}
+
+pub(super) enum DelegationProgress {
+    Continue,
+    Settled,
+}
+
+enum ChildSlot {
+    Ready(usize),
+    Retry,
+    Stopped,
+}
+
+enum ResearchSpawn {
+    Ready,
+    Cancelled,
+}
+
+enum SlotDispatch {
+    Started,
+    Stopped,
+}
+
+struct ChildCall {
+    result: CallResult,
+    limits: Option<crate::provider::RateLimits>,
+    valid_response: bool,
+}
+
+type ChildAttempt = ControlFlow<CompletedChildAttempt>;
+
+struct CompletedChildAttempt {
+    index: Option<usize>,
+    active: ActiveChild,
+    result: crate::engine::routing::AttemptResult,
 }
 
 struct EditorCompletion {
@@ -251,8 +288,8 @@ pub(super) enum ChildEnd {
 pub(super) enum StopHookRun {
     Passed,
     Blocked,
-    // The hook was cut off by active time (`budget`) or context room.
-    CutOff { budget: bool },
+    CutOffByActiveTime,
+    CutOffByContext,
     Uncertain,
 }
 
@@ -415,17 +452,22 @@ pub(super) fn decide_child_stop(
         },
         StopHookRun::Passed => ChildStop::Proceed,
         // A cut-off or cancelled hook ends this child only, unless its outcome stops the Run.
-        StopHookRun::CutOff { budget } => ChildStop::End {
+        StopHookRun::CutOffByActiveTime => ChildStop::End {
             disposition: if facts.cancelled {
                 AgentDisposition::Cancelled
             } else {
                 AgentDisposition::Failed
             },
-            cause: if budget {
-                WorkerCause::Budget
+            cause: WorkerCause::Budget,
+            stops_wave: !facts.hook.settled && abort.is_none(),
+        },
+        StopHookRun::CutOffByContext => ChildStop::End {
+            disposition: if facts.cancelled {
+                AgentDisposition::Cancelled
             } else {
-                WorkerCause::ToolFailed
+                AgentDisposition::Failed
             },
+            cause: WorkerCause::ToolFailed,
             stops_wave: !facts.hook.settled && abort.is_none(),
         },
         StopHookRun::Uncertain => ChildStop::End {
@@ -498,15 +540,19 @@ impl ChildQueue {
     }
 
     // Preserve the original abort cause if draining also fails.
-    async fn abort_with(&mut self, error: EngineError) -> EngineError {
-        let _ = self
-            .abort_and_drain()
-            .await
-            .inspect_err(crate::diagnostics::engine_failure);
-        error
+    async fn abort_with<T>(&mut self, outcome: T) -> T {
+        self.abort_and_drain().await;
+        outcome
     }
 
-    async fn abort_and_drain(&mut self) -> Result<(), EngineError> {
+    async fn abort_and_drain(&mut self) {
+        let _ = self
+            .try_abort_and_drain()
+            .await
+            .inspect_err(crate::diagnostics::engine_failure);
+    }
+
+    async fn try_abort_and_drain(&mut self) -> Result<(), EngineError> {
         self.calls.abort_all();
         let deadline = Instant::now() + CANCELLATION_DRAIN;
         while !self.calls.is_empty() {
@@ -584,7 +630,7 @@ impl RunLoop<'_> {
         objectives: Vec<ChildAssignment>,
         agent: Option<String>,
         delegate_turn: ProviderTurn,
-    ) -> super::step::BoxedStep<'a, bool> {
+    ) -> super::step::BoxedStep<'a, Admission<DelegationProgress>> {
         Box::pin(self.run_children_inner(root_request, objectives, agent, delegate_turn))
     }
 
@@ -594,12 +640,12 @@ impl RunLoop<'_> {
         objectives: Vec<ChildAssignment>,
         agent: Option<String>,
         delegate_turn: ProviderTurn,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Admission<DelegationProgress>, EngineError> {
         let count = objectives.len();
         let Some(Spawned {
             mut children,
             parallel,
-            mut active_segment,
+            active_segment: mut segment,
         }) = self
             .spawn_children(count, objectives.iter().any(|a| a.editor.is_some()))
             .await?
@@ -607,43 +653,67 @@ impl RunLoop<'_> {
             return self
                 .settle_primary(PrimaryEnd::Stopped(StopCause::Budget))
                 .await
-                .map(|()| false);
+                .map(|()| Admission::Reserved(DelegationProgress::Settled));
         };
-        let deadline = active_segment
-            .as_ref()
-            .expect("delegation segment")
-            .deadline();
-        let eager = objectives.iter().all(|a| a.editor.is_none());
-        let mut queue = ChildQueue::new(0, parallel);
-        queue.unspawned = objectives.into();
-        queue.definition = agent;
-        queue.tool_allowance =
-            self.ledger()
-                .remaining_calls()
-                .map_or(MAX_CHILD_TOOL_CALLS, |remaining| {
-                    (usize::try_from(remaining)
-                        .unwrap_or(usize::MAX)
-                        .saturating_sub(count + 1)
-                        / 2
-                        / count)
-                        .min(MAX_CHILD_TOOL_CALLS)
-                });
-        if eager
-            && self
+        let deadline = segment.as_ref().expect("delegation segment").deadline();
+        let mut queue = self.child_queue(objectives, agent, parallel);
+        if queue.unspawned.iter().all(|a| a.editor.is_none()) {
+            match self
                 .spawn_researchers(
                     &mut queue,
                     &mut children,
                     root_request,
-                    &mut active_segment,
+                    &mut segment,
                     deadline,
                 )
                 .await?
-        {
-            return self
-                .settle_primary(PrimaryEnd::Stopped(StopCause::Cancelled))
-                .await
-                .map(|()| false);
+            {
+                Admission::Reserved(ResearchSpawn::Ready) => {}
+                Admission::Exhausted => return Ok(Admission::Exhausted),
+                Admission::Reserved(ResearchSpawn::Cancelled) => {
+                    return self
+                        .settle_primary(PrimaryEnd::Stopped(StopCause::Cancelled))
+                        .await
+                        .map(|()| Admission::Reserved(DelegationProgress::Settled));
+                }
+            }
         }
+        Self::append_delegation_turn(root_request, &delegate_turn);
+        let drained = match self
+            .drive_children(
+                &mut children,
+                root_request,
+                &mut queue,
+                &mut segment,
+                deadline,
+            )
+            .await
+        {
+            Ok(Admission::Reserved(drained)) => drained,
+            Ok(Admission::Exhausted) => return Ok(queue.abort_with(Admission::Exhausted).await),
+            Err(error) => return Err(queue.abort_with(error).await),
+        };
+        let continues = self
+            .settle_delegation(
+                root_request,
+                children,
+                segment,
+                drained,
+                queue.primary_step.take(),
+                deadline,
+            )
+            .await?;
+        match queue.capacity_error {
+            Some(error) => Err(error),
+            None => Ok(Admission::Reserved(if continues {
+                DelegationProgress::Continue
+            } else {
+                DelegationProgress::Settled
+            })),
+        }
+    }
+
+    fn append_delegation_turn(root_request: &mut ProviderRequest, delegate_turn: &ProviderTurn) {
         if let Some(tools) = root_request.input.tools.as_mut() {
             tools.steps.push(ToolStep {
                 refusal: None,
@@ -658,33 +728,30 @@ impl RunLoop<'_> {
                 hook_feedback: Default::default(),
             });
         }
-        let driven = self
-            .drive_children(
-                &mut children,
-                root_request,
-                &mut queue,
-                &mut active_segment,
-                deadline,
-            )
-            .await;
-        let drained = match driven {
-            Ok(drained) => drained,
-            Err(error) => return Err(queue.abort_with(error).await),
-        };
-        let continues = self
-            .settle_delegation(
-                root_request,
-                children,
-                active_segment,
-                drained,
-                queue.primary_step.take(),
-                deadline,
-            )
-            .await?;
-        match queue.capacity_error {
-            Some(error) => Err(error),
-            None => Ok(continues),
-        }
+    }
+
+    fn child_queue(
+        &self,
+        objectives: Vec<ChildAssignment>,
+        agent: Option<String>,
+        parallel: usize,
+    ) -> ChildQueue {
+        let count = objectives.len();
+        let mut queue = ChildQueue::new(0, parallel);
+        queue.unspawned = objectives.into();
+        queue.definition = agent;
+        queue.tool_allowance =
+            self.ledger()
+                .remaining_calls()
+                .map_or(MAX_CHILD_TOOL_CALLS, |remaining| {
+                    (usize::try_from(remaining)
+                        .unwrap_or(usize::MAX)
+                        .saturating_sub(count + 1)
+                        / 2
+                        / count)
+                        .min(MAX_CHILD_TOOL_CALLS)
+                });
+        queue
     }
 
     fn settle_delegation<'b>(
@@ -846,21 +913,24 @@ impl RunLoop<'_> {
         root_request: &mut ProviderRequest,
         segment: &mut Option<ActiveSegment>,
         deadline: Instant,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Admission<ResearchSpawn>, EngineError> {
         while !queue.unspawned.is_empty() && !self.controls.cancellation.is_cancelled() {
             let child = match self
                 .spawn_next_child(queue, root_request, segment, deadline)
                 .await
             {
-                Ok(Some(child)) => child,
-                Ok(None) => break,
+                Ok(Admission::Reserved(Some(child))) => child,
+                Ok(Admission::Reserved(None)) => break,
+                Ok(Admission::Exhausted) => {
+                    return Ok(queue.abort_with(Admission::Exhausted).await);
+                }
                 Err(error) => return Err(queue.abort_with(error).await),
             };
             queue.pending.push_back(children.len());
             children.push(child);
         }
         if !self.controls.cancellation.is_cancelled() {
-            return Ok(false);
+            return Ok(Admission::Reserved(ResearchSpawn::Ready));
         }
         if let Some(segment) = segment.take() {
             self.settle_active_segment(segment)?;
@@ -869,7 +939,7 @@ impl RunLoop<'_> {
             self.finish_child(child.agent_run_id, AgentDisposition::Cancelled, None, false)
                 .await?;
         }
-        Ok(true)
+        Ok(Admission::Reserved(ResearchSpawn::Cancelled))
     }
 
     async fn spawn_children(
@@ -942,15 +1012,18 @@ impl RunLoop<'_> {
         root: &mut ProviderRequest,
         segments: &mut Option<ActiveSegment>,
         deadline: Instant,
-    ) -> Result<Option<ChildWork>, EngineError> {
+    ) -> Result<Admission<Option<ChildWork>>, EngineError> {
         let Some(assignment) = queue.unspawned.pop_front() else {
-            return Ok(None);
+            return Ok(Admission::Reserved(None));
         };
         if let Some(editor) = assignment.editor {
             if let Some(s) = segments.take() {
                 self.settle_active_segment(s)?;
             }
-            let mut child = self.begin_worker(root, editor).await?;
+            let mut child = match self.begin_worker(root, editor).await {
+                Err(EngineError::GoalBudgetExhausted) => return Ok(Admission::Exhausted),
+                child => child?,
+            };
             if let Some(child) = &mut child {
                 child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
             }
@@ -968,8 +1041,18 @@ impl RunLoop<'_> {
                     None
                 }
             };
-            return Ok(child);
+            return Ok(Admission::Reserved(child));
         }
+        self.spawn_researcher(queue, assignment)
+            .await
+            .map(|child| Admission::Reserved(Some(child)))
+    }
+
+    async fn spawn_researcher(
+        &self,
+        queue: &ChildQueue,
+        assignment: ChildAssignment,
+    ) -> Result<ChildWork, EngineError> {
         let definition = queue
             .definition
             .as_ref()
@@ -999,7 +1082,7 @@ impl RunLoop<'_> {
             assignment: None,
         })
         .await?;
-        Ok(Some(ChildWork {
+        Ok(ChildWork {
             agent_run_id: id,
             objective: assignment.objective,
             turns_remaining: definition.as_ref().map_or(MAX_CHILD_TURNS, |d| d.max_turns),
@@ -1014,7 +1097,7 @@ impl RunLoop<'_> {
                 .map(|r| r.research_context(queue.tool_allowance))
                 .transpose()?,
             tool_calls_remaining: queue.tool_allowance,
-        }))
+        })
     }
 
     fn drive_children<'a>(
@@ -1024,8 +1107,14 @@ impl RunLoop<'_> {
         queue: &'a mut ChildQueue,
         segments: &'a mut Option<ActiveSegment>,
         deadline: Instant,
-    ) -> super::step::BoxedStep<'a, Drained> {
-        Box::pin(self.drive_children_inner(children, root_request, queue, segments, deadline))
+    ) -> super::step::BoxedStep<'a, Admission<Drained>> {
+        Box::pin(self.drive_children_inner(ChildWave {
+            children,
+            root_request,
+            queue,
+            segments,
+            deadline,
+        }))
     }
 
     // A same-route retry waits out its committed delay inside the task, so cancellation still drains it.
@@ -1096,57 +1185,32 @@ impl RunLoop<'_> {
 
     async fn drive_children_inner(
         &self,
-        children: &mut Vec<ChildWork>,
-        root_request: &mut ProviderRequest,
-        queue: &mut ChildQueue,
-        segments: &mut Option<ActiveSegment>,
-        deadline: Instant,
-    ) -> Result<Drained, EngineError> {
-        let mut wave = ChildWave {
-            children,
-            root_request,
-            queue,
-            segments,
-            deadline,
-        };
-        if let Err(error) = self.refill_wave(&mut wave).await {
-            return Err(wave.queue.abort_with(error).await);
+        mut wave: ChildWave<'_>,
+    ) -> Result<Admission<Drained>, EngineError> {
+        match self.refill_wave(&mut wave).await {
+            Ok(Admission::Reserved(())) => {}
+            Ok(Admission::Exhausted) => {
+                return Ok(wave.queue.abort_with(Admission::Exhausted).await);
+            }
+            Err(error) => return Err(wave.queue.abort_with(error).await),
         }
         let mut abort = self.unstarted_stop(wave.queue);
         let mut drain_deadline = None;
 
         while !wave.queue.active.is_empty() {
-            let joined = self
-                .join_child_call(wave.queue, &mut abort, &mut drain_deadline)
-                .await?;
-            let (task_id, result) = classify_join(joined);
-            let Some(index) = wave.queue.active.get(&task_id).map(|active| active.index) else {
-                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
-            };
-            let respawn = self
-                .child_attempt_continuation(
-                    wave.queue,
-                    task_id,
-                    index,
-                    &result,
-                    abort,
-                    wave.deadline,
-                )
-                .await;
-            match respawn {
-                Ok(Some(delay)) => {
-                    if let Err(error) =
-                        self.respawn_attempt(wave.queue, task_id, index, delay, wave.deadline)
-                    {
-                        return Err(wave.queue.abort_with(error).await);
-                    }
-                    continue;
+            let (index, active, result) = match self
+                .next_child_attempt(&mut wave, &mut abort, &mut drain_deadline)
+                .await?
+            {
+                ControlFlow::Continue(()) => continue,
+                ControlFlow::Break(completed) => {
+                    let CompletedChildAttempt {
+                        index,
+                        active,
+                        result,
+                    } = completed;
+                    (index, active, result)
                 }
-                Ok(None) => {}
-                Err(error) => return Err(wave.queue.abort_with(error).await),
-            }
-            let Some(active) = wave.queue.active.remove(&task_id) else {
-                return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
             };
             let limits = active.limits.take();
             let result = result.result;
@@ -1160,8 +1224,8 @@ impl RunLoop<'_> {
                 if abort.is_some() {
                     wave.queue.calls.abort_all();
                     drain_deadline = Some(Instant::now() + CANCELLATION_DRAIN);
-                } else {
-                    self.refill_wave(&mut wave).await?;
+                } else if let Admission::Exhausted = self.refill_wave(&mut wave).await? {
+                    return Ok(Admission::Exhausted);
                 }
                 continue;
             }
@@ -1170,8 +1234,9 @@ impl RunLoop<'_> {
                 .settle_wave_child(&mut wave, index, result, limits, &mut abort)
                 .await?
             {
-                ChildProgress::Refilled => continue,
-                ChildProgress::Settled(disposition) => disposition,
+                Admission::Exhausted => return Ok(Admission::Exhausted),
+                Admission::Reserved(ChildProgress::Refilled) => continue,
+                Admission::Reserved(ChildProgress::Settled(disposition)) => disposition,
             };
             if abort.is_none() {
                 abort = wave_stop_after(
@@ -1183,16 +1248,58 @@ impl RunLoop<'_> {
                 );
             }
             if abort.is_none() {
-                if let Err(error) = self.refill_wave(&mut wave).await {
-                    return Err(wave.queue.abort_with(error).await);
+                match self.refill_wave(&mut wave).await {
+                    Ok(Admission::Reserved(())) => {}
+                    Ok(Admission::Exhausted) => {
+                        return Ok(wave.queue.abort_with(Admission::Exhausted).await);
+                    }
+                    Err(error) => return Err(wave.queue.abort_with(error).await),
                 }
                 abort = self.unstarted_stop(wave.queue);
             }
         }
-        Ok(Drained {
+        Ok(Admission::Reserved(Drained {
             abort,
             pending: std::mem::take(&mut wave.queue.pending),
-        })
+        }))
+    }
+
+    async fn next_child_attempt(
+        &self,
+        wave: &mut ChildWave<'_>,
+        abort: &mut Option<WaveStop>,
+        drain_deadline: &mut Option<Instant>,
+    ) -> Result<ChildAttempt, EngineError> {
+        let joined = self
+            .join_child_call(wave.queue, abort, drain_deadline)
+            .await?;
+        let (task_id, result) = classify_join(joined);
+        let Some(index) = wave.queue.active.get(&task_id).map(|active| active.index) else {
+            return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
+        };
+        let respawn = self
+            .child_attempt_continuation(wave.queue, task_id, index, &result, *abort, wave.deadline)
+            .await;
+        match respawn {
+            Ok(Some(delay)) => {
+                if let Err(error) =
+                    self.respawn_attempt(wave.queue, task_id, index, delay, wave.deadline)
+                {
+                    return Err(wave.queue.abort_with(error).await);
+                }
+                return Ok(ControlFlow::Continue(()));
+            }
+            Ok(None) => {}
+            Err(error) => return Err(wave.queue.abort_with(error).await),
+        }
+        let Some(active) = wave.queue.active.remove(&task_id) else {
+            return Err(wave.queue.abort_with(EngineError::CoordinatorFailed).await);
+        };
+        Ok(ControlFlow::Break(CompletedChildAttempt {
+            index,
+            active,
+            result,
+        }))
     }
 
     async fn child_attempt_continuation(
@@ -1484,16 +1591,15 @@ impl RunLoop<'_> {
             requests.pop().ok_or(EngineError::CoordinatorFailed)?,
             turn,
         ))
-        .await
+        .await?
         {
-            Ok(StepEnd::Continue) => None,
-            Ok(StepEnd::Stopped(StopCause::ActiveTime)) => {
+            StepEnd::Continue => None,
+            StepEnd::Stopped(StopCause::ActiveTime) => {
                 queue.stop.get_or_insert(StopCause::ActiveTime);
                 self.observe_worker_stop().await?;
                 Some(StopCause::ActiveTime)
             }
-            Ok(StepEnd::Stopped(cause)) => Some(cause),
-            Err(error) => return Err(error),
+            StepEnd::Stopped(cause) => Some(cause),
         };
         child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
         let can_continue = self.ledger().view(|v| {
@@ -1512,27 +1618,12 @@ impl RunLoop<'_> {
         index: usize,
         decision: ChildDecision,
         abort: &mut Option<WaveStop>,
-    ) -> Result<ChildProgress, EngineError> {
+    ) -> Result<Admission<ChildProgress>, EngineError> {
         let mut step_stop = None;
         let (answer, failure) = match decision {
             ChildDecision::Reprompt(reason, turn) => {
-                let child = &mut wave.children[index];
-                let text = reason.text().to_owned();
-                if let Some(tools) = child.tools.as_mut() {
-                    tools.add_stop_feedback(&turn, &text);
-                }
-                child
-                    .stop_hook_feedback
-                    .push(crate::provider::StopHookFeedback {
-                        after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
-                        turn,
-                        text,
-                        facts: None,
-                        steering_notes: Vec::new(),
-                    });
-                wave.queue.pending.push_back(index);
-                self.refill_wave(wave).await?;
-                return Ok(ChildProgress::Refilled);
+                Self::append_editor_reprompt(&mut wave.children[index], reason, turn);
+                return self.refill_editor_child(wave, index).await;
             }
             ChildDecision::Finish { answer, turn, .. } => {
                 match self
@@ -1547,9 +1638,7 @@ impl RunLoop<'_> {
                 {
                     ChildStop::Proceed => (Some(answer), WorkerCause::ToolFailed),
                     ChildStop::Reprompt => {
-                        wave.queue.pending.push_back(index);
-                        self.refill_wave(wave).await?;
-                        return Ok(ChildProgress::Refilled);
+                        return self.refill_editor_child(wave, index).await;
                     }
                     ChildStop::End { cause, .. } => (None, cause),
                 }
@@ -1567,10 +1656,15 @@ impl RunLoop<'_> {
                 step_stop = stop;
                 if step_stop.is_none() && can_continue {
                     wave.queue.pending.push_back(index);
-                    if let Err(error) = self.refill_wave(wave).await {
-                        return Err(wave.queue.abort_with(error).await);
+                    match self.refill_wave(wave).await {
+                        Ok(Admission::Reserved(())) => {}
+                        Ok(Admission::Exhausted) => {
+                            wave.queue.abort_and_drain().await;
+                            return Ok(Admission::Exhausted);
+                        }
+                        Err(error) => return Err(wave.queue.abort_with(error).await),
                     }
-                    return Ok(ChildProgress::Refilled);
+                    return Ok(Admission::Reserved(ChildProgress::Refilled));
                 }
                 (None, WorkerCause::ToolFailed)
             }
@@ -1590,7 +1684,35 @@ impl RunLoop<'_> {
             *abort,
         )
         .await
-        .map(|disposition| ChildProgress::Settled(Some(disposition)))
+        .map(|disposition| Admission::Reserved(ChildProgress::Settled(Some(disposition))))
+    }
+
+    async fn refill_editor_child(
+        &self,
+        wave: &mut ChildWave<'_>,
+        index: usize,
+    ) -> Result<Admission<ChildProgress>, EngineError> {
+        wave.queue.pending.push_back(index);
+        Ok(self
+            .refill_wave(wave)
+            .await?
+            .map(|()| ChildProgress::Refilled))
+    }
+
+    fn append_editor_reprompt(child: &mut ChildWork, reason: RepromptReason, turn: ProviderTurn) {
+        let text = reason.text().to_owned();
+        if let Some(tools) = child.tools.as_mut() {
+            tools.add_stop_feedback(&turn, &text);
+        }
+        child
+            .stop_hook_feedback
+            .push(crate::provider::StopHookFeedback {
+                after_step: child.tools.as_ref().map_or(0, |t| t.steps.len()),
+                turn,
+                text,
+                facts: None,
+                steering_notes: Vec::new(),
+            });
     }
 
     async fn settle_editor_call(
@@ -1643,15 +1765,11 @@ impl RunLoop<'_> {
         )
     }
 
-    async fn refill_wave(&self, wave: &mut ChildWave<'_>) -> Result<(), EngineError> {
-        self.fill_slots(
-            wave.queue,
-            wave.children,
-            wave.root_request,
-            wave.segments,
-            wave.deadline,
-        )
-        .await
+    fn refill_wave<'a>(
+        &'a self,
+        wave: &'a mut ChildWave<'_>,
+    ) -> super::step::BoxedStep<'a, Admission<()>> {
+        Box::pin(self.fill_slots(wave))
     }
 
     async fn join_child_call(
@@ -1687,7 +1805,7 @@ impl RunLoop<'_> {
         result: CallResult,
         limits: Option<crate::provider::RateLimits>,
         abort: &mut Option<WaveStop>,
-    ) -> Result<ChildProgress, EngineError> {
+    ) -> Result<Admission<ChildProgress>, EngineError> {
         let valid_response = self.ledger().tokens_within_limit()
             && match &result {
                 CallResult::Response(ProviderResponse {
@@ -1698,9 +1816,17 @@ impl RunLoop<'_> {
                     outcome: ProviderOutcome::Tools(requests),
                     ..
                 }) => self.valid_child_tools(&wave.children[index], requests),
-                _ => false,
+                CallResult::Response(ProviderResponse {
+                    outcome:
+                        ProviderOutcome::Delegate(_)
+                        | ProviderOutcome::Plan(_)
+                        | ProviderOutcome::Review(_),
+                    ..
+                })
+                | CallResult::Failed(_)
+                | CallResult::Cancelled => false,
             };
-        let step_disposition = if wave.children[index].editor {
+        if wave.children[index].editor {
             let decision = self
                 .classify_editor_call(
                     &wave.children[index],
@@ -1711,42 +1837,47 @@ impl RunLoop<'_> {
                     wave.deadline,
                 )
                 .await?;
-            match self.apply_editor_call(wave, index, decision, abort).await? {
-                ChildProgress::Refilled => return Ok(ChildProgress::Refilled),
-                ChildProgress::Settled(disposition) => disposition,
-            }
-        } else {
-            match self
-                .settle_child_call(
-                    &mut wave.children[index],
+            return self.apply_editor_call(wave, index, decision, abort).await;
+        }
+        let admission = match self
+            .settle_child_call(
+                &mut wave.children[index],
+                ChildCall {
                     result,
                     limits,
                     valid_response,
-                    abort,
-                    wave.deadline,
-                )
-                .await
-            {
-                Ok(None) => {
-                    wave.queue.pending.push_back(index);
-                    None
-                }
-                Ok(Some(disposition)) => Some(disposition),
-                Err(error) => return Err(wave.queue.abort_with(error).await),
-            }
+                },
+                abort,
+                wave.deadline,
+            )
+            .await
+        {
+            Ok(admission) => admission,
+            Err(error) => return Err(wave.queue.abort_with(error).await),
         };
-        Ok(ChildProgress::Settled(step_disposition))
+        if matches!(admission, Admission::Exhausted) {
+            wave.queue.abort_and_drain().await;
+        }
+        Ok(admission.map(|disposition| {
+            if disposition.is_none() {
+                wave.queue.pending.push_back(index);
+            }
+            ChildProgress::Settled(disposition)
+        }))
     }
 
     async fn settle_child_call(
         &self,
         child: &mut ChildWork,
-        result: CallResult,
-        limits: Option<crate::provider::RateLimits>,
-        valid_response: bool,
+        call: ChildCall,
         abort: &mut Option<WaveStop>,
         deadline: Instant,
-    ) -> Result<Option<AgentDisposition>, EngineError> {
+    ) -> Result<Admission<Option<AgentDisposition>>, EngineError> {
+        let ChildCall {
+            result,
+            limits,
+            valid_response,
+        } = call;
         let agent_run_id = child.agent_run_id;
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
@@ -1762,7 +1893,20 @@ impl RunLoop<'_> {
         })
         .await?;
         let facts = self.child_facts(child, deadline)?;
-        let disposition = match decide_child_call(result, valid_response, None, *abort, &facts) {
+        let decision = decide_child_call(result, valid_response, None, *abort, &facts);
+        self.apply_researcher_call(child, decision, abort, deadline)
+            .await
+    }
+
+    async fn apply_researcher_call(
+        &self,
+        child: &mut ChildWork,
+        decision: ChildDecision,
+        abort: &mut Option<WaveStop>,
+        deadline: Instant,
+    ) -> Result<Admission<Option<AgentDisposition>>, EngineError> {
+        let agent_run_id = child.agent_run_id;
+        let disposition = match decision {
             ChildDecision::Finish {
                 answer,
                 turn,
@@ -1774,8 +1918,10 @@ impl RunLoop<'_> {
                         .await?
                     {
                         ChildStop::Proceed => {}
-                        ChildStop::Reprompt => return Ok(None),
-                        ChildStop::End { disposition, .. } => return Ok(Some(disposition)),
+                        ChildStop::Reprompt => return Ok(Admission::Reserved(None)),
+                        ChildStop::End { disposition, .. } => {
+                            return Ok(Admission::Reserved(Some(disposition)));
+                        }
                     }
                 }
                 self.finish_child(
@@ -1787,48 +1933,10 @@ impl RunLoop<'_> {
                 .await?;
                 AgentDisposition::Finished
             }
-            ChildDecision::ToolStep(mut requests, turn) => {
-                self.ledger().child_call_finished()?;
-                let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
-                // Boxed: the Tool future is large and would overflow the caller's stack.
-                let end = Box::pin(self.execute_step(
-                    Grant::Researcher {
-                        child: &mut *child,
-                        deadline,
-                    },
-                    request,
-                    turn,
-                ))
-                .await?;
-                match end {
-                    StepEnd::Continue => {
-                        child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
-                        return Ok(None);
-                    }
-                    StepEnd::Stopped(StopCause::ActiveTime) => {
-                        return Err(EngineError::GoalBudgetExhausted);
-                    }
-                    StepEnd::Stopped(
-                        StopCause::Uncertain
-                        | StopCause::Cancelled
-                        | StopCause::HookStop
-                        | StopCause::Paused
-                        | StopCause::Budget
-                        | StopCause::Capacity
-                        | StopCause::ContextFull
-                        | StopCause::DelegationDeadline
-                        | StopCause::Refused(_)
-                        | StopCause::ToolStopped
-                        | StopCause::InvalidCommandResult,
-                    ) => {}
-                }
-                let disposition = researcher_end(
-                    self.actor_hook_requested_stop(agent_run_id)?,
-                    self.controls.cancellation.is_cancelled() || self.hook_requested_stop()?,
-                );
-                self.finish_child(agent_run_id, disposition, None, false)
-                    .await?;
-                disposition
+            ChildDecision::ToolStep(requests, turn) => {
+                return self
+                    .run_researcher_tool(child, requests, turn, deadline)
+                    .await;
             }
             ChildDecision::End(ChildEnd::Skipped {
                 disposition,
@@ -1851,7 +1959,59 @@ impl RunLoop<'_> {
                 return Err(EngineError::CoordinatorFailed);
             }
         };
-        Ok(Some(disposition))
+        Ok(Admission::Reserved(Some(disposition)))
+    }
+
+    async fn run_researcher_tool(
+        &self,
+        child: &mut ChildWork,
+        mut requests: Vec<ToolRequest>,
+        turn: ProviderTurn,
+        deadline: Instant,
+    ) -> Result<Admission<Option<AgentDisposition>>, EngineError> {
+        let agent_run_id = child.agent_run_id;
+
+        self.ledger().child_call_finished()?;
+        let request = requests.pop().ok_or(EngineError::CoordinatorFailed)?;
+        // Boxed: the Tool future is large and would overflow the caller's stack.
+        let end = Box::pin(self.execute_step(
+            Grant::Researcher {
+                child: &mut *child,
+                deadline,
+            },
+            request,
+            turn,
+        ))
+        .await?;
+        match end {
+            StepEnd::Continue => {
+                child.tool_calls_remaining = child.tool_calls_remaining.saturating_sub(1);
+                return Ok(Admission::Reserved(None));
+            }
+            StepEnd::Stopped(StopCause::ActiveTime) => {
+                return Ok(Admission::Exhausted);
+            }
+            StepEnd::Stopped(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::Capacity
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            ) => {}
+        }
+        let disposition = researcher_end(
+            self.actor_hook_requested_stop(agent_run_id)?,
+            self.controls.cancellation.is_cancelled() || self.hook_requested_stop()?,
+        );
+        self.finish_child(agent_run_id, disposition, None, false)
+            .await?;
+        Ok(Admission::Reserved(Some(disposition)))
     }
 
     fn subagent_stop<'a>(
@@ -1877,15 +2037,11 @@ impl RunLoop<'_> {
             .run_subagent_stop(child, &answer.text, turn, deadline)
             .await
         {
-            Ok(Some(())) => StopHookRun::Blocked,
-            Ok(None) => StopHookRun::Passed,
-            Err(EngineError::GoalBudgetExhausted) => StopHookRun::CutOff { budget: true },
-            Err(EngineError::ContextTooLarge) => StopHookRun::CutOff { budget: false },
             Err(EngineError::Tool(crate::tools::ToolError::Uncertain)) if child.editor => {
-                StopHookRun::Uncertain
+                Ok(StopHookRun::Uncertain)
             }
-            Err(error) => return Err(error),
-        };
+            run => run,
+        }?;
         if run == StopHookRun::Blocked && !child.editor {
             self.ledger().child_call_finished()?;
         }
@@ -1918,7 +2074,7 @@ impl RunLoop<'_> {
         message: &str,
         turn: ProviderTurn,
         deadline: Instant,
-    ) -> Result<Option<()>, EngineError> {
+    ) -> Result<StopHookRun, EngineError> {
         let subject = child.hook_subject().to_owned();
         let fits = self
             .controls
@@ -1927,18 +2083,23 @@ impl RunLoop<'_> {
             .is_none_or(|(runtime, tools)| {
                 tools.has_stop_room(&turn, runtime.context_limit_bytes())
             });
-        let Some(feedback) = self
-            .lifecycle_hooks(
-                child.agent_run_id,
-                crate::tools::permissions::HookEvent::SubagentStop,
-                &subject,
+        let feedback = match self
+            .lifecycle_hooks(LifecycleHook {
+                agent: child.agent_run_id,
+                event: crate::tools::permissions::HookEvent::SubagentStop,
+                subject: &subject,
                 message,
-                Some(deadline),
-                fits,
-            )
+                deadline: Some(deadline),
+                feedback_fits: fits,
+            })
             .await?
-        else {
-            return Ok(None);
+        {
+            Ok(Some(feedback)) => feedback,
+            Ok(None) => return Ok(StopHookRun::Passed),
+            Err(HookRefusal::ActiveTime) => {
+                return Ok(StopHookRun::CutOffByActiveTime);
+            }
+            Err(HookRefusal::ContextFull) => return Ok(StopHookRun::CutOffByContext),
         };
         if let Some(tools) = child.tools.as_mut() {
             tools.add_stop_feedback(&turn, &feedback);
@@ -1952,7 +2113,7 @@ impl RunLoop<'_> {
                 facts: None,
                 steering_notes: Vec::new(),
             });
-        Ok(Some(()))
+        Ok(StopHookRun::Blocked)
     }
 
     fn hook_facts(&self) -> Result<HookFacts, EngineError> {
@@ -2151,164 +2312,205 @@ impl RunLoop<'_> {
         }
     }
 
-    fn fill_slots<'a>(
-        &'a self,
-        queue: &'a mut ChildQueue,
-        children: &'a mut Vec<ChildWork>,
-        root_request: &'a mut ProviderRequest,
-        segments: &'a mut Option<ActiveSegment>,
-        deadline: Instant,
-    ) -> super::step::BoxedStep<'a, ()> {
-        Box::pin(self.fill_slots_inner(queue, children, root_request, segments, deadline))
-    }
-
-    async fn fill_slots_inner(
-        &self,
-        queue: &mut ChildQueue,
-        children: &mut Vec<ChildWork>,
-        root_request: &mut ProviderRequest,
-        segments: &mut Option<ActiveSegment>,
-        deadline: Instant,
-    ) -> Result<(), EngineError> {
-        while queue.active.len() < self.ledger().provider_concurrency(queue.parallel)
+    async fn fill_slots(&self, wave: &mut ChildWave<'_>) -> Result<Admission<()>, EngineError> {
+        while wave.queue.active.len() < self.ledger().provider_concurrency(wave.queue.parallel)
             && !self.controls.cancellation.is_cancelled()
             && !self.pause_requested()
             && self.ledger().can_start_provider_call()
             && self.ledger().remaining_calls() != Some(0)
-            && queue.stop.is_none()
+            && wave.queue.stop.is_none()
             && !self.worker_stopped()?
         {
-            if queue.pending.is_empty()
-                && self
-                    .fill_primary_slot(queue, root_request, deadline)
+            if wave.queue.pending.is_empty() {
+                match self
+                    .fill_primary_slot(wave.queue, wave.root_request, wave.deadline)
                     .await?
-            {
-                continue;
-            }
-            if queue.stop.is_some() {
-                break;
-            }
-            let index = if let Some(index) = queue.pending.pop_front() {
-                index
-            } else {
-                let next = self
-                    .spawn_next_child(queue, root_request, segments, deadline)
-                    .await;
-                let Some(child) = (match next {
-                    Ok(child) => child,
-                    Err(EngineError::GoalBudgetExhausted) => {
-                        queue.stop.get_or_insert(StopCause::ActiveTime);
-                        break;
-                    }
-                    Err(error) => return Err(error),
-                }) else {
-                    if queue.unspawned.is_empty() {
-                        break;
-                    } else {
-                        continue;
-                    }
-                };
-                let index = children.len();
-                children.push(child);
-                index
-            };
-            let child = &mut children[index];
-            let researcher = child.tools.is_some();
-            let mut request = self.child_request(child, root_request)?;
-            let cancellation = self.controls.cancellation.clone();
-            let provider = self.routing.bind(
-                crate::provider::ProviderRole::Child,
-                child.agent_run_id,
-                &mut request.model,
-                &mut request.max_output_tokens,
-            )?;
-            if child.editor && !self.admit_worker_call(queue).await? {
-                queue.pending.push_front(index);
-                break;
-            }
-            let Admission::Reserved(()) = self
-                .reserve_provider_call(
-                    child.agent_run_id,
-                    Action::Child {
-                        in_flight: self.ledger().in_flight_children(),
-                        research: researcher,
-                    },
-                    0,
-                )
-                .await?
-            else {
-                return Err(EngineError::GoalBudgetExhausted);
-            };
-            if self.controls.cancellation.is_cancelled()
-                || self.pause_requested()
-                || self.worker_stopped()?
-                || self.hook_requested_stop()?
-                || queue.stop.is_some()
-            {
-                let result = CallResult::Cancelled;
-                self.append(Event::ProviderCallRecorded {
-                    run_id: self.run_id,
-                    agent_run_id: child.agent_run_id,
-                    record: call_record(AgentPhase::ChildWork, &result, false, None, None, None),
-                })
-                .await?;
-                self.settle_result(&result)?;
-                self.ledger().child_call_finished()?;
-                queue.pending.push_front(index);
-                break;
-            }
-            if let Some(steering) = &self.controls.steering {
-                let target = crate::engine::ChildSteeringTarget {
-                    session_id: self.session_id,
-                    run_id: self.run_id,
-                    agent_run_id: child.agent_run_id,
-                };
-                if let Some(text) = steering.take_child_note(target) {
-                    self.append(Event::AgentSteeringNoteRecorded {
-                        goal_id: self.goal()?,
-                        run_id: self.run_id,
-                        agent_run_id: child.agent_run_id,
-                        text: text.clone(),
-                    })
-                    .await?;
-                    super::place_steering_note(&mut request.input, text);
-                    child.steering_notes = request.input.steering_notes.clone();
-                    child.tools = request.input.tools.clone();
-                    child.stop_hook_feedback = request.input.stop_hook_feedback.clone();
+                {
+                    Admission::Reserved(SlotDispatch::Started) => continue,
+                    Admission::Reserved(SlotDispatch::Stopped) => {}
+                    Admission::Exhausted => return Ok(Admission::Exhausted),
                 }
             }
-            let preview = (self
-                .routing
-                .chain(crate::provider::ProviderRole::Child, child.agent_run_id)?
-                .len()
-                > 1)
-            .then(|| crate::provider::ResponsePreview::new().0);
-            let attempt_request = request.clone();
-            let limits = crate::provider::RateLimitSlot::default();
-            let attempt_limits = limits.clone();
-            let handle = queue.calls.spawn(async move {
-                crate::engine::routing::invoke_attempt(
-                    provider.as_ref(),
-                    attempt_request,
-                    deadline,
-                    cancellation,
-                    preview,
-                    attempt_limits,
-                    #[cfg(feature = "test-support")]
-                    None,
-                )
-                .await
-            });
-            queue.active.insert(
-                handle.id(),
-                ActiveChild {
-                    limits,
-                    index: Some(index),
-                    request,
+            if wave.queue.stop.is_some() {
+                break;
+            }
+            let index = match self.next_child_slot(wave).await? {
+                ChildSlot::Ready(index) => index,
+                ChildSlot::Stopped => break,
+                ChildSlot::Retry => continue,
+            };
+            match self.fill_child_slot(wave, index).await? {
+                Admission::Reserved(SlotDispatch::Started) => {}
+                Admission::Reserved(SlotDispatch::Stopped) => break,
+                Admission::Exhausted => return Ok(Admission::Exhausted),
+            }
+        }
+        Ok(Admission::Reserved(()))
+    }
+
+    async fn next_child_slot(&self, wave: &mut ChildWave<'_>) -> Result<ChildSlot, EngineError> {
+        let index = if let Some(index) = wave.queue.pending.pop_front() {
+            index
+        } else {
+            let child = match self
+                .spawn_next_child(wave.queue, wave.root_request, wave.segments, wave.deadline)
+                .await?
+            {
+                Admission::Reserved(Some(child)) => child,
+                Admission::Reserved(None) => {
+                    return Ok(if wave.queue.unspawned.is_empty() {
+                        ChildSlot::Stopped
+                    } else {
+                        ChildSlot::Retry
+                    });
+                }
+                Admission::Exhausted => {
+                    wave.queue.stop.get_or_insert(StopCause::ActiveTime);
+                    return Ok(ChildSlot::Stopped);
+                }
+            };
+            let index = wave.children.len();
+            wave.children.push(child);
+            index
+        };
+        Ok(ChildSlot::Ready(index))
+    }
+
+    async fn fill_child_slot(
+        &self,
+        wave: &mut ChildWave<'_>,
+        index: usize,
+    ) -> Result<Admission<SlotDispatch>, EngineError> {
+        let child = &mut wave.children[index];
+        let researcher = child.tools.is_some();
+        let mut request = self.child_request(child, wave.root_request)?;
+        let provider = self.routing.bind(
+            crate::provider::ProviderRole::Child,
+            child.agent_run_id,
+            &mut request.model,
+            &mut request.max_output_tokens,
+        )?;
+        if child.editor && !self.admit_worker_call(wave.queue).await? {
+            wave.queue.pending.push_front(index);
+            return Ok(Admission::Reserved(SlotDispatch::Stopped));
+        }
+        let Admission::Reserved(()) = self
+            .reserve_provider_call(
+                child.agent_run_id,
+                Action::Child {
+                    in_flight: self.ledger().in_flight_children(),
+                    research: researcher,
                 },
-            );
+                0,
+            )
+            .await?
+        else {
+            return Ok(Admission::Exhausted);
+        };
+        if self.controls.cancellation.is_cancelled()
+            || self.pause_requested()
+            || self.worker_stopped()?
+            || self.hook_requested_stop()?
+            || wave.queue.stop.is_some()
+        {
+            let result = CallResult::Cancelled;
+            self.append(Event::ProviderCallRecorded {
+                run_id: self.run_id,
+                agent_run_id: child.agent_run_id,
+                record: call_record(AgentPhase::ChildWork, &result, false, None, None, None),
+            })
+            .await?;
+            self.settle_result(&result)?;
+            self.ledger().child_call_finished()?;
+            wave.queue.pending.push_front(index);
+            return Ok(Admission::Reserved(SlotDispatch::Stopped));
+        }
+        self.child_steering_note(child, &mut request).await?;
+        self.spawn_child_attempt(wave.queue, index, request, provider, wave.deadline)?;
+        Ok(Admission::Reserved(SlotDispatch::Started))
+    }
+
+    async fn child_steering_note(
+        &self,
+        child: &mut ChildWork,
+        request: &mut ProviderRequest,
+    ) -> Result<(), EngineError> {
+        if let Some(steering) = &self.controls.steering {
+            let target = crate::engine::ChildSteeringTarget {
+                session_id: self.session_id,
+                run_id: self.run_id,
+                agent_run_id: child.agent_run_id,
+            };
+            if let Some(text) = steering.take_child_note(target) {
+                self.append(Event::AgentSteeringNoteRecorded {
+                    goal_id: self.goal()?,
+                    run_id: self.run_id,
+                    agent_run_id: child.agent_run_id,
+                    text: text.clone(),
+                })
+                .await?;
+                super::place_steering_note(&mut request.input, text);
+                child.steering_notes = request.input.steering_notes.clone();
+                child.tools = request.input.tools.clone();
+                child.stop_hook_feedback = request.input.stop_hook_feedback.clone();
+            }
         }
         Ok(())
+    }
+
+    fn spawn_child_attempt(
+        &self,
+        queue: &mut ChildQueue,
+        index: usize,
+        request: ProviderRequest,
+        provider: std::sync::Arc<dyn crate::provider::Provider>,
+        deadline: Instant,
+    ) -> Result<(), EngineError> {
+        let preview = (self
+            .routing
+            .chain(crate::provider::ProviderRole::Child, request.agent_run_id)?
+            .len()
+            > 1)
+        .then(|| crate::provider::ResponsePreview::new().0);
+        self.spawn_attempt(
+            queue,
+            ActiveChild {
+                limits: crate::provider::RateLimitSlot::default(),
+                index: Some(index),
+                request,
+            },
+            provider,
+            preview,
+            deadline,
+        );
+        Ok(())
+    }
+
+    fn spawn_attempt(
+        &self,
+        queue: &mut ChildQueue,
+        active: ActiveChild,
+        provider: std::sync::Arc<dyn crate::provider::Provider>,
+        preview: Option<crate::provider::ResponsePreview>,
+        deadline: Instant,
+    ) {
+        let cancellation = self.controls.cancellation.clone();
+        let request = active.request.clone();
+        let limits = active.limits.clone();
+        let handle = queue.calls.spawn(async move {
+            crate::engine::routing::invoke_attempt(
+                provider.as_ref(),
+                request,
+                deadline,
+                cancellation,
+                preview,
+                limits,
+                #[cfg(feature = "test-support")]
+                None,
+            )
+            .await
+        });
+        queue.active.insert(handle.id(), active);
     }
 
     fn child_request(
@@ -2450,7 +2652,7 @@ impl RunLoop<'_> {
         queue: &mut ChildQueue,
         root_request: &mut ProviderRequest,
         deadline: Instant,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Admission<SlotDispatch>, EngineError> {
         // Settled agents only grow, so a deferral ends once more agents settle than it saw.
         let deferred = match queue.deferred {
             Some((_, at)) => self.settled_agents()? <= at,
@@ -2479,7 +2681,7 @@ impl RunLoop<'_> {
                 super::tool_compaction::PrimaryContext::Ready => {}
                 super::tool_compaction::PrimaryContext::Stop(cause) => {
                     queue.stop.get_or_insert(cause);
-                    return Ok(false);
+                    return Ok(Admission::Reserved(SlotDispatch::Stopped));
                 }
             }
             let mut request = root_request.clone();
@@ -2490,48 +2692,44 @@ impl RunLoop<'_> {
                 &mut request.max_output_tokens,
             )?;
             if !self.admit_worker_call(queue).await? {
-                return Ok(false);
+                return Ok(Admission::Reserved(SlotDispatch::Stopped));
             }
             let Admission::Reserved(()) = self
                 .reserve_provider_call(self.primary_id, self.primary_call(), 0)
                 .await?
             else {
-                return Err(EngineError::GoalBudgetExhausted);
+                return Ok(Admission::Exhausted);
             };
             self.primary_context(root_request).await?;
             request.input = root_request.input.clone();
-            let provider = self
-                .routing
-                .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
-            let attempt = request.clone();
-            let limits = crate::provider::RateLimitSlot::default();
-            let attempt_limits = limits.clone();
-            let cancellation = self.controls.cancellation.clone();
-            let handle = queue.calls.spawn(async move {
-                crate::engine::routing::invoke_attempt(
-                    provider.as_ref(),
-                    attempt,
-                    deadline,
-                    cancellation,
-                    Some(crate::provider::ResponsePreview::new().0),
-                    attempt_limits,
-                    #[cfg(feature = "test-support")]
-                    None,
-                )
-                .await
-            });
-            queue.active.insert(
-                handle.id(),
-                ActiveChild {
-                    limits,
-                    index: None,
-                    request,
-                },
-            );
+            self.spawn_wave_primary(queue, request, deadline)?;
             queue.primary_pending = true;
-            return Ok(true);
+            return Ok(Admission::Reserved(SlotDispatch::Started));
         }
-        Ok(false)
+        Ok(Admission::Reserved(SlotDispatch::Stopped))
+    }
+
+    fn spawn_wave_primary(
+        &self,
+        queue: &mut ChildQueue,
+        request: ProviderRequest,
+        deadline: Instant,
+    ) -> Result<(), EngineError> {
+        let provider = self
+            .routing
+            .provider(crate::provider::ProviderRole::Primary, self.primary_id)?;
+        self.spawn_attempt(
+            queue,
+            ActiveChild {
+                limits: crate::provider::RateLimitSlot::default(),
+                index: None,
+                request,
+            },
+            provider,
+            Some(crate::provider::ResponsePreview::new().0),
+            deadline,
+        );
+        Ok(())
     }
 
     async fn admit_worker_call(&self, queue: &mut ChildQueue) -> Result<bool, EngineError> {
@@ -3244,7 +3442,7 @@ mod decision_tests {
             stops_wave,
         };
         let unsettled = with(|f| f.hook.settled = false);
-        let budget = StopHookRun::CutOff { budget: true };
+        let budget = StopHookRun::CutOffByActiveTime;
         let rows = [
             (StopHookRun::Passed, None, OPEN, ChildStop::Proceed),
             (
@@ -3267,7 +3465,7 @@ mod decision_tests {
                 end(Failed, WorkerCause::Budget, false),
             ),
             (
-                StopHookRun::CutOff { budget: false },
+                StopHookRun::CutOffByContext,
                 None,
                 with(|f| f.cancelled = true),
                 end(Cancelled, WorkerCause::ToolFailed, false),

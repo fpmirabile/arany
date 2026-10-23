@@ -25,7 +25,9 @@ mod tool_compaction;
 mod worker;
 
 use step::Grant;
-use stop::{PrimaryEnd, RunFacts, Settlement, SizingRefusal, StepEnd, StopCause};
+pub(super) use step::hooks::LifecycleHook;
+pub(super) use stop::{HookRefusal, SizingRefusal};
+use stop::{PrimaryEnd, RunFacts, Settlement, StepEnd, StopCause};
 
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
@@ -45,6 +47,29 @@ pub(super) enum CallFailure {
     InvalidResponse(Option<ProviderFailureReason>),
     OutputLimit,
     TaskPanic,
+}
+
+enum PrimaryStop {
+    Continue,
+    Finish,
+}
+
+struct PrimaryAction {
+    phase: AgentPhase,
+    budget_action: crate::session::BudgetAction,
+}
+
+enum PrimaryFlow {
+    Continue,
+    Settled,
+    End(PrimaryEnd, usize),
+}
+
+struct PrimaryCall {
+    result: CallResult,
+    validity: Result<(), ProposalRefusalCause>,
+    facts: RunFacts,
+    budget_action: crate::session::BudgetAction,
 }
 
 struct DisplayCheckpoint {
@@ -408,40 +433,41 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
-        let end = match self.initialize_definitions(&mut root_request).await {
-            Ok(Admission::Reserved(step::DefinitionInitialization::Ready)) => None,
-            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped))
+        let end = match self.initialize_definitions(&mut root_request).await? {
+            Admission::Reserved(step::DefinitionInitialization::Ready) => None,
+            Admission::Reserved(step::DefinitionInitialization::Stopped)
                 if self.pause_at_boundary() =>
             {
                 Some(PrimaryEnd::Stopped(StopCause::Paused))
             }
-            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped))
+            Admission::Reserved(step::DefinitionInitialization::Stopped)
                 if self.take_active_time_floor() =>
             {
                 Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
             }
-            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped)) => {
+            Admission::Reserved(step::DefinitionInitialization::Stopped) => {
                 Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid))
             }
-            Ok(Admission::Exhausted) => Some(PrimaryEnd::Stopped(StopCause::ActiveTime)),
-            Err(error) => return Err(error),
+            Admission::Exhausted => Some(PrimaryEnd::Stopped(StopCause::ActiveTime)),
         };
         if let Some(end) = end {
             return self.settle_primary(end).await;
         }
-        let end = match self.initialize_skill(&mut root_request).await {
-            Ok(Admission::Reserved(step::SkillInitialization::Ready)) => {
-                return self.drive_primary(&mut root_request).await;
+        let end = match self.initialize_skill(&mut root_request).await? {
+            Admission::Reserved(step::SkillInitialization::Ready) => {
+                return match self.drive_primary(&mut root_request).await? {
+                    Admission::Reserved(()) => Ok(()),
+                    Admission::Exhausted => Err(EngineError::GoalBudgetExhausted),
+                };
             }
             // A stopped read carries no cause: the observed facts decide, as for a refused reservation.
-            Ok(Admission::Reserved(step::SkillInitialization::Stopped)) => {
+            Admission::Reserved(step::SkillInitialization::Stopped) => {
                 PrimaryEnd::Stopped(StopCause::Budget)
             }
-            Ok(Admission::Reserved(step::SkillInitialization::Failed(cause))) => {
+            Admission::Reserved(step::SkillInitialization::Failed(cause)) => {
                 PrimaryEnd::Failed(cause)
             }
-            Ok(Admission::Exhausted) => PrimaryEnd::Stopped(StopCause::ActiveTime),
-            Err(error) => return Err(error),
+            Admission::Exhausted => PrimaryEnd::Stopped(StopCause::ActiveTime),
         };
         if matches!(end, PrimaryEnd::Failed(RunFailure::ToolContextFull)) {
             self.record_context_full(&root_request, 0);
@@ -452,147 +478,249 @@ impl<'a> RunLoop<'a> {
     pub(super) fn drive_primary<'b>(
         &'b self,
         root_request: &'b mut ProviderRequest,
-    ) -> step::BoxedStep<'b, ()> {
+    ) -> step::BoxedStep<'b, Admission<()>> {
         Box::pin(self.drive_primary_inner(root_request))
     }
 
     async fn drive_primary_inner(
         &self,
         root_request: &mut ProviderRequest,
-    ) -> Result<(), EngineError> {
-        let mut pending_turn_bytes = 0;
-        let end = loop {
+    ) -> Result<Admission<()>, EngineError> {
+        let (end, pending_turn_bytes) = loop {
             let phase = root_request.phase;
             if self.pause_at_boundary() {
-                break PrimaryEnd::Stopped(StopCause::Paused);
+                break (PrimaryEnd::Stopped(StopCause::Paused), 0);
             }
             if self.controls.cancellation.is_cancelled() {
-                break PrimaryEnd::Stopped(StopCause::Cancelled);
+                break (PrimaryEnd::Stopped(StopCause::Cancelled), 0);
             }
             match self.maintain_primary_context(root_request, None).await? {
                 tool_compaction::PrimaryContext::Ready => {}
                 tool_compaction::PrimaryContext::Stop(cause) => {
-                    break PrimaryEnd::Stopped(cause);
+                    break (PrimaryEnd::Stopped(cause), 0);
                 }
             }
-            let limits = RateLimitSlot::default();
-            let (first, active_segment) =
-                match self.invoke_primary(root_request, limits.clone()).await {
-                    Ok(Admission::Reserved(result)) => result,
-                    Ok(Admission::Exhausted) => {
-                        break PrimaryEnd::Stopped(StopCause::Budget);
-                    }
-                    Err(error) => return Err(error),
-                };
-            root_request.input.outcome_correction = false;
-            self.settle_active_segment(active_segment)?;
-            let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
-            let facts = RunFacts::observe(self)?;
-            let record = call_record(
-                phase,
-                &first,
-                primary_admitted(PrimarySite::Loop, &first, validity, &facts),
-                self.default_child_profile(),
-                validity
-                    .err()
-                    .and_then(|cause| proposal_refusal(&first, cause)),
-                limits.take(),
-            );
-            self.append(Event::ProviderCallRecorded {
-                run_id: self.run_id,
-                agent_run_id: self.primary_id,
-                record,
-            })
-            .await?;
-            // A cancellation or active-time expiry while the record commits still stops this call.
-            let facts = RunFacts::observe(self)?;
-            let budget_action = match &first {
-                CallResult::Response(response) => match response.outcome {
-                    ProviderOutcome::Tools(_) => crate::session::BudgetAction::Tool,
-                    ProviderOutcome::Delegate(_) => crate::session::BudgetAction::Delegation,
-                    ProviderOutcome::Answer(_)
-                    | ProviderOutcome::Plan(_)
-                    | ProviderOutcome::Review(_) => crate::session::BudgetAction::Provider,
-                },
-                CallResult::Failed(_) | CallResult::Cancelled => {
-                    crate::session::BudgetAction::Provider
-                }
+            let call = match self.record_primary_call(root_request).await? {
+                Admission::Reserved(call) => call,
+                Admission::Exhausted => break (PrimaryEnd::Stopped(StopCause::Budget), 0),
             };
-            match decide_primary_call(PrimarySite::Loop, first, validity, &facts) {
-                PrimaryDecision::Plan(plan, turn) => {
-                    self.record_plan_step(root_request, *plan, turn).await?;
-                }
-                PrimaryDecision::Finish(answer, turn) => {
-                    pending_turn_bytes = turn.len();
-                    match self.stop_primary(root_request, &answer, turn).await {
-                        Ok(Ok(true)) => {}
-                        Ok(Ok(false)) => break PrimaryEnd::Finished(answer),
-                        Ok(Err(refusal)) => break PrimaryEnd::Stopped(refusal.into()),
-                        Err(error) => return Err(error),
-                    }
-                }
-                PrimaryDecision::Delegate(delegation, turn) => {
-                    if self.pause_at_boundary() {
-                        break PrimaryEnd::Stopped(StopCause::Paused);
-                    }
-                    if !self
-                        .run_children(root_request, delegation.children, delegation.agent, turn)
-                        .await?
-                    {
-                        return Ok(());
-                    }
-                }
-                PrimaryDecision::ToolStep(requests, turn) => {
-                    pending_turn_bytes = turn.len();
-                    if let Some(end) = self
-                        .primary_tools(root_request, requests, turn, phase == AgentPhase::RootPlan)
-                        .await?
-                    {
-                        if let PrimaryEnd::Stopped(cause) = &end
-                            && matches!(cause, StopCause::Budget | StopCause::ActiveTime)
-                        {
-                            self.ledger()
-                                .capture_budget_refusal(budget_action, Some(self.primary_id))?;
-                        }
-                        break end;
-                    }
-                }
-                PrimaryDecision::CorrectOutcome => {
-                    root_request.input.outcome_correction = true;
-                }
-                PrimaryDecision::RefusedTool(cause, requests, turn) => {
-                    pending_turn_bytes = turn.len();
-                    match self.record_refused_tool_step(root_request, requests, turn)? {
-                        tool_compaction::ContextCapacity::Fits => {}
-                        tool_compaction::ContextCapacity::Full => {
-                            break PrimaryEnd::Stopped(StopCause::ContextFull);
-                        }
-                    }
-                    if self.primary_refusal()?.1 {
-                        break PrimaryEnd::Stopped(StopCause::Refused(cause));
-                    }
-                }
-                PrimaryDecision::Refused(cause) => {
-                    if self.primary_refusal()?.1 {
-                        break PrimaryEnd::Stopped(StopCause::Refused(cause));
-                    }
-                }
-                PrimaryDecision::Stop(cause) => {
-                    if matches!(cause, StopCause::Budget | StopCause::ActiveTime) {
-                        self.ledger()
-                            .capture_budget_refusal(budget_action, Some(self.primary_id))?;
-                    }
-                    break PrimaryEnd::Stopped(cause);
-                }
-                PrimaryDecision::Fail(failure) => break PrimaryEnd::Failed(failure),
-                PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
+            let decision =
+                decide_primary_call(PrimarySite::Loop, call.result, call.validity, &call.facts);
+            match self
+                .apply_primary_decision(root_request, decision, phase, call.budget_action)
+                .await?
+            {
+                Admission::Reserved(PrimaryFlow::Continue) => {}
+                Admission::Reserved(PrimaryFlow::Settled) => return Ok(Admission::Reserved(())),
+                Admission::Reserved(PrimaryFlow::End(end, pending)) => break (end, pending),
+                Admission::Exhausted => return Ok(Admission::Exhausted),
             }
-            pending_turn_bytes = 0;
         };
         if matches!(end, PrimaryEnd::Stopped(StopCause::ContextFull)) {
             self.record_context_full(root_request, pending_turn_bytes);
         }
-        self.settle_primary(end).await
+        self.settle_primary(end).await.map(Admission::Reserved)
+    }
+
+    async fn record_primary_call(
+        &self,
+        root_request: &mut ProviderRequest,
+    ) -> Result<Admission<PrimaryCall>, EngineError> {
+        let phase = root_request.phase;
+        let limits = RateLimitSlot::default();
+        let (first, active_segment) =
+            match self.invoke_primary(root_request, limits.clone()).await? {
+                Admission::Reserved(result) => result,
+                Admission::Exhausted => return Ok(Admission::Exhausted),
+            };
+        root_request.input.outcome_correction = false;
+        self.settle_active_segment(active_segment)?;
+        let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
+        let facts = RunFacts::observe(self)?;
+        let record = call_record(
+            phase,
+            &first,
+            primary_admitted(PrimarySite::Loop, &first, validity, &facts),
+            self.default_child_profile(),
+            validity
+                .err()
+                .and_then(|cause| proposal_refusal(&first, cause)),
+            limits.take(),
+        );
+        self.append(Event::ProviderCallRecorded {
+            run_id: self.run_id,
+            agent_run_id: self.primary_id,
+            record,
+        })
+        .await?;
+        // A cancellation or active-time expiry while the record commits still stops this call.
+        let facts = RunFacts::observe(self)?;
+        let budget_action = match &first {
+            CallResult::Response(response) => match response.outcome {
+                ProviderOutcome::Tools(_) => crate::session::BudgetAction::Tool,
+                ProviderOutcome::Delegate(_) => crate::session::BudgetAction::Delegation,
+                ProviderOutcome::Answer(_)
+                | ProviderOutcome::Plan(_)
+                | ProviderOutcome::Review(_) => crate::session::BudgetAction::Provider,
+            },
+            CallResult::Failed(_) | CallResult::Cancelled => crate::session::BudgetAction::Provider,
+        };
+        Ok(Admission::Reserved(PrimaryCall {
+            result: first,
+            validity,
+            facts,
+            budget_action,
+        }))
+    }
+
+    async fn apply_primary_decision(
+        &self,
+        root_request: &mut ProviderRequest,
+        decision: PrimaryDecision,
+        phase: AgentPhase,
+        budget_action: crate::session::BudgetAction,
+    ) -> Result<Admission<PrimaryFlow>, EngineError> {
+        let flow = match decision {
+            PrimaryDecision::Plan(plan, turn) => {
+                self.record_plan_step(root_request, *plan, turn).await?;
+                PrimaryFlow::Continue
+            }
+            PrimaryDecision::Finish(answer, turn) => {
+                self.apply_primary_answer(root_request, answer, turn)
+                    .await?
+            }
+            PrimaryDecision::Delegate(delegation, turn) => {
+                if self.pause_at_boundary() {
+                    PrimaryFlow::End(PrimaryEnd::Stopped(StopCause::Paused), 0)
+                } else {
+                    return Ok(self
+                        .run_children(root_request, delegation.children, delegation.agent, turn)
+                        .await?
+                        .map(|progress| match progress {
+                            children::DelegationProgress::Continue => PrimaryFlow::Continue,
+                            children::DelegationProgress::Settled => PrimaryFlow::Settled,
+                        }));
+                }
+            }
+            PrimaryDecision::ToolStep(requests, turn) => {
+                self.apply_primary_tools(
+                    root_request,
+                    requests,
+                    turn,
+                    PrimaryAction {
+                        phase,
+                        budget_action,
+                    },
+                )
+                .await?
+            }
+            PrimaryDecision::CorrectOutcome => {
+                root_request.input.outcome_correction = true;
+                PrimaryFlow::Continue
+            }
+            PrimaryDecision::RefusedTool(cause, requests, turn) => {
+                self.apply_primary_refused_tool(root_request, requests, turn, cause)
+                    .await?
+            }
+            PrimaryDecision::Refused(cause) => {
+                if self.primary_refusal()?.1 {
+                    PrimaryFlow::End(PrimaryEnd::Stopped(StopCause::Refused(cause)), 0)
+                } else {
+                    PrimaryFlow::Continue
+                }
+            }
+            PrimaryDecision::Stop(cause) => {
+                if matches!(cause, StopCause::Budget | StopCause::ActiveTime) {
+                    self.ledger()
+                        .capture_budget_refusal(budget_action, Some(self.primary_id))?;
+                }
+                PrimaryFlow::End(PrimaryEnd::Stopped(cause), 0)
+            }
+            PrimaryDecision::Fail(failure) => PrimaryFlow::End(PrimaryEnd::Failed(failure), 0),
+            PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
+        };
+        Ok(Admission::Reserved(flow))
+    }
+
+    async fn apply_primary_answer(
+        &self,
+        root_request: &mut ProviderRequest,
+        answer: Answer,
+        turn: crate::provider::ProviderTurn,
+    ) -> Result<PrimaryFlow, EngineError> {
+        let pending_turn_bytes = turn.len();
+        match self.stop_primary(root_request, &answer, turn).await? {
+            Ok(PrimaryStop::Continue) => {}
+            Ok(PrimaryStop::Finish) => {
+                return Ok(PrimaryFlow::End(
+                    PrimaryEnd::Finished(answer),
+                    pending_turn_bytes,
+                ));
+            }
+            Err(refusal) => {
+                return Ok(PrimaryFlow::End(
+                    PrimaryEnd::Stopped(refusal.into()),
+                    pending_turn_bytes,
+                ));
+            }
+        }
+        Ok(PrimaryFlow::Continue)
+    }
+
+    async fn apply_primary_tools(
+        &self,
+        root_request: &mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        action: PrimaryAction,
+    ) -> Result<PrimaryFlow, EngineError> {
+        let pending_turn_bytes = turn.len();
+        if let Some(end) = self
+            .primary_tools(
+                root_request,
+                requests,
+                turn,
+                action.phase == AgentPhase::RootPlan,
+            )
+            .await?
+        {
+            if let PrimaryEnd::Stopped(cause) = &end
+                && matches!(cause, StopCause::Budget | StopCause::ActiveTime)
+            {
+                self.ledger()
+                    .capture_budget_refusal(action.budget_action, Some(self.primary_id))?;
+            }
+            return Ok(PrimaryFlow::End(end, pending_turn_bytes));
+        }
+
+        Ok(PrimaryFlow::Continue)
+    }
+
+    async fn apply_primary_refused_tool(
+        &self,
+        root_request: &mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+        cause: ProposalRefusalCause,
+    ) -> Result<PrimaryFlow, EngineError> {
+        let pending_turn_bytes = turn.len();
+        match self.record_refused_tool_step(root_request, requests, turn)? {
+            tool_compaction::ContextCapacity::Fits => {}
+            tool_compaction::ContextCapacity::Full => {
+                return Ok(PrimaryFlow::End(
+                    PrimaryEnd::Stopped(StopCause::ContextFull),
+                    pending_turn_bytes,
+                ));
+            }
+        }
+        if self.primary_refusal()?.1 {
+            return Ok(PrimaryFlow::End(
+                PrimaryEnd::Stopped(StopCause::Refused(cause)),
+                pending_turn_bytes,
+            ));
+        }
+
+        Ok(PrimaryFlow::Continue)
     }
 
     fn record_refused_tool_step(
@@ -710,7 +838,7 @@ impl<'a> RunLoop<'a> {
         root: &mut ProviderRequest,
         answer: &Answer,
         turn: crate::provider::ProviderTurn,
-    ) -> Result<Result<bool, SizingRefusal>, EngineError> {
+    ) -> Result<Result<PrimaryStop, SizingRefusal>, EngineError> {
         let fits = self
             .controls
             .tools
@@ -719,19 +847,19 @@ impl<'a> RunLoop<'a> {
                 tools.has_stop_room(&turn, runtime.context_limit_bytes())
             });
         let feedback = match self
-            .lifecycle_hooks(
-                self.primary_id,
-                crate::tools::permissions::HookEvent::Stop,
-                "",
-                &answer.text,
-                None,
-                fits,
-            )
-            .await
+            .lifecycle_hooks(LifecycleHook {
+                agent: self.primary_id,
+                event: crate::tools::permissions::HookEvent::Stop,
+                subject: "",
+                message: &answer.text,
+                deadline: None,
+                feedback_fits: fits,
+            })
+            .await?
         {
             Ok(Some(feedback)) => feedback,
-            Ok(None) => return Ok(Ok(false)),
-            Err(error) => return Ok(Err(SizingRefusal::from_error(error)?)),
+            Ok(None) => return Ok(Ok(PrimaryStop::Finish)),
+            Err(refusal) => return Ok(Err(refusal.into())),
         };
         let after_step = root.input.tools.as_mut().map_or(0, |tools| {
             tools.add_stop_feedback(&turn, &feedback);
@@ -746,7 +874,7 @@ impl<'a> RunLoop<'a> {
                 facts: None,
                 steering_notes: Vec::new(),
             });
-        Ok(Ok(true))
+        Ok(Ok(PrimaryStop::Continue))
     }
 
     fn primary_refusal(&self) -> Result<(Option<ProposalRefusal>, bool), EngineError> {
