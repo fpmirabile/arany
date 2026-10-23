@@ -16,6 +16,7 @@ mod output;
 pub mod permissions;
 mod process;
 mod search;
+mod selection;
 mod skills;
 pub use definitions::{DefinitionFilePin, DefinitionRegistryPin};
 pub(crate) mod toolchains;
@@ -1188,7 +1189,14 @@ impl ToolRuntime {
     pub(crate) fn reservation_overhead(&self, call: &ToolCall) -> Duration {
         match call.facts().site {
             Site::InProcess | Site::Unguarded | Site::Host => Duration::ZERO,
-            Site::Guard => guard::RESERVATION_OVERHEAD,
+            Site::Guard => {
+                guard::RESERVATION_OVERHEAD
+                    + if self.worker.is_none() && matches!(call, ToolCall::Command { .. }) {
+                        selection::PHASE_TIME
+                    } else {
+                        Duration::ZERO
+                    }
+            }
         }
     }
 

@@ -302,6 +302,7 @@ pub(super) async fn prepare_command_storage(
     root: &Path,
     runtime: &ToolRuntime,
     limits: &crate::tools::types::ToolLimits,
+    command: bool,
 ) -> Result<Vec<cap_std::fs::Dir>, ToolError> {
     use cap_fs_ext::DirExt;
 
@@ -339,7 +340,7 @@ pub(super) async fn prepare_command_storage(
     crate::tools::fs::snapshot_into(
         &workspace,
         &runtime.config,
-        runtime.worker.is_none().then_some(&volumes[0]),
+        (runtime.worker.is_none() && !command).then_some(&volumes[0]),
         &resources,
     )?;
     Ok(volumes)
