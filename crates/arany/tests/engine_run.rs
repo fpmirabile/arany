@@ -3018,6 +3018,7 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         .identity()
         .limits
         .max_output_tokens;
+        assert_eq!(cap, 32_768);
         for bound in [
             OutputTokenBound::ProviderEnforced,
             OutputTokenBound::LocalAcceptanceOnly,
