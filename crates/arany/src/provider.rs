@@ -16,6 +16,7 @@ mod image;
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
 mod limits;
+mod native;
 mod native_check;
 pub use limits::{
     LimitFailure, LimitSource, LimitUnavailable, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES,
