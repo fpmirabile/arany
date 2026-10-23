@@ -15,7 +15,7 @@ const MAX_PATTERN_BYTES: usize = 512;
 const MAX_ALTERNATIVES: usize = 16;
 const MAX_TRANSLATION_BYTES: usize = 8 * 1024;
 const MAX_SCANNED_ENTRIES: usize = MAX_SNAPSHOT_FILES * 4;
-const MAX_CANDIDATES: usize = MAX_SNAPSHOT_FILES;
+const MAX_GLOB_CANDIDATES: usize = MAX_SNAPSHOT_FILES;
 const MAX_DEPTH: usize = 16;
 
 pub(super) fn default_path() -> String {
@@ -252,7 +252,7 @@ pub(super) fn inspect_files<'a>(
         };
         if relative.is_some_and(|relative| matcher.is_match(relative)) {
             matches.insert(name.to_owned(), bytes as u64);
-            if matches.len() > MAX_CANDIDATES {
+            if matches.len() > MAX_GLOB_CANDIDATES {
                 return Err(ToolError::Limit);
             }
         }
@@ -378,7 +378,7 @@ impl Walk<'_> {
             .is_some_and(|relative| self.matcher.is_match(relative))
         {
             self.matches.insert(path.to_owned(), bytes);
-            if self.matches.len() > MAX_CANDIDATES {
+            if self.matches.len() > MAX_GLOB_CANDIDATES {
                 return Err(ToolError::Limit);
             }
         }

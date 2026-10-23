@@ -17,7 +17,7 @@ const MISSING_AGENT: &str = "That agent is no longer in this Run; back to primar
 const PRIMARY_SHOWN: &str = "The primary chat is already shown";
 const BACK_TO_PRIMARY: &str = "Back to primary";
 const PRIMARY_LINE: &str = "Viewing primary; its conversation is above";
-const INVALID_CHOICE: &str = "Invalid agent choice; type a number, n, p or q";
+const INVALID_AGENT_CHAT_CHOICE: &str = "Invalid agent choice; type a number, n, p or q";
 
 pub enum AgentChatInput {
     // The input keeps its ordinary meaning.
@@ -988,7 +988,12 @@ impl AttachedTerminal {
         self.linear
             .as_mut()
             .expect("linear presentation")
-            .write_agent_chat(&mut io::stderr(), &[], Some(INVALID_CHOICE), true)?;
+            .write_agent_chat(
+                &mut io::stderr(),
+                &[],
+                Some(INVALID_AGENT_CHAT_CHOICE),
+                true,
+            )?;
         Ok(AgentChatInput::Handled)
     }
 

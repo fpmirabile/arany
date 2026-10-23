@@ -1,4 +1,4 @@
-use super::super::{CAPTURE_BYTES, GuardCheck, TEARDOWN_WAIT, retry_transient};
+use super::super::{GUARD_CAPTURE_BYTES, GuardCheck, TEARDOWN_WAIT, retry_transient};
 use super::system_program;
 use crate::private_fs::open_directory;
 use crate::tools::toolchains::RuntimeGrant;
@@ -66,7 +66,7 @@ async fn disk_command(root: &Path, arguments: &[&str]) -> Result<Vec<u8>, ToolEr
         command
             .spawn()
             .map_err(|_| ToolError::ProtectionUnavailable)?,
-        CAPTURE_BYTES,
+        GUARD_CAPTURE_BYTES,
         Duration::from_secs(20),
     )
     .await?;

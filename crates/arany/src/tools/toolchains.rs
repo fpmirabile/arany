@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub(crate) const MAX_RUNTIME_GRANTS: usize = 11;
-const MAX_CANDIDATES: usize = 64;
+const MAX_TOOLCHAIN_CANDIDATES: usize = 64;
 const MAX_DIRECTORY_ENTRIES: usize = 128;
 #[cfg(target_os = "macos")]
 const APPLE_CLT_USR: &str = "/Library/Developer/CommandLineTools/usr";
@@ -822,7 +822,7 @@ fn apple_sdk_valid(_root: &Path) -> bool {
 }
 
 fn push_candidate(candidates: &mut Vec<Candidate>, grant: RuntimeGrant) -> Result<(), ToolError> {
-    if candidates.len() >= MAX_CANDIDATES {
+    if candidates.len() >= MAX_TOOLCHAIN_CANDIDATES {
         return Err(ToolError::Limit);
     }
     let token = grant.token()?;

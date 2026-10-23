@@ -18,7 +18,8 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
-const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
+const CUSTOM_CHECK_VERSION: &str =
+    "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
 
 pub struct CustomProfileCheck {
     profile_name: String,
@@ -422,7 +423,7 @@ pub(super) fn fingerprint(profile: &CustomProfile) -> [u8; 32] {
     let mut digest = Sha256::new();
     for field in [
         env!("CARGO_PKG_VERSION"),
-        CHECK_VERSION,
+        CUSTOM_CHECK_VERSION,
         profile.name(),
         profile.endpoint(),
         profile.model(),

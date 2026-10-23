@@ -468,7 +468,24 @@ impl RunLoop<'_> {
             | ToolCall::Command { .. } => {
                 (self.worker_allowance(id)? as usize).div_ceil(WORKER_CHUNK_BYTES)
             }
-            _ => 0,
+            ToolCall::ParseAgentDefinition { .. }
+            | ToolCall::List { .. }
+            | ToolCall::Read { .. }
+            | ToolCall::Search { .. }
+            | ToolCall::CommandUnguarded { .. }
+            | ToolCall::ApplyChangeset { .. }
+            | ToolCall::Skill { .. }
+            | ToolCall::McpList { .. }
+            | ToolCall::McpCall { .. }
+            | ToolCall::GitStatus { .. }
+            | ToolCall::GitDiff { .. }
+            | ToolCall::GitLog { .. }
+            | ToolCall::GitCommit { .. }
+            | ToolCall::GitBranch { .. }
+            | ToolCall::GitSwitch { .. }
+            | ToolCall::GitPush { .. }
+            | ToolCall::GhPrCreate { .. }
+            | ToolCall::Glob { .. } => 0,
         })
     }
 

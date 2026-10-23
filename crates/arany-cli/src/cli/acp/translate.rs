@@ -1262,7 +1262,12 @@ async fn expire_close(
         let _ = unload(&state, &serve, id, active.session).await;
     }
     let response = if active.uncertain > 0 {
-        wire::error(Some(active.id), -32603, tools::UNKNOWN, "effectUncertain")
+        wire::error(
+            Some(active.id),
+            -32603,
+            tools::UNKNOWN_ACP_TOOL_OUTCOME,
+            "effectUncertain",
+        )
     } else {
         wire::response(
             active.id,
@@ -1350,7 +1355,7 @@ async fn finish(
             Some(active.id),
             -32603,
             if reason == "effectUncertain" {
-                tools::UNKNOWN
+                tools::UNKNOWN_ACP_TOOL_OUTCOME
             } else {
                 turn.error
                     .as_ref()

@@ -12,7 +12,7 @@ mod subscription;
 pub(crate) mod wire;
 pub use subscription::ChatGptProvider;
 
-const ENDPOINT: &str = "https://api.openai.com/v1/responses";
+const OPENAI_ENDPOINT: &str = "https://api.openai.com/v1/responses";
 
 /// Makes three potentially plan-consuming, data-free strict-outcome probes.
 /// The caller must verify the selected account, catalog visibility, and explicit cost consent.
@@ -143,7 +143,7 @@ impl OpenAiProvider {
     fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
         Ok(native::json_request(
             &self.client,
-            ENDPOINT,
+            OPENAI_ENDPOINT,
             &self.key,
             wire::encode_request(&request)?,
         ))
