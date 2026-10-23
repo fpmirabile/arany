@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready`
+- Status: `In progress`
 - Owner: Fernando Mirabile
 - Last updated: `2026-10-22`
-- Next action: implement non-host A1 now, then A2; host A3 follows A1 once [Git S3, PR #279](https://github.com/fpmirabile/arany/pull/279) merges.
+- Next action: validate and land non-host A1, then implement A2; host A3 follows A1 once [Git S3, PR #279](https://github.com/fpmirabile/arany/pull/279) merges.
 
 ## Outcome and scope
 

@@ -828,9 +828,10 @@ fn register(directory: &PrivateDirectory, expires_at_ms: u64) -> Result<Ticket, 
 
 pub(super) async fn acquire(
     id: uuid::Uuid,
-    expires_at_ms: u64,
+    runtime_ms: u32,
     queued: impl Fn(bool),
 ) -> Result<Permit, ToolError> {
+    let expires_at_ms = crate::tools::now_ms().saturating_add(u64::from(runtime_ms));
     let path = crate::store::StateRoot::account_path()
         .map_err(|_| ToolError::Path)?
         .join("guard");

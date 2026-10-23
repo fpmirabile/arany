@@ -912,18 +912,16 @@ pub(super) async fn execute_inner(
     let intent = intent.clone();
     let started = Arc::new(AtomicBool::new(false));
     let worker_started = started.clone();
+    let reactor = tokio::runtime::Handle::current();
     let mut handle = tokio::task::spawn_blocking(move || {
         crate::tools::fs::validate_workspace(&runtime)?;
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|_| ToolError::Operation)?
-            .block_on(unit::execute(
-                &runtime,
-                &intent,
-                worker_cancellation,
-                &worker_started,
-            ))
+        // Admission and Engine deadlines must use the same runtime clock.
+        reactor.block_on(unit::execute(
+            &runtime,
+            &intent,
+            worker_cancellation,
+            &worker_started,
+        ))
     });
     let result = tokio::select! {
         result = &mut handle => result,
@@ -1455,7 +1453,6 @@ mod tests {
                     content: "synthetic".into(),
                 },
                 limits: ToolLimits::default(),
-                expires_at_ms: crate::tools::now_ms() + 60_000,
                 use_count: 1,
             },
             config,
@@ -1663,7 +1660,6 @@ mod tests {
                 workspace_inode: inode,
                 call: call.clone(),
                 limits: ToolLimits::default(),
-                expires_at_ms: crate::tools::now_ms() + 60_000,
                 use_count: 1,
             },
             config,

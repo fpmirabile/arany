@@ -1664,6 +1664,7 @@ fn send_result(
         disposition,
         output,
         attestation: Some(Attestation::Guard(receipt)),
+        approval_cause: None,
         cache_update: if private_command {
             crate::tools::CacheUpdate::Discarded
         } else if task.cache.is_some() {
@@ -1844,7 +1845,7 @@ pub(super) fn helper_main() -> ExitCode {
             .read_exact(&mut go)
             .map_err(|_| ToolError::Operation)?;
         let runtime_started = runtime_start_at_go();
-        // Intent expiry ends the capacity wait; admitted preparation and GO have their own deadlines.
+        // Admitted preparation and GO have their own deadlines.
         if go != *b"GO\n" {
             return Err(ToolError::Configuration);
         }
@@ -2585,6 +2586,7 @@ mod tests {
                     limits: intent.limits.clone(),
                 })
             }),
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         let line = |observation: &ToolObservation| {
@@ -2865,7 +2867,6 @@ mod tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -3070,6 +3071,7 @@ mod tests {
             output: r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
+            approval_cause: None,
             cache_update: CacheUpdate::NotAttempted,
         }
     }
@@ -3611,7 +3613,6 @@ mod tests {
                     workspace_inode: 2,
                     call,
                     limits: ToolLimits::default(),
-                    expires_at_ms: crate::tools::now_ms() + 60_000,
                     use_count: 1,
                 },
                 cache: None,
@@ -3638,12 +3639,6 @@ mod tests {
             cwd: String::new(),
         };
         assert!(validate_task(&task(command.clone())).is_ok());
-        let mut admitted = task(command);
-        admitted.intent.expires_at_ms = 1;
-        assert!(
-            validate_task(&admitted).is_ok(),
-            "preparation after admission is not charged to the intent expiry"
-        );
         assert!(matches!(
             validate_task(&task(ToolCall::CommandUnguarded {
                 program: "sh".into(),

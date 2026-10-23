@@ -1,18 +1,14 @@
 use super::{Config, tools, wire};
 use crate::cli::serve::server::ClientMessage;
-use arany::{RunId, SessionId, now_ms};
+use arany::{RunId, SessionId};
 use arany_cli::protocol::{methods::*, rpc::*};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
-    time::Duration,
 };
-use tokio::{
-    sync::{Notify, mpsc},
-    time::Instant,
-};
+use tokio::sync::{Notify, mpsc};
 
 pub(super) type Shared = Arc<Mutex<State>>;
 
@@ -41,8 +37,6 @@ struct Session {
 struct Permission {
     id: RequestId,
     serve_id: RequestId,
-    deadline: Instant,
-    expires_at_ms: u64,
     item_id: String,
     sent: bool,
 }
@@ -615,490 +609,65 @@ pub(super) async fn output(
     state: Shared,
     stopping: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
+    let mut pending = VecDeque::new();
+    let mut closed = false;
     loop {
         if let Some(withdrawal) = withdraw_permission(&state, None, false) {
             emit(&outbound, withdrawal).await?;
         }
-        let (deadline, changed) = {
-            let state = state.lock().expect("translator state");
-            (
-                state.permission.as_ref().map(|p| p.deadline),
-                state.changed.clone(),
-            )
-        };
-        let message = tokio::select! { biased;
-            () = changed.notified() => continue,
-            () = async { tokio::time::sleep_until(deadline.expect("permission deadline")).await }, if deadline.is_some() => continue,
-            message = inbound.recv() => message,
+        let changed = state.lock().expect("translator state").changed.clone();
+        let message = if let Some(message) = pending.pop_front() {
+            Some(message)
+        } else if closed {
+            None
+        } else {
+            tokio::select! { biased;
+                () = changed.notified() => continue,
+                message = inbound.recv() => message,
+            }
         };
         let Some(message) = message else { break };
-        match message {
-            Message::Response(reply) => {
-                let RequestId::Integer(id) = reply.id else {
-                    continue;
-                };
-                let pending = state.lock().expect("translator state").pending.remove(&id);
-                match pending {
-                    Some(Pending::Initialize(id)) => {
-                        emit(&outbound, wire::response(id, wire::initialized())).await?
-                    }
-                    Some(Pending::New(id, cwd, mode)) => {
-                        let result: ThreadResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve thread")?;
-                        {
-                            let mut state = state.lock().expect("translator state");
-                            state.sessions.insert(
-                                result.thread.id,
-                                Session {
-                                    sequence: 0,
-                                    cwd,
-                                    mode: mode.clone(),
-                                },
-                            );
-                            state.authenticated = true;
-                        }
-                        emit(
-                            &outbound,
-                            wire::response(id, {
-                                let mut settings = wire::mode_state(&mode);
-                                settings["sessionId"] = json!(result.thread.id);
-                                settings
-                            }),
-                        )
-                        .await?;
-                    }
-                    Some(Pending::Load {
-                        id,
-                        cwd,
-                        replay,
-                        mode,
-                    }) => {
-                        let result: ThreadResumeResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve history")?;
-                        if replay {
-                            for update in history_updates(&result, &cwd) {
-                                emit_answer(&outbound, update).await?;
-                            }
-                        }
-                        {
-                            let mut state = state.lock().expect("translator state");
-                            state.sessions.insert(
-                                result.thread.id,
-                                Session {
-                                    sequence: 0,
-                                    cwd,
-                                    mode: mode.clone(),
-                                },
-                            );
-                            state.authenticated = true;
-                        }
-                        emit(&outbound, wire::response(id, wire::mode_state(&mode))).await?;
-                    }
-                    Some(Pending::Mode {
-                        id,
-                        session,
-                        config,
-                    }) => {
-                        let result: ThreadSettingsUpdateResult =
-                            serde_json::from_value(reply.result)
-                                .map_err(|_| "invalid serve settings")?;
-                        state
-                            .lock()
-                            .expect("translator state")
-                            .sessions
-                            .get_mut(&session)
-                            .ok_or("no loaded ACP Session")?
-                            .mode = result.permission_mode.clone();
-                        for update in wire::mode_updates(session, &result.permission_mode) {
-                            emit(&outbound, update).await?;
-                        }
-                        let result = if config {
-                            json!({"configOptions":wire::mode_state(&result.permission_mode)["configOptions"]})
+        let projection = output_message(
+            message,
+            serve.clone(),
+            outbound.clone(),
+            state.clone(),
+            stopping.clone(),
+        );
+        tokio::pin!(projection);
+        let mut projected = false;
+        let mut withdrawal = None;
+        while !projected || withdrawal.is_some() {
+            tokio::select! { biased;
+                permit = outbound.reserve(), if withdrawal.is_some() => {
+                    permit.map_err(|_| "ACP output closed")?
+                        .send(withdrawal.take().expect("pending withdrawal"));
+                },
+                result = &mut projection, if !projected => { result?; projected = true; },
+                message = inbound.recv(), if !closed => match message {
+                    Some(Message::Request(request)) => {
+                        if withdrawal.is_some() {
+                            approval_response(&serve, request.id, "unavailable").await?;
                         } else {
-                            json!({})
-                        };
-                        emit(&outbound, wire::response(id, result)).await?;
-                    }
-                    Some(Pending::Close(id, session)) => {
+                            permission_request(&state, &serve, &outbound, request).await?;
+                        }
+                    },
+                    Some(Message::Notification(note)) if note.method == "$/cancel_request" => {
+                        if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+                            && let Some(cancel) = withdraw_permission(&state, Some(&params.request_id), true)
                         {
-                            let mut state = state.lock().expect("translator state");
-                            state.sessions.remove(&session);
-                            state.closing.remove(&session);
+                            // Admit no new permission until this withdrawal drains.
+                            withdrawal = Some(cancel);
                         }
-                        emit(&outbound, wire::response(id, json!({}))).await?;
-                    }
-                    Some(Pending::List(id)) => {
-                        let result: ThreadListResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve Session list")?;
-                        let sessions: Vec<_> = result
-                            .data
-                            .into_iter()
-                            .map(|item| {
-                                let mut session = json!({
-                                    "sessionId": item.id, "cwd": item.cwd,
-                                    "title": crate::presentation::escape_terminal(&item.title),
-                                });
-                                if item.updated_at != "Unknown" {
-                                    session["updatedAt"] = json!(item.updated_at);
-                                }
-                                session
-                            })
-                            .collect();
-                        emit(
-                            &outbound,
-                            wire::response(
-                                id,
-                                json!({"sessions": sessions, "nextCursor": result.next_cursor}),
-                            ),
-                        )
-                        .await?;
-                    }
-                    Some(Pending::Start) => {
-                        let result: TurnResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve turn")?;
-                        let cancel = {
-                            let mut state = state.lock().expect("translator state");
-                            let active = state.active.as_mut().ok_or("no active ACP prompt")?;
-                            active.turn = Some(result.turn.id);
-                            (active.cancelled && !*stopping.borrow()).then_some(
-                                TurnInterruptParams {
-                                    thread_id: active.session,
-                                    turn_id: result.turn.id,
-                                },
-                            )
-                        };
-                        if let Some(params) = cancel {
-                            send_request(
-                                &state,
-                                &serve,
-                                "turn/interrupt",
-                                params,
-                                Pending::Interrupt,
-                            )
-                            .await?;
-                        }
-                        let watch = {
-                            let state = state.lock().expect("translator state");
-                            state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
-                                (
-                                    a.session,
-                                    result.turn.id,
-                                    state.sessions.get(&a.session).map_or(0, |s| s.sequence),
-                                )
-                            })
-                        };
-                        if let Some((session, run, since)) = watch.filter(|_| !*stopping.borrow()) {
-                            send_request(
-                                &state,
-                                &serve,
-                                "events/subscribe",
-                                EventsSubscribeParams {
-                                    thread_id: session,
-                                    since,
-                                },
-                                Pending::Watch { session, run },
-                            )
-                            .await?;
-                        }
-                    }
-                    Some(Pending::Watch { session, run }) => {
-                        if !state
-                            .lock()
-                            .expect("translator state")
-                            .active
-                            .as_ref()
-                            .is_some_and(|a| a.session == session && a.turn == Some(run))
-                        {
-                            continue;
-                        }
-                        let page: EventsSubscribeResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve events")?;
-                        for event in &page.events {
-                            if let Some(update) = project_plan(&state, session, event)? {
-                                emit(&outbound, update).await?;
-                            }
-                        }
-                        if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
-                            send_request(
-                                &state,
-                                &serve,
-                                "events/subscribe",
-                                EventsSubscribeParams {
-                                    thread_id: session,
-                                    since,
-                                },
-                                Pending::Watch { session, run },
-                            )
-                            .await?;
-                        }
-                    }
-                    Some(Pending::Recover) => {
-                        let page: EventsSubscribeResult = serde_json::from_value(reply.result)
-                            .map_err(|_| "invalid serve events")?;
-                        let Some((session, run, prompt)) = ({
-                            let state = state.lock().expect("translator state");
-                            state.active.as_ref().and_then(|active| {
-                                Some((active.session, active.turn?, active.generation))
-                            })
-                        }) else {
-                            continue;
-                        };
-                        for event in &page.events {
-                            if let Some(update) = project_plan(&state, session, event)? {
-                                emit(&outbound, update).await?;
-                            }
-                            if event.run_id.as_deref() != Some(run.to_string().as_str()) {
-                                continue;
-                            }
-                            let item = match event.kind.as_str() {
-                                "MessageCommitted" => Some((
-                                    Item::AgentMessage {
-                                        id: format!("{run}:answer"),
-                                        text: event.payload["text"]
-                                            .as_str()
-                                            .ok_or("invalid committed answer")?
-                                            .into(),
-                                        phase: AgentMessagePhase::FinalAnswer,
-                                    },
-                                    false,
-                                )),
-                                "ToolStarted" => {
-                                    let intent: arany::EffectIntent =
-                                        serde_json::from_value(event.payload["intent"].clone())
-                                            .map_err(|_| "invalid committed Tool intent")?;
-                                    Some((
-                                        crate::cli::serve::items::tool_item(&intent, None, false),
-                                        true,
-                                    ))
-                                }
-                                "ToolFinished" => {
-                                    let mut payload = event.payload.clone();
-                                    if let Some(fields) = payload.as_object_mut() {
-                                        fields.remove("checkpoint");
-                                    }
-                                    let observation: arany::ToolObservation =
-                                        serde_json::from_value(payload)
-                                            .map_err(|_| "invalid committed Tool observation")?;
-                                    Some((
-                                        crate::cli::serve::items::tool_item(
-                                            &observation.intent,
-                                            Some(&observation),
-                                            false,
-                                        ),
-                                        false,
-                                    ))
-                                }
-                                _ => None,
-                            };
-                            if let Some((item, started)) = item
-                                && let Some(update) = project(&state, session, run, item, started)
-                            {
-                                emit_answer(&outbound, update).await?;
-                            }
-                        }
-                        if let Some(last) = page.events.last()
-                            && let Some(loaded) = state
-                                .lock()
-                                .expect("translator state")
-                                .sessions
-                                .get_mut(&session)
-                        {
-                            loaded.sequence = last.sequence;
-                        }
-                        if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
-                            recover(
-                                &state,
-                                &serve,
-                                &outbound,
-                                prompt,
-                                EventsSubscribeParams {
-                                    thread_id: session,
-                                    since,
-                                },
-                            )
-                            .await?;
-                        } else {
-                            finish(&state, &serve, &outbound, prompt, page.next_since.is_some())
-                                .await?;
-                        }
-                    }
-                    _ => (),
-                }
+                    },
+                    Some(message) if pending.len() < crate::cli::serve::OUTBOUND_CAPACITY => pending.push_back(message),
+                    Some(_) => return Err("ACP projection queue full; check Session history".into()),
+                    None => closed = true,
+                },
             }
-            Message::Error(reply) => {
-                let Some(RequestId::Integer(id)) = reply.id else {
-                    continue;
-                };
-                let pending = state.lock().expect("translator state").pending.remove(&id);
-                match pending {
-                    Some(
-                        Pending::Initialize(id)
-                        | Pending::New(id, ..)
-                        | Pending::Load { id, .. }
-                        | Pending::Mode { id, .. }
-                        | Pending::List(id),
-                    ) => emit(&outbound, remap(id, reply.error)).await?,
-                    Some(Pending::Close(id, session)) => {
-                        state
-                            .lock()
-                            .expect("translator state")
-                            .closing
-                            .remove(&session);
-                        emit(&outbound, remap(id, reply.error)).await?
-                    }
-                    Some(Pending::Start) => {
-                        let active = state
-                            .lock()
-                            .expect("translator state")
-                            .active
-                            .take()
-                            .ok_or("no active ACP prompt")?;
-                        let response = if active.cancelled {
-                            wire::response(active.id, json!({"stopReason":"cancelled"}))
-                        } else {
-                            remap(active.id, reply.error)
-                        };
-                        emit(&outbound, response).await?;
-                        if let Some(close) = active.close {
-                            unload(&state, &serve, close, active.session).await?;
-                        }
-                    }
-                    Some(Pending::Recover) => {
-                        eprintln!(
-                            "Arany could not reconcile all committed ACP updates; check Session history"
-                        );
-                        let prompt = state
-                            .lock()
-                            .expect("translator state")
-                            .active
-                            .as_ref()
-                            .map(|a| a.generation);
-                        if let Some(prompt) = prompt {
-                            finish(&state, &serve, &outbound, prompt, true).await?;
-                        }
-                    }
-                    Some(Pending::Watch { session, run }) => {
-                        if let Some(active) = &mut state.lock().expect("translator state").active
-                            && active.session == session
-                            && active.turn == Some(run)
-                        {
-                            active.resync = true;
-                        }
-                    }
-                    _ => (),
-                }
-            }
-            Message::Notification(note)
-                if matches!(note.method.as_str(), "item/started" | "item/completed") =>
-            {
-                let started = note.method == "item/started";
-                let (thread, turn, item) = if started {
-                    let item: ItemStartedNotification =
-                        serde_json::from_value(note.params.unwrap_or(Value::Null))
-                            .map_err(|_| "invalid serve item")?;
-                    (item.thread_id, item.turn_id, item.item)
-                } else {
-                    let item: ItemCompletedNotification =
-                        serde_json::from_value(note.params.unwrap_or(Value::Null))
-                            .map_err(|_| "invalid serve item")?;
-                    (item.thread_id, item.turn_id, item.item)
-                };
-                if !started {
-                    let withdrawal_id = {
-                        let state = state.lock().expect("translator state");
-                        state
-                            .permission
-                            .as_ref()
-                            .filter(|p| item.id() == p.item_id)
-                            .map(|p| p.serve_id.clone())
-                    };
-                    if let Some(id) = withdrawal_id
-                        && let Some(note) = withdraw_permission(&state, Some(&id), true)
-                    {
-                        emit(&outbound, note).await?;
-                    }
-                }
-                if let Some(update) = project(&state, thread, turn, item, started) {
-                    emit_answer(&outbound, update).await?;
-                }
-            }
-            Message::Notification(note) if note.method == "turn/completed" => {
-                let result: TurnNotification =
-                    serde_json::from_value(note.params.unwrap_or(Value::Null))
-                        .map_err(|_| "invalid serve completion")?;
-                let since = {
-                    let mut state = state.lock().expect("translator state");
-                    if let Some(active) = &mut state.active
-                        && active.session == result.thread_id
-                        && active.turn == Some(result.turn.id)
-                    {
-                        let recover = active.watch_plan
-                            || active.resync
-                            || (!active.answered && result.turn.status == TurnStatus::Completed);
-                        active.completion = Some(result.turn);
-                        let prompt = active.generation;
-                        Some((
-                            prompt,
-                            recover.then_some(
-                                state
-                                    .sessions
-                                    .get(&result.thread_id)
-                                    .map_or(0, |s| s.sequence),
-                            ),
-                        ))
-                    } else {
-                        None
-                    }
-                };
-                let Some((prompt, since)) = since else {
-                    continue;
-                };
-                if let Some(withdrawal) = withdraw_permission(&state, None, true) {
-                    emit(&outbound, withdrawal).await?;
-                }
-                if let Some(since) = since.filter(|_| !*stopping.borrow()) {
-                    recover(
-                        &state,
-                        &serve,
-                        &outbound,
-                        prompt,
-                        EventsSubscribeParams {
-                            thread_id: result.thread_id,
-                            since,
-                        },
-                    )
-                    .await?;
-                } else {
-                    finish(&state, &serve, &outbound, prompt, since.is_some()).await?;
-                }
-            }
-            Message::Notification(note) if note.method == "events/resync" => {
-                if let Some(active) = &mut state.lock().expect("translator state").active {
-                    active.resync = true;
-                }
-            }
-            Message::Notification(note) if note.method == "events/committed" => {
-                let params: EventsCommittedNotification =
-                    serde_json::from_value(note.params.unwrap_or(Value::Null))
-                        .map_err(|_| "invalid serve event")?;
-                if let Some(update) = project_plan(&state, params.thread_id, &params.event)? {
-                    emit(&outbound, update).await?;
-                }
-            }
-            Message::Notification(note) if note.method == "$/cancel_request" => {
-                if let Ok(params) = parse::<wire::CancelRequest>(note.params)
-                    && let Some(withdrawal) =
-                        withdraw_permission(&state, Some(&params.request_id), true)
-                {
-                    emit(&outbound, withdrawal).await?;
-                }
-            }
-            Message::Request(request) => {
-                permission_request(&state, &serve, &outbound, request).await?
-            }
-            _ => (),
         }
     }
+
     let completed = state
         .lock()
         .expect("translator state")
@@ -1132,6 +701,472 @@ async fn recover(
         Err(_) if serve.is_closed() => finish(state, serve, outbound, prompt, true).await,
         result => result,
     }
+}
+
+async fn output_message(
+    message: Message,
+    serve: mpsc::Sender<ClientMessage>,
+    outbound: mpsc::Sender<Value>,
+    state: Shared,
+    stopping: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
+    match message {
+        Message::Response(reply) => {
+            let RequestId::Integer(id) = reply.id else {
+                return Ok(());
+            };
+            let pending = state.lock().expect("translator state").pending.remove(&id);
+            match pending {
+                Some(Pending::Initialize(id)) => {
+                    emit(&outbound, wire::response(id, wire::initialized())).await?
+                }
+                Some(Pending::New(id, cwd, mode)) => {
+                    let result: ThreadResult =
+                        serde_json::from_value(reply.result).map_err(|_| "invalid serve thread")?;
+                    {
+                        let mut state = state.lock().expect("translator state");
+                        state.sessions.insert(
+                            result.thread.id,
+                            Session {
+                                sequence: 0,
+                                cwd,
+                                mode: mode.clone(),
+                            },
+                        );
+                        state.authenticated = true;
+                    }
+                    emit(
+                        &outbound,
+                        wire::response(id, {
+                            let mut settings = wire::mode_state(&mode);
+                            settings["sessionId"] = json!(result.thread.id);
+                            settings
+                        }),
+                    )
+                    .await?;
+                }
+                Some(Pending::Load {
+                    id,
+                    cwd,
+                    replay,
+                    mode,
+                }) => {
+                    let result: ThreadResumeResult = serde_json::from_value(reply.result)
+                        .map_err(|_| "invalid serve history")?;
+                    if replay {
+                        for update in history_updates(&result, &cwd) {
+                            emit_answer(&outbound, update).await?;
+                        }
+                    }
+                    {
+                        let mut state = state.lock().expect("translator state");
+                        state.sessions.insert(
+                            result.thread.id,
+                            Session {
+                                sequence: 0,
+                                cwd,
+                                mode: mode.clone(),
+                            },
+                        );
+                        state.authenticated = true;
+                    }
+                    emit(&outbound, wire::response(id, wire::mode_state(&mode))).await?;
+                }
+                Some(Pending::Mode {
+                    id,
+                    session,
+                    config,
+                }) => {
+                    let result: ThreadSettingsUpdateResult =
+                        serde_json::from_value(reply.result)
+                            .map_err(|_| "invalid serve settings")?;
+                    state
+                        .lock()
+                        .expect("translator state")
+                        .sessions
+                        .get_mut(&session)
+                        .ok_or("no loaded ACP Session")?
+                        .mode = result.permission_mode.clone();
+                    for update in wire::mode_updates(session, &result.permission_mode) {
+                        emit(&outbound, update).await?;
+                    }
+                    let result = if config {
+                        json!({"configOptions":wire::mode_state(&result.permission_mode)["configOptions"]})
+                    } else {
+                        json!({})
+                    };
+                    emit(&outbound, wire::response(id, result)).await?;
+                }
+                Some(Pending::Close(id, session)) => {
+                    {
+                        let mut state = state.lock().expect("translator state");
+                        state.sessions.remove(&session);
+                        state.closing.remove(&session);
+                    }
+                    emit(&outbound, wire::response(id, json!({}))).await?;
+                }
+                Some(Pending::List(id)) => {
+                    let result: ThreadListResult = serde_json::from_value(reply.result)
+                        .map_err(|_| "invalid serve Session list")?;
+                    let sessions: Vec<_> = result
+                        .data
+                        .into_iter()
+                        .map(|item| {
+                            let mut session = json!({
+                                "sessionId": item.id, "cwd": item.cwd,
+                                "title": crate::presentation::escape_terminal(&item.title),
+                            });
+                            if item.updated_at != "Unknown" {
+                                session["updatedAt"] = json!(item.updated_at);
+                            }
+                            session
+                        })
+                        .collect();
+                    emit(
+                        &outbound,
+                        wire::response(
+                            id,
+                            json!({"sessions": sessions, "nextCursor": result.next_cursor}),
+                        ),
+                    )
+                    .await?;
+                }
+                Some(Pending::Start) => {
+                    let result: TurnResult =
+                        serde_json::from_value(reply.result).map_err(|_| "invalid serve turn")?;
+                    let cancel = {
+                        let mut state = state.lock().expect("translator state");
+                        let active = state.active.as_mut().ok_or("no active ACP prompt")?;
+                        active.turn = Some(result.turn.id);
+                        (active.cancelled && !*stopping.borrow()).then_some(TurnInterruptParams {
+                            thread_id: active.session,
+                            turn_id: result.turn.id,
+                        })
+                    };
+                    if let Some(params) = cancel {
+                        send_request(&state, &serve, "turn/interrupt", params, Pending::Interrupt)
+                            .await?;
+                    }
+                    let watch = {
+                        let state = state.lock().expect("translator state");
+                        state.active.as_ref().filter(|a| a.watch_plan).map(|a| {
+                            (
+                                a.session,
+                                result.turn.id,
+                                state.sessions.get(&a.session).map_or(0, |s| s.sequence),
+                            )
+                        })
+                    };
+                    if let Some((session, run, since)) = watch.filter(|_| !*stopping.borrow()) {
+                        send_request(
+                            &state,
+                            &serve,
+                            "events/subscribe",
+                            EventsSubscribeParams {
+                                thread_id: session,
+                                since,
+                            },
+                            Pending::Watch { session, run },
+                        )
+                        .await?;
+                    }
+                }
+                Some(Pending::Watch { session, run }) => {
+                    if !state
+                        .lock()
+                        .expect("translator state")
+                        .active
+                        .as_ref()
+                        .is_some_and(|a| a.session == session && a.turn == Some(run))
+                    {
+                        return Ok(());
+                    }
+                    let page: EventsSubscribeResult =
+                        serde_json::from_value(reply.result).map_err(|_| "invalid serve events")?;
+                    for event in &page.events {
+                        if let Some(update) = project_plan(&state, session, event)? {
+                            emit(&outbound, update).await?;
+                        }
+                    }
+                    if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
+                        send_request(
+                            &state,
+                            &serve,
+                            "events/subscribe",
+                            EventsSubscribeParams {
+                                thread_id: session,
+                                since,
+                            },
+                            Pending::Watch { session, run },
+                        )
+                        .await?;
+                    }
+                }
+                Some(Pending::Recover) => {
+                    let page: EventsSubscribeResult =
+                        serde_json::from_value(reply.result).map_err(|_| "invalid serve events")?;
+                    let Some((session, run, prompt)) = ({
+                        let state = state.lock().expect("translator state");
+                        state.active.as_ref().and_then(|active| {
+                            Some((active.session, active.turn?, active.generation))
+                        })
+                    }) else {
+                        return Ok(());
+                    };
+                    for event in &page.events {
+                        if let Some(update) = project_plan(&state, session, event)? {
+                            emit(&outbound, update).await?;
+                        }
+                        if event.run_id.as_deref() != Some(run.to_string().as_str()) {
+                            continue;
+                        }
+                        let item = match event.kind.as_str() {
+                            "MessageCommitted" => Some((
+                                Item::AgentMessage {
+                                    id: format!("{run}:answer"),
+                                    text: event.payload["text"]
+                                        .as_str()
+                                        .ok_or("invalid committed answer")?
+                                        .into(),
+                                    phase: AgentMessagePhase::FinalAnswer,
+                                },
+                                false,
+                            )),
+                            "ToolStarted" => {
+                                let intent: arany::EffectIntent =
+                                    serde_json::from_value(event.payload["intent"].clone())
+                                        .map_err(|_| "invalid committed Tool intent")?;
+                                Some((
+                                    crate::cli::serve::items::tool_item(&intent, None, false),
+                                    true,
+                                ))
+                            }
+                            "ToolFinished" => {
+                                let mut payload = event.payload.clone();
+                                if let Some(fields) = payload.as_object_mut() {
+                                    fields.remove("checkpoint");
+                                }
+                                let observation: arany::ToolObservation =
+                                    serde_json::from_value(payload)
+                                        .map_err(|_| "invalid committed Tool observation")?;
+                                Some((
+                                    crate::cli::serve::items::tool_item(
+                                        &observation.intent,
+                                        Some(&observation),
+                                        false,
+                                    ),
+                                    false,
+                                ))
+                            }
+                            _ => None,
+                        };
+                        if let Some((item, started)) = item
+                            && let Some(update) = project(&state, session, run, item, started)
+                        {
+                            emit_answer(&outbound, update).await?;
+                        }
+                    }
+                    if let Some(last) = page.events.last()
+                        && let Some(loaded) = state
+                            .lock()
+                            .expect("translator state")
+                            .sessions
+                            .get_mut(&session)
+                    {
+                        loaded.sequence = last.sequence;
+                    }
+                    if let Some(since) = page.next_since.filter(|_| !*stopping.borrow()) {
+                        recover(
+                            &state,
+                            &serve,
+                            &outbound,
+                            prompt,
+                            EventsSubscribeParams {
+                                thread_id: session,
+                                since,
+                            },
+                        )
+                        .await?;
+                    } else {
+                        finish(&state, &serve, &outbound, prompt, page.next_since.is_some())
+                            .await?;
+                    }
+                }
+                _ => (),
+            }
+        }
+        Message::Error(reply) => {
+            let Some(RequestId::Integer(id)) = reply.id else {
+                return Ok(());
+            };
+            let pending = state.lock().expect("translator state").pending.remove(&id);
+            match pending {
+                Some(
+                    Pending::Initialize(id)
+                    | Pending::New(id, ..)
+                    | Pending::Load { id, .. }
+                    | Pending::Mode { id, .. }
+                    | Pending::List(id),
+                ) => emit(&outbound, remap(id, reply.error)).await?,
+                Some(Pending::Close(id, session)) => {
+                    state
+                        .lock()
+                        .expect("translator state")
+                        .closing
+                        .remove(&session);
+                    emit(&outbound, remap(id, reply.error)).await?
+                }
+                Some(Pending::Start) => {
+                    let active = state
+                        .lock()
+                        .expect("translator state")
+                        .active
+                        .take()
+                        .ok_or("no active ACP prompt")?;
+                    let response = if active.cancelled {
+                        wire::response(active.id, json!({"stopReason":"cancelled"}))
+                    } else {
+                        remap(active.id, reply.error)
+                    };
+                    emit(&outbound, response).await?;
+                    if let Some(close) = active.close {
+                        unload(&state, &serve, close, active.session).await?;
+                    }
+                }
+                Some(Pending::Recover) => {
+                    eprintln!(
+                        "Arany could not reconcile all committed ACP updates; check Session history"
+                    );
+                    let prompt = state
+                        .lock()
+                        .expect("translator state")
+                        .active
+                        .as_ref()
+                        .map(|a| a.generation);
+                    if let Some(prompt) = prompt {
+                        finish(&state, &serve, &outbound, prompt, true).await?;
+                    }
+                }
+                Some(Pending::Watch { session, run }) => {
+                    if let Some(active) = &mut state.lock().expect("translator state").active
+                        && active.session == session
+                        && active.turn == Some(run)
+                    {
+                        active.resync = true;
+                    }
+                }
+                _ => (),
+            }
+        }
+        Message::Notification(note)
+            if matches!(note.method.as_str(), "item/started" | "item/completed") =>
+        {
+            let started = note.method == "item/started";
+            let (thread, turn, item) = if started {
+                let item: ItemStartedNotification =
+                    serde_json::from_value(note.params.unwrap_or(Value::Null))
+                        .map_err(|_| "invalid serve item")?;
+                (item.thread_id, item.turn_id, item.item)
+            } else {
+                let item: ItemCompletedNotification =
+                    serde_json::from_value(note.params.unwrap_or(Value::Null))
+                        .map_err(|_| "invalid serve item")?;
+                (item.thread_id, item.turn_id, item.item)
+            };
+            if !started {
+                let withdrawal_id = {
+                    let state = state.lock().expect("translator state");
+                    state
+                        .permission
+                        .as_ref()
+                        .filter(|p| item.id() == p.item_id)
+                        .map(|p| p.serve_id.clone())
+                };
+                if let Some(id) = withdrawal_id
+                    && let Some(note) = withdraw_permission(&state, Some(&id), true)
+                {
+                    emit(&outbound, note).await?;
+                }
+            }
+            if let Some(update) = project(&state, thread, turn, item, started) {
+                emit_answer(&outbound, update).await?;
+            }
+        }
+        Message::Notification(note) if note.method == "turn/completed" => {
+            let result: TurnNotification =
+                serde_json::from_value(note.params.unwrap_or(Value::Null))
+                    .map_err(|_| "invalid serve completion")?;
+            let since = {
+                let mut state = state.lock().expect("translator state");
+                if let Some(active) = &mut state.active
+                    && active.session == result.thread_id
+                    && active.turn == Some(result.turn.id)
+                {
+                    let recover = active.watch_plan
+                        || active.resync
+                        || (!active.answered && result.turn.status == TurnStatus::Completed);
+                    active.completion = Some(result.turn);
+                    let prompt = active.generation;
+                    Some((
+                        prompt,
+                        recover.then_some(
+                            state
+                                .sessions
+                                .get(&result.thread_id)
+                                .map_or(0, |s| s.sequence),
+                        ),
+                    ))
+                } else {
+                    None
+                }
+            };
+            let Some((prompt, since)) = since else {
+                return Ok(());
+            };
+            if let Some(withdrawal) = withdraw_permission(&state, None, true) {
+                emit(&outbound, withdrawal).await?;
+            }
+            if let Some(since) = since.filter(|_| !*stopping.borrow()) {
+                recover(
+                    &state,
+                    &serve,
+                    &outbound,
+                    prompt,
+                    EventsSubscribeParams {
+                        thread_id: result.thread_id,
+                        since,
+                    },
+                )
+                .await?;
+            } else {
+                finish(&state, &serve, &outbound, prompt, since.is_some()).await?;
+            }
+        }
+        Message::Notification(note) if note.method == "events/resync" => {
+            if let Some(active) = &mut state.lock().expect("translator state").active {
+                active.resync = true;
+            }
+        }
+        Message::Notification(note) if note.method == "events/committed" => {
+            let params: EventsCommittedNotification =
+                serde_json::from_value(note.params.unwrap_or(Value::Null))
+                    .map_err(|_| "invalid serve event")?;
+            if let Some(update) = project_plan(&state, params.thread_id, &params.event)? {
+                emit(&outbound, update).await?;
+            }
+        }
+        Message::Notification(note) if note.method == "$/cancel_request" => {
+            if let Ok(params) = parse::<wire::CancelRequest>(note.params)
+                && let Some(withdrawal) =
+                    withdraw_permission(&state, Some(&params.request_id), true)
+            {
+                emit(&outbound, withdrawal).await?;
+            }
+        }
+        Message::Request(request) => permission_request(&state, &serve, &outbound, request).await?,
+        _ => (),
+    }
+    Ok(())
 }
 
 fn project_plan(
@@ -1460,12 +1495,25 @@ async fn approval_response(
     id: RequestId,
     decision: &str,
 ) -> Result<(), String> {
-    serve
-        .send(ClientMessage::Message(Message::Response(Response {
+    let message = if decision == "unavailable" {
+        Message::Error(ErrorResponse {
+            jsonrpc: Default::default(),
+            id: Some(id),
+            error: ErrorObject {
+                code: -32603,
+                message: "Approval channel unavailable".into(),
+                data: None,
+            },
+        })
+    } else {
+        Message::Response(Response {
             jsonrpc: Default::default(),
             id,
             result: json!({"decision":decision}),
-        })))
+        })
+    };
+    serve
+        .send(ClientMessage::Message(message))
         .await
         .map_err(|_| "serve input closed".into())
 }
@@ -1482,17 +1530,18 @@ async fn permission_reply(
         {
             "accept"
         }
+        Some(outcome) if outcome["outcome"] == "selected" && outcome["optionId"] == "deny" => {
+            "decline"
+        }
         Some(outcome) if outcome["outcome"] == "cancelled" => "cancel",
-        _ => "decline",
+        _ => "unavailable",
     };
     let pending = {
         let mut state = state.lock().expect("translator state");
         if state.active.as_ref().is_some_and(|a| a.cancelled) {
             return Ok(());
         }
-        let pending = state.permission.take_if(|p| {
-            p.id == id && p.sent && Instant::now() < p.deadline && now_ms() < p.expires_at_ms
-        });
+        let pending = state.permission.take_if(|p| p.id == id && p.sent);
         if decision == "cancel"
             && pending.is_some()
             && let Some(active) = &mut state.active
@@ -1510,10 +1559,9 @@ async fn permission_reply(
 fn withdraw_permission(state: &Shared, id: Option<&RequestId>, force: bool) -> Option<Value> {
     let mut state = state.lock().expect("translator state");
     let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
-    let pending = state.permission.take_if(|p| {
-        id.is_none_or(|id| *id == p.serve_id)
-            && (force || cancelled || Instant::now() >= p.deadline || now_ms() >= p.expires_at_ms)
-    })?;
+    let pending = state
+        .permission
+        .take_if(|p| id.is_none_or(|id| *id == p.serve_id) && (force || cancelled))?;
     pending.sent.then(
         || json!({"jsonrpc":"2.0","method":"$/cancel_request","params":{"requestId":pending.id}}),
     )
@@ -1526,10 +1574,7 @@ async fn permission_request(
     request: Request,
 ) -> Result<(), String> {
     let Ok(params) = parse::<ApprovalParams>(request.params) else {
-        return approval_response(serve, request.id, "decline").await;
-    };
-    let Ok(expires_at_ms) = u64::try_from(params.expires_at_ms) else {
-        return approval_response(serve, request.id, "decline").await;
+        return approval_response(serve, request.id, "unavailable").await;
     };
     let intent: arany::EffectIntent = serde_json::from_value(params.intent.clone())
         .map_err(|_| "invalid serve approval intent")?;
@@ -1541,11 +1586,10 @@ async fn permission_request(
                 && !a.cancelled
                 && a.completion.is_none()
         });
-        let remaining = expires_at_ms.saturating_sub(now_ms());
         if !valid
             || state.permission.is_some()
-            || remaining == 0
-            || (intent.call.is_unguarded() || intent.call.is_host())
+            || intent.call.is_unguarded()
+            || intent.call.is_host()
         {
             None
         } else {
@@ -1576,41 +1620,40 @@ async fn permission_request(
             if encode_line(&message).is_err() {
                 None
             } else {
-                let deadline = Instant::now() + Duration::from_millis(remaining);
                 state.permission = Some(Permission {
                     id,
                     serve_id: request.id.clone(),
-                    deadline,
-                    expires_at_ms,
                     item_id: params.item_id.clone(),
                     sent: false,
                 });
-                Some((message, deadline, state.changed.clone()))
+                Some(message)
             }
         }
     };
-    let Some((message, deadline, changed)) = prepared else {
-        return approval_response(serve, request.id, "decline").await;
+    let Some(message) = prepared else {
+        return approval_response(serve, request.id, "unavailable").await;
     };
-    loop {
-        let permit = tokio::select! { biased;
-            () = changed.notified() => None,
-            () = tokio::time::sleep_until(deadline) => None,
-            permit = output.reserve() => Some(permit.map_err(|_| "ACP output closed")?),
-        };
+    let delivered = {
         let mut state = state.lock().expect("translator state");
         let cancelled = state.active.as_ref().is_none_or(|a| a.cancelled);
         let live = state
             .permission
             .as_ref()
-            .is_some_and(|p| Instant::now() < p.deadline && now_ms() < p.expires_at_ms);
+            .is_some_and(|p| p.serve_id == request.id);
         if cancelled || !live {
             return Ok(());
         }
-        if let Some(permit) = permit {
+        if let Ok(permit) = output.try_reserve() {
             state.permission.as_mut().expect("live permission").sent = true;
             permit.send(message);
-            return Ok(());
+            true
+        } else {
+            state.permission = None;
+            false
         }
+    };
+    if !delivered {
+        approval_response(serve, request.id, "unavailable").await?;
     }
+    Ok(())
 }

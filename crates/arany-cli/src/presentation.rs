@@ -1175,7 +1175,7 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
         )),
     }
     lines.push(String::new());
-    lines.push("Allow once for this exact action · expires within one minute".into());
+    lines.push("Allow once for this exact action".into());
     lines
 }
 
@@ -1379,13 +1379,34 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             }) {
                 return Some("Error: The command succeeded but its build cache update is uncertain; the Run stopped without retrying. No answer was committed.".into());
             }
-            if run.tools.last().is_some_and(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
+            if let Some(observation) = run
+                .tools
+                .last()
+                .and_then(|tool| tool.observation.as_ref())
+                .filter(|observation| {
                     observation.disposition == arany::ToolDisposition::Denied
                         && observation.attestation.is_none()
                 })
-            }) {
-                return Some("Action denied or approval expired. No further action ran; earlier completed actions remain. Use /permissions or Shift+Tab to review approval settings.".into());
+            {
+                let disposition = match observation.approval_cause {
+                    Some(arany::ApprovalCause::Cancelled) => "Run cancelled.",
+                    Some(arany::ApprovalCause::Paused) => "Goal paused.",
+                    Some(arany::ApprovalCause::ChannelUnavailable) => {
+                        "Approval channel unavailable."
+                    }
+                    Some(arany::ApprovalCause::ChildTimeout) => "Child approval wait timed out.",
+                    Some(arany::ApprovalCause::Declined) | None => "Action denied.",
+                };
+                let recovery = if observation.approval_cause
+                    == Some(arany::ApprovalCause::ChannelUnavailable)
+                {
+                    "Start a new request from an interactive approval channel."
+                } else {
+                    "Use /permissions or Shift+Tab to review approval settings."
+                };
+                return Some(format!(
+                    "{disposition} No further action ran; earlier completed actions remain. {recovery}"
+                ));
             }
             if let Some(tool) = run.tools.last()
                 && tool.observation.as_ref().is_none_or(|observation| {
@@ -1414,7 +1435,24 @@ pub fn run_feedback(run: &RunView) -> Option<String> {
             None => "Run stopped by hook".into(),
         }),
         RunStatus::Cancelled => {
-            Some("Run cancelled. No answer was committed. You can submit a new task.".to_owned())
+            let notice = match run
+                .tools
+                .last()
+                .and_then(|tool| tool.observation.as_ref())
+                .and_then(|observation| observation.approval_cause)
+            {
+                Some(arany::ApprovalCause::Paused) => "Goal paused.",
+                Some(
+                    arany::ApprovalCause::Cancelled
+                    | arany::ApprovalCause::ChannelUnavailable
+                    | arany::ApprovalCause::Declined
+                    | arany::ApprovalCause::ChildTimeout,
+                )
+                | None => "Run cancelled.",
+            };
+            Some(format!(
+                "{notice} No answer was committed. You can submit a new task."
+            ))
         }
         _ => None,
     }
@@ -2548,7 +2586,6 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
         workspace_inode: 2,
         call,
         limits: arany::ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     arany::ToolView {
@@ -2558,6 +2595,7 @@ pub(crate) fn tool_fixture(call: arany::ToolCall, output: &str) -> arany::ToolVi
             disposition: arany::ToolDisposition::Succeeded,
             output: output.into(),
             attestation: None,
+            approval_cause: None,
             cache_update: arany::CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -2902,7 +2940,7 @@ mod peer_row_tests {
                 "Insert:",
                 "+ \\u{001b}[2J",
                 "",
-                "Allow once for this exact action · expires within one minute",
+                "Allow once for this exact action",
             ]
         );
     }
@@ -3373,7 +3411,6 @@ mod enforcement_tests {
                 content: "text".into(),
             },
             limits: arany::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         let mut tool = arany::ToolView {
@@ -3384,6 +3421,7 @@ mod enforcement_tests {
                 disposition: arany::ToolDisposition::Denied,
                 output: String::new(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: arany::CacheUpdate::NotApplicable,
                 enforcement_cause: Some(arany::EnforcementCause::FilesystemDenied),
                 limit_cause: None,
@@ -3460,7 +3498,6 @@ mod unguarded_tests {
                 justification: "It needs the network\u{1b}[31m".into(),
             },
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -3524,6 +3561,7 @@ mod unguarded_tests {
                 intent: intent.clone(),
                 disposition,
                 output: String::new(),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             }),
             intent,

@@ -65,6 +65,9 @@ async fn closed_bundle(
 }
 
 pub(super) async fn worker_case(case: &'static str) {
+    let _deadline = engine_support::deadline(case, Duration::from_secs(180));
+    let approval_timeout = case == "approval_timeout";
+    let case = if approval_timeout { "denial" } else { case };
     // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
     // child call; each case pads to the largest prefix that still reaches its capacity stop.
     let padding = match case {
@@ -269,10 +272,20 @@ pub(super) async fn worker_case(case: &'static str) {
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
-            Some(approval) = inbox.next(), if case != "no_channel" => {
+            Some(mut approval) = inbox.next(), if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
                     arany::FaultPlan::lose_guard_receipt(approval.intent.id); injected = true;
+                }
+                if approval_timeout && private {
+                    tokio::time::pause();
+                    tokio::time::advance(Duration::from_millis(u64::from(approval.intent.limits.runtime_ms) + 1)).await;
+                    tokio::time::resume();
+                    tokio::select! {
+                        result = &mut running => { approval.decide(true); break result; }
+                        () = approval.abandoned() => approval.decide(true),
+                    }
+                    continue;
                 }
                 approval.decide(!(case == "denial" && private || case == "integration_denial" && !private));
             }
@@ -323,6 +336,28 @@ pub(super) async fn worker_case(case: &'static str) {
             Some(b"original a".as_slice())
         );
         store.close().await.unwrap();
+    }
+    if approval_timeout {
+        let tool = run
+            .agents
+            .iter()
+            .flat_map(|agent| &agent.tools)
+            .find(|tool| {
+                tool.observation.as_ref().is_some_and(|observation| {
+                    observation.output
+                        == "Child approval wait timed out; no operation was dispatched"
+                })
+            })
+            .expect("child timeout observation");
+        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+        assert_eq!(
+            tool.observation.as_ref().unwrap().approval_cause,
+            Some(arany::ApprovalCause::ChildTimeout)
+        );
+        assert_eq!(
+            tool.permission_verdict.as_ref().unwrap().source,
+            arany::permissions::PermissionSource::UnavailableApproval
+        );
     }
     let worker = run
         .agents
@@ -782,6 +817,7 @@ pub(super) async fn worker_case(case: &'static str) {
                 let tool = run.tools.last().unwrap();
                 assert_eq!(tool.hooks.len(), 1);
                 assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+                assert_eq!(tool.observation.as_ref().unwrap().approval_cause, None);
             }
             if case == "private_loss" {
                 assert!(injected, "{case}");
@@ -815,6 +851,7 @@ pub(super) async fn worker_case(case: &'static str) {
 fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
     for case in [
         "tool_deadline",
+        "approval_timeout",
         "hook_stop_last_turn",
         "hook_requested_stop_last_turn",
         "hook_stop_tokens",
@@ -934,10 +971,14 @@ async fn foreground_worker_guard_journey_active_time_budget_closes_the_goal() {
 fn pad_worker_session(state: &Path, id: SessionId, through: i64) {
     let mut connection = rusqlite::Connection::open(state.join("events.sqlite3")).unwrap();
     let transaction = connection.transaction().unwrap();
-    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)").unwrap();
+    let mut insert = transaction.prepare("INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)").unwrap();
     for sequence in 2..=through {
         insert
-            .execute(rusqlite::params![sequence, id.to_string()])
+            .execute(rusqlite::params![
+                sequence,
+                id.to_string(),
+                arany::test_support::payload_version("SessionRenamed")
+            ])
             .unwrap();
     }
     drop(insert);
@@ -1071,7 +1112,6 @@ async fn worker_recovery_handoff_is_honest_at_each_lifecycle_point() {
     }
 }
 
-// The case advances the paused clock by an hour, so no wall-clock timeout can wrap it.
 #[tokio::test]
 async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team() {
     arany::test_support::worker_teams::run_case(

@@ -247,7 +247,6 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
         };
         observation.intent.call = a.clone();
         observation.intent.id = uuid::Uuid::now_v7();
-        observation.intent.expires_at_ms = n;
         let crate::session::worker::EffectTarget::WorkerView { revision, .. } =
             &mut observation.intent.target
         else {

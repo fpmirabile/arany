@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 43] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 47] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -45,19 +45,48 @@ const EVENT_FIXTURES: [EventFixture<'static>; 43] = [
         GLOB_PROVIDERCALLRECORDED,
         GLOB_PROVIDERCALLRECORDED,
     ),
-    ("GoalFinished", 7, GOAL_FINISHED_V7, GOAL_FINISHED_V8),
-    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
-    ("ToolFinished", 24, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
+    (
+        "ToolStarted",
+        18,
+        GLOB_TOOLSTARTED,
+        include_str!("toolstarted-without-expiry.json"),
+    ),
     (
         "ToolFinished",
         24,
-        COMMAND_TOOLFINISHED,
-        SELECTION_TOOLFINISHED,
+        GLOB_TOOLFINISHED,
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "HookStarted",
+        8,
+        GLOB_HOOKSTARTED,
+        include_str!("hookstarted-without-expiry.json"),
     ),
     (
         "HookFinished",
         13,
         GLOB_HOOKFINISHED,
+        include_str!("hookfinished-without-expiry.json"),
+    ),
+    ("GoalFinished", 7, GOAL_FINISHED_V7, GOAL_FINISHED_V8),
+    ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
+    (
+        "ToolFinished",
+        25,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        25,
+        COMMAND_TOOLFINISHED_WITHOUT_EXPIRY,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        14,
+        include_str!("hookfinished-without-expiry.json"),
         SELECTION_HOOKFINISHED,
     ),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
@@ -133,11 +162,10 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     let step = REGISTRY.event_step("ToolStarted", 15).unwrap();
     assert!((step.canonical)(&started.to_string()).is_none());
     assert!((step.transform)(started.clone()).is_none());
-    let host_step = REGISTRY.event_step("ToolStarted", 16).unwrap();
-    assert_eq!(
-        (host_step.transform)(started.clone()),
-        Some(started.clone())
-    );
+    for from in 16..payload_version("ToolStarted").unwrap() {
+        let step = REGISTRY.event_step("ToolStarted", from).unwrap();
+        started = (step.transform)(started).unwrap();
+    }
     let (run, agent) = intent_scope(&started).unwrap();
     let current = Event::decode(
         "ToolStarted",
@@ -1165,27 +1193,32 @@ fn schema_of(sql: &str) -> Vec<[String; 4]> {
 
 #[test]
 fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() {
-    for (kind, version, input, expected) in [
+    for (kind, version, expiring, input, expected) in [
         (
             "ToolFinished",
-            24,
+            25,
             COMMAND_TOOLFINISHED,
+            COMMAND_TOOLFINISHED_WITHOUT_EXPIRY,
             SELECTION_TOOLFINISHED,
         ),
         (
             "HookFinished",
-            13,
+            14,
             GLOB_HOOKFINISHED,
+            include_str!("hookfinished-without-expiry.json"),
             SELECTION_HOOKFINISHED,
         ),
     ] {
         let step = REGISTRY.event_step(kind, version).unwrap();
         assert_eq!((step.canonical)(input).as_deref(), Some(input));
         let previous = REGISTRY.event_step(kind, version - 1).unwrap();
-        assert_eq!((previous.canonical)(input).as_deref(), Some(input));
-        let unchanged = (previous.transform)(serde_json::from_str(input).unwrap()).unwrap();
-        assert_eq!(unchanged, serde_json::from_str::<Value>(input).unwrap());
-        let migrated = (step.transform)(unchanged).unwrap();
+        assert_eq!((previous.canonical)(expiring).as_deref(), Some(expiring));
+        let without_expiry = (previous.transform)(serde_json::from_str(expiring).unwrap()).unwrap();
+        assert_eq!(
+            without_expiry,
+            serde_json::from_str::<Value>(input).unwrap()
+        );
+        let migrated = (step.transform)(without_expiry).unwrap();
         assert_eq!(migrated, serde_json::from_str::<Value>(expected).unwrap());
         let (run, agent) = intent_scope(&migrated).unwrap();
         Event::decode(
@@ -1227,8 +1260,12 @@ fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() 
 #[test]
 fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceiling() {
     for (kind, version, input) in [
-        ("ToolFinished", 24, COMMAND_TOOLFINISHED),
-        ("HookFinished", 13, GLOB_HOOKFINISHED),
+        ("ToolFinished", 25, COMMAND_TOOLFINISHED_WITHOUT_EXPIRY),
+        (
+            "HookFinished",
+            14,
+            include_str!("hookfinished-without-expiry.json"),
+        ),
     ] {
         for shape in ["full", "balanced", "asymmetric"] {
             let mut value: Value = serde_json::from_str(input).unwrap();
@@ -1844,10 +1881,135 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
     }
 }
 
-const SELECTION_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation":{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable"},"result":{"restricted":{"decision":"deny","reason":"blocked"}}}"#;
+const SELECTION_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation":{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[141,97,53,247,53,49,168,154,40,85,182,218,142,191,39,167,241,62,24,231,138,149,79,234,129,164,230,179,135,109,205,218],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"approval_cause":null,"cache_update":"not_applicable"},"result":{"restricted":{"decision":"deny","reason":"blocked"}}}"#;
 
+const COMMAND_TOOLFINISHED_WITHOUT_EXPIRY: &str =
+    include_str!("command-toolfinished-without-expiry.json");
 const COMMAND_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"changeset\":{\"files\":[]},\"exit_code\":2,\"stderr\":\"blocked\",\"stderr_total\":{\"bytes\":7,\"lines\":1},\"stdout\":\"\",\"stdout_total\":{\"bytes\":0,\"lines\":0}}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable","checkpoint":null}"#;
-const SELECTION_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable","checkpoint":null}"#;
+const SELECTION_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[141,97,53,247,53,49,168,154,40,85,182,218,142,191,39,167,241,62,24,231,138,149,79,234,129,164,230,179,135,109,205,218],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"approval_cause":null,"cache_update":"not_applicable","checkpoint":null}"#;
+
+#[test]
+fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() {
+    for (name, fixture) in [
+        ("worker", crate::session::worker_protocol_fixture()),
+        ("command", crate::session::worker_command_protocol_fixture()),
+        ("compacted", crate::session::worker_compacted_fixture(true)),
+        ("host", crate::session::host_protocol_fixture()),
+        (
+            "host-session",
+            crate::session::session_host_protocol_fixture(),
+        ),
+    ] {
+        for interrupted in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut connection = Connection::open(temp.path().join("history.sqlite3")).unwrap();
+            connection.execute_batch(SCHEMA_SQL).unwrap();
+            let mut pins = HashMap::new();
+            let mut expected = Vec::new();
+            for envelope in fixture.envelopes() {
+                let event = &envelope.event;
+                let mut value: Value = serde_json::from_str(&event.payload().unwrap()).unwrap();
+                let intent = value
+                    .get("intent")
+                    .or_else(|| value.get("observation")?.get("intent"))
+                    .cloned();
+                let prior_human = value
+                    .get("host")
+                    .and_then(|host| host.get("source_intent"))
+                    .and_then(|pin| serde_json::from_value::<[u8; 32]>(pin.clone()).ok());
+                repin_intents(&mut value, &pins);
+                if let Some(old) = prior_human.and_then(|pin| pins.get(&pin)) {
+                    value["host"]["source_intent"] = serde_json::json!(old);
+                }
+                let source_version = match event {
+                    Event::ToolStarted { .. } => 18,
+                    Event::ToolFinished { .. } => 24,
+                    Event::HookStarted { .. } => 8,
+                    Event::HookFinished { .. } => 13,
+                    _ => event.version(),
+                };
+                let expiring = source_version != event.version();
+                if let Some(original) = intent.filter(|_| expiring) {
+                    let current: crate::tools::EffectIntent =
+                        serde_json::from_value(original).unwrap();
+                    let target = if event.kind() == "HookFinished" {
+                        &mut value["observation"]["intent"]
+                    } else {
+                        &mut value["intent"]
+                    };
+                    target["expires_at_ms"] = serde_json::json!(1);
+                    let historical = crate::session::expiring_intent_text(target).unwrap();
+                    let old = Sha256::digest(historical.as_bytes()).into();
+                    pins.insert(current.digest(), old);
+                    crate::session::replace_intent_pin(&mut value, &current.digest(), &old);
+                }
+                let observation = match event {
+                    Event::ToolFinished { .. } => Some(&mut value),
+                    Event::HookFinished { .. } => Some(&mut value["observation"]),
+                    _ => None,
+                };
+                if let Some(observation) = observation {
+                    observation
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("approval_cause");
+                    if let Ok(mut result) =
+                        serde_json::from_str::<Value>(observation["output"].as_str().unwrap())
+                        && result.get("selection").is_some()
+                    {
+                        result.as_object_mut().unwrap().remove("selection");
+                        observation["output"] = result.to_string().into();
+                    }
+                }
+                let payload = if expiring {
+                    crate::session::expiring_payload(event.kind(), &value.to_string()).unwrap()
+                } else {
+                    Event::decode(
+                        event.kind(),
+                        event.version(),
+                        &value.to_string(),
+                        envelope.run_id,
+                        envelope.agent_run_id,
+                    )
+                    .unwrap()
+                    .payload()
+                    .unwrap()
+                };
+                connection.execute("INSERT INTO events (sequence,session_id,run_id,agent_run_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,0)", rusqlite::params![i64::try_from(envelope.sequence).unwrap(), envelope.session_id.to_string(), envelope.run_id.map(|id| id.to_string()), envelope.agent_run_id.map(|id| id.to_string()), event.kind(), source_version, payload]).unwrap();
+                let mut expected_event = envelope.event;
+                let observation = match &mut expected_event {
+                    Event::ToolFinished { observation, .. } => Some(observation),
+                    Event::HookFinished { outcome, .. } => Some(&mut outcome.observation),
+                    _ => None,
+                };
+                if let Some(observation) = observation
+                    && let Ok(mut result) = serde_json::from_str::<crate::tools::types::CommandResult>(
+                        &observation.output,
+                    )
+                {
+                    result.selection = None;
+                    observation.output = serde_json::to_string(&result).unwrap();
+                }
+                expected.push(expected_event);
+                if interrupted && expiring {
+                    break;
+                }
+            }
+            repin(&connection, |_| {});
+            let transaction = connection.transaction().unwrap();
+            assert!(rewrite_events(&transaction, &REGISTRY).unwrap() > 0);
+            transaction.commit().unwrap();
+            validate_all(&connection, MAX_VALIDATION_EVENTS).unwrap();
+            drop(connection);
+            let reopened = Connection::open(temp.path().join("history.sqlite3")).unwrap();
+            let actual: Vec<_> = rows(&reopened)
+                .into_iter()
+                .map(|row| row.decode().unwrap().event)
+                .collect();
+            assert_eq!(actual, expected, "{name}, interrupted={interrupted}");
+        }
+    }
+}
 
 #[test]
 fn diagnostic_schema_upgrade_preserves_sessions_and_discards_unproven_evidence() {
@@ -1917,31 +2079,20 @@ fn restore_pre_check_schema(connection: &Connection, source_version: i64) {
 #[test]
 fn pre_host_migrations_never_create_live_authority() {
     use crate::tools::permissions::{PermissionSource, PermissionVerdict};
-    let tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
-    let (run, agent) = intent_scope(&tool).unwrap();
-    let mut event = Event::decode(
-        "ToolStarted",
-        crate::test_support::payload_version("ToolStarted"),
-        GLOB_TOOLSTARTED,
-        Some(run),
-        Some(agent),
-    )
-    .unwrap();
-    let control = event.payload().unwrap();
+    let mut tool: Value = serde_json::from_str(GLOB_TOOLSTARTED).unwrap();
+    let control = crate::session::expiring_payload("ToolStarted", GLOB_TOOLSTARTED).unwrap();
     assert_eq!(
         crate::session::pre_host_payload("ToolStarted", &control),
         Some(control)
     );
-    let Event::ToolStarted { intent, .. } = &mut event else {
-        unreachable!()
-    };
-    intent.call = crate::tools::ToolCall::CommandUnguarded {
+    tool["intent"]["call"] = serde_json::to_value(crate::tools::ToolCall::CommandUnguarded {
         program: "find".into(),
         args: vec![".".into()],
         cwd: String::new(),
         justification: "Inspect the Workspace".into(),
-    };
-    assert!(crate::session::pre_host_payload("ToolStarted", &event.payload().unwrap()).is_none());
+    })
+    .unwrap();
+    assert!(crate::session::pre_host_payload("ToolStarted", &tool.to_string()).is_none());
 
     let mut run: Value = serde_json::from_str(HOST_RUNSTARTED).unwrap();
     assert!(crate::session::pre_host_payload("RunStarted", &run.to_string()).is_some());
@@ -1985,30 +2136,15 @@ fn pre_host_migrations_preserve_marker_words_in_data() {
         tool["intent"]["call"] =
             serde_json::json!({"operation":"search","path":"src","query":marker});
         let (run, agent) = intent_scope(&tool).unwrap();
-        let event = Event::decode(
-            "ToolStarted",
-            crate::test_support::payload_version("ToolStarted"),
-            &tool.to_string(),
-            Some(run),
-            Some(agent),
-        )
-        .unwrap();
-        let payload = event.payload().unwrap();
+        let payload = crate::session::expiring_payload("ToolStarted", &tool.to_string()).unwrap();
         assert_eq!(
             crate::session::pre_host_payload("ToolStarted", &payload),
             Some(payload)
         );
         let mut finished: Value = serde_json::from_str(GLOB_TOOLFINISHED).unwrap();
         finished["output"] = marker.into();
-        let event = Event::decode(
-            "ToolFinished",
-            crate::test_support::payload_version("ToolFinished"),
-            &finished.to_string(),
-            Some(run),
-            Some(agent),
-        )
-        .unwrap();
-        let payload = event.payload().unwrap();
+        let payload =
+            crate::session::expiring_payload("ToolFinished", &finished.to_string()).unwrap();
         assert_eq!(
             crate::session::pre_host_payload("ToolFinished", &payload),
             Some(payload)
@@ -2040,21 +2176,30 @@ fn generic_host_migrations_preserve_preceding_typed_host_git_pins() {
         serde_json::json!({"source_oid":oid, "refspec":format!("{oid}:refs/heads/main")});
     value["intent"]["limits"]["network"] = "host".into();
     let (run, agent) = intent_scope(&value).unwrap();
+    let payload = crate::session::expiring_payload("ToolStarted", &value.to_string()).unwrap();
+    let step = REGISTRY.event_step("ToolStarted", 17).unwrap();
+    assert_eq!((step.canonical)(&payload), Some(payload.clone()));
+    let value: Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!((step.transform)(value.clone()), Some(value.clone()));
+    let mut current = value.clone();
+    for from in 17..payload_version("ToolStarted").unwrap() {
+        current = (REGISTRY.event_step("ToolStarted", from).unwrap().transform)(current).unwrap();
+    }
     let event = Event::decode(
         "ToolStarted",
         crate::test_support::payload_version("ToolStarted"),
-        &value.to_string(),
+        &current.to_string(),
         Some(run),
         Some(agent),
     )
     .unwrap();
-    let payload = event.payload().unwrap();
-    let step = REGISTRY
-        .event_step("ToolStarted", event.version() - 1)
-        .unwrap();
-    assert_eq!((step.canonical)(&payload), Some(payload.clone()));
-    let value: Value = serde_json::from_str(&payload).unwrap();
-    assert_eq!((step.transform)(value.clone()), Some(value));
+    assert_eq!(current["intent"]["host"], value["intent"]["host"]);
+    assert_eq!(current["intent"]["limits"], value["intent"]["limits"]);
+    assert!(current["intent"].get("expires_at_ms").is_none());
+    assert_eq!(
+        serde_json::from_str::<Value>(&event.payload().unwrap()).unwrap(),
+        current
+    );
 }
 
 #[test]
@@ -2090,5 +2235,23 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
     assert_eq!(
         (step.canonical)(GLOB_TOOLSTARTED).unwrap(),
         GLOB_TOOLSTARTED
+    );
+    let mut host = source;
+    host["intent"]["host"] = serde_json::json!({"source_oid":"1".repeat(40),"refspec":format!("{}:refs/heads/main", "1".repeat(40))});
+    host["intent"]["call"] = serde_json::json!({"operation":"git_push","remote":"https://github.com/o/r","branch":"main"});
+    host["intent"]["limits"]["network"] = serde_json::json!("host");
+    let expiry = REGISTRY
+        .event_step("ToolStarted", payload_version("ToolStarted").unwrap() - 1)
+        .unwrap();
+    assert!((expiry.canonical)(&host.to_string()).is_some());
+    let migrated = (expiry.transform)(host.clone()).unwrap();
+    assert!(migrated["intent"].get("expires_at_ms").is_none());
+    host["intent"]
+        .as_object_mut()
+        .unwrap()
+        .remove("expires_at_ms");
+    assert_eq!(
+        migrated, host,
+        "host approval loses only the shared clock expiry"
     );
 }

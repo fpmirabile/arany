@@ -64,7 +64,6 @@ impl Fixture {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         }
     }
@@ -125,6 +124,7 @@ impl Fixture {
                 enforcement_cause: None,
                 limit_cause: (disposition == crate::tools::ToolDisposition::Limit)
                     .then_some(crate::tools::LimitCause::Resource),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             },
         })
@@ -1794,6 +1794,86 @@ pub(crate) fn host_protocol_fixture() -> Fixture {
     f
 }
 
+pub(crate) fn session_host_protocol_fixture() -> Fixture {
+    use crate::tools::permissions::{Decision, HostApproval, PermissionSource, PermissionVerdict};
+    let mut f = host_protocol_fixture();
+    f.events.truncate(f.events.len() - 2);
+    let epoch = uuid::Uuid::now_v7();
+    for event in &mut f.events {
+        match event {
+            Event::RunStarted { config, .. } => {
+                config.tool_policy.as_mut().unwrap().host_epoch = Some(epoch);
+            }
+            Event::GoalPlanContractRecorded { contract, .. } => {
+                contract.commands = vec!["sh".into()];
+            }
+            _ => {}
+        }
+    }
+    let mut intent = f.intent(
+        f.primary,
+        ToolCall::CommandUnguarded {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 0".into()],
+            cwd: String::new(),
+            justification: "Run the exact host command".into(),
+        },
+        EffectTarget::Workspace,
+    );
+    intent.host_command = Some(crate::tools::types::test_host_pin());
+    let first = intent.digest();
+    for source in [PermissionSource::Human, PermissionSource::SessionApproval] {
+        let human = source == PermissionSource::Human;
+        f.started(&intent);
+        f.push(Event::ToolPermissionDecided {
+            run_id: f.run,
+            agent_run_id: f.primary,
+            verdict: PermissionVerdict {
+                host: Some(HostApproval {
+                    epoch,
+                    session: human,
+                    source_intent: (!human).then_some(first),
+                }),
+                intent_digest: intent.digest(),
+                decision: if human {
+                    Decision::Ask
+                } else {
+                    Decision::Allow
+                },
+                mode: None,
+                basis: if human {
+                    PermissionSource::Mode
+                } else {
+                    source
+                },
+                source,
+                approved: true,
+                hook_restriction: None,
+                hooks: 0,
+                narrowed: false,
+            },
+        });
+        if human {
+            f.observed(
+                &intent,
+                ToolDisposition::Succeeded,
+                Some(Attestation::for_site(&intent)),
+                r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#,
+            );
+            f.call(
+                f.primary,
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::ToolRequested,
+                None,
+            );
+            intent.id = uuid::Uuid::now_v7();
+            intent.limits.runtime_ms /= 2;
+        }
+    }
+    f.view();
+    f
+}
+
 #[test]
 fn host_effect_tracking_and_rewind_keep_approved_unknown_effects() {
     for outcome in [
@@ -2418,6 +2498,7 @@ fn worker_protocol_child_permission_mode_never_removes_parent_approval() {
                         data,
                     }),
                 }),
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             },
         },
@@ -2670,6 +2751,7 @@ fn worker_protocol_private_reads_require_the_worker_read_attestation() {
             output: "{}".into(),
             enforcement_cause: None,
             limit_cause: None,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         },
     };
@@ -3511,6 +3593,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
             } else {
                 serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":2,"stdout":"","stderr":"blocked","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset":{"files":[]}}).to_string()
             },
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
             enforcement_cause: None,
             limit_cause: None,
@@ -3561,6 +3644,7 @@ fn worker_hook_replay_binds_private_tools_stop_and_handover_to_the_actor() {
                         disposition: ToolDisposition::Denied,
                         output: "Hook denied this Tool: blocked".into(),
                         attestation: None,
+                        approval_cause: None,
                         cache_update: CacheUpdate::NotApplicable,
                         enforcement_cause: None,
                         limit_cause: None,
@@ -3894,6 +3978,7 @@ fn worker_protocol_subagent_stop_uses_the_editor_actor_and_preserves_unknown_hoo
             intent: intent.clone(), disposition, output: serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":exit,"stdout":stdout,"stderr":stderr,"stdout_total":{"bytes":(stdout).len(),"lines":(stdout).lines().count()},"stderr_total":{"bytes":(stderr).len(),"lines":(stderr).lines().count()},"changeset":{"files":[]}}).to_string(),
             attestation: (result != "unknown").then(|| Attestation::Guard(receipt(&intent))), enforcement_cause: None,
             limit_cause: (disposition == ToolDisposition::Limit).then_some(crate::LimitCause::Resource),
+            approval_cause: None,
             cache_update: if result == "stopped_unknown" { CacheUpdate::Uncertain } else { CacheUpdate::NotApplicable },
         };
         let finished = Event::HookFinished {
@@ -4036,6 +4121,7 @@ impl Fixture {
                 attestation: Some(Attestation::WorkerCommand {
                     receipt: receipt(&intent),
                 }),
+                approval_cause: None,
                 cache_update: CacheUpdate::Discarded,
                 output: serde_json::to_string(&WorkerCommandResult {
                     exit_code: Some(0),

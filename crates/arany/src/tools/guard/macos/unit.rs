@@ -577,10 +577,11 @@ impl Unit {
         intent: &EffectIntent,
     ) -> Result<(Self, Option<crate::tools::ActiveToolWindow>), ToolError> {
         let capture = FixtureSpan::begin(FixtureStage::Admission);
-        let permit = super::super::admission::acquire(intent.id, intent.expires_at_ms, |queued| {
-            runtime.queue_changed(intent.id, queued)
-        })
-        .await?;
+        let permit =
+            super::super::admission::acquire(intent.id, intent.limits.runtime_ms, |queued| {
+                runtime.queue_changed(intent.id, queued)
+            })
+            .await?;
         let admitted_at = tokio::time::Instant::now();
         let active_window = runtime.begin_active_action(admitted_at).await?;
         let mut unit = Self::create(permit, Path::new(UNIT_ROOT_PARENT))?;
@@ -1886,7 +1887,6 @@ mod tests {
                 cache_transfer_ms: 1_000,
                 ..ToolLimits::default()
             },
-            expires_at_ms: 1,
             use_count: 1,
         };
         let start = tokio::time::Instant::now();
@@ -3899,7 +3899,6 @@ int main(int argc, char **argv) {
                             cwd: ".".into(),
                         },
                         limits: limits.clone(),
-                        expires_at_ms: crate::tools::now_ms() + 60_000,
                         use_count: 1,
                     },
                     workspace: runtime.workspace.clone(),

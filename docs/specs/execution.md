@@ -39,7 +39,7 @@ Read-only research steps of child AgentRuns keep Child Tool facts in the child's
 | Child Tool calls | `min(16, ((remaining calls − children − 1) / 2) / children)`, 16 if calls are unlimited; replay cap 16 | catalog `tool_calls_remaining: 0`, only answer offered; a further Tool is an invalid response |
 | Child Tool result | `min([Tool result ceiling](tools.md#limits-and-failure-behavior), (context limit − context − intent − 512) / 6)`; Tools offered only while at least 4.6 KiB fits | only answer offered; safety net stops the child |
 | Delegation time | one active segment, at most 20 min and at most the remaining Goal active time | calls time out, child Failed, Run fails |
-| Child Tool time | runtime at most half of (deadline − preparation − cleanup − Store overhead); the Guard capacity wait ends at `expires_at_ms` = start + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | insufficient runtime: journal a non-dispatched `Limit` observation (`Delegation deadline reached`); no hook or Tool executes |
+| Child Tool time | runtime at most half of (deadline − preparation − cleanup − Store overhead); the Guard capacity wait ends at queue-entry time + runtime (Guard returns `Limit` before dispatch, Linux and macOS) | insufficient runtime: journal a non-dispatched `Limit` observation (`Delegation deadline reached`); no hook or Tool executes |
 | Events per delegation | child Events at most 1,064 (8 × (8 × 16 + 5), including one possible steering Event for each of the 17 ChildWork calls per child), admitted with an 8-Event tail plus, for every child, review and synthesis call, its route switches and three same-route retry facts before the first spawn | Store admission refusal before `AgentSpawned` |
 | Concurrency | Provider concurrency for calls; child Tools one at a time per Run | queued |
 
@@ -161,8 +161,8 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | Event kind | Current payload version |
 |---|---|
 | `RunStarted` | 22; `config` pins `user_instruction_digest` (raw SHA-256 of the State `AGENTS.md`, or explicit null), ordered `instruction_sources` (`{directory, file, digest}`, root first; `file` is null only when migrated) and the Workspace-relative `launch_directory` |
-| `ToolFinished` | 25 |
-| `ToolStarted` | 18 |
+| `ToolFinished` | 26 |
+| `ToolStarted` | 19 |
 | `AgentSpawned` | 14 |
 | `AgentFinished` | 10 |
 | `ProviderCallRecorded` | 18; the closed failure reasons include `rate_limited` |
@@ -175,8 +175,8 @@ Persist only SQLite schema 6, compaction compiler version 3 and one current payl
 | `SupervisorVerdictRecorded`, `WorkspaceRewindStarted`, `WorkspaceRewindFinished`, `ProviderFallbackUsed`, `ProviderRetryScheduled`, `WorkerDataChunk`, `WorkerDataSealed`, `WorkerStopObserved`, `WorkerIntegrationRecorded`, `WorkerHandoverDiscarded`, `WorkerLeaseReleased`, `WorkerVerificationRecorded` | 1 |
 | `ToolResultsCleared`, `AgentSteeringNoteRecorded` | 1 |
 | `WorkerHandoverRecorded` | 2 |
-| `HookStarted` | 8 |
-| `HookFinished` | 14 |
+| `HookStarted` | 9 |
+| `HookFinished` | 15 |
 | All other supported Event kinds | 6 |
 
 An additive optional field that is omitted at its default keeps the payload version without a migration step: every existing record keeps its bytes and digests and remains a valid current record, and an older binary rejects a record carrying a non-default value, which then follows the incompatible-history archive path. Search's `regex`, `include`, `case_sensitive`, `offset` and `limit` use this rule; a field that changes the meaning or bytes of an existing record still needs a version bump and migration. A new enum variant is not such a field, because an older binary decodes no record that uses it: the [`glob` operation](./tools.md#glob-file-discovery) adds a Tool call variant, carried by `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished` and the success criteria of `GoalPlanContractRecorded` and of `ProviderCallRecorded` editor delegations, and a worker Tool label carried by the `RunStarted` worker policy and `AgentSpawned` grants, so each of those kinds advanced one payload version with an identity migration step. The [typed Git write](./tools.md#typed-git-writes) operations add three more call variants to the same `ToolStarted`, `ToolFinished`, `HookStarted`, `HookFinished`, `GoalPlanContractRecorded` and `ProviderCallRecorded` payloads, and carry their publication receipt inside the existing observation output, so those six kinds advanced once more with identity steps that refuse an older row naming a Git write. The [MultiEdit operation](./tools.md#atomic-single-file-multiedit) adds a call variant and worker Tool label to the same eight enclosing kinds as Glob, so each advances once with an identity migration step that refuses an older row naming `multiedit`. These payload steps add no SQLite or checkpoint schema change. The internal worker-command Guard target and shared-read cache restore reuse these exact payloads; they add no stored fields, variants or version bump. Unsupported prior payload versions still reject without modifying their bytes. Strict replay consumes only the committed intent, receipt, capture and seal; it never reconstructs an image, restores a cache or executes a command. The model-facing worker-command refusal and command-criterion exemption remain as specified above.
@@ -271,7 +271,9 @@ The complete lifecycle has a 240-second ceiling; requests end at least five seco
 
 ### Journal migration
 
-`ToolFinished` 24 → 25 and `HookFinished` 13 → 14 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
+The current Tool and hook intent payloads omit absolute approval expiry. The expiry-removal steps follow the primary generic-host steps. ToolFinished and HookFinished also require nullable `approval_cause`; migration sets it to `null` because older history cannot prove why approval was absent. The migration removes the intent expiry, validates and rebinds intent references in verdicts, hook subjects, receipts, command integrations and worker cleanup, and retains content hashes. Historical prefix hashes are verified before replacement. A migrated pending intent is interrupted history, never a restored live approval.
+
+`ToolFinished` 25 → 26 and `HookFinished` 14 → 15 add `selection: null` to prior complete command results because historical selection counts were not recorded. A near-limit result is refitted within its original `result_bytes` budget with explicit omission markers. The migration preserves output totals, exit status, changesets and hook verdicts. It refuses a result that already exceeds `result_bytes` or already contains `selection`, or whose converted result cannot fit or validate; non-command observations keep their bytes.
 
 `GoalFinished` 7 → 8 adds `budget_refusal: null`; version 7 did not record refused quantities. A source payload already containing that field refuses. No runtime compatibility reader or invented historical reservation is introduced.
 

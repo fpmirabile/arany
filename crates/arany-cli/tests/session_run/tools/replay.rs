@@ -87,7 +87,6 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         workspace_inode: 2,
         call: call.clone(),
         limits: arany::ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     };
     let observation = arany::ToolObservation {
@@ -108,6 +107,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             enforcement_digest: intent.enforcement_digest,
             limits: intent.limits.clone(),
         })),
+        approval_cause: None,
         cache_update: arany::CacheUpdate::NotApplicable,
     };
     let record = |disposition| Event::ProviderCallRecorded {
@@ -621,7 +621,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             );
             assert!(!feedback.contains("approval expired"));
         } else {
-            assert!(feedback.contains("Action denied or approval expired"));
+            assert!(feedback.contains("Action denied"));
         }
         assert!(!feedback.contains("CANARY"));
     }
@@ -685,6 +685,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
                 limits: intent.limits.clone(),
             })),
             intent,
+            approval_cause: None,
             cache_update: arany::CacheUpdate::NotApplicable,
         },
     };
