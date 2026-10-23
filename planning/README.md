@@ -55,6 +55,7 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | [Arany-owned storage report](./arany-storage/README.md) | `In progress`: S2 recorded native Guard storage remains; S1 local StateRoot/cache report uses the metadata-only lead default, with no automatic model disclosure |
 | [Provider check journal](./provider-check-journal/README.md) | `In progress`: C1 implemented; C2 selected ChatGPT checks and account-index migration remain; prerequisite for setup UI |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: depends on Provider check journal C1–C2; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
+| [Anthropic Tool turns](./anthropic-tool-stream/README.md) | `Ready`: S1 names Anthropic failure stages in `development.log`; S2 journals the closed reason; S3 fixes the cause after the owner's live re-run |
 | [Large draft attachments](./large-draft-attachments/README.md) | In progress: pasted-text slice implemented; typed/restored drafts and clipboard/path image chips remain |
 | [Composer newline keys](./composer-newline-keys/README.md) | In progress: remaining slice negotiates modifier keys with capability-aware guidance and terminal restoration |
 | [Team supervision](./agentic-teams/README.md) | Calibrated signal enforcement, read-only changeset review and one-use user responses; shadow evaluation shipped |

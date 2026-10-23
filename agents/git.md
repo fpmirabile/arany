@@ -11,6 +11,7 @@ Load before running a git command or proposing a git step in a plan.
 
 - Never force-push, including `--force-with-lease`.
 - Never push directly to `main`; merge through a pull request.
+- Never bypass the `main` ruleset (for example `gh pr merge --admin`): merge only after required checks and approvals pass. The admin bypass is reserved for the owner, by hand.
 - Never skip hooks or signing unless the user explicitly authorizes it for a specific commit.
 - Never use destructive resets or delete a branch containing unmerged work without explicit approval and a verified recovery path.
 
