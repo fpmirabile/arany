@@ -1,7 +1,7 @@
 use crate::journal::{Subscription, Tapped};
 use crate::provider::{
-    AgentPhase, MAX_REPORTED_INPUT_TOKENS, ProviderIdentity, ProviderRole, ProviderRoutes,
-    Providers,
+    AgentPhase, MAX_REPORTED_INPUT_TOKENS, ProviderIdentity, ProviderKind, ProviderRole,
+    ProviderRoutes, Providers,
 };
 use crate::session::{
     AgentDisposition, AgentRole, AgentRunId, CompactionFailure, CompactionStatus, Event,
@@ -266,12 +266,12 @@ fn telemetry_resource() -> Resource {
 
 impl TraceProvider {
     pub(crate) fn from_profile(profile: &str) -> Self {
-        match profile {
-            "openai" => Self::OpenAi,
-            "anthropic" => Self::Anthropic,
-            "chatgpt" => Self::ChatGpt,
-            value if value.starts_with("custom:") => Self::Custom,
-            _ => Self::Other,
+        match ProviderKind::parse(profile) {
+            Some(ProviderKind::OpenAi) => Self::OpenAi,
+            Some(ProviderKind::Anthropic) => Self::Anthropic,
+            Some(ProviderKind::ChatGpt) => Self::ChatGpt,
+            Some(ProviderKind::Custom) => Self::Custom,
+            None => Self::Other,
         }
     }
 

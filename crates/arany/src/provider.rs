@@ -67,6 +67,26 @@ pub use render::semantic;
 pub(crate) use render::{history_refusal_block, history_tool_block, history_unanswered_block};
 pub use streaming::{PreviewText, ResponsePreview};
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProviderKind {
+    OpenAi,
+    Anthropic,
+    ChatGpt,
+    Custom,
+}
+
+impl ProviderKind {
+    pub(crate) fn parse(profile: &str) -> Option<Self> {
+        match profile {
+            "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "chatgpt" => Some(Self::ChatGpt),
+            value if value.starts_with("custom:") => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
 fn http_client(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     // Decompression stays off even when another dependency enables reqwest's compression features.
     reqwest::Client::builder()
@@ -381,7 +401,10 @@ pub fn validate_native_model_id(model: &str) -> Result<(), ProviderError> {
 
 pub(crate) fn valid_saved_api_account_id(profile: &str, id: Option<Uuid>) -> bool {
     id.is_none_or(|id| {
-        matches!(profile, "openai" | "anthropic") && id.get_version() == Some(Version::SortRand)
+        matches!(
+            ProviderKind::parse(profile),
+            Some(ProviderKind::OpenAi | ProviderKind::Anthropic)
+        ) && id.get_version() == Some(Version::SortRand)
     })
 }
 
@@ -477,13 +500,14 @@ impl ProviderIdentity {
     }
 
     pub(crate) fn valid(&self) -> bool {
-        let chatgpt = self.profile == "chatgpt";
+        let provider = ProviderKind::parse(&self.profile);
+        let chatgpt = provider == Some(ProviderKind::ChatGpt);
         let limits = &self.limits;
         !self.profile.is_empty()
             && self.profile.len() <= 128
             && !self.model.is_empty()
             && self.model.len() <= 128
-            && self.profile.starts_with("custom:") == self.custom_provenance().is_some()
+            && (provider == Some(ProviderKind::Custom)) == self.custom_provenance().is_some()
             && valid_saved_api_account_id(&self.profile, self.saved_api_account_id())
             && chatgpt == self.chatgpt_provenance().is_some()
             && chatgpt == (limits.output_token_bound == OutputTokenBound::LocalAcceptanceOnly)
