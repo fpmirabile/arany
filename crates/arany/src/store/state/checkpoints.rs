@@ -1,5 +1,6 @@
 use super::{StateRoot, StoreError, check_private_record_file, nonblocking};
 use crate::session::{Checkpoint, CheckpointReason, CheckpointStatus, GoalId, RunId, SessionId};
+use crate::validate::MAX_PATH_BYTES;
 use cap_fs_ext::{FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{File, Metadata, MetadataExt, OpenOptions, OpenOptionsExt};
 use rusqlite::{
@@ -576,7 +577,7 @@ fn capture_inner(
         .ok_or(StoreError::CheckpointUnavailable)?;
     let sequence = i64::try_from(sequence).map_err(|_| StoreError::CheckpointUnavailable)?;
     for (path, content) in &capture.files {
-        if !crate::tools::types::valid_relative(path, false) || path.len() > 4096 {
+        if !crate::validate::valid_relative(path, false) || path.len() > MAX_PATH_BYTES {
             return Err(StoreError::CheckpointUnavailable);
         }
         let count = scalar(

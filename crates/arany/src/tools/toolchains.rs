@@ -1,4 +1,5 @@
 use super::{ToolError, fs};
+use crate::validate::MAX_PATH_BYTES;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -162,7 +163,7 @@ impl RuntimeGrant {
 
     pub(crate) fn validate_shape(&self) -> Result<(), ToolError> {
         if !self.path.is_absolute()
-            || self.path.as_os_str().len() > 4096
+            || self.path.as_os_str().len() > MAX_PATH_BYTES
             || self.path.components().any(|component| {
                 matches!(
                     component,

@@ -1,5 +1,6 @@
 use crate::session::{InstructionFile, WorkspaceIdentity};
 use crate::store::{RecordKind, StateRoot, StoreError};
+use crate::validate::MAX_PATH_BYTES;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
@@ -201,8 +202,8 @@ impl WorkspaceInputs {
 }
 
 pub(crate) fn valid_include_path(path: &str) -> bool {
-    path.len() <= crate::tools::types::MAX_RELATIVE_PATH_BYTES
-        && crate::tools::types::valid_relative(path.strip_suffix('/').unwrap_or(path), false)
+    path.len() <= crate::validate::MAX_RELATIVE_PATH_BYTES
+        && crate::validate::valid_relative(path.strip_suffix('/').unwrap_or(path), false)
 }
 
 fn read_relative(
@@ -212,7 +213,7 @@ fn read_relative(
 ) -> Result<Option<InputSnapshot>, InputError> {
     let path = path
         .to_str()
-        .filter(|path| path.len() <= crate::tools::types::MAX_RELATIVE_PATH_BYTES)
+        .filter(|path| path.len() <= crate::validate::MAX_RELATIVE_PATH_BYTES)
         .ok_or(InputError::InvalidPath)?
         .to_owned();
     let normalized = path.strip_suffix('/').unwrap_or(&path);
@@ -220,7 +221,7 @@ fn read_relative(
         return Err(crate::tools::ToolError::OutsideWorkspace.into());
     }
     let names = relative_components(Path::new(normalized))?;
-    if normalized.split('/').any(crate::tools::types::forbidden) {
+    if normalized.split('/').any(crate::validate::forbidden) {
         return Err(crate::tools::ToolError::ProtectedPath.into());
     }
     if !valid_include_path(&path) {
@@ -294,7 +295,7 @@ fn launch_components(workspace: &Path, launch: Option<&Path>) -> Result<Vec<Stri
     if names.len() >= MAX_INSTRUCTION_LEVELS {
         return Err(InputError::TooLarge);
     }
-    if names.join("/").len() > 4096 {
+    if names.join("/").len() > MAX_PATH_BYTES {
         return Err(InputError::InvalidPath);
     }
     Ok(names)
@@ -426,7 +427,7 @@ fn read_directory(directory: Dir, path: String) -> Result<InputSnapshot, InputEr
         let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
             continue;
         };
-        if !crate::tools::types::valid_relative(&name, false) {
+        if !crate::validate::valid_relative(&name, false) {
             continue;
         }
         let metadata = directory.symlink_metadata(&name)?;

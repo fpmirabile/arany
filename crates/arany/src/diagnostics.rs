@@ -133,10 +133,8 @@ impl fmt::Debug for ToolArgumentShape {
 
 impl ToolArgumentShape {
     pub(crate) fn from_call(call: &crate::tools::ToolCall) -> Self {
-        use crate::tools::{
-            ToolCall,
-            types::{valid_digest, valid_name, valid_relative},
-        };
+        use crate::tools::ToolCall;
+        use crate::validate::{valid_digest, valid_name, valid_relative};
         let mut shape = Self {
             operation: call.label(),
             serialized_bytes: serde_json::to_vec(call).map_or(0, |bytes| bytes.len()),

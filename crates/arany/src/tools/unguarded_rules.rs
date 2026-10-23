@@ -1,5 +1,6 @@
 use super::ToolError;
 use crate::store::{RecordFormat, RecordKind, StateRoot};
+use crate::validate::MAX_PATH_BYTES;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
@@ -92,7 +93,7 @@ impl ExactCommandRules {
 
 fn valid_workspace(path: &Path, inode: u64) -> bool {
     path.is_absolute()
-        && path.as_os_str().len() <= 4096
+        && path.as_os_str().len() <= MAX_PATH_BYTES
         && path.to_str().is_some_and(|path| !path.contains('\0'))
         && inode != 0
 }

@@ -1458,7 +1458,7 @@ pub(crate) fn intent_without_expiry(mut value: serde_json::Value) -> Option<serd
     let old = expiring_intent_text(intent)?;
     intent.as_object_mut()?.remove("expires_at_ms")?;
     let current: crate::tools::EffectIntent = serde_json::from_value(intent.clone()).ok()?;
-    let old_digest = crate::tools::types::digest(old.as_bytes());
+    let old_digest = crate::validate::digest(old.as_bytes());
     let new_digest = current.digest();
     replace_intent_pin(&mut value, &old_digest, &new_digest);
     let observation = if value.get("observation").is_some() {
@@ -1907,7 +1907,7 @@ fn required_skill<'de, D: serde::Deserializer<'de>>(
     let skill = Option::<String>::deserialize(deserializer)?;
     if skill
         .as_deref()
-        .is_some_and(|name| !crate::tools::types::valid_name(name))
+        .is_some_and(|name| !crate::validate::valid_name(name))
     {
         return Err(serde::de::Error::custom("invalid Skill name"));
     }

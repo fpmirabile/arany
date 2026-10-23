@@ -6,9 +6,10 @@ use super::{
 use crate::tools::Cancellation;
 use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
-    ToolCall, ToolLimits, ToolObservation, ToolResourceClass, digest,
+    ToolCall, ToolLimits, ToolObservation, ToolResourceClass,
 };
 use crate::tools::{ToolError, ToolRuntime};
+use crate::validate::{MAX_PATH_BYTES, digest};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -1465,7 +1466,7 @@ fn decode_mount_path(bytes: &[u8]) -> Result<Vec<u8>, ToolError> {
     let path = decode_mount_field(bytes)?;
     if path.contains(&0)
         || !path.starts_with(b"/")
-        || path.len() > 4096
+        || path.len() > MAX_PATH_BYTES
         || path.len() > 1 && path.last() == Some(&b'/')
         || path != b"/"
             && path[1..]

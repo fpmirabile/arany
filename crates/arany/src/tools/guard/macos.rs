@@ -6,8 +6,9 @@ use super::{
 use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
 use crate::tools::executable::EXECUTABLES;
-use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES, digest};
+use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES};
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
+use crate::validate::{MAX_PATH_BYTES, digest};
 
 pub(super) fn boot_session() -> Result<uuid::Uuid, ToolError> {
     ffi::boot_session()
@@ -324,7 +325,7 @@ fn configure_file_cpu() -> Result<(), ToolError> {
 
 fn quoted(path: &Path) -> Result<String, ToolError> {
     let path = path.to_str().ok_or(ToolError::Path)?;
-    if !path.starts_with('/') || path.len() > 4096 || path.chars().any(char::is_control) {
+    if !path.starts_with('/') || path.len() > MAX_PATH_BYTES || path.chars().any(char::is_control) {
         return Err(ToolError::Path);
     }
     serde_json::to_string(path).map_err(|_| ToolError::Path)

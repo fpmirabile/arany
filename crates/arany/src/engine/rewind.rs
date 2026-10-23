@@ -426,7 +426,7 @@ impl Engine {
                 source: ChangesetSource::Rewind {
                     plan_digest: started.plan_digest,
                     bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::RewindTooLarge)?,
-                    sha256: crate::tools::types::digest(&bytes),
+                    sha256: crate::validate::digest(&bytes),
                 },
             },
         );
@@ -834,7 +834,7 @@ fn rewind_attestation(
         workspace_device: started.workspace_device,
         workspace_inode: started.workspace_inode,
         enforcement_digest: started.enforcement_digest,
-        receipt_digest: crate::tools::types::digest(&serde_json::to_vec(receipt).ok()?),
+        receipt_digest: crate::validate::digest(&serde_json::to_vec(receipt).ok()?),
     })
 }
 

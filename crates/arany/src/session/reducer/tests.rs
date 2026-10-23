@@ -7909,7 +7909,7 @@ mod goal_replay_tests {
         }];
         let mut configured = config(CollaborationPolicy::Single, true);
         configured.agent_definitions = Some(crate::tools::DefinitionRegistryPin {
-            digest: crate::tools::types::digest(&serde_json::to_vec(&files).unwrap()),
+            digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
             files,
         });
         let mut events = vec![goal_started(goal, GoalBudget::default())];

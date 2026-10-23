@@ -3192,7 +3192,7 @@ impl RunLoop<'_> {
                         });
                         entry["editor"] = serde_json::json!(true);
                         entry["background"] = serde_json::json!(definition.background);
-                        entry["digest"] = serde_json::json!(crate::tools::types::digest(
+                        entry["digest"] = serde_json::json!(crate::validate::digest(
                             &serde_json::to_vec(definition).expect("normalized definition")
                         ));
                         entry["max_turns"] = serde_json::json!(definition.max_turns);

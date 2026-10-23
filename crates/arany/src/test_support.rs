@@ -476,7 +476,7 @@ pub async fn exercise_private_guard_command(
                 seal_sequence: candidate.data.len().div_ceil(WORKER_CHUNK_BYTES) as u64 + 1,
                 chunks: candidate.data.len().div_ceil(WORKER_CHUNK_BYTES) as u16,
                 bytes: candidate.data.len() as u32,
-                sha256: crate::tools::types::digest(&candidate.data),
+                sha256: crate::validate::digest(&candidate.data),
             };
             let observation = view.acknowledge(candidate, reference)?;
             assert!(observation.valid());
@@ -666,7 +666,7 @@ pub async fn exercise_private_guard_target(
         seal_sequence: chunks.len() as u64 + 1,
         chunks: chunks.len() as u16,
         bytes: candidate.data.len() as u32,
-        sha256: crate::tools::types::digest(&candidate.data),
+        sha256: crate::validate::digest(&candidate.data),
     };
     let observation = view.acknowledge(candidate, reference.clone())?;
     assert!(observation.valid());
@@ -920,7 +920,7 @@ async fn publish_worker_fixture(
         seal_sequence: bytes.len().div_ceil(WORKER_CHUNK_BYTES) as u64 + 1,
         chunks: u16::try_from(bytes.len().div_ceil(WORKER_CHUNK_BYTES)).unwrap(),
         bytes: u32::try_from(bytes.len()).unwrap(),
-        sha256: crate::tools::types::digest(&bytes),
+        sha256: crate::validate::digest(&bytes),
     };
     let mut publication = runtime.intent(
         run_id,

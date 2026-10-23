@@ -92,7 +92,7 @@ impl WorkerGrant {
             && self
                 .read_paths
                 .iter()
-                .all(|p| crate::tools::types::valid_relative(p, true))
+                .all(|p| crate::validate::valid_relative(p, true))
             && (self.write_paths == ["."] || valid_leases(&self.write_paths))
             && !self.tools.is_empty()
             && self.tools.len() <= 11
@@ -113,7 +113,7 @@ impl WorkerGrant {
                     && names
                         .iter()
                         .enumerate()
-                        .all(|(i, n)| crate::tools::types::valid_name(n) && !names[..i].contains(n))
+                        .all(|(i, n)| crate::validate::valid_name(n) && !names[..i].contains(n))
             })
     }
 
@@ -253,10 +253,10 @@ impl ChildAssignment {
                         .is_none_or(crate::provider::valid_profile_name)
                     && definition
                         .as_ref()
-                        .is_none_or(|n| crate::tools::types::valid_name(n))
+                        .is_none_or(|n| crate::validate::valid_name(n))
             }
             Self::Editor { assignment: a } => {
-                crate::tools::types::valid_name(&a.definition)
+                crate::validate::valid_name(&a.definition)
                     && a.definition_digest != [0; 32]
                     && !a.mission.is_empty()
                     && a.mission.len() <= 2048
@@ -281,11 +281,11 @@ pub(crate) fn criterion_valid(criterion: &GoalSuccessCriterion) -> bool {
                 call.valid() && call.facts().goal_success
             }
             GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
-                crate::tools::types::valid_relative(path, false)
-                    && crate::tools::types::valid_digest(sha256)
+                crate::validate::valid_relative(path, false)
+                    && crate::validate::valid_digest(sha256)
             }
             GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
-                crate::tools::types::valid_relative(path, false) && content.len() <= 8 * 1024
+                crate::validate::valid_relative(path, false) && content.len() <= 8 * 1024
             }
         }
 }
@@ -406,7 +406,7 @@ impl WorkerDataChunk {
             .decode(&self.content)
             .ok()?;
         (bytes.len() == self.bytes as usize
-            && crate::tools::types::digest(&bytes) == self.sha256
+            && crate::validate::digest(&bytes) == self.sha256
             && base64::engine::general_purpose::STANDARD.encode(&bytes) == self.content)
             .then_some(bytes)
     }
@@ -655,9 +655,7 @@ pub struct WorkerMutation {
 }
 
 pub(crate) fn writable_path(path: &str) -> bool {
-    path.is_ascii()
-        && crate::tools::types::valid_relative(path, false)
-        && path.split('/').count() <= 16
+    path.is_ascii() && crate::validate::valid_relative(path, false) && path.split('/').count() <= 16
 }
 pub(crate) fn contains(root: &str, path: &str) -> bool {
     root == "." || root == path || path.strip_prefix(root).is_some_and(|s| s.starts_with('/'))
@@ -797,7 +795,7 @@ fn decode_data_inner(
         }
         let mut total = 0usize;
         for (i, entry) in manifest.entries.iter().enumerate() {
-            if !crate::tools::types::valid_relative(&entry.path, false)
+            if !crate::validate::valid_relative(&entry.path, false)
                 || entry.path.split('/').count() > 16
                 || manifest.entries[..i].iter().any(|e| {
                     e.path >= entry.path
@@ -808,7 +806,7 @@ fn decode_data_inner(
                 return Err(ReplayError::InvalidPayload);
             }
             if let WorkerBaseVersion::File { sha256, bytes, .. } = &entry.version {
-                if !crate::tools::types::valid_digest(sha256) || *bytes as usize > 1024 * 1024 {
+                if !crate::validate::valid_digest(sha256) || *bytes as usize > 1024 * 1024 {
                     return Err(ReplayError::InvalidPayload);
                 }
                 total = total
@@ -854,7 +852,7 @@ fn decode_data_inner(
                 let Some(v) = v else {
                     return Ok(WorkerBaseVersion::Absent);
                 };
-                if !crate::tools::types::valid_digest(&v.sha256)
+                if !crate::validate::valid_digest(&v.sha256)
                     || v.content.len() > (1024usize * 1024).div_ceil(3) * 4
                 {
                     return Err(ReplayError::InvalidPayload);
@@ -971,8 +969,7 @@ impl WorkerOutcome {
 pub(crate) fn valid_commands(commands: &[String]) -> bool {
     commands.len() <= 8
         && commands.iter().enumerate().all(|(i, name)| {
-            crate::tools::types::valid_name(name)
-                && commands[..i].iter().all(|earlier| earlier < name)
+            crate::validate::valid_name(name) && commands[..i].iter().all(|earlier| earlier < name)
         })
 }
 

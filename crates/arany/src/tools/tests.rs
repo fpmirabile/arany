@@ -3,6 +3,7 @@ use super::config::Config;
 use super::skills::parse_json;
 use super::types::*;
 use crate::session::WorkspaceIdentity;
+use crate::validate::{digest, valid_revision};
 use serde_json::{Value, json};
 
 fn config_value() -> Value {

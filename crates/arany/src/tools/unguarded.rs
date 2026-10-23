@@ -7,6 +7,7 @@ use super::output::{Window, read_window_into};
 use super::toolchains::RuntimeGrant;
 use super::types::{CommandChangeset, LimitCause, ToolDisposition};
 use crate::session::WorkspaceIdentity;
+use crate::validate::MAX_PATH_BYTES;
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal, kill_process_group, test_kill_process_group};
 use std::path::Path;
@@ -316,15 +317,15 @@ pub(crate) fn manual_handoff(call: &super::ToolCall) -> String {
 impl super::types::HostCommandPin {
     pub(crate) fn valid(&self) -> bool {
         Path::new(&self.workspace).is_absolute()
-            && self.workspace.len() <= 4096
+            && self.workspace.len() <= MAX_PATH_BYTES
             && self
                 .state_roots
                 .iter()
-                .all(|root| Path::new(root).is_absolute() && root.len() <= 4096)
+                .all(|root| Path::new(root).is_absolute() && root.len() <= MAX_PATH_BYTES)
             && Path::new(&self.executable).is_absolute()
-            && self.executable.len() <= 4096
+            && self.executable.len() <= MAX_PATH_BYTES
             && self.inode != 0
-            && super::types::valid_digest(&self.sha256)
+            && crate::validate::valid_digest(&self.sha256)
             && !self.path.is_empty()
             && self.path.len() <= 16 * 1024
             && std::env::split_paths(&self.path).all(|path| path.is_absolute())
@@ -433,7 +434,7 @@ pub(crate) fn environment_digest(path: &str) -> [u8; 32] {
             std::env::var_os(name).map(|value| value.to_string_lossy().into_owned()),
         )
     });
-    super::types::digest(
+    crate::validate::digest(
         &serde_json::to_vec(&(HOST_POLICY_VERSION, path, values)).expect("host environment"),
     )
 }
@@ -526,7 +527,7 @@ fn host_exec(executable: &str, args: &[String]) -> std::process::ExitCode {
     use std::os::unix::process::CommandExt;
     let resolved = Path::new(executable).canonicalize().ok();
     if !Path::new(executable).is_absolute()
-        || executable.len() > 4096
+        || executable.len() > MAX_PATH_BYTES
         || !super::process::valid_command("host", args, "")
         || prohibited(executable, args)
         || !resolved

@@ -187,7 +187,7 @@ impl RunLoop<'_> {
                     && definition.editor()
                     && (!definition.background || a.mode == WorkerMode::Background)
                     && a.definition_digest
-                        == crate::tools::types::digest(
+                        == crate::validate::digest(
                             &serde_json::to_vec(definition).expect("normalized definition"),
                         )
                     && a.commands.iter().all(|c| {
@@ -391,7 +391,7 @@ impl RunLoop<'_> {
                     tool_id: intent.id,
                     ordinal: u16::try_from(ordinal).map_err(|_| EngineError::InvalidHistory)?,
                     bytes: u32::try_from(chunk.len()).map_err(|_| EngineError::InvalidHistory)?,
-                    sha256: crate::tools::types::digest(chunk),
+                    sha256: crate::validate::digest(chunk),
                     content: base64::engine::general_purpose::STANDARD.encode(chunk),
                 },
             })
@@ -427,7 +427,7 @@ impl RunLoop<'_> {
                 .ok_or(EngineError::InvalidHistory)?,
             chunks,
             bytes: u32::try_from(bytes.len()).map_err(|_| EngineError::InvalidHistory)?,
-            sha256: crate::tools::types::digest(bytes),
+            sha256: crate::validate::digest(bytes),
         })
     }
 
@@ -1413,7 +1413,7 @@ impl RunLoop<'_> {
                     let passed = verification_passed(&contract, run, released, &evidence).ok()?;
                     Some(WorkerVerification {
                         assignment_id: a.id,
-                        criterion_digest: crate::tools::types::digest(
+                        criterion_digest: crate::validate::digest(
                             &serde_json::to_vec(&contract.success_criterion).expect("criterion"),
                         ),
                         passed,

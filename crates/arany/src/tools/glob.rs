@@ -1,7 +1,8 @@
 use super::ToolError;
 use super::config::Config;
 use super::fs::{Keep, identity, ignored_directory, open_file};
-use super::types::{MAX_SNAPSHOT_FILES, ToolCall, forbidden, valid_relative};
+use super::types::{MAX_SNAPSHOT_FILES, ToolCall};
+use crate::validate::{forbidden, valid_relative};
 use cap_std::fs::Dir;
 use regex::{Regex, RegexBuilder};
 use serde::Deserialize;

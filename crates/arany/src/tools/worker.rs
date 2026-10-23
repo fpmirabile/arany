@@ -3,6 +3,7 @@ use super::{
     ToolError, ToolObservation, ToolRuntime, fs, types::*,
 };
 use crate::session::{AgentRunId, worker::*};
+use crate::validate::{digest, valid_relative};
 use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

@@ -1,5 +1,6 @@
-use super::types::{MAX_SKILLS, ToolCall, valid_name};
+use super::types::{MAX_SKILLS, ToolCall};
 use super::{fs, git, mcp, process, skills};
+use crate::validate::valid_name;
 use serde_json::{Value, json};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

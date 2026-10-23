@@ -193,7 +193,7 @@ impl Fixture {
                     tool_id: intent.id,
                     ordinal: u16::try_from(i).unwrap(),
                     bytes: u32::try_from(bytes.len()).unwrap(),
-                    sha256: crate::tools::types::digest(bytes),
+                    sha256: crate::validate::digest(bytes),
                     content: base64::engine::general_purpose::STANDARD.encode(bytes),
                 },
             });
@@ -205,7 +205,7 @@ impl Fixture {
             seal_sequence: self.events.len() as u64 + 1,
             chunks: u16::try_from(bytes.len().div_ceil(WORKER_CHUNK_BYTES)).unwrap(),
             bytes: u32::try_from(bytes.len()).unwrap(),
-            sha256: crate::tools::types::digest(bytes),
+            sha256: crate::validate::digest(bytes),
         };
         self.push(Event::WorkerDataSealed {
             run_id: self.run,
@@ -439,9 +439,7 @@ impl Fixture {
             agent_run_id: self.primary,
             record: WorkerVerification {
                 assignment_id: self.child,
-                criterion_digest: crate::tools::types::digest(
-                    &serde_json::to_vec(&criterion).unwrap(),
-                ),
+                criterion_digest: crate::validate::digest(&serde_json::to_vec(&criterion).unwrap()),
                 passed: true,
                 evidence: vec![seq],
             },
@@ -588,7 +586,7 @@ fn fixture_with_manifest(
             data_bytes: WORKER_DATA_BYTES as u32,
         }),
         agent_definitions: Some(crate::tools::DefinitionRegistryPin {
-            digest: crate::tools::types::digest(&serde_json::to_vec(&files).unwrap()),
+            digest: crate::validate::digest(&serde_json::to_vec(&files).unwrap()),
             files,
         }),
         roster: None,
@@ -765,7 +763,7 @@ fn fixture_with_manifest(
     let request = EditorAssignment {
         commands: Vec::new(),
         definition: "editor".into(),
-        definition_digest: crate::tools::types::digest(&serde_json::to_vec(&definition).unwrap()),
+        definition_digest: crate::validate::digest(&serde_json::to_vec(&definition).unwrap()),
         mission: "Edit src".into(),
         direction: String::new(),
         lease: vec!["src/a".into()],
@@ -1666,7 +1664,7 @@ fn worker_protocol_bulk_file_content_and_serialized_bounds() {
             tool_id: uuid::Uuid::now_v7(),
             ordinal: 0,
             bytes: WORKER_CHUNK_BYTES as u32,
-            sha256: crate::tools::types::digest(&bytes),
+            sha256: crate::validate::digest(&bytes),
             content: base64::engine::general_purpose::STANDARD.encode(bytes),
         },
     };
@@ -3097,7 +3095,7 @@ fn worker_protocol_command_criterion_requires_both_command_and_its_publication()
     );
     let verification = WorkerVerification {
         assignment_id: f.child,
-        criterion_digest: crate::tools::types::digest(&serde_json::to_vec(&criterion).unwrap()),
+        criterion_digest: crate::validate::digest(&serde_json::to_vec(&criterion).unwrap()),
         passed: true,
         evidence: vec![command_seq, apply_seq],
     };
@@ -4147,7 +4145,7 @@ impl Fixture {
             seal_sequence: first_sequence + 1,
             chunks: 1,
             bytes: bytes.len() as u32,
-            sha256: crate::tools::types::digest(&bytes),
+            sha256: crate::validate::digest(&bytes),
         };
         let intent = self.command(PrivateCapture::Sealed { data: data.clone() });
         assert_eq!(
@@ -4263,7 +4261,7 @@ fn worker_protocol_command_authority_revision_generation_and_capture_order() {
                         let definition: crate::tools::definitions::AgentDefinition =
                             serde_json::from_value(value["Definition"]["definition"].clone())
                                 .unwrap();
-                        definition_digest = Some(crate::tools::types::digest(
+                        definition_digest = Some(crate::validate::digest(
                             &serde_json::to_vec(&definition).unwrap(),
                         ));
                         observation.output = value.to_string();
