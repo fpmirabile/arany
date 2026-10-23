@@ -1,5 +1,7 @@
 use super::replay::{MAX_SESSION_EVENTS, replay_through, resolve_open_view, resolve_view};
-use super::{DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit};
+use super::{
+    AdmissionKind, DATABASE_FILE, MAX_DATABASE_BYTES, StateRoot, StoreError, event_payload_limit,
+};
 use crate::session::{
     CompactionStatus, Event, EventEnvelope, ForkLineage, SessionId, SessionView, prefix_digest,
     validate_compaction_references,
@@ -97,13 +99,12 @@ fn begin_write<'a>(
     Ok(transaction)
 }
 
-pub(super) fn admit_operation(
+pub(super) fn admit(
     connection: &mut Connection,
     session_id: SessionId,
     event_slots: usize,
     tool_observations: usize,
-    run_start: bool,
-    sealed_data: bool,
+    kind: AdmissionKind,
 ) -> Result<(), StoreError> {
     let transaction = begin_write(connection, None)?;
     admit_in_transaction(
@@ -111,8 +112,7 @@ pub(super) fn admit_operation(
         session_id,
         event_slots,
         tool_observations,
-        run_start,
-        sealed_data,
+        kind,
     )?;
     transaction.commit()?;
     Ok(())
@@ -123,8 +123,7 @@ fn admit_in_transaction(
     session_id: SessionId,
     event_slots: usize,
     tool_observations: usize,
-    run_start: bool,
-    sealed_data: bool,
+    kind: AdmissionKind,
 ) -> Result<(), StoreError> {
     let mut count = 0;
     resolve_open_view(transaction, session_id, &mut count)?;
@@ -144,7 +143,7 @@ fn admit_in_transaction(
             + crate::provider::MAX_RATE_LIMIT_BYTES as i64
             + EVENT_SQLITE_OVERHEAD_PAGES * page_size)
         + observations * (super::MAX_TOOL_FINISHED_BYTES - super::MAX_EVENT_BYTES) as i64;
-    let run_start_extra = if run_start {
+    let run_start_extra = if kind == AdmissionKind::RunStart {
         super::RUN_START_EXTRA_BYTES as i64
     } else {
         0
@@ -158,9 +157,7 @@ fn admit_in_transaction(
         return Err(StoreError::StorageFull);
     }
     #[cfg(any(test, feature = "test-support"))]
-    crate::test_support::admissions::record(session_id, count, event_slots, sealed_data);
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = sealed_data;
+    crate::test_support::admissions::record(session_id, count, event_slots, kind);
     Ok(())
 }
 
@@ -471,7 +468,13 @@ pub(super) fn prepare_fork(
 }
 
 fn validate_fork(transaction: &Transaction<'_>, boundary: ForkLineage) -> Result<(), StoreError> {
-    admit_in_transaction(transaction, boundary.source_session_id, 1, 0, false, false)?;
+    admit_in_transaction(
+        transaction,
+        boundary.source_session_id,
+        1,
+        0,
+        AdmissionKind::Operation,
+    )?;
     let id = SessionId::new();
     let event = fork_event(boundary, "Forked Session".into());
     let envelope = EventEnvelope {

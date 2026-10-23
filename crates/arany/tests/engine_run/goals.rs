@@ -5343,7 +5343,9 @@ async fn two_child_research_delegation_admission_covers_its_spawns() {
     assert!(
         arany::test_support::admissions::recorded(outcome.session_id)
             .iter()
-            .any(|(_, slots, sealed_data)| *slots > 200 && !sealed_data),
+            .any(|(_, slots, kind)| {
+                *slots > 200 && *kind != arany::test_support::admissions::AdmissionKind::SealedData
+            }),
         "the research delegation admission exceeds 200 slots"
     );
     assert_action_bounds(&events, false, false);

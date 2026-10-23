@@ -12,7 +12,7 @@ use crate::session::{
     MAX_STEERING_NOTE_BYTES, MAX_USER_MESSAGE_BYTES, RunConfig, RunId, RunView, SessionId,
     WorkspaceIdentity,
 };
-use crate::store::{SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
+use crate::store::{AdmissionKind, SessionRunLock, StateRoot, Store, StoreError, WorkspaceRunLock};
 use crate::telemetry::Telemetry;
 use std::collections::HashMap;
 use std::future::{Future, IntoFuture};
@@ -1934,7 +1934,7 @@ impl Engine {
             }
             + usize::from(request.session_id.is_none());
         self.journal
-            .admit_run_start(session_id, event_slots)
+            .admit_as(session_id, event_slots, 0, AdmissionKind::RunStart)
             .await?;
         let writes = match &submission.grant {
             ToolGrant::None => false,

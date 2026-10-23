@@ -12,6 +12,7 @@ use crate::provider::{
     RunInput,
 };
 use crate::session::{CollaborationPolicy, Event};
+use crate::store::AdmissionKind;
 use crate::tools::permissions::{Decision, PermissionSource, PermissionVerdict};
 use crate::tools::types::{CommandChangeset, CommandResult, MAX_TOOL_RESULT_BYTES};
 use crate::tools::{
@@ -1010,10 +1011,10 @@ impl RunLoop<'_> {
         };
         // This intent's ToolStarted can exceed the ordinary Event bound; an observation slot covers it.
         let observations = observations.saturating_add(1);
-        let mut sealed_data = false;
+        let mut kind = AdmissionKind::Operation;
         let tail = if worker {
             let chunks = self.worker_call_chunks(intent.agent_run_id, &intent.call)?;
-            sealed_data = chunks > 0;
+            kind = AdmissionKind::for_chunks(chunks);
             let action = Action::Worker { chunks };
             tail.max(
                 action
@@ -1024,15 +1025,10 @@ impl RunLoop<'_> {
         } else {
             tail
         };
-        let admitted = if sealed_data {
-            self.journal
-                .admit_sealed_data(self.session_id, tail, observations)
-                .await
-        } else {
-            self.journal
-                .admit(self.session_id, tail, observations)
-                .await
-        };
+        let admitted = self
+            .journal
+            .admit_as(self.session_id, tail, observations, kind)
+            .await;
         match admitted {
             Ok(()) => Ok(Ok(())),
             // A worker effect's capacity stops the wave; any other stays a Store failure.

@@ -1,5 +1,5 @@
 use crate::session::{Event, EventEnvelope, SessionId};
-use crate::store::{Store, StoreError};
+use crate::store::{AdmissionKind, Store, StoreError};
 pub mod check;
 use std::future::Future;
 use std::sync::Arc;
@@ -149,28 +149,25 @@ impl Journal {
         event_slots: usize,
         tool_observations: usize,
     ) -> Result<(), StoreError> {
-        self.store
-            .admit_operation(session_id, event_slots, tool_observations)
-            .await
+        self.admit_as(
+            session_id,
+            event_slots,
+            tool_observations,
+            AdmissionKind::Operation,
+        )
+        .await
     }
 
-    pub(crate) async fn admit_sealed_data(
+    pub(crate) async fn admit_as(
         &self,
         session_id: SessionId,
         event_slots: usize,
         tool_observations: usize,
+        kind: AdmissionKind,
     ) -> Result<(), StoreError> {
         self.store
-            .admit_sealed_data(session_id, event_slots, tool_observations)
+            .admit(session_id, event_slots, tool_observations, kind)
             .await
-    }
-
-    pub(crate) async fn admit_run_start(
-        &self,
-        session_id: SessionId,
-        event_slots: usize,
-    ) -> Result<(), StoreError> {
-        self.store.admit_run_start(session_id, event_slots).await
     }
 
     pub(crate) async fn close(self) -> Result<(), StoreError> {
