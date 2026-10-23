@@ -55,18 +55,32 @@ pub(super) enum StepEnd {
 }
 
 #[must_use]
-pub(super) enum SizingRefusal {
+pub(in crate::engine) enum SizingRefusal {
     DelegationDeadline,
     ActiveTime,
     ContextFull,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub(in crate::engine) enum HookRefusal {
+    ActiveTime,
+    ContextFull,
+}
+
+impl From<HookRefusal> for SizingRefusal {
+    fn from(refusal: HookRefusal) -> Self {
+        match refusal {
+            HookRefusal::ActiveTime => Self::ActiveTime,
+            HookRefusal::ContextFull => Self::ContextFull,
+        }
+    }
+}
+
 impl SizingRefusal {
-    pub(super) fn from_error(error: EngineError) -> Result<Self, EngineError> {
-        match error {
-            EngineError::GoalBudgetExhausted => Ok(Self::ActiveTime),
-            EngineError::ContextTooLarge => Ok(Self::ContextFull),
-            error => Err(error),
+    pub(in crate::engine) fn into_engine_error(self) -> EngineError {
+        match self {
+            Self::ActiveTime | Self::DelegationDeadline => EngineError::GoalBudgetExhausted,
+            Self::ContextFull => EngineError::ContextTooLarge,
         }
     }
 }
@@ -358,6 +372,26 @@ mod tests {
 
     #[test]
     fn sizing_and_stop_precedence() {
+        for (refusal, expected) in [
+            (HookRefusal::ActiveTime, StopCause::ActiveTime),
+            (HookRefusal::ContextFull, StopCause::ContextFull),
+        ] {
+            assert_eq!(StopCause::from(SizingRefusal::from(refusal)), expected);
+        }
+        for (refusal, expected) in [
+            (SizingRefusal::ActiveTime, EngineError::GoalBudgetExhausted),
+            (SizingRefusal::ContextFull, EngineError::ContextTooLarge),
+            (
+                SizingRefusal::DelegationDeadline,
+                EngineError::GoalBudgetExhausted,
+            ),
+        ] {
+            assert_eq!(
+                std::mem::discriminant(&refusal.into_engine_error()),
+                std::mem::discriminant(&expected),
+            );
+        }
+
         for (refusal, expected) in [
             (SizingRefusal::ActiveTime, StopCause::ActiveTime),
             (SizingRefusal::ContextFull, StopCause::ContextFull),

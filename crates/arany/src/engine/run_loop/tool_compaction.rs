@@ -1,5 +1,5 @@
-use super::RunLoop;
 use super::stop::{SizingRefusal, StopCause};
+use super::{LifecycleHook, RunLoop};
 use crate::engine::EngineError;
 use crate::engine::compaction::{COMPACTION_CALL_DEADLINE, classify_response};
 use crate::engine::ledger::{Action, Admission};
@@ -276,45 +276,12 @@ impl RunLoop<'_> {
                 covered,
                 bytes,
             } => {
-                let boundary = ledger.view(|view| {
-                    let run = view
-                        .runs
-                        .iter()
-                        .find(|run| run.id == self.run_id)
-                        .ok_or(EngineError::InvalidHistory)?;
-                    run.live_tool_records()
-                        .nth(covered - 1)
-                        .map(|(index, _)| index + 1)
-                        .ok_or(EngineError::InvalidHistory)
-                })??;
-                self.journal
-                    .admit(
-                        self.session_id,
-                        1 + self
-                            .primary_call()
-                            .max_events_for_admitted(&self.routing.providers)
-                            + ledger.verdicts(self.primary_call()),
-                        0,
-                    )
+                let rendered_len = self
+                    .clear_tool_results(request, prefix_steps, covered, bytes)
                     .await?;
-                self.append(Event::ToolResultsCleared {
-                    run_id: self.run_id,
-                    covered_tool_count: u32::try_from(boundary)
-                        .map_err(|_| EngineError::InvalidHistory)?,
-                    cleared_bytes: u32::try_from(bytes).map_err(|_| EngineError::InvalidHistory)?,
-                })
-                .await?;
-                let context = request
-                    .input
-                    .tools
-                    .as_mut()
-                    .ok_or(EngineError::InvalidRequest)?;
-                for step in &mut context.steps[..prefix_steps] {
-                    step.cleared = true;
-                }
                 if bytes >= crate::tools::types::MAX_TOOL_RESULT_BYTES
                     && matches!(
-                        context_capacity(context.rendered_len(), context_limit, reserve),
+                        context_capacity(rendered_len, context_limit, reserve),
                         ContextCapacity::Fits
                     )
                 {
@@ -339,22 +306,34 @@ impl RunLoop<'_> {
             return Ok(Ok(()));
         }
         if match self
-            .lifecycle_hooks(
-                self.primary_id,
-                crate::tools::permissions::HookEvent::PreCompact,
-                "auto",
-                "",
-                None,
-                true,
-            )
-            .await
+            .lifecycle_hooks(LifecycleHook {
+                agent: self.primary_id,
+                event: crate::tools::permissions::HookEvent::PreCompact,
+                subject: "auto",
+                message: "",
+                deadline: None,
+                feedback_fits: true,
+            })
+            .await?
         {
             Ok(feedback) => feedback.is_some(),
-            Err(error) => return Ok(Err(SizingRefusal::from_error(error)?)),
+            Err(refusal) => return Ok(Err(refusal.into())),
         } || self.hook_requested_stop()?
         {
             return Ok(Ok(()));
         }
+        self.run_tool_compaction(request, window, summary_limit, deadline)
+            .await
+    }
+
+    async fn run_tool_compaction(
+        &self,
+        request: &mut ProviderRequest,
+        window: CompactionWindow,
+        summary_limit: usize,
+        deadline: Option<Instant>,
+    ) -> Result<Result<(), SizingRefusal>, EngineError> {
+        let ledger = self.ledger();
         let reservation = ledger.reserve(Action::Compaction, self.primary_id).await?;
         let Admission::Reserved(reservation) = reservation else {
             return Ok(Ok(()));
@@ -397,6 +376,52 @@ impl RunLoop<'_> {
             return Ok(Err(SizingRefusal::ActiveTime));
         }
         Ok(Ok(()))
+    }
+
+    async fn clear_tool_results(
+        &self,
+        request: &mut ProviderRequest,
+        prefix_steps: usize,
+        covered: usize,
+        bytes: usize,
+    ) -> Result<usize, EngineError> {
+        let ledger = self.ledger();
+        let boundary = ledger.view(|view| {
+            let run = view
+                .runs
+                .iter()
+                .find(|run| run.id == self.run_id)
+                .ok_or(EngineError::InvalidHistory)?;
+            run.live_tool_records()
+                .nth(covered - 1)
+                .map(|(index, _)| index + 1)
+                .ok_or(EngineError::InvalidHistory)
+        })??;
+        self.journal
+            .admit(
+                self.session_id,
+                1 + self
+                    .primary_call()
+                    .max_events_for_admitted(&self.routing.providers)
+                    + ledger.verdicts(self.primary_call()),
+                0,
+            )
+            .await?;
+        self.append(Event::ToolResultsCleared {
+            run_id: self.run_id,
+            covered_tool_count: u32::try_from(boundary).map_err(|_| EngineError::InvalidHistory)?,
+            cleared_bytes: u32::try_from(bytes).map_err(|_| EngineError::InvalidHistory)?,
+        })
+        .await?;
+        let context = request
+            .input
+            .tools
+            .as_mut()
+            .ok_or(EngineError::InvalidRequest)?;
+        for step in &mut context.steps[..prefix_steps] {
+            step.cleared = true;
+        }
+        Ok(context.rendered_len())
     }
 
     // Each pressured primary report maintains context once, however often maintenance runs before the next call.

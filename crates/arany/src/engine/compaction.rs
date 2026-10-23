@@ -278,15 +278,16 @@ impl Engine {
             None,
         );
         Ok(runner
-            .lifecycle_hooks(
-                primary_id,
-                crate::tools::permissions::HookEvent::PreCompact,
-                trigger,
-                "",
-                None,
-                true,
-            )
+            .lifecycle_hooks(super::run_loop::LifecycleHook {
+                agent: primary_id,
+                event: crate::tools::permissions::HookEvent::PreCompact,
+                subject: trigger,
+                message: "",
+                deadline: None,
+                feedback_fits: true,
+            })
             .await?
+            .map_err(|refusal| super::run_loop::SizingRefusal::from(refusal).into_engine_error())?
             .is_some())
     }
 
