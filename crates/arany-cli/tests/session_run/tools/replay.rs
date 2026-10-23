@@ -95,7 +95,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         intent: intent.clone(),
         disposition: ToolDisposition::Succeeded,
         output: serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "",
             "stderr": "",
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
@@ -392,7 +392,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         let digest = Sha256::digest(serde_json::to_vec(&observation.intent).unwrap()).into();
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "",
             "stderr": "",
             "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset": {"files": []}
@@ -690,7 +690,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
         },
     };
     let command_result = serde_json::json!({
-        "exit_code":7,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":changeset
+        "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0},"changeset":changeset
     })
     .to_string();
     let mut integrated = prefix[..TOOL_STARTED].to_vec();
@@ -804,7 +804,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     if let Event::ToolFinished { observation, .. } = &mut unfinalized_cache[COMMAND_FINISHED] {
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
             "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
@@ -820,7 +820,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
     if let Event::ToolFinished { observation, .. } = &mut uncertain_cache[COMMAND_FINISHED] {
         observation.disposition = ToolDisposition::Succeeded;
         observation.output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "build complete",
             "stderr": "",
             "stdout_total":{"bytes":14,"lines":1},"stderr_total":{"bytes":0,"lines":0},"changeset": changeset,
@@ -1253,6 +1253,11 @@ pub(super) async fn native_command_changeset_corpus(
     }
     for (case, suffix, rejected) in [
         ("nonzero", "exit 7", None),
+        (
+            "selection",
+            "test ! -e src/asset; test ! -e src/ignored/secret; test ! -r /prepared/command-selection.json; mkdir src/ignored; printf generated > src/ignored/new; printf '*' > src/.gitignore",
+            None,
+        ),
         ("ai-approve", "", None),
         ("deny", "", None),
         ("drop", "", None),
@@ -1303,6 +1308,15 @@ pub(super) async fn native_command_changeset_corpus(
         std::fs::create_dir_all(workspace.join("src")).unwrap();
         crate::private_file(&workspace.join("src/m-modified"), b"before\n");
         crate::private_file(&workspace.join("src/z-deleted"), b"delete\n");
+        if case == "selection" {
+            crate::private_file(&workspace.join("src/.gitignore"), b"ignored/\n");
+            std::fs::create_dir(workspace.join("src/ignored")).unwrap();
+            crate::private_file(
+                &workspace.join("src/ignored/secret"),
+                b"omitted input canary",
+            );
+            crate::private_file(&workspace.join("src/asset"), &vec![b'x'; 1024 * 1024 + 1]);
+        }
         if case == "partial" {
             std::fs::create_dir(workspace.join("src/a")).unwrap();
             std::fs::create_dir(workspace.join("src/z")).unwrap();
@@ -1756,6 +1770,17 @@ pub(super) async fn native_command_changeset_corpus(
             assert_eq!(result["exit_code"], if case == "nonzero" { 7 } else { 0 });
             assert_eq!(result["stdout"], "payload-complete");
             assert_eq!(result["stderr"], "");
+            if case == "selection" {
+                assert_eq!(
+                    result["selection"],
+                    json!({"ignored_entries":1,"pruned_directories":1,"oversized_inputs":1,"discarded_outputs":1})
+                );
+                assert!(!workspace.join("src/ignored/new").exists());
+                assert_eq!(
+                    std::fs::read(workspace.join("src/ignored/secret")).unwrap(),
+                    b"omitted input canary"
+                );
+            }
             let ToolCall::ApplyChangeset {
                 source:
                     arany::worker::ChangesetSource::CommandReceipt {
@@ -1839,7 +1864,7 @@ pub(super) async fn native_command_changeset_corpus(
                 b"delete\n"
             );
             assert!(view.runs[0].assistant_message.is_none());
-        } else if matches!(case, "nonzero" | "ai-approve") {
+        } else if matches!(case, "nonzero" | "ai-approve" | "selection") {
             if case == "nonzero" {
                 assert_eq!(
                     requests[2]

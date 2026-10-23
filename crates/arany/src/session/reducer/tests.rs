@@ -4632,6 +4632,7 @@ mod goal_replay_tests {
         ) {
             let stdout = String::from_utf8(content.to_vec()).unwrap();
             serde_json::to_string(&crate::tools::types::CommandResult {
+                selection: Some(Default::default()),
                 exit_code: Some(0),
                 stdout_total: crate::tools::OutputTotal {
                     bytes: stdout.len() as u64,
@@ -5513,7 +5514,7 @@ mod goal_replay_tests {
             apply(&mut view, tool_started(run, agent, &intent)).unwrap();
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
-            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
+            hook_observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
             for event in [
                 started(intent.digest(), &hook_intent),
                 finished(hook_observation.clone(), deny.clone()),
@@ -5845,7 +5846,7 @@ mod goal_replay_tests {
             );
             let mut hook_observation = observation_for(hook_intent.clone(), b"");
             hook_observation.disposition = ToolDisposition::Failed;
-            hook_observation.output = serde_json::json!({"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
+            hook_observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 2, "stdout": "", "stderr": "blocked", "stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":7,"lines":1},"changeset": {"files": []}}).to_string();
             for forged in [
                 HookResult::Passed,
                 HookResult::Restricted {
@@ -6043,7 +6044,7 @@ mod goal_replay_tests {
             observation.limit_cause = (disposition == ToolDisposition::Limit)
                 .then_some(crate::tools::LimitCause::Resource);
             observation.output =
-                r#"{"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+                r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":7,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
             apply(
                 &mut view,
                 Event::ToolFinished {
@@ -6091,6 +6092,188 @@ mod goal_replay_tests {
             run,
             agent,
             started: true,
+        }
+    }
+
+    #[test]
+    fn primary_host_approval_preserves_ignored_hook_outcomes() {
+        use crate::tools::EnforcementCause;
+        use crate::tools::permissions::{
+            Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
+            PermissionMode, PermissionSource,
+        };
+        for cause in [
+            EnforcementCause::FilesystemDenied,
+            EnforcementCause::GuardBootstrap,
+        ] {
+            let (mut view, goal, run, agent) = primary_tool_session(true);
+            view.goals[0]
+                .plan_contract
+                .as_mut()
+                .unwrap()
+                .commands
+                .push("sh".into());
+            let policy = view.runs[0]
+                .config
+                .as_mut()
+                .unwrap()
+                .tool_policy
+                .as_mut()
+                .unwrap();
+            policy.permissions_digest = Some([3; 32]);
+            policy.unguarded_rules_digest = Some([5; 32]);
+            policy.host_epoch = Some(uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501));
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let intent = read_intent(run, agent, "src/lib.rs");
+            apply(&mut view, tool_started(run, agent, &intent)).unwrap();
+            let hook = child_intent(
+                run,
+                agent,
+                ToolCall::Command {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 7".into()],
+                    cwd: String::new(),
+                },
+            );
+            apply(
+                &mut view,
+                Event::HookStarted {
+                    run_id: run,
+                    agent_run_id: agent,
+                    hook: HookInvocation {
+                        active_ceiling_ms: None,
+                        event: HookEvent::PreToolUse,
+                        group: 0,
+                        handler: 0,
+                        subject_digest: intent.digest(),
+                        intent: hook.clone(),
+                        input_digest: [9; 32],
+                    },
+                },
+            )
+            .unwrap();
+            let mut observation = observation_for(hook, b"");
+            observation.enforcement_cause = Some(cause);
+            observation.disposition = if cause == EnforcementCause::GuardBootstrap {
+                observation.attestation = None;
+                ToolDisposition::Failed
+            } else {
+                ToolDisposition::Denied
+            };
+            let ignored = HookResult::Ignored {
+                why: HookIgnoreReason::NotCompleted,
+            };
+            apply(
+                &mut view,
+                Event::HookFinished {
+                    run_id: run,
+                    agent_run_id: agent,
+                    outcome: HookOutcome {
+                        boundary_active_ms: None,
+                        observation,
+                        result: ignored.clone(),
+                    },
+                },
+            )
+            .unwrap();
+            let mut verdict = verdict_event(
+                &intent,
+                Some(PermissionMode::Default),
+                Decision::Allow,
+                PermissionSource::Mode,
+                PermissionSource::Mode,
+                true,
+            );
+            if let Event::ToolPermissionDecided { verdict, .. } = &mut verdict {
+                verdict.hooks = 1;
+            }
+            apply(&mut view, verdict).unwrap();
+            apply(&mut view, tool_finished(run, agent, &intent, b"ok")).unwrap();
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+            let host = child_intent(
+                run,
+                agent,
+                ToolCall::CommandUnguarded {
+                    program: "sh".into(),
+                    args: vec!["-c".into(), "exit 0".into()],
+                    cwd: String::new(),
+                    justification: "Run a primary host command".into(),
+                },
+            );
+            apply(&mut view, tool_started(run, agent, &host)).unwrap();
+            for source in [
+                PermissionSource::AiReview,
+                PermissionSource::Rule,
+                PermissionSource::Mode,
+            ] {
+                assert!(rejected(
+                    &view,
+                    verdict_event(
+                        &host,
+                        Some(PermissionMode::Default),
+                        Decision::Ask,
+                        PermissionSource::Mode,
+                        source,
+                        true
+                    )
+                ));
+            }
+            let human = verdict_event(
+                &host,
+                Some(PermissionMode::Default),
+                Decision::Ask,
+                PermissionSource::Mode,
+                PermissionSource::Human,
+                true,
+            );
+            assert!(!rejected(&view, human.clone()));
+            let mut denied = view.clone();
+            apply(
+                &mut denied,
+                verdict_event(
+                    &host,
+                    Some(PermissionMode::Default),
+                    Decision::Ask,
+                    PermissionSource::Mode,
+                    PermissionSource::Human,
+                    false,
+                ),
+            )
+            .unwrap();
+            let mut ran = observation_for(host.clone(), b"ok");
+            ran.output =
+                r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+            assert!(rejected(
+                &denied,
+                Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: ran.clone()
+                }
+            ));
+            apply(&mut view, human).unwrap();
+            apply(
+                &mut view,
+                Event::ToolFinished {
+                    checkpoint: None,
+                    run_id: run,
+                    agent_run_id: agent,
+                    observation: ran,
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                view.runs[0].tools[0].hooks[0]
+                    .outcome
+                    .as_ref()
+                    .unwrap()
+                    .result,
+                ignored
+            );
+            assert_eq!(view.runs[0].unguarded_tools(), 1);
         }
     }
 
@@ -6479,7 +6662,7 @@ mod goal_replay_tests {
         cached.cache_update = CacheUpdate::Published;
         assert!(rejected(&approved, finish(cached)));
         host_run.output =
-            r#"{"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
+            r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#.into();
         let no_verdict = good.view.clone();
         assert!(rejected(&no_verdict, finish(host_run.clone())));
         let mut refused = good.view.clone();
@@ -7897,7 +8080,7 @@ mod goal_replay_tests {
             assert!(rejected(&view, reserve_child_call(goal, run, actor)));
             let mut observation = observation_for(intent, b"");
             observation.disposition = ToolDisposition::Failed;
-            observation.output = serde_json::json!({"exit_code":2,"stdout":"","stderr":"verify","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":6,"lines":1},"changeset":{"files":[]}}).to_string();
+            observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":2,"stdout":"","stderr":"verify","stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":6,"lines":1},"changeset":{"files":[]}}).to_string();
             let finished = Event::HookFinished {
                 run_id: run,
                 agent_run_id: actor,
@@ -7935,7 +8118,7 @@ mod goal_replay_tests {
                 let mut stopped = finished.clone();
                 if let Event::HookFinished { outcome, .. } = &mut stopped {
                     outcome.observation.disposition = ToolDisposition::Succeeded;
-                    outcome.observation.output = serde_json::json!({"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
+                    outcome.observation.output = serde_json::json!({"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":r#"{"continue":false,"stopReason":"halt"}"#,"stderr":"","stdout_total":{"bytes":(r#"{"continue":false,"stopReason":"halt"}"#).len(),"lines":(r#"{"continue":false,"stopReason":"halt"}"#).lines().count()},"stderr_total":{"bytes":0,"lines":0},"changeset":{"files":[]}}).to_string();
                     outcome.result = HookResult::Stopped {
                         reason: Some("halt".into()),
                     };

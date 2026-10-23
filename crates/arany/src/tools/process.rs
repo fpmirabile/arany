@@ -66,12 +66,6 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
         .iter()
         .find(|value| &value.name == program)
         .ok_or(ToolError::Configuration)?;
-    #[cfg(target_os = "linux")]
-    let before = if site.intent.target == crate::session::worker::EffectTarget::Workspace {
-        Some(super::fs::command_snapshot(site.workspace)?)
-    } else {
-        None
-    };
     #[cfg(target_os = "macos")]
     let args = args
         .iter()
@@ -144,20 +138,66 @@ pub(super) async fn run(site: &GuardContext<'_>) -> Result<String, ToolError> {
     let timed_out = status.is_none();
     let exit_code = status.and_then(|status| status.code());
     #[cfg(target_os = "linux")]
-    let changeset = {
+    let (changeset, selection) = {
         site.stop_descendants().await?;
+        let mut capture_deadline = None;
+        if site.command_before.is_some() {
+            capture_deadline = Some(
+                tokio::task::spawn_blocking(|| {
+                    use std::io::{Read, Write};
+                    let mut stdout = std::io::stdout().lock();
+                    stdout
+                        .write_all(b"CAPTURE_READY\n")
+                        .and_then(|()| stdout.flush())
+                        .map_err(|_| ToolError::Operation)?;
+                    let mut acknowledgement = [0; 8];
+                    std::io::stdin()
+                        .lock()
+                        .read_exact(&mut acknowledgement)
+                        .map_err(|_| ToolError::Operation)?;
+                    if acknowledgement != *b"CAPTURE\n" {
+                        return Err(ToolError::Configuration);
+                    }
+                    let mut frame = [0; 8];
+                    std::io::stdin()
+                        .lock()
+                        .read_exact(&mut frame)
+                        .map_err(|_| ToolError::Operation)?;
+                    super::guard::selection_phase::decode_deadline(frame)
+                })
+                .await
+                .map_err(|_| ToolError::Operation)??,
+            );
+        }
         if timed_out {
-            super::types::CommandChangeset::default()
+            (
+                super::types::CommandChangeset::default(),
+                site.command_before
+                    .as_ref()
+                    .map(|(_, selection)| selection.summary)
+                    .unwrap_or_default(),
+            )
         } else {
-            match before {
-                Some(before) => super::fs::command_changeset(site.workspace, &before)?,
-                None => super::types::CommandChangeset::default(),
+            match &site.command_before {
+                Some((before, selection)) => super::fs::selected_command_changeset(
+                    site.workspace,
+                    before,
+                    selection,
+                    capture_deadline.ok_or(ToolError::Operation)?,
+                )?,
+                None => (
+                    super::types::CommandChangeset::default(),
+                    Default::default(),
+                ),
             }
         }
     };
     #[cfg(not(target_os = "linux"))]
-    let changeset = super::types::CommandChangeset::default();
-    command_output(site, exit_code, timed_out, out, err, changeset)
+    let (changeset, selection) = (
+        super::types::CommandChangeset::default(),
+        Default::default(),
+    );
+    command_output(site, exit_code, timed_out, out, err, changeset, selection)
 }
 
 fn command_output(
@@ -167,6 +207,7 @@ fn command_output(
     out: super::output::Window,
     err: super::output::Window,
     changeset: super::types::CommandChangeset,
+    selection: super::types::CommandSelectionSummary,
 ) -> Result<String, ToolError> {
     let budget = site.intent.limits.result_bytes as usize;
     let truncation = if site.hook_stdin.is_some() {
@@ -203,20 +244,29 @@ fn command_output(
     #[cfg(target_os = "macos")]
     {
         if matches!(truncation, Truncation::Refuse) {
-            fit_command(exit_code, &out, &err, changeset.clone(), budget, truncation)?;
+            fit_selected_command(
+                exit_code,
+                &out,
+                &err,
+                changeset.clone(),
+                budget,
+                truncation,
+                selection,
+            )?;
         }
         super::output::CommandWindows {
             stdout: out,
             stderr: err,
         }
         .send()?;
-        let output = fit_command(
+        let output = fit_selected_command(
             exit_code,
             &super::output::Window::default(),
             &super::output::Window::default(),
             changeset,
             budget,
             truncation,
+            selection,
         )?;
         if timed_out {
             Err(ToolError::Timeout(output))
@@ -226,7 +276,9 @@ fn command_output(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let output = fit_command(exit_code, &out, &err, changeset, budget, truncation)?;
+        let output = fit_selected_command(
+            exit_code, &out, &err, changeset, budget, truncation, selection,
+        )?;
         if timed_out {
             Err(ToolError::Timeout(output))
         } else {
@@ -243,11 +295,32 @@ pub(super) fn fit_command(
     budget: usize,
     truncation: Truncation,
 ) -> Result<String, ToolError> {
-    if !changeset.valid() {
+    fit_selected_command(
+        exit_code,
+        stdout,
+        stderr,
+        changeset,
+        budget,
+        truncation,
+        Default::default(),
+    )
+}
+
+pub(super) fn fit_selected_command(
+    exit_code: Option<i32>,
+    stdout: &super::output::Window,
+    stderr: &super::output::Window,
+    changeset: super::types::CommandChangeset,
+    budget: usize,
+    truncation: Truncation,
+    selection: super::types::CommandSelectionSummary,
+) -> Result<String, ToolError> {
+    if !changeset.valid() || !selection.valid() {
         return Err(ToolError::Limit);
     }
     let render = |out: &str, err: &str| {
         serde_json::to_string(&CommandResult {
+            selection: Some(selection),
             exit_code,
             stdout: out.into(),
             stderr: err.into(),
@@ -303,6 +376,7 @@ mod tests {
         )
         .unwrap();
         let result: CommandResult = serde_json::from_str(&text).unwrap();
+        assert_eq!(result.selection, Some(Default::default()));
         assert_eq!(result.changeset, changeset);
         assert!(matches!(
             fit_command(

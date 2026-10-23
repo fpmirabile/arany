@@ -2536,6 +2536,7 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
     let config_bytes = br#"{"version":1,"workspace_paths":["src"],"write":true,"commands":[],"skills":[],"mcp":[]}"#;
     for (case, stage) in [
         ("eof", "handshake"),
+        ("missing_preparation", "admission"),
         ("invalid_go", "admission"),
         ("early_go", "admission"),
         ("stale_workspace", "workspace"),
@@ -2560,8 +2561,11 @@ fn guard_refuses_before_go(root: &Path, workspace: &Path, admitted: &arany::Effe
         if case == "resource_mismatch" {
             intent.limits.resource_profile = ToolResourceProfile::LinuxKernel;
         }
-        let mut task_value = json!({"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
+        let mut task_value = json!({"preparation":false,"config":serde_json::from_slice::<serde_json::Value>(config_bytes).unwrap(),
             "intent":intent,"definition":null,"worker":null,"handover":null,"workspace":workspace,"guard_executable":env!("CARGO_BIN_EXE_arany")});
+        if case == "missing_preparation" {
+            task_value.as_object_mut().unwrap().remove("preparation");
+        }
         if case == "catalogue_tamper" {
             task_value["system_programs"] =
                 json!({"programs":[["/bin/launchctl",[0,0,0,0,0,0,0]]]});

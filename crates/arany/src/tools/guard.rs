@@ -67,6 +67,7 @@ pub(super) use macos::{
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod admission;
+pub(super) mod selection_phase;
 
 pub(super) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     check_available()?;
@@ -107,6 +108,7 @@ pub(super) use macos::RESERVATION_OVERHEAD;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Task {
+    preparation: bool,
     config: Config,
     intent: EffectIntent,
     cache: Option<BuildCacheTransfer>,
@@ -674,6 +676,7 @@ pub(super) fn task_fits(runtime: &ToolRuntime, intent: &EffectIntent) -> bool {
     {
         profile::Namespaces::read().is_ok_and(|parent_namespaces| {
             encode_task(&Task {
+                preparation: false,
                 config: runtime.config.clone(),
                 intent: intent.clone(),
                 cache: None,
@@ -1420,6 +1423,8 @@ fn bootstrap_locations(
 }
 
 pub(super) struct GuardContext<'a> {
+    #[cfg(target_os = "linux")]
+    pub(super) command_before: Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>,
     pub(super) intent: &'a EffectIntent,
     pub(super) config: &'a Config,
     pub(super) root: &'a Path,
@@ -1468,6 +1473,13 @@ impl GuardContext<'_> {
 
 fn validate_task(task: &Task) -> Result<(), ToolError> {
     task.config.validate()?;
+    if task.preparation
+        && (!cfg!(target_os = "linux")
+            || task.worker.is_some()
+            || !matches!(task.intent.call, ToolCall::Command { .. }))
+    {
+        return Err(ToolError::Configuration);
+    }
     if let Some(cache) = &task.cache {
         cache.validate(&task.intent, &task.config)?;
     }
@@ -1777,6 +1789,10 @@ pub(super) fn helper_main() -> ExitCode {
         let mut stdin = std::io::BufReader::new(std::io::stdin().lock());
         let task = read_task(&mut stdin)?;
         validate_task(&task)?;
+        #[cfg(target_os = "linux")]
+        if task.preparation {
+            return linux::prepare_main(&task, &mut stdin);
+        }
         let (root, workspace) = bootstrap_locations(&task, &mut stage)?;
         attest_runtime_mounts(
             &task.intent.call,
@@ -1808,6 +1824,11 @@ pub(super) fn helper_main() -> ExitCode {
                 profile::install_non_spawning()?;
             }
         }
+        #[cfg(target_os = "linux")]
+        let command_before = {
+            stage = BootstrapStage::Workspace;
+            prepare_command_baseline(&task, workspace, &mut stdin)?
+        };
         stage = BootstrapStage::Handshake;
         let ready = Ready {
             digest: task.intent.digest(),
@@ -1861,7 +1882,10 @@ pub(super) fn helper_main() -> ExitCode {
             super::worker::materialize(image, &super::fs::open_directory(workspace)?)?;
         }
         #[cfg(not(target_os = "macos"))]
-        if task.intent.call.is_process() && task.worker.is_none() {
+        if task.intent.call.is_process()
+            && task.worker.is_none()
+            && !matches!(task.intent.call, ToolCall::Command { .. })
+        {
             super::fs::copy_seed()?;
         }
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1869,6 +1893,8 @@ pub(super) fn helper_main() -> ExitCode {
             .build()
             .map_err(|_| ToolError::Operation)?;
         let site = GuardContext {
+            #[cfg(target_os = "linux")]
+            command_before,
             intent: &task.intent,
             config: &task.config,
             root: &root,
@@ -1881,8 +1907,11 @@ pub(super) fn helper_main() -> ExitCode {
             #[cfg(target_os = "linux")]
             parent_namespaces: &task.parent_namespaces,
         };
+        // Capture handshakes acquire stdout from a blocking worker during dispatch.
+        drop(stdout);
         let result = runtime.block_on(super::dispatch::run(&site));
         stage = BootstrapStage::Receipt;
+        let mut stdout = std::io::stdout().lock();
         send_result(task, workspace, result, &mut stdout, &root, image.as_ref())?;
         Ok(())
     })();
@@ -2075,6 +2104,29 @@ pub(super) fn payload(
     Ok(command)
 }
 
+#[cfg(target_os = "linux")]
+fn prepare_command_baseline(
+    task: &Task,
+    workspace: &Path,
+    stdin: &mut impl Read,
+) -> Result<Option<(super::fs::CommandSnapshot, super::fs::CommandSelection)>, ToolError> {
+    let command_before =
+        if task.worker.is_none() && matches!(task.intent.call, ToolCall::Command { .. }) {
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(b"SELECTION_READY\n")
+                .and_then(|()| stdout.flush())
+                .map_err(|_| ToolError::Operation)?;
+            let selection = super::fs::CommandSelection::receive(stdin)?;
+            super::fs::copy_seed()?;
+            Some((super::fs::command_snapshot(workspace)?, selection))
+        } else {
+            None
+        };
+
+    Ok(command_before)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2210,6 +2262,7 @@ mod tests {
         };
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let mut task = Task {
+            preparation: false,
             config,
             intent: intent(call),
             cache: None,
@@ -2271,6 +2324,7 @@ mod tests {
             .collect();
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":false,"commands":commands,"skills":[],"mcp":[]})).unwrap();
         let task = |config: Config| Task {
+            preparation: false,
             config,
             intent: intent(call.clone()),
             cache: None,
@@ -2302,6 +2356,7 @@ mod tests {
     fn the_largest_typed_write_fits_one_task_frame_at_its_exact_ceiling() {
         let config: Config = serde_json::from_value(serde_json::json!({"version":1,"workspace_paths":["."],"write":true,"commands":[],"skills":[],"mcp":[]})).unwrap();
         let task = Task {
+            preparation: false,
             config,
             intent: intent(ToolCall::Write {
                 path: "\"".repeat(512),
@@ -2769,7 +2824,7 @@ mod tests {
                 .unwrap();
         assert_eq!(status.code(), Some(1));
         let output = serde_json::json!({
-            "exit_code": status.code(),
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": status.code(),
             "stdout": String::from_utf8(stdout).unwrap(),
             "stderr": String::from_utf8(stderr).unwrap(),
             "enforcement_cause": "filesystem_denied",
@@ -2816,30 +2871,71 @@ mod tests {
         }
         let before = model_observation(&observation);
         assert!(before.get("enforcement_cause").is_none());
-        let workspace = tempfile::tempdir().unwrap();
-        let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
-        std::fs::create_dir(workspace.path().join(".git")).unwrap();
-        std::fs::write(
-            workspace.path().join(".git/config"),
-            b"protected fixture content",
-        )
-        .unwrap();
-        let rejected = super::super::fs::command_changeset(workspace.path(), &snapshot);
-        let (disposition, output, cause, limit_cause) =
-            super::super::dispatch::outcome(&observation.intent, rejected.map(|_| String::new()));
-        assert_eq!(cause, Some(EnforcementCause::FilesystemDenied));
-        observation.disposition = disposition;
-        observation.limit_cause = limit_cause;
-        observation.output = output;
-        observation.enforcement_cause = cause;
-        assert!(observation.valid());
-        assert!(!observation.output.contains(".git"));
-        assert!(!observation.output.contains("protected fixture content"));
-        let projected = model_observation(&observation);
-        assert_eq!(
-            projected["enforcement_cause"],
-            "Guard enforcement: protected path or set-ID entry refused"
-        );
+        for path in [
+            ".git/config",
+            "ignored/.git/config",
+            "setuid",
+            "ignored/setuid",
+            "setgid",
+            "ignored/setgid",
+        ] {
+            use std::os::unix::fs::{MetadataExt, PermissionsExt};
+            let source = tempfile::tempdir().unwrap();
+            let workspace = tempfile::tempdir().unwrap();
+            let resources = tempfile::tempdir().unwrap();
+            std::fs::write(source.path().join(".gitignore"), b"ignored/\n").unwrap();
+            let selection = super::super::fs::prepare_command(
+                &super::super::fs::open_directory(source.path()).unwrap(),
+                &super::super::fs::open_directory(workspace.path()).unwrap(),
+                &super::super::fs::open_directory(resources.path()).unwrap(),
+                &config(Vec::new()),
+                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+            )
+            .unwrap();
+            let snapshot = super::super::fs::command_snapshot(workspace.path()).unwrap();
+            let output_path = workspace.path().join(path);
+            std::fs::create_dir_all(output_path.parent().unwrap()).unwrap();
+            std::fs::write(&output_path, b"protected fixture content").unwrap();
+            if !path.ends_with("config") {
+                let mode = if path.ends_with("setuid") {
+                    0o4755
+                } else {
+                    0o2755
+                };
+                // Temporary files can inherit a group outside the caller's memberships on macOS.
+                rustix::fs::chown(&output_path, None, Some(rustix::process::getegid())).unwrap();
+                std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(mode))
+                    .unwrap();
+                assert_eq!(
+                    std::fs::metadata(&output_path).unwrap().mode() & 0o6000,
+                    mode & 0o6000,
+                    "{path}: fixture must retain its set-ID bit"
+                );
+            }
+            let rejected = super::super::fs::selected_command_changeset(
+                workspace.path(),
+                &snapshot,
+                &selection,
+                std::time::Instant::now() + super::super::selection::PHASE_TIME,
+            );
+            let (disposition, output, cause, limit_cause) = super::super::dispatch::outcome(
+                &observation.intent,
+                rejected.map(|_| String::new()),
+            );
+            assert_eq!(cause, Some(EnforcementCause::FilesystemDenied), "{path}");
+            observation.disposition = disposition;
+            observation.limit_cause = limit_cause;
+            observation.output = output;
+            observation.enforcement_cause = cause;
+            assert!(observation.valid());
+            assert!(!observation.output.contains(".git"));
+            assert!(!observation.output.contains("protected fixture content"));
+            let projected = model_observation(&observation);
+            assert_eq!(
+                projected["enforcement_cause"],
+                "Guard enforcement: protected path or set-ID entry refused"
+            );
+        }
     }
 
     fn node_grant(home: &Path) -> RuntimeGrant {
@@ -3068,7 +3164,7 @@ mod tests {
             limit_cause: None,
             intent,
             disposition: ToolDisposition::Succeeded,
-            output: r#"{"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
+            output: r#"{"selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code":0,"stdout":"built","stderr":"","changeset":{"files":[]},"stdout_total":{"bytes":5,"lines":1},"stderr_total":{"bytes":0,"lines":0}}"#
                 .into(),
             attestation: Some(Attestation::Guard(guard)),
             approval_cause: None,
@@ -3595,6 +3691,7 @@ mod tests {
         .unwrap();
         let task = |call: ToolCall| {
             let probe = Task {
+                preparation: false,
                 definition: None,
                 worker: None,
                 handover: None,
