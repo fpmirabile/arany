@@ -1,6 +1,6 @@
 use arany::{
-    ApprovalInbox, EffectIntent, Event, RunCancellation, SessionId, StateRoot, Store, ToolApproval,
-    ToolCall, UnguardedPrompt, now_ms,
+    ApprovalInbox, ApprovalReply, EffectIntent, Event, RunCancellation, SessionId, StateRoot,
+    Store, ToolApproval, ToolCall, UnguardedPrompt,
 };
 use arany_cli::protocol::{methods::*, rpc::*};
 use serde_json::Value;
@@ -11,19 +11,12 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicI64, Ordering},
     },
-    time::Duration,
 };
-use tokio::{
-    sync::{Notify, mpsc, oneshot},
-    time::Instant,
-};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 struct Pending {
     id: RequestId,
-    deadline: Instant,
-    expires_ms: u64,
-    sent: bool,
-    decide: oneshot::Sender<bool>,
+    decide: oneshot::Sender<ApprovalReply>,
 }
 
 #[derive(Default)]
@@ -73,9 +66,7 @@ impl Approvals {
         };
         owner.worker = Some(tokio::spawn(async move {
             let mut current: Option<ToolApproval> = None;
-            let mut answer: Option<oneshot::Receiver<bool>> = None;
-            let mut outgoing = None;
-            let mut deadline = None;
+            let mut answer: Option<oneshot::Receiver<ApprovalReply>> = None;
             loop {
                 tokio::select! { biased;
                     () = cancel.cancelled() => break,
@@ -86,75 +77,46 @@ impl Approvals {
                     }
                     allow = async { answer.as_mut().expect("answer").await }, if answer.is_some() => {
                         if let Some(approval) = current.take() {
-                            approval.decide(allow.unwrap_or(false));
+                            approval.decide(allow.unwrap_or(ApprovalReply::Unavailable));
                         }
                         answer = None;
-                        outgoing = None;
-                        deadline = None;
                     }
                     () = async { current.as_mut().expect("approval").abandoned().await }, if current.is_some() => {
                         withdraw(&state, &outbound, withdrawals);
                         current = None;
                         answer = None;
-                        outgoing = None;
-                        deadline = None;
-                    }
-                    () = async { tokio::time::sleep_until(deadline.expect("pending expiry")).await }, if deadline.is_some() => {
-                        withdraw(&state, &outbound, withdrawals);
-                        current = None;
-                        answer = None;
-                        outgoing = None;
-                        deadline = None;
                     }
                     approval = inbox.next() => {
-                        let Some(approval) = approval else { break };
+                        let Some(mut approval) = approval else { break };
                         if current.is_some() {
-                            approval.decide(false);
+                            approval.decide(ApprovalReply::Unavailable);
                             continue;
                         }
-                        let remaining = approval.intent.expires_at_ms.saturating_sub(now_ms());
-                        if remaining == 0 { approval.decide(false); continue; }
-                        let expires = Instant::now() + Duration::from_millis(remaining);
+                        let intent = approval.intent.clone();
                         let message = tokio::select! { biased;
                             () = cancel.cancelled() => break,
                             () = finished.cancelled() => break,
                             () = outbound.closed() => break,
-                            () = tokio::time::sleep_until(expires) => None,
-                            started = started_at(approval.intent.clone()) => {
+                            () = approval.abandoned() => None,
+                            started = started_at(intent) => {
                                 started.and_then(|started| request(thread_id, &approval, started, &next_id))
                             },
                         };
-                        let Some(message) = message else { approval.decide(false); continue; };
+                        let Some(message) = message else { approval.decide(ApprovalReply::Unavailable); continue; };
                         let (decide, decision) = oneshot::channel();
                         let mut state = state.lock().expect("approval state");
-                        if state.closed { approval.decide(false); break; }
+                        if state.closed { approval.decide(ApprovalReply::Unavailable); break; }
+                        let Ok(permit) = outbound.try_reserve() else {
+                            approval.decide(ApprovalReply::Unavailable);
+                            continue;
+                        };
                         state.pending = Some(Pending {
                             id: message.id.clone(),
-                            deadline: expires,
-                            expires_ms: approval.intent.expires_at_ms,
-                            sent: false,
                             decide,
                         });
                         current = Some(approval);
                         answer = Some(decision);
-                        outgoing = Some(Message::Request(message));
-                        deadline = Some(expires);
-                    }
-                    permit = outbound.reserve(), if outgoing.is_some() => {
-                        let Ok(permit) = permit else { break };
-                        let mut state = state.lock().expect("approval state");
-                        match (&mut state.pending, outgoing.take()) {
-                            (Some(pending), Some(message)) if Instant::now() < pending.deadline => {
-                                pending.sent = true;
-                                permit.send(message);
-                            }
-                            _ => {
-                                state.pending = None;
-                                current = None;
-                                answer = None;
-                                deadline = None;
-                            }
-                        }
+                        permit.send(Message::Request(message));
                     }
                 }
             }
@@ -170,24 +132,20 @@ impl Approvals {
     pub fn respond(&self, id: RequestId, result: Option<Value>) {
         let mut state = self.state.lock().expect("approval state");
         let closed = state.closed;
-        let Some(pending) = state.pending.take_if(|pending| {
-            !closed
-                && pending.id == id
-                && pending.sent
-                && Instant::now() < pending.deadline
-                && pending.expires_ms > now_ms()
-        }) else {
+        let Some(pending) = state.pending.take_if(|pending| !closed && pending.id == id) else {
             return;
         };
         let decision = result
             .and_then(|value| serde_json::from_value::<ApprovalResult>(value).ok())
             .map(|result| result.decision);
-        let _ = pending
-            .decide
-            .send(matches!(decision, Some(ApprovalDecision::Accept)));
         if matches!(decision, Some(ApprovalDecision::Cancel)) {
             self.cancel.cancel();
         }
+        let _ = pending.decide.send(match decision {
+            Some(ApprovalDecision::Accept) => ApprovalReply::AllowOnce,
+            Some(ApprovalDecision::Decline) => ApprovalReply::Deny,
+            Some(ApprovalDecision::Cancel) | None => ApprovalReply::Unavailable,
+        });
     }
 
     pub fn close(&self) {
@@ -223,7 +181,7 @@ fn withdraw(state: &Mutex<State>, output: &mpsc::Sender<Message>, enabled: bool)
 }
 
 fn notify_withdrawal(pending: Option<Pending>, output: &mpsc::Sender<Message>, enabled: bool) {
-    if enabled && let Some(pending) = pending.filter(|pending| pending.sent) {
+    if enabled && let Some(pending) = pending {
         let _ = output.try_send(Message::Notification(super::items::notification(
             "$/cancel_request",
             serde_json::json!({"requestId": pending.id}),
@@ -297,7 +255,6 @@ fn request(
                 turn_id: intent.run_id,
                 item_id: intent.id.to_string(),
                 started_at_ms,
-                expires_at_ms: intent.expires_at_ms.try_into().ok()?,
                 intent: serde_json::to_value(intent).ok()?,
                 lines: lines(intent, approval.unguarded.as_ref()),
             })
@@ -328,7 +285,6 @@ mod tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: now_ms() + 60_000,
             use_count: 1,
         }
     }
@@ -428,6 +384,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_or_closed_output_refuses_an_unsent_request_and_forgets_its_id() {
+        let _deadline = crate::cli::serve::tests::deadline();
+        for closed in [false, true] {
+            let (approvals, inbox) = ToolApprovals::new(ApprovalMode::Request);
+            let (outbound, mut output) = mpsc::channel(1);
+            if closed {
+                output.close();
+            } else {
+                outbound
+                    .try_send(super::super::server::response(
+                        RequestId::Integer(99),
+                        serde_json::json!({}),
+                    ))
+                    .unwrap();
+            }
+            let owner = Approvals::start(
+                inbox,
+                RunCancellation::new(),
+                SessionId::new(),
+                Channel {
+                    outbound,
+                    next_id: Arc::new(AtomicI64::new(1)),
+                    withdrawals: false,
+                },
+                RunCancellation::new(),
+                |_| async { Some(1) },
+            );
+            assert!(
+                !tokio::time::timeout(
+                    Duration::from_secs(5),
+                    arany::test_support::approval::ask(&approvals, &intent(read()))
+                )
+                .await
+                .unwrap()
+            );
+            owner.respond(
+                RequestId::Integer(1),
+                Some(serde_json::json!({"decision":"accept"})),
+            );
+            if !closed {
+                assert!(matches!(output.try_recv().unwrap(), Message::Response(_)));
+            }
+            assert!(output.try_recv().is_err());
+        }
+    }
+
+    #[tokio::test]
     async fn one_approval_is_pending_and_an_abandoned_ask_frees_the_slot() {
         let _deadline = crate::cli::serve::tests::deadline();
         for withdrawals in [false, true] {
@@ -454,6 +457,10 @@ mod tests {
             let first = ask(read());
             let request = next_request(&mut output).await;
             assert_eq!(request.id, RequestId::Integer(1));
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_secs(3600)).await;
+            tokio::time::resume();
+            assert!(!first.is_finished(), "live approval must not expire");
             assert!(!ask(read()).await.expect("second ask"));
             assert!(output.try_recv().is_err());
             owner.respond(request.id, Some(serde_json::json!({"decision":"accept"})));

@@ -95,11 +95,11 @@ use catalog::Site;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub use types::{
-    Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause, FileChange,
-    FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS, MAX_SKILLS,
-    NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits, ToolObservation,
-    ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile, ToolResourceSettings,
-    ToolStep, UnguardedGrant, UnguardedReceipt,
+    ApprovalCause, Attestation, CacheUpdate, CommandChangeset, EffectIntent, EnforcementCause,
+    FileChange, FileVersion, GuardReceipt, HostIntent, LimitCause, LiteralEdit, MAX_SEARCH_ROWS,
+    MAX_SKILLS, NetworkGrant, OutputTotal, ToolCall, ToolContext, ToolDisposition, ToolLimits,
+    ToolObservation, ToolPolicyReceipt, ToolRequest, ToolResourceClass, ToolResourceProfile,
+    ToolResourceSettings, ToolStep, UnguardedGrant, UnguardedReceipt,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -1146,7 +1146,6 @@ impl ToolRuntime {
             workspace_inode: self.workspace_identity.inode,
             call,
             limits,
-            expires_at_ms: now_ms().saturating_add(60_000),
             use_count: 1,
         }
     }
@@ -1232,6 +1231,7 @@ impl ToolRuntime {
                 disposition: ToolDisposition::Denied,
                 output: crate::tools::PRIVATE_IMAGE_REQUIRED.into(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: CacheUpdate::NotApplicable,
             };
         }
@@ -1257,6 +1257,7 @@ impl ToolRuntime {
                 disposition: ToolDisposition::Denied,
                 output: "Tool operation is outside the pinned grant".into(),
                 attestation: None,
+                approval_cause: None,
                 cache_update: crate::tools::CacheUpdate::NotApplicable,
             };
         }
@@ -1307,6 +1308,7 @@ impl ToolRuntime {
             return ToolObservation {
                 enforcement_cause: None,
                 limit_cause: None,
+                approval_cause: None,
                 intent,
                 disposition: ToolDisposition::Denied,
                 output,
@@ -1371,6 +1373,7 @@ impl ToolRuntime {
             intent,
             disposition: outcome.disposition,
             output: outcome.output,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if !observation.valid() {
@@ -1393,7 +1396,12 @@ impl ToolRuntime {
         if intent.target != crate::session::worker::EffectTarget::Workspace
             || !intent.valid()
             || intent.policy_digest != self.config.digest()
-            || intent.expires_at_ms <= now_ms()
+            || intent.enforcement_digest
+                != if intent.call.is_process() {
+                    self.process_enforcement_digest
+                } else {
+                    self.enforcement_digest
+                }
         {
             return Err(ToolError::Configuration);
         }
@@ -1484,6 +1492,7 @@ impl ToolRuntime {
             intent,
             disposition,
             output,
+            approval_cause: None,
             cache_update: CacheUpdate::NotApplicable,
         };
         if !observation.valid() {
@@ -1519,6 +1528,7 @@ fn unattested_limit(intent: EffectIntent, cause: LimitCause, output: &str) -> To
         disposition: ToolDisposition::Limit,
         output: output.into(),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -1531,6 +1541,7 @@ fn cancelled_read(intent: EffectIntent) -> ToolObservation {
         disposition: ToolDisposition::Cancelled,
         output: "Read cancelled; nothing in the Workspace changed".into(),
         attestation: None,
+        approval_cause: None,
         cache_update: CacheUpdate::NotApplicable,
     }
 }
@@ -1637,6 +1648,7 @@ fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservat
         intent,
         disposition: ToolDisposition::Failed,
         attestation: None,
+        approval_cause: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }
@@ -1657,6 +1669,7 @@ pub(super) fn uncertain_observation(
             "Guard {stage} unconfirmed; effects may have occurred. Do not retry automatically."
         ),
         attestation: None,
+        approval_cause: None,
         cache_update,
     }
 }

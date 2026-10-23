@@ -166,14 +166,14 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderFallbackUsed", 1),
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 6),
-    ("HookStarted", 8),
-    ("HookFinished", 13),
-    ("ToolFinished", 24),
+    ("HookStarted", 9),
+    ("HookFinished", 14),
+    ("ToolFinished", 25),
     ("RunStarted", 22),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
     ("GoalCompactionCallReserved", 7),
-    ("ToolStarted", 18),
+    ("ToolStarted", 19),
     ("ContextCompacted", 7),
 ];
 
@@ -1443,6 +1443,127 @@ impl Event {
     }
 }
 
+pub(crate) fn intent_without_expiry(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let intent = if value.get("intent").is_some() {
+        value.get_mut("intent")?
+    } else {
+        value.get_mut("observation")?.get_mut("intent")?
+    };
+    let old = expiring_intent_text(intent)?;
+    intent.as_object_mut()?.remove("expires_at_ms")?;
+    let current: crate::tools::EffectIntent = serde_json::from_value(intent.clone()).ok()?;
+    let old_digest = crate::tools::types::digest(old.as_bytes());
+    let new_digest = current.digest();
+    replace_intent_pin(&mut value, &old_digest, &new_digest);
+    let observation = if value.get("observation").is_some() {
+        value.get_mut("observation")?
+    } else {
+        &mut value
+    };
+    if observation.get("disposition").is_some()
+        && observation
+            .as_object_mut()?
+            .insert("approval_cause".into(), serde_json::Value::Null)
+            .is_some()
+    {
+        return None;
+    }
+    Some(value)
+}
+
+pub(crate) fn replace_intent_pin(value: &mut serde_json::Value, old: &[u8; 32], new: &[u8; 32]) {
+    rebind_intent_pins(value, &|digest| (digest == old).then_some(*new));
+}
+
+pub(crate) fn rebind_intent_pins(
+    value: &mut serde_json::Value,
+    lookup: &impl Fn(&[u8; 32]) -> Option<[u8; 32]>,
+) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, value) in fields {
+                if matches!(
+                    key.as_str(),
+                    "intent_digest"
+                        | "source_intent_digest"
+                        | "last_intent_digest"
+                        | "subject_digest"
+                ) && let Ok(old) = serde_json::from_value::<[u8; 32]>(value.clone())
+                    && let Some(new) = lookup(&old)
+                {
+                    *value = serde_json::json!(new);
+                } else {
+                    rebind_intent_pins(value, lookup);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                rebind_intent_pins(value, lookup);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn restore_expiry(mut text: String, expiry: u64) -> Option<String> {
+    let at = text.find(",\"use_count\":")?;
+    text.insert_str(at, &format!(",\"expires_at_ms\":{expiry}"));
+    Some(text)
+}
+
+pub(crate) fn expiring_intent_text(value: &serde_json::Value) -> Option<String> {
+    let mut value = value.clone();
+    let expiry = value.as_object_mut()?.remove("expires_at_ms")?.as_u64()?;
+    if expiry == 0 {
+        return None;
+    }
+    let intent: crate::tools::EffectIntent = serde_json::from_value(value).ok()?;
+    let text = serialize(&intent).ok()?;
+    restore_expiry(text, expiry)
+}
+
+pub(crate) fn expiring_payload(kind: &str, payload: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(payload).ok()?;
+    let intent = if kind == "HookFinished" {
+        value.get_mut("observation")?.get_mut("intent")?
+    } else {
+        value.get_mut("intent")?
+    };
+    let expiry = intent.as_object_mut()?.remove("expires_at_ms")?.as_u64()?;
+    if expiry == 0 {
+        return None;
+    }
+    if matches!(kind, "ToolFinished" | "HookFinished") {
+        let observation = if kind == "HookFinished" {
+            value.get_mut("observation")?
+        } else {
+            &mut value
+        };
+        if observation
+            .as_object_mut()?
+            .insert("approval_cause".into(), serde_json::Value::Null)
+            .is_some()
+        {
+            return None;
+        }
+    }
+    let payload = value.to_string();
+    let text = match kind {
+        "ToolStarted" => serialize(&parse::<ToolStartedPayload>(&payload).ok()?).ok()?,
+        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(&payload).ok()?).ok()?,
+        "HookStarted" => {
+            serialize(&parse::<crate::tools::permissions::HookInvocation>(&payload).ok()?).ok()?
+        }
+        "HookFinished" => {
+            serialize(&parse::<crate::tools::permissions::HookOutcome>(&payload).ok()?).ok()?
+        }
+        _ => return None,
+    };
+    let text = text.replacen(",\"approval_cause\":null", "", 1);
+    restore_expiry(text, expiry)
+}
+
 // The typed text a payload had before its kind only gained the glob variants, or `None`
 // when it names them (they did not exist) or does not parse.
 pub(crate) fn pre_glob_payload(kind: &str, payload: &str) -> Option<String> {
@@ -1457,6 +1578,16 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
     ) -> Option<String> {
         let value = parse::<T>(payload).ok()?;
         allowed(&value).then(|| serialize(&value).ok()).flatten()
+    }
+    fn expiring_again<T: for<'de> Deserialize<'de>>(
+        kind: &str,
+        payload: &str,
+        allowed: impl FnOnce(&T) -> bool,
+    ) -> Option<String> {
+        let source = expiring_payload(kind, payload)?;
+        let current = intent_without_expiry(serde_json::from_str(payload).ok()?)?;
+        let value = serde_json::from_value::<T>(current).ok()?;
+        allowed(&value).then_some(source)
     }
     fn intent_allowed(intent: &crate::tools::EffectIntent) -> bool {
         intent.host_command.is_none() && !intent.call.is_unguarded()
@@ -1478,10 +1609,12 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
                     && policy.child_unguarded == crate::tools::UnguardedGrant::Denied
             })
         }),
-        "ToolStarted" => again::<ToolStartedPayload>(payload, |data| intent_allowed(&data.intent)),
-        "ToolFinished" => {
-            again::<ToolFinishedPayload>(payload, |data| observation_allowed(&data.observation))
+        "ToolStarted" => {
+            expiring_again::<ToolStartedPayload>(kind, payload, |data| intent_allowed(&data.intent))
         }
+        "ToolFinished" => expiring_again::<ToolFinishedPayload>(kind, payload, |data| {
+            observation_allowed(&data.observation)
+        }),
         "ToolPermissionDecided" => {
             again::<crate::tools::permissions::PermissionVerdict>(payload, |verdict| {
                 verdict.host.is_none()
@@ -1497,13 +1630,17 @@ pub(crate) fn pre_host_payload(kind: &str, payload: &str) -> Option<String> {
                     .as_ref()
                     .is_none_or(|assignment| criterion_allowed(&assignment.request.criterion))
         }),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload, |hook| {
-            intent_allowed(&hook.intent)
-        }),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload, |outcome| {
-            observation_allowed(&outcome.observation)
-                && !matches!(&outcome.result, HookResult::Narrowed { call } if call.is_unguarded())
-        }),
+        "HookStarted" => {
+            expiring_again::<crate::tools::permissions::HookInvocation>(kind, payload, |hook| {
+                intent_allowed(&hook.intent)
+            })
+        }
+        "HookFinished" => {
+            expiring_again::<crate::tools::permissions::HookOutcome>(kind, payload, |outcome| {
+                observation_allowed(&outcome.observation)
+                    && !matches!(&outcome.result, HookResult::Narrowed { call } if call.is_unguarded())
+            })
+        }
         "ProviderCallRecorded" => again::<ProviderCallRecord>(payload, |record| {
             record
                 .refusal
@@ -1586,10 +1723,9 @@ fn before_operations(
         serialize(&parse::<T>(payload).ok()?).ok()
     }
     let text = match kind {
-        "ToolStarted" => again::<ToolStartedPayload>(payload),
-        "ToolFinished" => again::<ToolFinishedPayload>(payload),
-        "HookStarted" => again::<crate::tools::permissions::HookInvocation>(payload),
-        "HookFinished" => again::<crate::tools::permissions::HookOutcome>(payload),
+        "ToolStarted" | "ToolFinished" | "HookStarted" | "HookFinished" => {
+            expiring_payload(kind, payload)
+        }
         "GoalPlanContractRecorded" => again::<GoalContractPayload>(payload),
         "AgentSpawned" => again::<SpawnPayload>(payload),
         "RunStarted" => run_started_v18_payload(payload),

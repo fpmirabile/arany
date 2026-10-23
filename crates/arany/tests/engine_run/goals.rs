@@ -6677,8 +6677,8 @@ async fn steered_run(
         for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
             transaction
                 .execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string()],
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 )
                 .expect("padding");
         }
@@ -6845,8 +6845,8 @@ async fn reviewed_write_run(
         for sequence in first_padding..=i64::try_from(prefix).expect("prefix") {
             transaction
                 .execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session_id.to_string()],
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 )
                 .expect("padding");
         }
@@ -7291,8 +7291,8 @@ async fn blocked_stop_reserves_its_shadow_verdict_before_journaling() {
             let transaction = connection.transaction().unwrap();
             for sequence in 2..=i64::try_from(10_000 - offset - free).unwrap() {
                 transaction.execute(
-                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
-                    rusqlite::params![sequence, session.to_string()],
+                    "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
+                    rusqlite::params![sequence, session.to_string(), arany::test_support::payload_version("SessionRenamed")],
                 ).unwrap();
             }
             transaction.commit().unwrap();
@@ -7438,11 +7438,10 @@ async fn supervisor_shadow_journals_loops_without_changing_provider_input_or_out
                         normalize_facts(facts);
                     }
                     for observation in &mut step.observations {
-                        // Normalize the per-run intent identities and expiry, which never enter model input.
+                        // Normalize the per-run intent identities, which never enter model input.
                         observation.intent.id = Uuid::nil();
                         observation.intent.run_id = normalized_run;
                         observation.intent.agent_run_id = normalized_actor;
-                        observation.intent.expires_at_ms = 0;
                     }
                 }
                 input

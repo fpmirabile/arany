@@ -24,7 +24,7 @@ fn supervisor_event_projects_canonical_jsonl_and_validates_against_exported_sche
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "SupervisorVerdictRecorded");
-    assert_eq!(line["event_version"], 1);
+    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(
         line["payload"],
         serde_json::from_str::<Value>(&envelope.event.payload().unwrap()).unwrap()
@@ -65,7 +65,7 @@ fn child_steering_projects_as_an_actor_scoped_committed_event() {
     };
     let line = serde_json::to_value(EventLine::from(&envelope)).unwrap();
     assert_eq!(line["kind"], "AgentSteeringNoteRecorded");
-    assert_eq!(line["event_version"], 1);
+    assert_eq!(line["event_version"], envelope.event.version());
     assert_eq!(line["payload"], json!({"goal_id":goal,"text":"note"}));
     let schema = protocol_schema();
     validate(
@@ -511,7 +511,7 @@ fn every_conformance_message_validates_against_the_schema() {
         "item/fileChange/requestApproval",
         "item/tool/requestApproval",
     ] {
-        let params = json!({"threadId": thread_id, "turnId": run_id, "itemId": "tool", "startedAtMs": 1, "expiresAtMs": 2, "intent": {"expires_at_ms": 2}, "lines": ["Allow read?"]});
+        let params = json!({"threadId": thread_id, "turnId": run_id, "itemId": "tool", "startedAtMs": 1, "intent": {}, "lines": ["Allow read?"]});
         validate(&schema, &schema["serverRequests"][name]["params"], &params);
         for decision in ["accept", "decline", "cancel"] {
             validate(
