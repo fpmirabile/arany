@@ -621,6 +621,19 @@ mod tests {
             Err(ProviderError::InvalidOutcome)
         ));
 
+        let rows = (0..=MAX_MODELS)
+            .map(|index| format!("{{\"id\":\"model-{index}\"}}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let many = format!("{{\"data\":[{rows}]}}");
+        assert!(matches!(
+            fixture("openai", &[(many.as_str(), None)]).await.0,
+            Err(ProviderError::InvalidOutcome)
+        ));
+    }
+
+    #[test]
+    fn catalog_page_model_rows_are_bounded_without_transport() {
         let rows = (0..MAX_MODELS)
             .map(|index| format!("{{\"id\":\"model-{index}\"}}"))
             .collect::<Vec<_>>()
@@ -650,9 +663,5 @@ mod tests {
                 .to_string()
                 .contains("too many model rows")
         );
-        assert!(matches!(
-            fixture("openai", &[(many.as_str(), None)]).await.0,
-            Err(ProviderError::InvalidOutcome)
-        ));
     }
 }

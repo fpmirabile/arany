@@ -986,6 +986,26 @@ cargo test --locked --lib --verbose
         } else {
             let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(result["exit_code"] == 0, success, "{case}: {result}");
+            if !success {
+                let fragments: &[&str] = match case {
+                    "missing-index" => {
+                        &["no matching package named `arany-fixture-dependency` found"]
+                    }
+                    "missing-source" => {
+                        &["failed to unpack package `arany-fixture-dependency v0.1.0`"]
+                    }
+                    "hostile-config" => &[
+                        "could not execute process",
+                        "unselected-wrapper",
+                        "(never executed)",
+                    ],
+                    _ => &[],
+                };
+                let stderr = result["stderr"].as_str().unwrap();
+                for fragment in fragments {
+                    assert!(stderr.contains(fragment), "{case}: {result}");
+                }
+            }
             assert_eq!(
                 outcome.run.status,
                 if success {
