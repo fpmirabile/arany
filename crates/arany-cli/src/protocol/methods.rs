@@ -1,9 +1,10 @@
-use arany::{Effort, GoalId, RunId, SessionId, ToolDisposition};
+use arany::{
+    Effort, GoalId, MAX_ENCODED_IMAGE_BYTES, MAX_USER_MESSAGE_BYTES, RunId, SessionId,
+    ToolDisposition,
+};
 use schemars::{JsonSchema, Schema, SchemaGenerator, json_schema};
 use serde::{Deserialize, Deserializer, Serialize, de::Error};
 use serde_json::Value;
-
-const MAX_ENCODED_IMAGE_BYTES: usize = arany::MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 pub const CAPABILITIES: &[&str] = &[
     "threads_v1",
@@ -442,7 +443,7 @@ pub struct TurnStartParams {
 )]
 pub enum UserInput {
     Text {
-        #[schemars(length(max = 65536))]
+        #[schemars(length(max = MAX_USER_MESSAGE_BYTES))]
         text: String,
     },
     Image {
@@ -461,7 +462,7 @@ pub enum UserInput {
 )]
 pub enum TextInput {
     Text {
-        #[schemars(length(max = 65536))]
+        #[schemars(length(max = MAX_USER_MESSAGE_BYTES))]
         text: String,
     },
 }
@@ -1000,8 +1001,11 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
         match item {
             UserInput::Text { text } => {
                 texts += 1;
-                if text.len() > 64 * 1024 {
-                    return Err(D::Error::custom("text exceeds 64 KiB"));
+                if text.len() > MAX_USER_MESSAGE_BYTES {
+                    return Err(D::Error::custom(format!(
+                        "text exceeds {} KiB",
+                        MAX_USER_MESSAGE_BYTES / 1024
+                    )));
                 }
             }
             UserInput::Image { data, .. } => {
@@ -1030,8 +1034,11 @@ fn turn_input<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<UserInpu
 
 fn single_text<E: Error>(input: Vec<TextInput>) -> Result<Vec<TextInput>, E> {
     match input.as_slice() {
-        [TextInput::Text { text }] if text.len() <= 64 * 1024 => Ok(input),
-        _ => Err(E::custom("exactly one text of at most 64 KiB")),
+        [TextInput::Text { text }] if text.len() <= MAX_USER_MESSAGE_BYTES => Ok(input),
+        _ => Err(E::custom(format!(
+            "exactly one text of at most {} KiB",
+            MAX_USER_MESSAGE_BYTES / 1024
+        ))),
     }
 }
 

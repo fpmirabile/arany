@@ -2,6 +2,7 @@ use super::{
     Admission, Feedback, controls::ActiveSubmission, emit_outcome, load_confirmed_outcome, run,
 };
 use crate::accounts::chatgpt;
+use crate::cli::exec::SHUTDOWN_GRACE;
 use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
     AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
@@ -12,8 +13,6 @@ use arany::{
     RunRequest, RunSteering, SessionView, SteeringRefused,
 };
 use std::time::Duration;
-
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
 
 pub(super) enum RunSubmission {
     Completed(Box<RunOutcome>, bool, Option<String>),
