@@ -1,8 +1,8 @@
 use super::{
     AgentPhase, AnthropicProvider, CompactionItem, CompactionRequest, Effort, HistoryTurn,
-    MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PromptRole, Provider,
-    ProviderError, ProviderOutcome, ProviderRequest, RunInput, catalog::valid_model_id,
-    valid_saved_api_account_id, validate_native_api_key,
+    MAX_REPORTED_INPUT_TOKENS, NativeApiCredentials, OpenAiProvider, PROBE_OUTPUT_CAP,
+    PROBE_TOTAL_DEADLINE, PromptRole, Provider, ProviderError, ProviderOutcome, ProviderRequest,
+    RunInput, catalog::valid_model_id, valid_saved_api_account_id, validate_native_api_key,
 };
 use crate::provider::evidence::NativeEvidenceRecord;
 use crate::session::{AgentRunId, RunId, SessionId};
@@ -13,14 +13,12 @@ use crate::{
 };
 use aws_lc_rs::hmac;
 use sha2::{Digest, Sha256};
-use std::time::Duration;
 #[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
-pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
-pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
+const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
@@ -447,6 +445,10 @@ fn fingerprint(
     fingerprint_with_workspace(profile, model, effort, key, account_id, None)
 }
 
+fn probe_fingerprint_contract() -> String {
+    format!("{PROBE_COUNT_LABEL}-probes-{PROBE_OUTPUT_CAP}-output-tokens")
+}
+
 fn fingerprint_with_workspace(
     profile: &str,
     model: &str,
@@ -464,6 +466,7 @@ fn fingerprint_with_workspace(
         return Err(NativeCheckError::InvalidSelection);
     }
     validate_native_api_key(key).map_err(|_| NativeCheckError::CredentialUnavailable)?;
+    let contract = probe_fingerprint_contract();
     let mut message = Vec::with_capacity(256);
     for field in [
         CHECK_VERSION,
@@ -472,7 +475,7 @@ fn fingerprint_with_workspace(
         profile,
         model,
         effort.as_str(),
-        "three-probes-1024-output-tokens",
+        &contract,
         "sequential-concurrency-one",
         if account_id.is_some() { "saved" } else { "env" },
         workspace_id.unwrap_or(""),
@@ -515,6 +518,14 @@ mod tests {
     use super::*;
     use crate::provider::{Answer, CompactionResponse, Delegate, ProviderError, ProviderResponse};
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn probe_fingerprint_contract_preserves_persisted_bytes() {
+        assert_eq!(
+            probe_fingerprint_contract().as_bytes(),
+            b"three-probes-1024-output-tokens"
+        );
+    }
 
     #[tokio::test]
     async fn native_run_admission_rechecks_exact_private_evidence() {

@@ -2,7 +2,6 @@ use super::{ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
-use crate::provider::native_check::{PROBE_OUTPUT_CAP, PROBE_TOTAL_DEADLINE};
 use crate::provider::{RateLimitSlot, ResponsePreview};
 mod limits;
 use crate::provider::conversation::Conversation;
@@ -10,11 +9,11 @@ use crate::provider::streaming::{FramingStage, ResponsesPreview, SseEvent, SseFr
 use crate::provider::{
     AgentPhase, CallLimits, ChatGptProvenance, CompactionItem, CompactionRequest,
     CompactionResponse, Effort, HistoryTurn, MAX_REPORTED_INPUT_TOKENS, MAX_REPORTED_OUTPUT_TOKENS,
-    MAX_RESPONSE_BYTES, OutputTokenBound, PromptRole, Provenance, Provider, ProviderError,
-    ProviderIdentity, ProviderOutcome, ProviderRequest, ProviderResponse, RunInput, Usage,
-    catalog::valid_model_id, render,
+    MAX_RESPONSE_BYTES, OutputTokenBound, PROBE_OUTPUT_CAP, PROBE_TOTAL_DEADLINE, PromptRole,
+    Provenance, Provider, ProviderError, ProviderIdentity, ProviderOutcome, ProviderRequest,
+    ProviderResponse, RunInput, Usage, catalog::valid_model_id, render,
 };
-use crate::session::{AgentRunId, RunId, SessionId};
+use crate::session::{AgentRunId, MAX_COMPACTION_OUTPUT_TOKENS, RunId, SessionId};
 #[cfg(test)]
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url, header};
@@ -373,7 +372,7 @@ async fn compact_at_observed(
     effort: Effort,
     limits: RateLimitSlot,
 ) -> Result<CompactionResponse, ProviderError> {
-    if !(1..=1024).contains(&request.max_output_tokens) {
+    if !(1..=MAX_COMPACTION_OUTPUT_TOKENS).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
     let body = subscription_compaction_body(request, effort)?;

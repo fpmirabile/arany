@@ -1,9 +1,8 @@
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};
 use crate::provider::evidence::ProviderEvidenceRecord;
-use crate::provider::native_check::PROBE_TOTAL_DEADLINE;
 use crate::provider::{
-    AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderOutcome,
-    ProviderRequest, RunInput,
+    AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PROBE_TOTAL_DEADLINE, PromptRole,
+    ProviderOutcome, ProviderRequest, RunInput,
 };
 use crate::session::{AgentRunId, RunId, SessionId};
 use crate::store::StateRoot;
