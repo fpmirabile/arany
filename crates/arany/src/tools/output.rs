@@ -23,6 +23,24 @@ impl Window {
         }
     }
 
+    pub(super) fn from_recorded(text: &str, total: OutputTotal) -> Option<Self> {
+        let (head, tail) = recorded_parts(total, text)?;
+        if head.len() == text.len() {
+            let mut window = Self::new(text.len());
+            window.push(text.as_bytes(), DRAIN_BYTES).ok()?;
+            window.total = total;
+            window.last = None;
+            return Some(window);
+        }
+        Some(Self {
+            head: head.as_bytes().to_vec(),
+            tail: tail.bytes().collect(),
+            cap: (head.len() + tail.len()).min(total.bytes.saturating_sub(1) as usize),
+            total,
+            last: None,
+        })
+    }
+
     pub(super) fn push(&mut self, bytes: &[u8], ceiling: u64) -> Result<(), ToolError> {
         if self.total.bytes + bytes.len() as u64 > ceiling {
             return Err(ToolError::OutputCeiling);
@@ -63,7 +81,12 @@ impl Window {
             return String::from_utf8_lossy(&stored).into_owned();
         }
         let head_len = keep.div_ceil(2).min(self.head.len());
-        let tail_len = (keep / 2).min(stored.len() - head_len);
+        let tail_available = if self.total.bytes <= self.cap as u64 {
+            stored.len() - head_len
+        } else {
+            self.tail.len()
+        };
+        let tail_len = (keep / 2).min(tail_available);
         let mut head = &stored[..head_len];
         let mut tail = &stored[stored.len() - tail_len..];
         // Drop only the incomplete character at a window edge, before lossy decoding.
@@ -164,6 +187,10 @@ pub(super) fn fit_streams(
 }
 
 pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
+    recorded_parts(total, text).is_some()
+}
+
+fn recorded_parts(total: OutputTotal, text: &str) -> Option<(&str, &str)> {
     // Lossy decoding turns one to three invalid bytes into one U+FFFD.
     let minimum_bytes = |s: &str| {
         s.chars()
@@ -178,12 +205,12 @@ pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
     };
     let lines = |s: &str| s.bytes().filter(|&b| b == b'\n').count() as u64;
     if total.bytes > DRAIN_BYTES || total.lines > total.bytes {
-        return false;
+        return None;
     }
     if (minimum_bytes(text)..=text.len() as u64).contains(&total.bytes)
         && text.lines().count() as u64 == total.lines
     {
-        return true;
+        return Some((text, ""));
     }
     // Only the exact Engine marker can account for bytes outside the captured streams.
     for (start, _) in text.match_indices("\n…[") {
@@ -216,10 +243,10 @@ pub(super) fn valid_total(total: OutputTotal, text: &str) -> bool {
                 .contains(&shown_min)
             && omitted_lines == total.lines.saturating_sub(shown_lines)
         {
-            return true;
+            return Some((head, tail));
         }
     }
-    false
+    None
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -329,6 +356,18 @@ mod tests {
                 "cap={cap}"
             );
         }
+        let restored = Window::from_recorded(
+            "prefixword\n…[11 bytes, 0 lines omitted; 24 bytes, 1 lines total]…\nend",
+            OutputTotal {
+                bytes: 24,
+                lines: 1,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            restored.preview(12),
+            "prefix\n…[15 bytes, 0 lines omitted; 24 bytes, 1 lines total]…\nend"
+        );
         let mut window = Window::new(8);
         window.push(b"head\nmiddle\ntail", DRAIN_BYTES).unwrap();
         assert_eq!(

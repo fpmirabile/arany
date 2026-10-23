@@ -9,8 +9,8 @@ use std::path::Path;
 const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
-// One canonical (kind, from, input, expected) fixture per production step.
-const EVENT_FIXTURES: [EventFixture<'static>; 45] = [
+// One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
+const EVENT_FIXTURES: [EventFixture<'static>; 48] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -72,6 +72,24 @@ const EVENT_FIXTURES: [EventFixture<'static>; 45] = [
     ),
     ("GoalFinished", 7, GOAL_FINISHED_V7, GOAL_FINISHED_V8),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
+    (
+        "ToolFinished",
+        25,
+        include_str!("toolfinished-without-expiry.json"),
+        include_str!("toolfinished-without-expiry.json"),
+    ),
+    (
+        "ToolFinished",
+        25,
+        COMMAND_TOOLFINISHED_WITHOUT_EXPIRY,
+        SELECTION_TOOLFINISHED,
+    ),
+    (
+        "HookFinished",
+        14,
+        include_str!("hookfinished-without-expiry.json"),
+        SELECTION_HOOKFINISHED,
+    ),
     ("ToolStarted", 14, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 20, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 4, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -1177,6 +1195,184 @@ fn schema_of(sql: &str) -> Vec<[String; 4]> {
 }
 
 #[test]
+fn command_selection_migrates_committed_outputs_and_rejects_forged_old_counts() {
+    for (kind, version, expiring, input, expected) in [
+        (
+            "ToolFinished",
+            25,
+            COMMAND_TOOLFINISHED,
+            COMMAND_TOOLFINISHED_WITHOUT_EXPIRY,
+            SELECTION_TOOLFINISHED,
+        ),
+        (
+            "HookFinished",
+            14,
+            GLOB_HOOKFINISHED,
+            include_str!("hookfinished-without-expiry.json"),
+            SELECTION_HOOKFINISHED,
+        ),
+    ] {
+        let step = REGISTRY.event_step(kind, version).unwrap();
+        assert_eq!((step.canonical)(input).as_deref(), Some(input));
+        let previous = REGISTRY.event_step(kind, version - 1).unwrap();
+        assert_eq!((previous.canonical)(expiring).as_deref(), Some(expiring));
+        let without_expiry = (previous.transform)(serde_json::from_str(expiring).unwrap()).unwrap();
+        assert_eq!(
+            without_expiry,
+            serde_json::from_str::<Value>(input).unwrap()
+        );
+        let migrated = (step.transform)(without_expiry).unwrap();
+        assert_eq!(migrated, serde_json::from_str::<Value>(expected).unwrap());
+        let (run, agent) = intent_scope(&migrated).unwrap();
+        Event::decode(
+            kind,
+            version + 1,
+            &migrated.to_string(),
+            Some(run),
+            Some(agent),
+        )
+        .unwrap();
+        let observation = if kind == "HookFinished" {
+            &migrated["observation"]
+        } else {
+            &migrated
+        };
+        let output: crate::tools::types::CommandResult =
+            serde_json::from_str(observation["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output.selection, None);
+        for selection in [
+            Value::Null,
+            serde_json::to_value(crate::tools::types::CommandSelectionSummary::default()).unwrap(),
+        ] {
+            let mut forged = migrated.clone();
+            let observation = if kind == "HookFinished" {
+                &mut forged["observation"]
+            } else {
+                &mut forged
+            };
+            let mut result: Value =
+                serde_json::from_str(observation["output"].as_str().unwrap()).unwrap();
+            result["selection"] = selection;
+            observation["output"] = result.to_string().into();
+            assert!((step.canonical)(&forged.to_string()).is_none());
+            assert!((step.transform)(forged).is_none());
+        }
+    }
+}
+
+#[test]
+fn command_selection_migration_refits_full_and_truncated_results_at_the_old_ceiling() {
+    for (kind, version, input) in [
+        ("ToolFinished", 25, COMMAND_TOOLFINISHED_WITHOUT_EXPIRY),
+        (
+            "HookFinished",
+            14,
+            include_str!("hookfinished-without-expiry.json"),
+        ),
+    ] {
+        for shape in ["full", "balanced", "asymmetric"] {
+            let mut value: Value = serde_json::from_str(input).unwrap();
+            let observation = if kind == "HookFinished" {
+                &mut value["observation"]
+            } else {
+                &mut value
+            };
+            let mut result: Value =
+                serde_json::from_str(observation["output"].as_str().unwrap()).unwrap();
+            let budget = observation["intent"]["limits"]["result_bytes"]
+                .as_u64()
+                .unwrap() as usize;
+            let mut low = 0;
+            let mut high = budget;
+            let mut old = String::new();
+            while low <= high {
+                let count = low + (high - low) / 2;
+                let (stdout, total) = if shape != "full" {
+                    let head = "prefix".repeat(count);
+                    let tail = "suffix".repeat(if shape == "asymmetric" { 1 } else { count });
+                    let total = crate::tools::OutputTotal {
+                        bytes: (head.len() + tail.len() + 1024) as u64,
+                        lines: 1,
+                    };
+                    (
+                        format!(
+                            "{head}\n…[1024 bytes, 0 lines omitted; {} bytes, 1 lines total]…\n{tail}",
+                            total.bytes
+                        ),
+                        total,
+                    )
+                } else {
+                    let text = "line\"\n".repeat(count);
+                    let total = crate::tools::OutputTotal {
+                        bytes: text.len() as u64,
+                        lines: text.lines().count() as u64,
+                    };
+                    (text, total)
+                };
+                assert!(total.valid_for(&stdout));
+                result["stdout"] = stdout.into();
+                result["stdout_total"] = serde_json::to_value(total).unwrap();
+                let text = result.to_string();
+                if text.len() <= budget {
+                    old = text;
+                    low = count + 1;
+                } else {
+                    high = count - 1;
+                }
+            }
+            assert!(old.len() > budget - 16);
+            let old_result: Value = serde_json::from_str(&old).unwrap();
+            observation["output"] = old.into();
+            let step = REGISTRY.event_step(kind, version).unwrap();
+            let mut oversized = value.clone();
+            let observation = if kind == "HookFinished" {
+                &mut oversized["observation"]
+            } else {
+                &mut oversized
+            };
+            let mut output = old_result.clone();
+            output["stdout"] = "x".repeat(budget).into();
+            output["stdout_total"] = serde_json::json!({"bytes": budget, "lines": 1});
+            observation["output"] = output.to_string().into();
+            assert!((step.transform)(oversized).is_none());
+            let migrated = (step.transform)(value).unwrap();
+            let observation = if kind == "HookFinished" {
+                &migrated["observation"]
+            } else {
+                &migrated
+            };
+            let output = observation["output"].as_str().unwrap();
+            assert!(output.len() <= budget);
+            let result: crate::tools::types::CommandResult = serde_json::from_str(output).unwrap();
+            assert!(result.valid());
+            assert_eq!(result.selection, None);
+            let mut missing: Value = serde_json::from_str(output).unwrap();
+            missing.as_object_mut().unwrap().remove("selection");
+            assert!(serde_json::from_value::<crate::tools::types::CommandResult>(missing).is_err());
+            for field in ["exit_code", "changeset", "stdout_total", "stderr_total"] {
+                assert_eq!(
+                    serde_json::to_value(&result).unwrap()[field],
+                    old_result[field]
+                );
+            }
+            assert!(result.stdout.contains("lines omitted;"));
+            if shape == "asymmetric" {
+                assert_eq!(result.stdout.split_once("]…\n").unwrap().1, "suffix");
+            }
+            let (run, agent) = intent_scope(&migrated).unwrap();
+            Event::decode(
+                kind,
+                version + 1,
+                &migrated.to_string(),
+                Some(run),
+                Some(agent),
+            )
+            .unwrap();
+        }
+    }
+}
+
+#[test]
 fn every_stored_version_above_its_floor_has_a_step_and_fixture() {
     use crate::journal::check::{CHECK_FORMATS, tests::fixture};
     let check_floors: Vec<_> = CHECK_FORMATS
@@ -1688,6 +1884,13 @@ fn checkpoint_recovery_preserves_newer_malformed_busy_and_unsafe_storage() {
     }
 }
 
+const SELECTION_HOOKFINISHED: &str = r#"{"boundary_active_ms":null,"observation":{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[141,97,53,247,53,49,168,154,40,85,182,218,142,191,39,167,241,62,24,231,138,149,79,234,129,164,230,179,135,109,205,218],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"approval_cause":null,"cache_update":"not_applicable"},"result":{"restricted":{"decision":"deny","reason":"blocked"}}}"#;
+
+const COMMAND_TOOLFINISHED_WITHOUT_EXPIRY: &str =
+    include_str!("command-toolfinished-without-expiry.json");
+const COMMAND_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"changeset\":{\"files\":[]},\"exit_code\":2,\"stderr\":\"blocked\",\"stderr_total\":{\"bytes\":7,\"lines\":1},\"stdout\":\"\",\"stdout_total\":{\"bytes\":0,\"lines\":0}}","attestation":{"guard":{"contract_version":1,"intent_digest":[131,11,117,251,8,22,13,66,136,215,191,13,209,208,209,113,109,80,241,218,188,193,7,40,115,63,160,61,172,44,137,133],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"cache_update":"not_applicable","checkpoint":null}"#;
+const SELECTION_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560ce9fc3701","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"command","program":"sh","args":["-c","exit 2"],"cwd":""},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"use_count":1},"disposition":"failed","enforcement_cause":null,"limit_cause":null,"output":"{\"exit_code\":2,\"stdout\":\"\",\"stderr\":\"blocked\",\"stdout_total\":{\"bytes\":0,\"lines\":0},\"stderr_total\":{\"bytes\":7,\"lines\":1},\"changeset\":{\"files\":[]},\"selection\":null}","attestation":{"guard":{"contract_version":1,"intent_digest":[141,97,53,247,53,49,168,154,40,85,182,218,142,191,39,167,241,62,24,231,138,149,79,234,129,164,230,179,135,109,205,218],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"}}},"approval_cause":null,"cache_update":"not_applicable","checkpoint":null}"#;
+
 #[test]
 fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() {
     for (name, fixture) in [
@@ -1721,13 +1924,14 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
                 if let Some(old) = prior_human.and_then(|pin| pins.get(&pin)) {
                     value["host"]["source_intent"] = serde_json::json!(old);
                 }
-                let expiring = matches!(
-                    event,
-                    Event::ToolStarted { .. }
-                        | Event::ToolFinished { .. }
-                        | Event::HookStarted { .. }
-                        | Event::HookFinished { .. }
-                );
+                let source_version = match event {
+                    Event::ToolStarted { .. } => 18,
+                    Event::ToolFinished { .. } => 24,
+                    Event::HookStarted { .. } => 8,
+                    Event::HookFinished { .. } => 13,
+                    _ => event.version(),
+                };
+                let expiring = source_version != event.version();
                 if let Some(original) = intent.filter(|_| expiring) {
                     let current: crate::tools::EffectIntent =
                         serde_json::from_value(original).unwrap();
@@ -1742,13 +1946,23 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
                     pins.insert(current.digest(), old);
                     crate::session::replace_intent_pin(&mut value, &current.digest(), &old);
                 }
-                if event.kind() == "ToolFinished" {
-                    value.as_object_mut().unwrap().remove("approval_cause");
-                } else if event.kind() == "HookFinished" {
-                    value["observation"]
+                let observation = match event {
+                    Event::ToolFinished { .. } => Some(&mut value),
+                    Event::HookFinished { .. } => Some(&mut value["observation"]),
+                    _ => None,
+                };
+                if let Some(observation) = observation {
+                    observation
                         .as_object_mut()
                         .unwrap()
                         .remove("approval_cause");
+                    if let Ok(mut result) =
+                        serde_json::from_str::<Value>(observation["output"].as_str().unwrap())
+                        && result.get("selection").is_some()
+                    {
+                        result.as_object_mut().unwrap().remove("selection");
+                        observation["output"] = result.to_string().into();
+                    }
                 }
                 let payload = if expiring {
                     crate::session::expiring_payload(event.kind(), &value.to_string()).unwrap()
@@ -1764,8 +1978,22 @@ fn expiry_migration_rebinds_worker_receipts_and_preserves_interrupted_history() 
                     .payload()
                     .unwrap()
                 };
-                connection.execute("INSERT INTO events (sequence,session_id,run_id,agent_run_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,0)", rusqlite::params![i64::try_from(envelope.sequence).unwrap(), envelope.session_id.to_string(), envelope.run_id.map(|id| id.to_string()), envelope.agent_run_id.map(|id| id.to_string()), event.kind(), event.version() - i64::from(expiring), payload]).unwrap();
-                expected.push(envelope.event);
+                connection.execute("INSERT INTO events (sequence,session_id,run_id,agent_run_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,?3,?4,?5,?6,?7,0)", rusqlite::params![i64::try_from(envelope.sequence).unwrap(), envelope.session_id.to_string(), envelope.run_id.map(|id| id.to_string()), envelope.agent_run_id.map(|id| id.to_string()), event.kind(), source_version, payload]).unwrap();
+                let mut expected_event = envelope.event;
+                let observation = match &mut expected_event {
+                    Event::ToolFinished { observation, .. } => Some(observation),
+                    Event::HookFinished { outcome, .. } => Some(&mut outcome.observation),
+                    _ => None,
+                };
+                if let Some(observation) = observation
+                    && let Ok(mut result) = serde_json::from_str::<crate::tools::types::CommandResult>(
+                        &observation.output,
+                    )
+                {
+                    result.selection = None;
+                    observation.output = serde_json::to_string(&result).unwrap();
+                }
+                expected.push(expected_event);
                 if interrupted && expiring {
                     break;
                 }

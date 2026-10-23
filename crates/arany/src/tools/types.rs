@@ -148,6 +148,29 @@ pub struct CommandResult {
     pub stdout_total: OutputTotal,
     pub stderr_total: OutputTotal,
     pub changeset: CommandChangeset,
+    #[serde(deserialize_with = "Option::deserialize")]
+    pub selection: Option<CommandSelectionSummary>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CommandSelectionSummary {
+    pub ignored_entries: u64,
+    pub pruned_directories: u64,
+    pub oversized_inputs: u64,
+    pub discarded_outputs: u64,
+}
+
+impl CommandSelectionSummary {
+    pub(crate) fn valid(self) -> bool {
+        let scanned = (MAX_SNAPSHOT_FILES * 4) as u64;
+        self.pruned_directories <= self.ignored_entries
+            && self
+                .ignored_entries
+                .checked_add(self.oversized_inputs)
+                .is_some_and(|count| count <= scanned)
+            && self.discarded_outputs <= scanned
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -163,8 +186,26 @@ pub enum CacheUpdate {
 }
 
 impl CommandResult {
+    pub(crate) fn fit_migrated(&self, budget: usize) -> Option<String> {
+        if !self.changeset.valid() || !self.selection.is_none_or(CommandSelectionSummary::valid) {
+            return None;
+        }
+        let stdout = super::output::Window::from_recorded(&self.stdout, self.stdout_total)?;
+        let stderr = super::output::Window::from_recorded(&self.stderr, self.stderr_total)?;
+        super::output::fit_streams(&stdout, &stderr, budget, |stdout, stderr| {
+            serde_json::to_string(&Self {
+                stdout: stdout.into(),
+                stderr: stderr.into(),
+                ..self.clone()
+            })
+            .map_err(|_| super::ToolError::Operation)
+        })
+        .ok()
+    }
+
     pub(crate) fn valid(&self) -> bool {
         self.changeset.valid()
+            && self.selection.is_none_or(CommandSelectionSummary::valid)
             && self.stdout_total.valid_for(&self.stdout)
             && self.stderr_total.valid_for(&self.stderr)
             && serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= MAX_TOOL_RESULT_BYTES)
@@ -1859,6 +1900,7 @@ mod unguarded_vocabulary_tests {
             enforcement_cause: None,
             limit_cause: None,
             output: serde_json::to_string(&CommandResult {
+                selection: Some(Default::default()),
                 exit_code: Some(0),
                 stdout: String::new(),
                 stderr: String::new(),

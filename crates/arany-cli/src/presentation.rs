@@ -22,6 +22,7 @@ pub(crate) use model::{DraftAction, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };
+use usage::grouped_count;
 pub use usage::usage_pages;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -264,6 +265,14 @@ pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
                     state.into()
                 } else {
                     match (disposition, &tool.intent.call) {
+                        (
+                            ToolDisposition::Failed,
+                            ToolCall::Command { .. } | ToolCall::CommandUnguarded { .. },
+                        ) => format!(
+                            "{state}: {}",
+                            command_result_summary(observation)
+                                .unwrap_or_else(|| safe_truncate(&observation.output, 160))
+                        ),
                         // An uncertain Git write may lead with locks the owner must remove by hand.
                         (
                             ToolDisposition::Uncertain,
@@ -407,24 +416,56 @@ fn command_result_summary(observation: &arany::ToolObservation) -> Option<String
         serde_json::from_value(result.get("stdout_total")?.clone()).ok()?;
     let stderr: arany::OutputTotal =
         serde_json::from_value(result.get("stderr_total")?.clone()).ok()?;
-    let truncated = [(stdout, "stdout"), (stderr, "stderr")]
-        .into_iter()
-        .any(|(total, name)| {
-            result[name].as_str().is_some_and(|text| {
-                total.bytes > text.len() as u64 || total.lines != text.lines().count() as u64
-            })
-        });
+    let stderr_text = result.get("stderr")?.as_str()?;
+    let truncated = [
+        (stdout, result.get("stdout")?.as_str()?),
+        (stderr, stderr_text),
+    ]
+    .into_iter()
+    .any(|(total, text)| {
+        total.bytes > text.len() as u64 || total.lines != text.lines().count() as u64
+    });
     let lines = stdout.lines.saturating_add(stderr.lines);
-    let digits = lines.to_string();
-    let mut count = String::new();
-    for (index, character) in digits.chars().enumerate() {
-        if index > 0 && (digits.len() - index).is_multiple_of(3) {
-            count.push(',');
+    let count = grouped_count(lines);
+    let selection = result.get("selection")?;
+    let omissions = if selection.is_null() {
+        " · selection counts unavailable".into()
+    } else {
+        let selection_count = |key: &str| selection[key].as_u64();
+        let counts = [
+            selection_count("ignored_entries")?,
+            selection_count("pruned_directories")?,
+            selection_count("oversized_inputs")?,
+            selection_count("discarded_outputs")?,
+        ];
+        let noun = |count: u64, singular: &str, plural: &str| {
+            format!(
+                "{} {}",
+                grouped_count(count),
+                if count == 1 { singular } else { plural }
+            )
+        };
+        if counts.iter().any(|count| *count > 0) {
+            format!(
+                " · {} ({}), {}, {}",
+                noun(counts[0], "ignored entry", "ignored entries"),
+                noun(counts[1], "pruned root", "pruned roots"),
+                noun(counts[2], "oversized input", "oversized inputs"),
+                noun(counts[3], "discarded output", "discarded outputs")
+            )
+        } else {
+            String::new()
         }
-        count.push(character);
-    }
+    };
+    let diagnostic = if observation.disposition == arany::ToolDisposition::Failed
+        && !stderr_text.trim().is_empty()
+    {
+        format!(" · stderr: {}", safe_truncate(stderr_text.trim(), 80))
+    } else {
+        String::new()
+    };
     Some(format!(
-        "exit {exit} · {count} {}{}",
+        "exit {exit} · {count} {}{}{omissions}{diagnostic}",
         if lines == 1 { "line" } else { "lines" },
         if truncated { " (truncated)" } else { "" }
     ))
@@ -3076,7 +3117,7 @@ mod peer_row_tests {
     #[test]
     fn command_rows_use_typed_line_totals_and_mark_truncation() {
         let output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "head\n…[123398 bytes, 12338 lines omitted; 123408 bytes, 12340 lines total]…\ntail\n",
             "stderr": "", "stdout_total": {"bytes":123408,"lines":12340},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -3099,7 +3140,7 @@ mod peer_row_tests {
         );
         let mut tool = tool;
         tool.observation.as_mut().unwrap().output = serde_json::json!({
-            "exit_code": 0,
+            "selection":{"ignored_entries":0,"pruned_directories":0,"oversized_inputs":0,"discarded_outputs":0},"exit_code": 0,
             "stdout": "x lines omitted; 45 bytes, 1 lines total]…\n",
             "stderr": "", "stdout_total": {"bytes":45,"lines":1},
             "stderr_total": {"bytes":0,"lines":0}, "changeset":{"files":[]}
@@ -3109,6 +3150,81 @@ mod peer_row_tests {
         assert_eq!(
             plain_tool_summary(&tool_summary(&tool)),
             "Command(sh )\nResult: exit 0 · 1 line"
+        );
+        let observation = tool.observation.as_mut().unwrap();
+        let mut result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+        result["selection"] = serde_json::Value::Null;
+        observation.output = result.to_string();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 1 line · selection counts unavailable"
+        );
+        result["selection"] = serde_json::json!({
+            "ignored_entries":7,"pruned_directories":2,"oversized_inputs":1,"discarded_outputs":3
+        });
+        tool.observation.as_mut().unwrap().output = result.to_string();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: exit 0 · 1 line · 7 ignored entries (2 pruned roots), 1 oversized input, 3 discarded outputs"
+        );
+        for (count, expected) in [
+            (
+                1000,
+                "1,000 ignored entries (1,000 pruned roots), 1,000 oversized inputs, 1,000 discarded outputs",
+            ),
+            (
+                1,
+                "1 ignored entry (1 pruned root), 1 oversized input, 1 discarded output",
+            ),
+            (
+                2,
+                "2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs",
+            ),
+        ] {
+            result["selection"] = serde_json::json!({
+                "ignored_entries":count,"pruned_directories":count,"oversized_inputs":count,"discarded_outputs":count
+            });
+            tool.observation.as_mut().unwrap().output = result.to_string();
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!("Command(sh )\nResult: exit 0 · 1 line · {expected}")
+            );
+        }
+        result["exit_code"] = serde_json::json!(7);
+        let observation = tool.observation.as_mut().unwrap();
+        observation.disposition = ToolDisposition::Failed;
+        observation.output = result.to_string();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            "Command(sh )\nResult: Error: exit 7 · 1 line · 2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs"
+        );
+        for (stderr, lines, preview) in [
+            ("build failed".into(), 2, "build failed".into()),
+            (
+                "\u{1b}[31mfailed\nnext".into(),
+                3,
+                r"\u{001b}[31mfailed\u{000a}next".into(),
+            ),
+            ("界".repeat(80), 2, format!("{}…", "界".repeat(39))),
+        ] {
+            let stderr: String = stderr;
+            result["stderr"] = serde_json::json!(stderr);
+            result["stderr_total"] = serde_json::json!({
+                "bytes":stderr.len(),"lines":stderr.lines().count()
+            });
+            tool.observation.as_mut().unwrap().output = result.to_string();
+            assert_eq!(
+                plain_tool_summary(&tool_summary(&tool)),
+                format!(
+                    "Command(sh )\nResult: Error: exit 7 · {lines} lines · 2 ignored entries (2 pruned roots), 2 oversized inputs, 2 discarded outputs · stderr: {preview}"
+                )
+            );
+        }
+        let incomplete = r#"{"exit_code":7,"stdout_total":{"bytes":0,"lines":0},"stderr_total":{"bytes":0,"lines":0}}"#;
+        tool.observation.as_mut().unwrap().output = incomplete.into();
+        assert_eq!(
+            plain_tool_summary(&tool_summary(&tool)),
+            format!("Command(sh )\nResult: Error: {incomplete}")
         );
     }
 

@@ -167,8 +167,8 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("ProviderRetryScheduled", 1),
     ("ToolPermissionDecided", 6),
     ("HookStarted", 9),
-    ("HookFinished", 14),
-    ("ToolFinished", 25),
+    ("HookFinished", 15),
+    ("ToolFinished", 26),
     ("RunStarted", 22),
     ("RunFinished", 9),
     ("GoalProviderCallReserved", 7),
@@ -1887,4 +1887,74 @@ fn required_skill<'de, D: serde::Deserializer<'de>>(
         return Err(serde::de::Error::custom("invalid Skill name"));
     }
     Ok(skill)
+}
+
+pub(crate) fn pre_command_selection_payload(kind: &str, payload: &str) -> Option<String> {
+    let text = match kind {
+        "ToolFinished" => serialize(&parse::<ToolFinishedPayload>(payload).ok()?).ok()?,
+        "HookFinished" => {
+            serialize(&parse::<crate::tools::permissions::HookOutcome>(payload).ok()?).ok()?
+        }
+        _ => return None,
+    };
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let observation = if kind == "HookFinished" {
+        &value["observation"]
+    } else {
+        &value
+    };
+    let output = observation["output"].as_str()?;
+    if matches!(
+        observation["intent"]["call"]["operation"].as_str(),
+        Some("command" | "command_unguarded")
+    ) && serde_json::from_str::<serde_json::Value>(output)
+        .is_ok_and(|value| value.get("selection").is_some())
+    {
+        return None;
+    }
+    Some(text)
+}
+
+pub(crate) fn add_command_selection(
+    kind: &str,
+    mut value: serde_json::Value,
+) -> Option<serde_json::Value> {
+    pre_command_selection_payload(kind, &value.to_string())?;
+    let observation = if kind == "HookFinished" {
+        value.get_mut("observation")?
+    } else {
+        &mut value
+    };
+    if !matches!(
+        observation["intent"]["call"]["operation"].as_str(),
+        Some("command" | "command_unguarded")
+    ) {
+        return Some(value);
+    }
+    let budget = usize::try_from(observation["intent"]["limits"]["result_bytes"].as_u64()?).ok()?;
+    let output = observation.get_mut("output")?;
+    if output.as_str()?.len() > budget {
+        return None;
+    }
+    let Ok(mut result) = serde_json::from_str::<serde_json::Value>(output.as_str()?) else {
+        return Some(value);
+    };
+    if result.get("changeset").is_some() {
+        result
+            .as_object_mut()?
+            .insert("selection".into(), serde_json::Value::Null);
+        let result: crate::tools::types::CommandResult = serde_json::from_value(result).ok()?;
+        let mut text = serde_json::to_string(&result).ok()?;
+        if text.len() > budget {
+            text = result.fit_migrated(budget)?;
+        }
+        if !serde_json::from_str::<crate::tools::types::CommandResult>(&text)
+            .ok()?
+            .valid()
+        {
+            return None;
+        }
+        *output = text.into();
+    }
+    Some(value)
 }
