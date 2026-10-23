@@ -12,6 +12,11 @@ enum Fault {
     CheckpointStall(SessionId),
     SupervisorOff(SessionId),
     GuardReceipt(uuid::Uuid),
+    GuardCacheReport(
+        uuid::Uuid,
+        oneshot::Sender<crate::tools::ToolObservation>,
+        oneshot::Receiver<()>,
+    ),
     RecordSync(std::path::PathBuf, &'static str),
     GoalAppend(SessionId, Admits),
     GoalAcknowledgment(
@@ -180,6 +185,27 @@ impl FaultPlan {
 
     pub fn lose_guard_receipt(intent: uuid::Uuid) {
         plan().push(Fault::GuardReceipt(intent));
+    }
+
+    pub fn gate_guard_cache_report(
+        intent: uuid::Uuid,
+    ) -> (
+        oneshot::Receiver<crate::tools::ToolObservation>,
+        oneshot::Sender<()>,
+    ) {
+        let (entered, wait) = oneshot::channel();
+        let (release, released) = oneshot::channel();
+        plan().push(Fault::GuardCacheReport(intent, entered, released));
+        (wait, release)
+    }
+
+    pub(crate) async fn guard_cache_report_gate(observation: &crate::tools::ToolObservation) {
+        if let Some(Fault::GuardCacheReport(_, entered, release)) = take(
+            |fault| matches!(fault, Fault::GuardCacheReport(id, ..) if *id == observation.intent.id),
+        ) {
+            let _ = entered.send(observation.clone());
+            let _ = release.await;
+        }
     }
 
     pub(crate) fn guard_receipt_lost(intent: uuid::Uuid) -> bool {

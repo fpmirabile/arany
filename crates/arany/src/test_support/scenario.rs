@@ -876,6 +876,16 @@ cargo test --locked --lib --verbose
         ("hostile-config", "cargo test --locked --lib", false),
         ("cancelled", "cargo test --locked --lib", false),
         (
+            "cancelled-report",
+            r#"set -eu
+test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained
+cargo test --locked --lib
+printf discarded > "$CARGO_TARGET_DIR/prior-marker"
+printf cache-changed
+"#,
+            false,
+        ),
+        (
             "retained",
             r#"test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained && cargo test --locked --lib"#,
             true,
@@ -957,32 +967,76 @@ cargo test --locked --lib --verbose
                 approval.intent.limits.resource_class,
                 ToolResourceClass::Build
             );
+            let report_gate = (case == "cancelled-report")
+                .then(|| crate::fault::FaultPlan::gate_guard_cache_report(approval.intent.id));
             if case == "cancelled" {
                 cancellation.cancel();
             }
             approval.decide(case != "cancelled");
+            if let Some((entered, release)) = report_gate {
+                let report = entered.await.expect("Cargo completed before publication");
+                assert_eq!(report.disposition, crate::ToolDisposition::Succeeded);
+                let result: serde_json::Value = serde_json::from_str(&report.output).unwrap();
+                assert_eq!(result["exit_code"], 0, "{result}");
+                assert!(
+                    result["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("cache-changed")
+                );
+                cancellation.cancel();
+                Some(release)
+            } else {
+                None
+            }
         };
-        let (outcome, ()) = tokio::time::timeout(Duration::from_secs(100), async {
+        let (outcome, report_release) = tokio::time::timeout(Duration::from_secs(100), async {
             tokio::join!(run, approve)
         })
         .await
         .expect("bounded Cargo journey");
-        let outcome = outcome.unwrap();
+        drop(report_release);
         engine.close().await.unwrap();
-        let observation = outcome.run.tools[0]
+        let session_id = provider.requests.lock().unwrap()[0].session_id;
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(session_id).await.unwrap();
+        store.close().await.unwrap();
+        let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
+        assert_eq!(replay.runs.len(), 1);
+        let run = &replay.runs[0];
+        if case == "cancelled-report" {
+            assert!(matches!(
+                outcome,
+                Err(crate::EngineError::Tool(crate::ToolError::Uncertain))
+            ));
+        } else {
+            assert_eq!(run, &outcome.unwrap().run);
+        }
+        let observation = run.tools[0]
             .observation
             .as_ref()
             .expect("Cargo observation");
-        assert_eq!(outcome.run.tools.len(), 1);
+        assert_eq!(run.tools.len(), 1);
         assert!(
             !observation
                 .output
                 .contains("UNSELECTED_CARGO_CREDENTIAL_CANARY"),
             "{case}: unselected data reached command output"
         );
-        if case == "cancelled" {
-            assert_eq!(outcome.run.status, RunStatus::Cancelled);
+        if matches!(case, "cancelled" | "cancelled-report") {
+            assert_eq!(
+                run.status,
+                if case == "cancelled" {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Interrupted
+                }
+            );
             assert!(observation.attestation.is_none());
+            if case == "cancelled-report" {
+                assert_eq!(observation.disposition, crate::ToolDisposition::Uncertain);
+                assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+            }
         } else {
             let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
             assert_eq!(result["exit_code"] == 0, success, "{case}: {result}");
@@ -1007,7 +1061,7 @@ cargo test --locked --lib --verbose
                 }
             }
             assert_eq!(
-                outcome.run.status,
+                run.status,
                 if success {
                     RunStatus::Finished
                 } else {
@@ -1072,15 +1126,15 @@ cargo test --locked --lib --verbose
                 assert_eq!(result["exit_code"], 101, "{case}: {result}");
             }
         }
-        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
-        let events = store.load_session(outcome.session_id).await.unwrap();
-        store.close().await.unwrap();
-        let replay = SessionView::replay(outcome.session_id, &events)
-            .unwrap()
-            .unwrap();
-        assert_eq!(replay.runs.as_slice(), std::slice::from_ref(&outcome.run));
         let requests = provider.requests.lock().unwrap();
-        assert_eq!(requests.len(), if case == "cancelled" { 2 } else { 3 });
+        assert_eq!(
+            requests.len(),
+            if matches!(case, "cancelled" | "cancelled-report") {
+                2
+            } else {
+                3
+            }
+        );
         for text in [
             events
                 .iter()

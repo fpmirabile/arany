@@ -1087,6 +1087,8 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
         return Err(ToolError::Operation);
     }
+    #[cfg(any(test, feature = "test-support"))]
+    crate::fault::FaultPlan::guard_cache_report_gate(&observation).await;
     Ok(observation)
 }
 
