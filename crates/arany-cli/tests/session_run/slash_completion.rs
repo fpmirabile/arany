@@ -684,6 +684,7 @@ fn new_and_clear_keep_current_selection_without_rewriting_prior_history() {
             .append(
                 current_id,
                 arany::Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Prior accepted objective".into(),
                     workspace_identity,
@@ -3318,8 +3319,8 @@ esac
                 "--symlink",
                 "usr/lib",
                 "/lib",
-                "--symlink",
-                "usr/lib",
+                "--ro-bind-try",
+                "/lib64",
                 "/lib64",
                 "--proc",
                 "/proc",
@@ -3431,12 +3432,23 @@ esac
             b"Input:\r\n",
         );
         assert!(!dir.join("client-log").exists(), "startup read clipboard");
+        let large_text = "synthetic paste ".repeat(600);
+        let large_preview = format!(
+            "Draft (not sent):\r\n  [Pasted Content 9600 chars]\r\nExpanded text (not sent):\r\n  {large_text}\r\nDraft: 9600 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n"
+        );
         for (types, mode, payload, expected, calls) in [
             (
                 "text/plain\n",
                 "success",
                 b"first\nsecond".as_slice(),
                 "Draft (not sent):\r\n  first\r\n  second\r\nDraft: 12 characters; Enter submits when idle; Ctrl+C clears when idle\r\nInput:\r\n",
+                "types\npayload\n",
+            ),
+            (
+                "text/plain\n",
+                "success",
+                large_text.as_bytes(),
+                large_preview.as_str(),
                 "types\npayload\n",
             ),
             (
@@ -3515,7 +3527,7 @@ esac
             (
                 b"text/plain\n".to_vec(),
                 "success",
-                vec![b'x'; 8193],
+                vec![b'x'; 65_537],
                 "clipboard output exceeds its limit",
                 "types\npayload\n",
             ),
@@ -3983,4 +3995,523 @@ fn slash_skill_enter_submits_the_admitted_name_and_task() {
     composer.clear();
     composer.insert_paste("/unadmitted").unwrap();
     assert!(composer.submission().is_err());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+#[cfg_attr(not(arany_ci), ignore = "requires bubblewrap user namespaces and PTY")]
+fn pasted_mentions_stay_data_and_legacy_continuation_explains_missing_includes() {
+    use super::loopback::{check_profile, read_request, send_response, write_profile};
+    use std::net::TcpListener;
+    use std::os::unix::net::UnixListener;
+
+    for (linear, prefix) in [(false, ""), (true, ""), (false, "//literal ")] {
+        let temp = tempfile::tempdir().expect("private attachment fixture");
+        let root = temp.path();
+        let workspace = root.join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join("private.txt"), "OMITTED_ATTACHMENT_CANARY").unwrap();
+        let state = root.join("state");
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        write_profile(&state, listener.local_addr().unwrap().port());
+        let payload = format!("@private.txt {}", "ordinary text ".repeat(700));
+        let expected = format!(
+            "{}{payload} typed suffix",
+            prefix.strip_prefix('/').unwrap_or(prefix)
+        );
+        let expected_request = expected.clone();
+        let (submit, submitted) = std::sync::mpsc::sync_channel(1);
+        let (requests_sent, requests) = std::sync::mpsc::sync_channel(4);
+        let server = thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            for index in 0..4 {
+                if index == 3 {
+                    submitted
+                        .recv_timeout(Duration::from_secs(30))
+                        .expect("attachment submission gate");
+                }
+                let deadline = Instant::now() + Duration::from_secs(10);
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "missing synthetic request {index}"
+                            );
+                            thread::yield_now();
+                        }
+                        Err(error) => panic!("loopback accept: {error}"),
+                    }
+                };
+                let body = read_request(&mut stream);
+                assert!(!String::from_utf8_lossy(&body).contains("OMITTED_ATTACHMENT_CANARY"));
+                if index == 3 {
+                    let wire = serde_json::from_slice(&body).unwrap();
+                    let input = crate::semantic::input(&wire);
+                    assert_eq!(input["objective"], expected_request);
+                    assert_eq!(input["includes"], serde_json::json!([]));
+                }
+                let response = match index {
+                    0 => serde_json::json!("ok"),
+                    1 => {
+                        serde_json::json!({"outcome":{"type":"delegate","children":[{"objective":"synthetic child","profile":null}]}})
+                    }
+                    2 => serde_json::json!("synthetic summary"),
+                    _ => serde_json::json!("Attachment received"),
+                };
+                send_response(&mut stream, index, response);
+                requests_sent
+                    .send(index)
+                    .expect("synthetic request completed");
+            }
+        });
+        check_profile(&workspace, &state);
+        for index in 0..3 {
+            assert_eq!(
+                requests.recv_timeout(Duration::from_secs(10)).unwrap(),
+                index,
+                "conformance request order"
+            );
+        }
+        let id = saved_conversation(&state, &workspace, SessionDefaults::default());
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let before = runtime.block_on(async {
+            let store = Store::open(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let view = store.load_view(id).await.unwrap().unwrap();
+            let goal_id = arany::GoalId::new();
+            let run_id = arany::RunId::new();
+            for event in [
+                arany::Event::GoalStarted {
+                    goal_id,
+                    objective: "Legacy @private.txt".into(),
+                    include_paths: None,
+                    workspace_identity: view.workspace_identity.unwrap(),
+                    budget: arany::GoalBudget {
+                        max_runs: 1,
+                        ..Default::default()
+                    },
+                    phase: arany::GoalPhase::Implementation,
+                    autonomous: false,
+                    resource_settings: Default::default(),
+                    continues: None,
+                },
+                arany::Event::GoalRunLinked {
+                    goal_id,
+                    run_id,
+                    phase: arany::GoalPhase::Implementation,
+                },
+                arany::Event::MessageAccepted {
+                    skill: None,
+                    run_id,
+                    text: "Legacy @private.txt".into(),
+                    images: Vec::new(),
+                },
+                arany::Event::GoalFinished {
+                    goal_id,
+                    status: arany::GoalStatus::Failed,
+                    active_ms: 0,
+                    report: arany::GoalReport {
+                        summary: "Budget exhausted".into(),
+                        changes: Vec::new(),
+                        evidence: Vec::new(),
+                        unresolved: Vec::new(),
+                        cached_input_tokens: 0,
+                    },
+                    exhausted: true,
+                    budget_refusal: None,
+                },
+            ] {
+                store.append(id, event).await.unwrap();
+            }
+            let events = store.load_session(id).await.unwrap();
+            assert!(
+                store
+                    .load_view(id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .continuable_goal()
+                    .is_some()
+            );
+            store.close().await.unwrap();
+            events
+        });
+        let clipboard = root.join("clipboard");
+        std::fs::write(&clipboard, "#!/bin/sh\ncase \"$*\" in\n --list-types) printf 'text/plain\\n' ;;\n '--no-newline --type text/plain') exec /usr/bin/cat /clipboard-payload ;;\n *) exit 1 ;;\nesac\n").unwrap();
+        std::fs::set_permissions(&clipboard, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::write(root.join("payload"), &payload).unwrap();
+        let wayland = root.join("runtime");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&wayland)
+            .unwrap();
+        let _socket = UnixListener::bind(wayland.join("wayland-0")).unwrap();
+        let home = root.join("account-home");
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&home)
+            .unwrap();
+        std::fs::write(
+            root.join("passwd"),
+            format!(
+                "root:x:0:0:Synthetic owner:{}:/usr/bin/sh\n",
+                home.display()
+            ),
+        )
+        .unwrap();
+        let mut command = Command::new("/usr/bin/bwrap");
+        command
+            .args([
+                "--unshare-user",
+                "--uid",
+                "0",
+                "--gid",
+                "0",
+                "--unshare-pid",
+                "--die-with-parent",
+                "--tmpfs",
+                "/",
+                "--dir",
+                "/usr",
+                "--dir",
+                "/usr/bin",
+                "--dir",
+                "/etc",
+                "--ro-bind",
+                "/usr/lib",
+                "/usr/lib",
+                "--symlink",
+                "usr/lib",
+                "/lib",
+                "--ro-bind-try",
+                "/lib64",
+                "/lib64",
+                "--symlink",
+                "usr/bin",
+                "/bin",
+                "--proc",
+                "/proc",
+                "--dev-bind",
+                "/dev",
+                "/dev",
+                "--bind",
+            ])
+            .arg(root)
+            .arg(root)
+            .arg("--ro-bind")
+            .arg(root.join("passwd"))
+            .arg("/etc/passwd")
+            .arg("--ro-bind")
+            .arg(env!("CARGO_BIN_EXE_arany"))
+            .arg("/arany")
+            .arg("--ro-bind")
+            .arg(&clipboard)
+            .arg("/usr/bin/wl-paste")
+            .arg("--ro-bind")
+            .arg(root.join("payload"))
+            .arg("/clipboard-payload");
+        for program in ["sh", "script", "stty", "cat"] {
+            command
+                .arg("--ro-bind")
+                .arg(format!("/usr/bin/{program}"))
+                .arg(format!("/usr/bin/{program}"));
+        }
+        // The HTTP client loads system roots even for loopback HTTP; preserve bundle symlink targets.
+        if std::path::Path::new("/etc/ssl").is_dir() {
+            command.args(["--ro-bind", "/etc/ssl", "/etc/ssl"]);
+        }
+        command.args([
+            "--ro-bind-try",
+            "/etc/ca-certificates",
+            "/etc/ca-certificates",
+        ]);
+        command.args(["--", "/usr/bin/script"]);
+        let mode = if linear {
+            "--screen-reader"
+        } else {
+            "--classic"
+        };
+        let shell = format!(
+            "trap ':' INT; stty rows 24 cols 120; exec \"$ARANY_TEST_EXE\" {mode} --no-color --state-dir \"$ARANY_TEST_STATE\" --workspace \"$ARANY_TEST_WORKSPACE\" --resume {id} --provider custom:local --model model-1"
+        );
+        command
+            .env_clear()
+            .env("ARANY_TEST_EXE", "/arany")
+            .env("HOME", &home)
+            .env("ARANY_TEST_STATE", &state)
+            .env("ARANY_TEST_WORKSPACE", &workspace)
+            .env("ARANY_PROVIDER_LOCAL_KEY", "test-key")
+            .env("XDG_RUNTIME_DIR", &wayland)
+            .env("WAYLAND_DISPLAY", "wayland-0")
+            .env("SHELL", "/bin/sh")
+            .env("TERM", if linear { "dumb" } else { "xterm" })
+            .current_dir(&workspace)
+            .args(["-q", "-e", "-c", &shell, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = ChildGuard::new(command.spawn().unwrap());
+        let mut input = child.child().stdin.take().unwrap();
+        let mut output = child.child().stdout.take().unwrap();
+        fcntl_setfl(&output, OFlags::NONBLOCK).unwrap();
+        let mut transcript = Vec::new();
+        let mut answered = crate::session_picker::PtyResponses::default();
+        let wait_text = |output: &mut std::process::ChildStdout,
+                         input: &mut std::process::ChildStdin,
+                         transcript: &mut Vec<u8>,
+                         answered: &mut crate::session_picker::PtyResponses,
+                         from: usize,
+                         text: &str| {
+            if linear {
+                wait_for_after(output, input, transcript, answered, from, text.as_bytes());
+                from + crate::process::pty_text_matches(&transcript[from..], text.as_bytes())
+                    .next()
+                    .expect("observed linear text")
+                    .end
+            } else {
+                wait_for_screen(output, input, transcript, answered, (from, 120, 24), text);
+                transcript.len()
+            }
+        };
+        wait_text(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            0,
+            if linear { "Input:\r\n" } else { "Ask Arany" },
+        );
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        } else {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                0,
+                3,
+            );
+        }
+        let from = transcript.len();
+        input.write_all(b"/goal continue\r").unwrap();
+        let refused = wait_text(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            &arany::EngineError::GoalIncludesUnavailable.to_string(),
+        );
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let events = store.load_session(id).await.unwrap();
+            // Startup may save defaults, but a refused continuation must not append Goal/Run facts.
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| !matches!(
+                        event.event,
+                        arany::Event::SessionDefaultChanged { .. }
+                    ))
+                    .collect::<Vec<_>>(),
+                before.iter().collect::<Vec<_>>()
+            );
+            store.close().await.unwrap();
+        });
+        if !linear {
+            let from = transcript.len();
+            input.write_all(b"\x03").unwrap();
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                3,
+            );
+        } else {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                refused,
+                b"Input:\r\n",
+            );
+        }
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        }
+        let from = transcript.len();
+        if linear {
+            input.write_all(b"/paste\r").unwrap();
+        } else {
+            input
+                .write_all(format!("{prefix}\x1b[200~{payload}\x1b[201~").as_bytes())
+                .unwrap();
+        }
+        let label = format!("[Pasted Content {} chars]", payload.chars().count());
+        let pasted = wait_text(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            &label,
+        );
+        if linear {
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                pasted,
+                b"Input:\r\n",
+            );
+        } else {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                u16::try_from(3 + prefix.len() + label.len()).unwrap(),
+            );
+        }
+        if linear {
+            fresh_capture(&mut transcript, &mut answered);
+        }
+        let from = transcript.len();
+        input.write_all(b" typed suffix").unwrap();
+        if !linear {
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                u16::try_from(3 + prefix.len() + label.len() + " typed suffix".len()).unwrap(),
+            );
+        }
+        submit.send(()).expect("arm attachment request deadline");
+        input.write_all(b"\r").unwrap();
+        let answer = wait_text(
+            &mut output,
+            &mut input,
+            &mut transcript,
+            &mut answered,
+            from,
+            "Attachment received",
+        );
+        assert_eq!(
+            requests.recv_timeout(Duration::from_secs(10)).unwrap(),
+            3,
+            "attachment request order"
+        );
+        server.join().unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            let view = runtime.block_on(store.load_view(id)).unwrap().unwrap();
+            if view
+                .goals
+                .last()
+                .is_some_and(|goal| goal.status == arany::GoalStatus::Completed)
+            {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attachment Goal did not commit completion: {}",
+                tail(&transcript[from..])
+            );
+            thread::yield_now();
+        }
+        runtime.block_on(store.close()).unwrap();
+        if linear {
+            let receipt = wait_text(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                answer,
+                "Status: finished\r\n",
+            );
+            wait_for_after(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                receipt,
+                b"Input:\r\n",
+            );
+        } else {
+            wait_for_screen(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (from, 120, 24),
+                "ready · custom:local/model-1",
+            );
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                from,
+                3,
+            );
+        }
+        let exit_from = transcript.len();
+        input.write_all(b"/exit").unwrap();
+        if !linear {
+            wait_for_screen(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                (exit_from, 120, 24),
+                "> /exit",
+            );
+            wait_for_caret(
+                &mut output,
+                &mut input,
+                &mut transcript,
+                &mut answered,
+                exit_from,
+                8,
+            );
+        }
+        input.write_all(b"\r").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            pump(&mut output, &mut input, &mut transcript, &mut answered);
+            if let Some(status) = child.child().try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "attachment journey did not exit (linear={linear}, prefix={prefix:?}): {}",
+                tail(&transcript[exit_from..])
+            );
+            thread::yield_now();
+        }
+        runtime.block_on(async {
+            let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+            let view = store.load_view(id).await.unwrap().unwrap();
+            let goal = view.goals.last().unwrap();
+            assert_eq!(goal.objective, expected);
+            assert_eq!(view.runs.last().unwrap().objective, expected);
+            assert_eq!(goal.include_paths, Some(Vec::new()));
+            assert_eq!(goal.status, arany::GoalStatus::Completed);
+            store.close().await.unwrap();
+        });
+    }
 }

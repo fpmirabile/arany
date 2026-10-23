@@ -22,7 +22,7 @@ pub(super) async fn inspect(
             }
             TerminalInput::Suspend => {
                 terminal
-                    .suspend_and_resume(0)
+                    .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                     .map_err(|error| error.to_string())?;
                 terminal
                     .draw(view, &Composer::default(), None)

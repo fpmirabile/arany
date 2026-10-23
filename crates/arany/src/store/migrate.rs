@@ -170,6 +170,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         ),
         variant_step!("RunStarted", 20, crate::session::pre_multiedit_payload),
         variant_step!("AgentSpawned", 12, crate::session::pre_multiedit_payload),
+        EventStep {
+            kind: "GoalStarted",
+            from: 7,
+            transform: crate::session::goal_started_v7_to_v8,
+            canonical: crate::session::goal_started_v7_payload,
+        },
         variant_step!("ToolStarted", 16, crate::session::pre_host_git_payload),
         variant_step!("ToolFinished", 22, crate::session::pre_host_git_payload),
         variant_step!("HookStarted", 6, crate::session::pre_host_git_payload),
@@ -217,6 +223,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
             canonical: |payload| {
                 crate::session::pre_command_selection_payload("HookFinished", payload)
             },
+        },
+        EventStep {
+            kind: "ProviderCallRecorded",
+            from: 18,
+            transform: crate::session::provider_call_v18_to_v19,
+            canonical: crate::session::provider_call_v18_payload,
         },
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),

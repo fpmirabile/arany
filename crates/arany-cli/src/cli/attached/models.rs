@@ -416,7 +416,7 @@ pub(super) async fn browse(
         tokio::pin!(refresh);
         if terminal.is_linear() {
             terminal
-                .restore_draft_input(0)
+                .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?;
             browse_linear(
                 terminal,
@@ -443,7 +443,7 @@ pub(super) async fn browse(
     };
     terminal.close_models();
     terminal
-        .restore_draft_input(composer.text().len())
+        .restore_draft_input(composer.input_capacity())
         .map_err(|error| error.to_string())?;
     match selection? {
         Choice::Closed => Ok(ModelBrowse::Notice(super::Feedback::Transient(
@@ -647,7 +647,7 @@ async fn load_while_owned(
                     }
                     TerminalInput::Shutdown(signal) => break Err(ModelBrowse::Shutdown(signal)),
                     TerminalInput::Suspend => {
-                        terminal.suspend_and_resume(composer.text().len()).map_err(|error| error.to_string())?;
+                        terminal.suspend_and_resume(composer.input_capacity()).map_err(|error| error.to_string())?;
                         terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::LineRejected => {
@@ -663,7 +663,7 @@ async fn load_while_owned(
                         if !terminal.is_linear() {
                             composer.continue_line();
                         }
-                        terminal.restore_draft_input(composer.text().len()).map_err(|error| error.to_string())?;
+                        terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
                         terminal.draw_busy_notice(view, composer, Some(crate::terminal::TerminalNotice::Transient(CATALOG_LOADING))).map_err(|error| error.to_string())?;
                     }
                     TerminalInput::Resize => {
@@ -675,7 +675,7 @@ async fn load_while_owned(
         }
     };
     terminal
-        .restore_draft_input(composer.text().len())
+        .restore_draft_input(composer.input_capacity())
         .map_err(|error| error.to_string())?;
     Ok(outcome)
 }
@@ -819,7 +819,7 @@ async fn browse_inline(
                 }
             }
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(composer.text().len())
+                .suspend_and_resume(composer.input_capacity())
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(Choice::Closed);
@@ -974,7 +974,7 @@ async fn browse_linear(
                 terminal.discard_draft_input();
             }
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(0)
+                .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 terminal.discard_draft_input();

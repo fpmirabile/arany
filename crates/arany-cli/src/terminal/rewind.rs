@@ -177,7 +177,7 @@ impl AttachedTerminal {
                     return Err(RewindPanelError::Shutdown(signal.name()));
                 }
                 TerminalInput::Suspend => {
-                    self.suspend_and_resume(0)?;
+                    self.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
                     page = 0;
                     selected = initial;
                     id = uuid::Uuid::now_v7();

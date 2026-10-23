@@ -309,7 +309,7 @@ impl AttachedTerminal {
         input: TerminalInput,
         composer: &Composer,
     ) -> Result<AgentChatInput, TerminalError> {
-        self.primary_draft_bytes = composer.text().len();
+        self.primary_input_capacity = composer.input_capacity();
         if self.agent_chat.is_none() {
             if !matches!(
                 input,
@@ -338,7 +338,7 @@ impl AttachedTerminal {
                 Ok(AgentChatInput::Pass)
             }
             TerminalInput::Suspend => {
-                self.suspend_and_resume(0)?;
+                self.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
                 self.rearm_agent_chat(view).await
             }
             TerminalInput::Resize => self.rearm_agent_chat(view).await,
@@ -540,13 +540,7 @@ impl AttachedTerminal {
         self.begin_dialog();
         self.draw_agent_chat(view, None)?;
         self.arm_dialog().await?;
-        let bytes = if self.linear.is_some() {
-            0
-        } else {
-            self.selected_child_draft()
-                .map_or(0, |draft| draft.composer.text().len())
-        };
-        self.restore_draft_input(bytes)
+        self.restore_selected_draft_input(self.primary_input_capacity)
     }
 
     async fn rearm_agent_chat(
@@ -563,7 +557,7 @@ impl AttachedTerminal {
         // Keys meant for the child view must not reach the primary draft.
         self.begin_dialog();
         self.arm_dialog().await?;
-        self.restore_draft_input(self.primary_draft_bytes)?;
+        self.restore_draft_input(self.primary_input_capacity)?;
         Ok(AgentChatInput::Returned)
     }
 
@@ -660,19 +654,21 @@ impl AttachedTerminal {
 
     pub fn restore_selected_draft_input(
         &mut self,
-        primary_bytes: usize,
+        primary_capacity: usize,
     ) -> Result<(), TerminalError> {
-        let bytes = if self.agent_chat.is_some() {
+        let capacity = if let Some(chat) = &self.agent_chat {
             if self.linear.is_some() {
-                0
+                super::MAX_DRAFT_BYTES.saturating_sub(chat.choice.len())
             } else {
                 self.selected_child_draft()
-                    .map_or(0, |draft| draft.composer.text().len())
+                    .map_or(super::MAX_DRAFT_BYTES, |draft| {
+                        draft.composer.input_capacity()
+                    })
             }
         } else {
-            primary_bytes
+            primary_capacity
         };
-        self.restore_draft_input(bytes)
+        self.restore_draft_input(capacity)
     }
 
     pub fn child_notes_pending(&self) -> bool {
@@ -827,12 +823,12 @@ impl AttachedTerminal {
             },
             None => draft.composer.apply(input),
         };
-        let bytes = draft.composer.text().len();
+        let capacity = draft.composer.input_capacity();
         let edited = before != draft.composer.text();
         if edited && draft.offered.is_none() {
             draft.notice = None;
         }
-        self.restore_draft_input(bytes)?;
+        self.restore_draft_input(capacity)?;
         self.draw_agent_chat(view, None)?;
         Ok(if edit == ComposerEdit::AtCapacity {
             AgentChatInput::Notice("Child draft exceeds 8.0 KB; text retained")
@@ -977,7 +973,7 @@ impl AttachedTerminal {
             }
             TerminalInput::Suspend => {
                 chat.shown = false;
-                self.suspend_and_resume(0)?;
+                self.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
                 self.rearm_agent_chat(view).await
             }
             TerminalInput::Paste => {
@@ -1018,7 +1014,7 @@ impl AttachedTerminal {
             acknowledged |= draft.acknowledge(view);
         }
         if acknowledged {
-            self.restore_selected_draft_input(self.primary_draft_bytes)?;
+            self.restore_selected_draft_input(self.primary_input_capacity)?;
         }
         let (history_notice, transient) = match notice {
             Some(TerminalNotice::History(text)) => (Some(text), None),
@@ -1199,6 +1195,7 @@ mod tests {
                 workspace_identity,
             },
             arany::Event::GoalStarted {
+                include_paths: Some(Vec::new()),
                 goal_id: arany::GoalId::new(),
                 objective: "team".into(),
                 workspace_identity,
@@ -1609,17 +1606,17 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn child_drafts_primary_bytes_and_shortcut_survive_a_released_terminal() {
+    async fn child_drafts_primary_capacity_and_shortcut_survive_a_released_terminal() {
         for shortcut in [NewlineShortcut::AltEnter, NewlineShortcut::CtrlEnter] {
             let mut terminal = super::super::clipboard::cleanup_tests::released_terminal(None);
             terminal.set_newline_shortcut(shortcut);
             terminal.child_drafts = vec![filled_draft(RunId::new())];
-            terminal.primary_draft_bytes = 7;
+            terminal.primary_input_capacity = 7;
             terminal.replace_released(super::super::clipboard::cleanup_tests::released_terminal(
                 None,
             ));
             assert_eq!(terminal.child_drafts.len(), 1);
-            assert_eq!(terminal.primary_draft_bytes, 7);
+            assert_eq!(terminal.primary_input_capacity, 7);
             assert_eq!(terminal.newline_shortcut, shortcut);
         }
     }

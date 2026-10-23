@@ -138,6 +138,7 @@ fn tool_journal_transition_corpus_rejects_unmatched_or_reusable_effects() {
             },
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id: goal,
             objective: "Past work".into(),
             workspace_identity: WorkspaceIdentity {

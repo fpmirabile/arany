@@ -1575,7 +1575,7 @@ mod child_grant_tests {
         assert!(
             Event::decode(
                 child.kind(),
-                payload_version(child.kind()).expect("payload version") - 1,
+                child.version() - 1,
                 &payload,
                 Some(run_id),
                 Some(agent_run_id)
@@ -2137,6 +2137,7 @@ mod payload_version_tests {
             finished
         );
         let started = Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: "continue".into(),
             workspace_identity: WorkspaceIdentity {
@@ -2151,9 +2152,83 @@ mod payload_version_tests {
         };
         let started_payload = started.payload().expect("payload");
         assert_eq!(
-            Event::decode("GoalStarted", 7, &started_payload, None, None).expect("v7"),
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &started_payload,
+                None,
+                None
+            )
+            .expect("current"),
             started
         );
+        let current: serde_json::Value = serde_json::from_str(&started_payload).unwrap();
+        let mut missing = current.clone();
+        missing.as_object_mut().unwrap().remove("include_paths");
+        assert!(
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &missing.to_string(),
+                None,
+                None
+            )
+            .is_err()
+        );
+        let migrated = goal_started_v7_to_v8(missing).expect("unknown legacy inputs");
+        assert!(migrated["include_paths"].is_null());
+        assert!(
+            Event::decode(
+                "GoalStarted",
+                started.version(),
+                &migrated.to_string(),
+                None,
+                None
+            )
+            .is_ok()
+        );
+        assert!(goal_started_v7_to_v8(current.clone()).is_none());
+        for paths in [
+            serde_json::json!(["../private"]),
+            serde_json::json!(["/absolute"]),
+            serde_json::json!([""]),
+            serde_json::json!(vec!["input.txt"; 17]),
+            serde_json::json!(["x".repeat(513)]),
+            serde_json::json!([format!("{}/", "x".repeat(512))]),
+            serde_json::json!(["notes//"]),
+            serde_json::json!(["notes/.env/"]),
+        ] {
+            let mut invalid = current.clone();
+            invalid["include_paths"] = paths;
+            assert!(
+                Event::decode(
+                    "GoalStarted",
+                    started.version(),
+                    &invalid.to_string(),
+                    None,
+                    None
+                )
+                .is_err()
+            );
+        }
+        for path in [
+            "x".repeat(512),
+            format!("{}/", "x".repeat(511)),
+            "notes/".into(),
+        ] {
+            let mut longest = current.clone();
+            longest["include_paths"] = serde_json::json!([path]);
+            assert!(
+                Event::decode(
+                    "GoalStarted",
+                    started.version(),
+                    &longest.to_string(),
+                    None,
+                    None
+                )
+                .is_ok()
+            );
+        }
         for (kind, payload) in [
             ("GoalStarted", &started_payload),
             ("GoalFinished", &payload),
@@ -2417,7 +2492,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::InvalidResponse,
+        disposition: ProviderCallDisposition::Rejected,
         requested_tools: 0,
         response_id: None,
         input_tokens: None,
@@ -2643,24 +2718,24 @@ fn clearing_event_has_one_strict_current_payload() {
         covered_tool_count: 4,
         cleared_bytes: 1234,
     };
-    assert_eq!(payload_version(event.kind()), Some(1));
+    let current = event.version();
     let payload = event.payload().unwrap();
     assert_eq!(
-        Event::decode(event.kind(), 1, &payload, Some(run), None).unwrap(),
+        Event::decode(event.kind(), current, &payload, Some(run), None).unwrap(),
         event
     );
     for (version, body, agent) in [
-        (0, payload.clone(), None),
-        (2, payload.clone(), None),
-        (1, payload.clone(), Some(AgentRunId::new())),
-        (1, r#"{"covered_tool_count":4}"#.into(), None),
+        (current - 1, payload.clone(), None),
+        (current + 1, payload.clone(), None),
+        (current, payload.clone(), Some(AgentRunId::new())),
+        (current, r#"{"covered_tool_count":4}"#.into(), None),
         (
-            1,
+            current,
             r#"{"covered_tool_count":0,"cleared_bytes":1}"#.into(),
             None,
         ),
         (
-            1,
+            current,
             r#"{"covered_tool_count":4,"cleared_bytes":1,"extra":true}"#.into(),
             None,
         ),

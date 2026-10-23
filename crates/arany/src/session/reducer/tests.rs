@@ -97,6 +97,7 @@ mod goal_recovery_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: "Inspect before planning".into(),
                 workspace_identity: WorkspaceIdentity {
@@ -296,6 +297,7 @@ mod goal_replay_tests {
         continues: Option<GoalId>,
     ) -> Event {
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
             workspace_identity: WorkspaceIdentity {
@@ -2812,6 +2814,28 @@ mod goal_replay_tests {
             .is_err(),
             "a second continuation of one source"
         );
+        for paths in [None, Some(vec!["new-input.txt".into()])] {
+            assert!(
+                replay(vec![continued(GoalId::new(), &|event| {
+                    if let Event::GoalStarted { include_paths, .. } = event {
+                        *include_paths = paths.clone();
+                    }
+                })])
+                .is_err(),
+                "continuation cannot replace admitted inputs"
+            );
+        }
+        let mut migrated = events.clone();
+        migrated.push(continued(GoalId::new(), &|_| {}));
+        for event in &mut migrated {
+            if let Event::GoalStarted { include_paths, .. } = event {
+                *include_paths = None;
+            }
+        }
+        assert!(
+            SessionView::replay_open(session, &session_with(session, migrated)).is_ok(),
+            "already-recorded legacy continuations replay with unknown inputs"
+        );
         let mismatches: [&dyn Fn(&mut Event); 3] = [
             &|event| {
                 if let Event::GoalStarted { objective, .. } = event {
@@ -2848,6 +2872,7 @@ mod goal_replay_tests {
             ..GoalBudget::default()
         };
         let mut events = vec![Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: GOAL_OBJECTIVE.into(),
             workspace_identity: WorkspaceIdentity {
@@ -3054,6 +3079,7 @@ mod goal_replay_tests {
                     },
                 },
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: GOAL_OBJECTIVE.into(),
                     workspace_identity: WorkspaceIdentity {
@@ -3566,6 +3592,7 @@ mod goal_replay_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {
@@ -4759,6 +4786,7 @@ mod goal_replay_tests {
             }],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {
@@ -4956,6 +4984,7 @@ mod goal_replay_tests {
             ],
             compactions: Vec::new(),
             goals: vec![GoalView {
+                include_paths: Some(Vec::new()),
                 id: goal_id,
                 objective: GOAL_OBJECTIVE.into(),
                 workspace_identity: WorkspaceIdentity {
@@ -5069,7 +5098,7 @@ mod goal_replay_tests {
                 };
                 let mut refusal = record(
                     AgentPhase::RootPlan,
-                    ProviderCallDisposition::InvalidResponse,
+                    ProviderCallDisposition::Rejected,
                     Some(0),
                 );
                 refusal.failure_reason =
@@ -5191,7 +5220,7 @@ mod goal_replay_tests {
                     if planned {
                         ProviderCallDisposition::PlanRecorded
                     } else {
-                        ProviderCallDisposition::InvalidResponse
+                        ProviderCallDisposition::Rejected
                     },
                     Some(0),
                 );
@@ -7429,6 +7458,62 @@ mod goal_replay_tests {
         apply(&mut view, tool_started(run, agent, &second)).expect("second request starts");
         apply(&mut view, tool_finished(run, agent, &second, b"two")).expect("second observed");
         apply(&mut view, continuation).expect("all declared requests observed");
+    }
+
+    #[test]
+    fn compaction_before_outcome_correction_requires_the_first_settled_failure() {
+        let (mut view, goal, run, agent) = primary_tool_session(false);
+        let read = read_intent(run, agent, "src/lib.rs");
+        apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+        apply(&mut view, requesting_step(run, agent, 1)).unwrap();
+        apply(&mut view, tool_started(run, agent, &read)).unwrap();
+        apply(&mut view, tool_finished(run, agent, &read, b"one")).unwrap();
+        let reservation = Event::GoalCompactionCallReserved {
+            goal_id: goal,
+            run_id: run,
+            active_ceiling_ms: 0,
+        };
+        for attempt in 1..=2 {
+            apply(&mut view, reserve_child_call(goal, run, agent)).unwrap();
+            let mut failure = record(
+                AgentPhase::RootPlan,
+                ProviderCallDisposition::InvalidResponse,
+                Some(0),
+            );
+            failure.failure_reason = Some(crate::provider::ProviderFailureReason::OutcomeContract);
+            apply(
+                &mut view,
+                Event::ProviderCallRecorded {
+                    run_id: run,
+                    agent_run_id: agent,
+                    record: failure,
+                },
+            )
+            .unwrap();
+            if attempt == 1 {
+                let mut compacting = view.clone();
+                apply(&mut compacting, reservation.clone()).expect("compaction before correction");
+                assert_eq!(compacting.goals[0].compaction_call_reserved, Some(run));
+                assert_eq!(
+                    compacting.goals[0].provider_calls,
+                    view.goals[0].provider_calls + 1
+                );
+                assert!(
+                    compacting.runs[0]
+                        .primary()
+                        .unwrap()
+                        .outcome_correction_pending()
+                );
+                let mut unsettled = view.clone();
+                unsettled.runs[0].tools[0].observation = None;
+                assert!(rejected(&unsettled, reservation.clone()));
+            } else {
+                assert!(
+                    rejected(&view, reservation.clone()),
+                    "correction is exhausted"
+                );
+            }
+        }
     }
 
     fn compacting_session() -> (SessionView, GoalId, RunId) {

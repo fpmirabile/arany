@@ -22,6 +22,7 @@ impl SessionView {
         &mut self,
         goal_id: &GoalId,
         objective: &str,
+        include_paths: &Option<Vec<String>>,
         workspace_identity: WorkspaceIdentity,
         budget: &GoalBudget,
         resource_settings: &crate::tools::ToolResourceSettings,
@@ -35,6 +36,7 @@ impl SessionView {
             if source.is_none_or(|source| {
                 source.id != source_id
                     || source.objective != objective
+                    || source.include_paths != *include_paths
                     || source.phase != *phase
                     || source.autonomous != autonomous
             }) {
@@ -60,6 +62,7 @@ impl SessionView {
         self.goals.push(GoalView {
             id: *goal_id,
             objective: objective.to_owned(),
+            include_paths: include_paths.clone(),
             workspace_identity,
             budget: *budget,
             resource_settings: *resource_settings,
@@ -245,10 +248,14 @@ impl SessionView {
             .iter()
             .any(|agent| agent.id == *agent_run_id && agent.status == AgentStatus::Active);
         let run = current_run(self, *run_id)?;
-        if run
-            .primary()
-            .is_some_and(|agent| agent.id == *agent_run_id && agent.refusal_limit_reached())
-        {
+        if run.primary().is_some_and(|agent| {
+            agent.id == *agent_run_id
+                && (agent.refusal_limit_reached()
+                    || agent.outcome_correction_exhausted()
+                    || agent.outcome_correction_pending()
+                        && (!run.hooks_settled()
+                            || run.tools.iter().any(|tool| !tool.settled_without_stop())))
+        }) {
             return Err(ReplayError::InvalidTransition);
         }
         if let Some(agent) = run.agents.iter().find(|agent| agent.id == *agent_run_id)
@@ -405,17 +412,27 @@ impl SessionView {
                     }) else {
                         return false;
                     };
+                    let calls_settled =
+                        primary.provider_calls[request_index + 1..]
+                            .iter()
+                            .all(|call| {
+                                call.phase == AgentPhase::ToolReview
+                                && call.disposition == ProviderCallDisposition::Finished
+                                || call.disposition == ProviderCallDisposition::Rejected
+                                    && call.refusal.is_some()
+                                || call.disposition == ProviderCallDisposition::InvalidResponse
+                                    && call.failure_reason
+                                        == Some(
+                                            crate::provider::ProviderFailureReason::OutcomeContract,
+                                        )
+                                    && primary.outcome_correction_pending()
+                            });
                     primary.status == AgentStatus::Active
                         && matches!(
                             primary.provider_calls[request_index].phase,
                             AgentPhase::RootPlan | AgentPhase::RootSynthesis
                         )
-                        && primary.provider_calls[request_index + 1..]
-                            .iter()
-                            .all(|call| {
-                                call.phase == AgentPhase::ToolReview
-                                    && call.disposition == ProviderCallDisposition::Finished
-                            })
+                        && calls_settled
                         && pending_tool_requests(run) == Some(0)
                 });
         let primary_id = run.primary().ok_or(ReplayError::InvalidTransition)?.id;
@@ -735,6 +752,7 @@ pub(super) fn apply(
         Event::GoalStarted {
             goal_id,
             objective,
+            include_paths,
             workspace_identity,
             budget,
             resource_settings,
@@ -745,6 +763,7 @@ pub(super) fn apply(
             current.start_goal(
                 goal_id,
                 objective,
+                include_paths,
                 *workspace_identity,
                 budget,
                 resource_settings,

@@ -484,6 +484,36 @@ impl ToolCall {
         }
     }
 
+    pub(crate) fn path_argument(&self) -> Option<(&str, bool)> {
+        match self {
+            Self::List { path } | Self::Search { path, .. } | Self::Glob { path, .. } => {
+                Some((path, true))
+            }
+            Self::Read { path, .. }
+            | Self::Mkdir { path }
+            | Self::Write { path, .. }
+            | Self::Edit { path, .. }
+            | Self::MultiEdit {
+                file_path: path, ..
+            } => Some((path, false)),
+            Self::Command { cwd, .. } | Self::CommandUnguarded { cwd, .. } => Some((cwd, true)),
+            Self::ParseAgentDefinition { .. }
+            | Self::ApplyChangeset { .. }
+            | Self::PrepareWorker { .. }
+            | Self::Skill { .. }
+            | Self::McpList { .. }
+            | Self::McpCall { .. }
+            | Self::GitStatus { .. }
+            | Self::GitDiff { .. }
+            | Self::GitLog { .. }
+            | Self::GitCommit { .. }
+            | Self::GitBranch { .. }
+            | Self::GitSwitch { .. }
+            | Self::GitPush { .. }
+            | Self::GhPrCreate { .. } => None,
+        }
+    }
+
     pub(crate) fn valid(&self) -> bool {
         if !serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= self.argument_limit()) {
             return false;
@@ -549,11 +579,13 @@ pub(crate) fn valid_revision(value: &str) -> bool {
     name_valid && suffix.is_empty() && steps <= 4
 }
 
+pub(crate) const MAX_RELATIVE_PATH_BYTES: usize = 512;
+
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
     if value.is_empty() || value == "." {
         return root;
     }
-    value.len() <= 512
+    value.len() <= MAX_RELATIVE_PATH_BYTES
         && !value.chars().any(char::is_control)
         && !value.contains('\\')
         && value
@@ -1352,11 +1384,12 @@ pub struct ToolRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ToolStep {
     pub cleared: bool,
+    pub refusal: Option<crate::session::ProposalRefusal>,
     pub plan: Option<crate::provider::PlanRequest>,
     pub turn: crate::provider::ProviderTurn,
     /// Empty for a Delegate step.
     pub requests: Vec<ToolRequest>,
-    /// A prefix of `requests` plus any Engine integration observation; shorter only when the Run stopped.
+    /// Empty for a refused proposal; otherwise the acknowledged request prefix and Engine integrations.
     pub observations: Vec<ToolObservation>,
     /// Goal facts written when the next call is prepared; `None` for Researchers.
     pub facts: Option<crate::provider::GoalContextFacts>,
@@ -1397,6 +1430,7 @@ impl ToolStep {
     }
 }
 
+pub(crate) const MAX_TOOL_REFUSAL_BYTES: usize = 2048;
 const RESULT_ENVELOPE_BYTES: usize = 128;
 
 fn skill_context_bytes(skill: &ToolObservation) -> usize {
@@ -1457,6 +1491,7 @@ impl ToolContext {
 
     fn step_len(&self, step: &ToolStep) -> usize {
         step.turn.len()
+            + usize::from(step.refusal.is_some()) * (MAX_TOOL_REFUSAL_BYTES + RESULT_ENVELOPE_BYTES)
             + step.plan.as_ref().map_or(0, |plan| {
                 plan.result().to_string().len() + RESULT_ENVELOPE_BYTES
             })
@@ -1473,6 +1508,10 @@ impl ToolContext {
                 .and_then(|facts| serde_json::to_string(&facts).ok())
                 .map_or(0, |facts| facts.len() + RESULT_ENVELOPE_BYTES)
             + step.steering_notes.iter().map(String::len).sum::<usize>()
+    }
+
+    pub(crate) fn with_step_len(&self, step: &ToolStep) -> usize {
+        self.rendered_len() + self.step_len(step)
     }
 
     pub(crate) fn with_invoked_skill_len(&self, skill: &ToolObservation) -> usize {
@@ -1571,10 +1610,20 @@ impl ToolContext {
         self.steps[..steps]
             .iter()
             .flat_map(|step| {
-                step.observations
+                step.refusal
                     .iter()
-                    .enumerate()
-                    .map(|(index, _)| self.model_result(step, index))
+                    .map(|refusal| {
+                        json!({
+                            "refused_tool": refusal,
+                            "execution": "refused; nothing dispatched",
+                        })
+                    })
+                    .chain(
+                        step.observations
+                            .iter()
+                            .enumerate()
+                            .map(|(index, _)| self.model_result(step, index)),
+                    )
             })
             .collect()
     }

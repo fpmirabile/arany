@@ -245,21 +245,10 @@ fn tool_failure_stage(
     if serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() > call.argument_limit()) {
         return Stage::OutcomeToolArgumentSize;
     }
-    let path = match call {
-        ToolCall::List { path } | ToolCall::Search { path, .. } | ToolCall::Glob { path, .. } => {
-            Some((path, true))
-        }
-        ToolCall::Read { path, .. }
-        | ToolCall::Mkdir { path }
-        | ToolCall::Write { path, .. }
-        | ToolCall::Edit { path, .. }
-        | ToolCall::MultiEdit {
-            file_path: path, ..
-        } => Some((path, false)),
-        ToolCall::Command { cwd, .. } | ToolCall::CommandUnguarded { cwd, .. } => Some((cwd, true)),
-        _ => None,
-    };
-    if path.is_some_and(|(path, root)| !valid_relative(path, root)) {
+    if call
+        .path_argument()
+        .is_some_and(|(path, root)| !valid_relative(path, root))
+    {
         return Stage::OutcomeToolPath;
     }
     match call {

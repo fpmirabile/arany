@@ -39,6 +39,7 @@ fn read(path: &str) -> ToolCall {
 
 fn step(id: &str, path: &str) -> ToolStep {
     ToolStep {
+        refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
         requests: vec![ToolRequest {
@@ -96,6 +97,71 @@ fn serialized(messages: &[Message]) -> Vec<String> {
 }
 
 #[test]
+fn harness_feedback_is_bounded_and_correction_preserves_the_system_prefix() {
+    use crate::session::{GoalLimit, RunFailure, RunStop};
+    for (stop, reason) in [
+        (
+            RunStop::Failed(RunFailure::ProviderCall),
+            Some(super::super::ProviderFailureReason::OutcomeContract),
+        ),
+        (RunStop::Failed(RunFailure::ToolContextFull), None),
+        (RunStop::GoalExhausted(GoalLimit::Tokens), None),
+        (
+            RunStop::Failed(RunFailure::WorkersUnverified),
+            Some(super::super::ProviderFailureReason::UsageTemporarilyUnavailable),
+        ),
+        (RunStop::Uncertain, None),
+        (RunStop::Interrupted, None),
+        (RunStop::Cancelled, None),
+        (RunStop::Paused, None),
+        (RunStop::StoppedByHook, None),
+    ] {
+        let mut request = request(vec![step("call_1", "src/lib.rs")]);
+        request.input.previous_run_failure = Some(crate::session::RunFailureFeedback {
+            stop,
+            provider_disposition: Some(crate::session::ProviderCallDisposition::InvalidResponse),
+            provider_failure: reason,
+            refusal_cause: Some(crate::session::ProposalRefusalCause::InvalidPath),
+        });
+        let original = conversation(&request).expect("original request");
+        request.input.outcome_correction = true;
+        let rendered = conversation(&request).expect("render");
+        assert_eq!(original.system, rendered.system);
+        assert_eq!(
+            original.messages,
+            rendered.messages[..original.messages.len()]
+        );
+        assert_eq!(rendered.messages.len(), original.messages.len() + 1);
+        let correction = rendered.messages.last().expect("correction");
+        assert_eq!(correction.role, Role::User);
+        let mut feedback: String = rendered.system[2..].iter().map(SystemBlock::text).collect();
+        let [Block::Text(text)] = correction.blocks.as_slice() else {
+            panic!("harness data")
+        };
+        assert!(text.contains("harness_outcome_correction"));
+        assert!(text.contains("single corrective call"));
+        feedback.push_str(text);
+        request.input.outcome_correction = false;
+        let subsequent = conversation(&request).expect("subsequent request");
+        assert_eq!(original.system, subsequent.system);
+        assert_eq!(original.messages, subsequent.messages);
+        assert!(
+            feedback.len() <= crate::provider::conversation::MAX_HARNESS_FEEDBACK_BYTES,
+            "feedback fits its reserved framing"
+        );
+        assert!(feedback.contains("committed Events"));
+        assert!(feedback.contains("plain assistant text"));
+        assert!(feedback.contains(&serde_json::to_string(&stop).expect("failure")));
+        for canary in CANARIES {
+            assert!(
+                !feedback.contains(canary),
+                "untrusted input cannot enter feedback"
+            );
+        }
+    }
+}
+
+#[test]
 fn render_never_places_untrusted_text_in_system() {
     let mut request = request(vec![step("call_1", "src/lib.rs")]);
     request.input.child_results = vec![ChildResult {
@@ -104,7 +170,6 @@ fn render_never_places_untrusted_text_in_system() {
         result: "child canary".into(),
     }];
     let rendered = conversation(&request).unwrap();
-    // SystemBlock is a closed enum: a frozen prompt file or the policy sentence, nothing else.
     for block in &rendered.system {
         let text = block.text();
         for canary in CANARIES {
@@ -694,6 +759,7 @@ fn command_git_hint_respects_the_complete_model_result_ceiling() {
 #[test]
 fn delegate_step_carries_child_results_once() {
     let mut delegated = request(vec![ToolStep {
+        refusal: None,
         plan: None,
         turn: ProviderTurn::scripted(),
         requests: Vec::new(),
@@ -1010,6 +1076,7 @@ fn refusal_note_uses_the_coordination_channel_without_changing_offered_tools() {
     use crate::session::{ProposalRefusal, ProposalRefusalCause::*};
     for cause in [
         InvalidArguments,
+        InvalidPath,
         Phase,
         PlanInvalid,
         PlanBudgetOutsideGoal,

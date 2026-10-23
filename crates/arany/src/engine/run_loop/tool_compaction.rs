@@ -723,6 +723,7 @@ mod tests {
         let mut context = tool_context(serde_json::json!({"git": {}}));
         context.steps = vec![
             ToolStep {
+                refusal: None,
                 cleared: false,
                 plan: None,
                 turn: crate::provider::ProviderTurn::scripted(),
@@ -806,6 +807,7 @@ mod tests {
             let mut context = tool_context(serde_json::json!({}));
             for size in sizes {
                 context.steps.push(ToolStep {
+                    refusal: None,
                     cleared: false,
                     plan: None,
                     turn: crate::provider::ProviderTurn::scripted(),

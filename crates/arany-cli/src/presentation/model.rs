@@ -963,6 +963,10 @@ mod tests {
         }
         for (cause, expected) in [
             (
+                arany::ProposalRefusalCause::InvalidPath,
+                "Arany refused an invalid or protected Workspace path. The proposed action did not run.",
+            ),
+            (
                 arany::ProposalRefusalCause::InvalidArguments,
                 "Arany refused invalid operation arguments. The proposed action did not run.",
             ),
@@ -1013,7 +1017,7 @@ mod tests {
         ] {
             let run = &mut view.runs[0];
             run.failure = Some(arany::RunFailure::ProposalRefused);
-            let mut call = record(ProviderCallDisposition::InvalidResponse);
+            let mut call = record(ProviderCallDisposition::Rejected);
             call.failure_reason = Some(arany::ProviderFailureReason::ProposalRefused);
             call.refusal = Some(arany::ProposalRefusal {
                 operation: "arany_write".into(),

@@ -4374,6 +4374,78 @@ fn child_composer_is_labelled_literal_and_disabled_after_settlement() {
 }
 
 #[test]
+fn paste_chips_and_detail_remain_inert_at_narrow_widths_without_color() {
+    for width in [16, 20, 27, 28, 50, 80] {
+        let mut composer = Composer::default();
+        let payload = format!("literal @missing /exit\n{}", "content ".repeat(1152));
+        composer.insert_paste("before ").unwrap();
+        composer.insert_paste(&payload).unwrap();
+        composer.apply(TerminalInput::Left);
+        let caret = composer.cursor_byte_offset();
+        let compact = wrapped_composer(&composer, usize::from(width));
+        assert!(!compact.lines.join(" ").contains("@missing"));
+        let mut terminal = Terminal::new(TestBackend::new(width, 8)).unwrap();
+        let model = PresentationModel {
+            status_line: "ready".into(),
+            activity_lines: Vec::new(),
+            setup_required: false,
+            draft_action: DraftAction::Submit,
+            empty_chat: true,
+            agent_switch: false,
+        };
+        terminal
+            .draw(|frame| {
+                draw_composer(
+                    frame,
+                    &model,
+                    &composer,
+                    Palette { color: false },
+                    frame.area(),
+                    0,
+                    false,
+                );
+            })
+            .unwrap();
+        let hint = buffer_row(terminal.backend().buffer(), 7);
+        assert!(
+            hint.contains(if width >= 28 {
+                "Tab: inspect · Del: remove"
+            } else {
+                "Tab / Del"
+            }),
+            "{width}: {hint}"
+        );
+        assert!(composer.inspect_input(TerminalInput::Tab));
+        let (label, text, _) = composer.paste_detail().unwrap();
+        terminal
+            .draw(|frame| {
+                draw_paste_detail(
+                    frame,
+                    frame.area(),
+                    &label,
+                    text,
+                    0,
+                    Palette { color: false },
+                )
+            })
+            .unwrap();
+        let rendered = (0..8)
+            .map(|y| buffer_row(terminal.backend().buffer(), y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(rendered.contains("literal @missing"));
+        composer.inspect_input(TerminalInput::End);
+        composer.clamp_detail_scroll(paste_detail_scroll_limit(&payload, usize::from(width), 8));
+        let last = composer.paste_detail().unwrap().2;
+        composer.inspect_input(TerminalInput::Up);
+        assert_eq!(composer.paste_detail().unwrap().2, last - 1);
+        composer.inspect_input(TerminalInput::Escape);
+        assert_eq!(composer.cursor_byte_offset(), caret);
+        assert_eq!(composer.text(), format!("before {payload}"));
+    }
+}
+
+#[test]
 fn usage_details_wrap_without_losing_scope_or_unknown_labels() {
     let page = "Session totals\nInput: 12,340 known; some calls unreported\nCache write (included in input): unknown (not reported)\nChatGPT weekly: unknown (not reported)\nGroups 1-1 of 1\n";
     for width in [80, 50, 40, 16] {

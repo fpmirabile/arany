@@ -1480,6 +1480,9 @@ fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
 fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
     use arany::ProposalRefusalCause as Cause;
     match cause {
+        Cause::InvalidPath => {
+            "Arany refused an invalid or protected Workspace path. The proposed action did not run."
+        }
         Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
         }
@@ -1520,10 +1523,7 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
 fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     use arany::ProviderFailureReason;
     match (call.disposition, call.failure_reason) {
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::ProposalRefused),
-        ) => {
+        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::ProposalRefused)) => {
             return call
                 .refusal
                 .as_ref()
@@ -1671,19 +1671,30 @@ pub fn goal_status(view: &SessionView) -> String {
     if host > 0 {
         text.push_str(&format!(" · host effects: {host}"));
     }
-    if goal.status == arany::GoalStatus::Interrupted {
+    if goal.status == arany::GoalStatus::Interrupted && goal.include_paths.is_none() {
+        text.push_str(&format!(
+            " · {}",
+            arany::EngineError::GoalIncludesUnavailable
+        ));
+    } else if goal.status == arany::GoalStatus::Interrupted {
         text.push_str(if goal.admits_resume(view) {
             " · Use /goal resume to continue"
         } else {
             " · out of budget"
         });
     }
-    if let Some(paused) = view.interrupted_goal_id().filter(|id| *id != goal.id) {
-        let short = paused.to_string().chars().take(8).collect::<String>();
-        if view
-            .goal(paused)
-            .is_some_and(|paused| paused.admits_resume(view))
-        {
+    if let Some(paused) = view
+        .interrupted_goal_id()
+        .and_then(|id| view.goal(id))
+        .filter(|paused| paused.id != goal.id)
+    {
+        let short = paused.id.to_string().chars().take(8).collect::<String>();
+        if paused.include_paths.is_none() {
+            text.push_str(&format!(
+                "\nPaused Goal {short}: {}",
+                arany::EngineError::GoalIncludesUnavailable
+            ));
+        } else if paused.admits_resume(view) {
             text.push_str(&format!(
                 "\nPaused Goal {short} can be resumed with /goal resume"
             ));
@@ -1818,6 +1829,7 @@ mod exec_jsonl_tests {
 
     fn goal_started(goal_id: GoalId, objective: &str) -> Event {
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             objective: objective.into(),
             workspace_identity: WorkspaceIdentity {
@@ -2354,6 +2366,7 @@ mod goal_status_tests {
                 },
             },
             Event::GoalStarted {
+                include_paths: Some(Vec::new()),
                 goal_id: GoalId::new(),
                 objective: "Ship the parser".into(),
                 workspace_identity: WorkspaceIdentity {
@@ -2452,25 +2465,67 @@ mod goal_status_tests {
     }
 
     #[test]
-    fn goal_status_shows_out_of_budget_instead_of_a_resume_hint() {
-        let mut view = session_with_goal(true);
-        view.goals[0].status = GoalStatus::Interrupted;
-        view.goals[0].provider_calls = view.goals[0]
-            .effective_budget()
-            .max_provider_calls
-            .unwrap_or(0);
-        let exhausted = goal_status(&view);
-        assert!(exhausted.ends_with(" · out of budget"), "{exhausted}");
-        assert!(!exhausted.contains("/goal resume"), "{exhausted}");
+    fn goal_status_hints_distinguish_unknown_includes_from_exhausted_budgets() {
+        for includes_known in [true, false] {
+            for exhausted in [true, false] {
+                let mut view = session_with_goal(true);
+                view.goals[0].status = GoalStatus::Interrupted;
+                view.goals[0].include_paths = includes_known.then(Vec::new);
+                if exhausted {
+                    view.goals[0].provider_calls = view.goals[0]
+                        .effective_budget()
+                        .max_provider_calls
+                        .expect("finite call budget");
+                }
+                let guidance =
+                    "Goal include paths are unknown; start a new Goal with explicit inputs";
+                let current_suffix = if !includes_known {
+                    format!(" · {guidance}")
+                } else if exhausted {
+                    " · out of budget".into()
+                } else {
+                    " · Use /goal resume to continue".into()
+                };
+                let current = goal_status(&view);
+                assert!(current.ends_with(&current_suffix), "{current}");
+                assert_eq!(
+                    current.contains("/goal resume"),
+                    includes_known && !exhausted
+                );
+                assert_eq!(
+                    current.contains("out of budget"),
+                    includes_known && exhausted
+                );
 
-        let mut newer = view.goals[0].clone();
-        newer.id = arany::GoalId::new();
-        newer.status = GoalStatus::Completed;
-        view.goals.push(newer);
-        let status = goal_status(&view);
-        assert!(!status.contains("/goal resume"), "{status}");
-        assert!(status.contains("\nPaused Goal "), "{status}");
-        assert!(status.ends_with(" is out of budget"), "{status}");
+                let paused = view.goals[0]
+                    .id
+                    .to_string()
+                    .chars()
+                    .take(8)
+                    .collect::<String>();
+                let mut newer = view.goals[0].clone();
+                newer.id = arany::GoalId::new();
+                newer.status = GoalStatus::Completed;
+                view.goals.push(newer);
+                let paused_suffix = if !includes_known {
+                    format!("\nPaused Goal {paused}: {guidance}")
+                } else if exhausted {
+                    format!("\nPaused Goal {paused} is out of budget")
+                } else {
+                    format!("\nPaused Goal {paused} can be resumed with /goal resume")
+                };
+                let status = goal_status(&view);
+                assert!(status.ends_with(&paused_suffix), "{status}");
+                assert_eq!(
+                    status.contains("/goal resume"),
+                    includes_known && !exhausted
+                );
+                assert_eq!(
+                    status.contains("out of budget"),
+                    includes_known && exhausted
+                );
+            }
+        }
     }
 
     #[test]

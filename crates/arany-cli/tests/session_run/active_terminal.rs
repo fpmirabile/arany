@@ -270,7 +270,14 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("cancel deadline");
                 let mut byte = [0];
-                assert_eq!(stream.read(&mut byte).expect("cancelled socket"), 0);
+                assert_eq!(
+                    stream
+                        .read_exact(&mut byte)
+                        .expect_err("cancelled socket returned response bytes")
+                        .kind(),
+                    std::io::ErrorKind::UnexpectedEof,
+                    "cancelled socket must close"
+                );
                 closed_sender.send(()).expect("socket closure observation");
                 return;
             }
@@ -321,6 +328,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let reader_input = Arc::clone(&input);
     let mut output = attached.child().stdout.take().expect("PTY output");
     let (stage_sender, stages) = mpsc::channel();
+    let (paste_sender, paste_ready) = mpsc::sync_channel(1);
     let expect_idle = matches!(
         exit,
         ActiveExit::CtrlC
@@ -353,6 +361,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         let mut declined = false;
         let mut answered = 0;
         let mut bytes = Vec::new();
+        let mut paste_sender = expect_draft.then_some(paste_sender);
         let mut patterns: Vec<&[u8]> = vec![
             b"SHELL_PID:",
             if inline {
@@ -388,7 +397,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         }
         if expect_help {
             patterns.push(if inline {
-                b"Commands"
+                // Only armed help has this token; cursor moves can replace the space before close.
+                b"Enter/Esc"
             } else {
                 b"Command: /exit; Exit Session; during Run: view-only\r\n"
             });
@@ -408,7 +418,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
             });
         }
         if expect_draft {
-            patterns.push(b"Draft retained: 6 characters; Enter submits");
+            patterns.push(b"Draft retained: 9222 characters; Enter submits");
         }
         if expect_idle {
             patterns.push(if inline { b"\x1b[?25h" } else { b"Input:" });
@@ -445,6 +455,16 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 &bytes,
                 &mut answered,
             );
+            if paste_sender.is_some()
+                && super::session_picker::screen_contains(
+                    &bytes,
+                    80,
+                    24,
+                    "Pasted Content 9216 chars",
+                )
+            {
+                paste_sender.take().unwrap().send(()).unwrap();
+            }
             while next < patterns.len() {
                 let Some(matched) =
                     crate::process::pty_text_matches(&bytes[search_from..], patterns[next]).next()
@@ -497,6 +517,12 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 .0,
             2
         );
+        let pasted = format!("@not-admitted /exit {}", "p".repeat(9196));
+        assert_eq!(pasted.len(), 9 * 1024);
+        write_input(&input, format!("\x1b[200~{pasted}\x1b[201~").as_bytes());
+        paste_ready
+            .recv_timeout(Duration::from_secs(10))
+            .expect("chip rendered before the Run settles");
     }
     match exit {
         ActiveExit::ProviderFailure => {
@@ -807,7 +833,7 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                 }
         );
         if expect_draft {
-            write_input(&input, b"\x1b[3~\r");
+            write_input(&input, b"\x1b[D\x1b[3~\x1b[3~\r");
             for expected in [7, 8] {
                 assert_eq!(
                     stages
@@ -990,6 +1016,10 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     }
     assert!(!transcript.contains("Answer:"));
     assert!(!transcript.contains("OMITTED_CANARY"));
+    assert!(
+        !transcript.contains("@not-admitted"),
+        "unsent payload stays collapsed and undisclosed"
+    );
     assert!(!transcript.contains("test-key"));
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
@@ -1027,6 +1057,14 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
     let view = SessionView::replay(session_id, &events)
         .expect("strict replay")
         .expect("Session");
+    assert!(
+        events.iter().all(|event| !event
+            .event
+            .payload()
+            .expect("payload")
+            .contains("@not-admitted")),
+        "unsubmitted paste never enters the journal"
+    );
     assert_eq!(view.runs.len(), 1);
     assert_eq!(
         view.runs[0].status,

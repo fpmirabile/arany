@@ -1229,12 +1229,14 @@ async fn invalid_last_assignment_rejects_the_whole_plan_without_spawns_or_repair
                     ..
                 }
             )));
-            assert!(
-                view.runs[0].agents[0]
-                    .provider_calls
-                    .iter()
-                    .all(|call| { call.disposition == ProviderCallDisposition::InvalidResponse })
-            );
+            assert_eq!(view.runs[0].agents[0].provider_calls.len(), 3);
+            assert!(view.runs[0].agents[0].provider_calls.iter().all(|call| {
+                call.disposition == ProviderCallDisposition::Rejected
+                    && call.failure_reason == Some(arany::ProviderFailureReason::ProposalRefused)
+                    && call.refusal.as_ref().is_some_and(|refusal| {
+                        refusal.cause == arany::ProposalRefusalCause::DelegateInvalid
+                    })
+            }));
             assert_eq!(view.runs[0].failure, Some(arany::RunFailure::RefusalLimit));
         }
     }

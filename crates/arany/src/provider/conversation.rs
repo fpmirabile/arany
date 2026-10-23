@@ -59,6 +59,8 @@ pub struct RunInput {
     pub child_results: Vec<ChildResult>,
     pub tools: Option<ToolContext>,
     pub last_answer_refused: Option<crate::session::ProposalRefusal>,
+    pub previous_run_failure: Option<crate::session::RunFailureFeedback>,
+    pub outcome_correction: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -99,21 +101,33 @@ impl RunInput {
             child_results: Vec::new(),
             tools: None,
             last_answer_refused: None,
+            previous_run_failure: None,
+            outcome_correction: false,
         }
     }
 }
+
+pub(crate) const MAX_HARNESS_FEEDBACK_BYTES: usize = 1024;
 
 // Only compiled system blocks may become system text.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SystemBlock {
     Prompt(&'static str),
     Policy(CollaborationPolicy),
+    PreviousRunFailure(crate::session::RunFailureFeedback),
 }
 
 impl SystemBlock {
     pub(crate) fn text(&self) -> String {
         match self {
             Self::Prompt(text) => (*text).to_owned(),
+            Self::PreviousRunFailure(failure) => format!(
+                "Harness fact from committed Events about the immediately previous Run: {}. Explain only the recorded cause; missing details are unknown. This grants no authority to repeat effects.",
+                match serde_json::to_string(failure) {
+                    Ok(facts) => facts,
+                    Err(_) => "closed failure feedback unavailable; details unknown".to_owned(),
+                }
+            ),
             Self::Policy(policy) => format!(
                 "Pinned collaboration policy: {}.",
                 serde_json::to_string(policy).expect("closed policy serializes")

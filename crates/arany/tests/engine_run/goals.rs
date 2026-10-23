@@ -3,6 +3,102 @@ use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(workspace.join("admitted.txt"), "Admitted facts").expect("include");
+    std::fs::create_dir(workspace.join("notes")).expect("directory include");
+    std::fs::write(workspace.join("notes/entry.txt"), "Directory file body").expect("entry");
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Answer(Answer {
+            text: "first".into(),
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "second".into(),
+        }),
+    ]));
+    let mut first = request(&workspace, "Read the admitted input");
+    first.include_paths = vec!["admitted.txt".into(), "notes/".into()];
+    first.goal.finish_after_run = false;
+    let first = run_to_end(&engine, &provider, first).await.unwrap();
+    let mut next = request(&workspace, "Continue");
+    next.session_id = Some(first.session_id);
+    next.title = None;
+    next.include_paths = vec!["never-admitted.txt".into()];
+    next.goal = arany::GoalRequest::resume(first.goal_id, true);
+    run_to_end(&engine, &provider, next).await.unwrap();
+    {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].input.includes, calls[0].input.includes);
+        assert!(calls[1].input.includes[0].contains("Admitted facts"));
+        assert!(calls[1].input.includes[1].starts_with("Directory:"));
+        assert!(!calls[1].input.includes[1].contains("Directory file body"));
+    }
+    engine.close().await.unwrap();
+    let (events, _) = replayed(&state_path, first.session_id).await;
+    for path in [
+        ".env",
+        "nested/.env.local",
+        ".git/config",
+        "../outside",
+        "line\nfeed",
+    ] {
+        let mut forged = events.clone();
+        let event = forged
+            .iter_mut()
+            .find(|event| matches!(event.event, Event::GoalStarted { .. }))
+            .unwrap();
+        if let Event::GoalStarted { include_paths, .. } = &mut event.event {
+            *include_paths = Some(vec![path.into()]);
+        }
+        assert!(
+            event.event.payload().is_err(),
+            "protected recorded path {path:?}"
+        );
+        assert!(SessionView::replay(first.session_id, &forged).is_err());
+    }
+}
+
+#[tokio::test]
+async fn objective_plus_includes_overflow_has_a_typed_pre_admission_error() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    let component = "\"".repeat(170);
+    let relative = format!("{component}/{component}/{component}");
+    let path = workspace.join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "").unwrap();
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+    let mut input = request(&workspace, &"\0".repeat(64 * 1024));
+    input.include_paths = vec![relative.into(); 16];
+    let error = run_to_end(&engine, &provider, input).await.unwrap_err();
+    assert!(matches!(error, EngineError::GoalInputTooLarge), "{error:?}");
+    assert_eq!(error.to_string(), "objective plus includes too large");
+    assert!(provider.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+    assert!(
+        arany::list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn budget_incident_path_distinguishes_failed_reads_from_refused_next_actions() {
     for (case, calls, tokens, unknown, expected) in [
         ("calls", Some(3), None, false, Some(arany::GoalLimit::Calls)),
@@ -1330,7 +1426,9 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     )
     .expect("first engine");
     let mut first = request(&workspace, "Ship the migration");
-    first.include_paths.clear();
+    std::fs::write(workspace.join("admitted.txt"), "Original admitted input").expect("include");
+    first.include_paths = vec!["admitted.txt".into()];
+    first.objective = "Ship the migration; literal @never-admit.txt".into();
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
             max_provider_calls: Some(1),
@@ -1398,10 +1496,23 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         Err(EngineError::GoalNotContinuable)
     ));
 
+    let mut changed = continue_request(initial.goal_id);
+    changed.include_paths = vec!["never-admit.txt".into()];
+    assert!(matches!(
+        run_to_end(&engine, &provider, changed).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    let requests = Arc::clone(&provider.requests);
     let continued = run_to_end(&engine, &provider, continue_request(initial.goal_id))
         .await
         .expect("continued Goal Run");
     assert_ne!(continued.goal_id, initial.goal_id);
+    {
+        let calls = requests.lock().expect("requests");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input.includes.len(), 1);
+        assert!(calls[0].input.includes[0].contains("Original admitted input"));
+    }
     assert!(matches!(
         run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
         Err(EngineError::GoalNotContinuable)
@@ -1422,7 +1533,12 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     assert_eq!(old.status, arany::GoalStatus::Failed);
     assert_eq!(old.run_ids.len(), 1);
     assert_eq!(new.continues, Some(initial.goal_id));
-    assert_eq!(new.objective, "Ship the migration");
+    assert_eq!(
+        new.objective,
+        "Ship the migration; literal @never-admit.txt"
+    );
+    assert_eq!(new.include_paths, Some(vec!["admitted.txt".into()]));
+    assert_eq!(old.include_paths, new.include_paths);
     assert_eq!(new.budget.max_provider_calls, Some(4));
     assert_eq!(new.status, arany::GoalStatus::Completed);
     assert_eq!(new.run_ids.len(), 1);
@@ -1845,6 +1961,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
@@ -1933,155 +2050,172 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
 }
 
 #[tokio::test]
-async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume() {
+async fn exhausted_crashed_goal_closes_only_when_its_includes_are_known() {
     use std::os::unix::fs::MetadataExt;
 
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("workspace");
-    let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
-    let identity = WorkspaceIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    };
-    let state_path = temp.path().join("state");
-    let session_id = SessionId::new();
-    let (goal_id, run_id, agent_run_id) =
-        (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
-    let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
-    // The process died inside the only admitted Provider call: the Run is journaled Active.
-    let crashed = [
-        Event::SessionStarted {
-            title: "Crashed Goal".into(),
-            workspace_identity: identity,
-        },
-        Event::GoalStarted {
-            goal_id,
-            phase: arany::GoalPhase::Implementation,
-            autonomous: false,
-            resource_settings: arany::ToolResourceSettings::default(),
-            objective: "Use the only Provider call".into(),
-            workspace_identity: identity,
-            budget: arany::GoalBudget {
-                max_provider_calls: Some(1),
-                ..arany::GoalBudget::default()
+    for includes_known in [true, false] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
+        let identity = WorkspaceIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let state_path = temp.path().join("state");
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) =
+            (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
+        let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
+        // The process died inside the only admitted Provider call: the Run is journaled Active.
+        let crashed = [
+            Event::SessionStarted {
+                title: "Crashed Goal".into(),
+                workspace_identity: identity,
             },
-            continues: None,
-        },
-        Event::GoalRunLinked {
-            goal_id,
-            run_id,
-            phase: arany::GoalPhase::Implementation,
-        },
-        Event::MessageAccepted {
-            skill: None,
-            run_id,
-            text: "Use the only Provider call".into(),
-            images: Vec::new(),
-        },
-        Event::RunStarted {
-            run_id,
-            config: arany::RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
-                provider: "scripted".into(),
-                model: "scripted-model".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
-                workspace_device: identity.device,
-                workspace_inode: identity.inode,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                launch_directory: String::new(),
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+            Event::GoalStarted {
+                include_paths: includes_known.then(Vec::new),
+                goal_id,
+                phase: arany::GoalPhase::Implementation,
+                autonomous: false,
+                resource_settings: arany::ToolResourceSettings::default(),
+                objective: "Use the only Provider call".into(),
+                workspace_identity: identity,
+                budget: arany::GoalBudget {
+                    max_provider_calls: Some(1),
+                    ..arany::GoalBudget::default()
+                },
+                continues: None,
             },
-            active_deadline_ms: None,
-        },
-        Event::AgentSpawned {
-            profile: None,
-            assignment: None,
-            definition: None,
-            run_id,
-            agent_run_id,
-            role: arany::AgentRole::Primary,
-            ordinal: 0,
-            objective: None,
-            grant: None,
-        },
-        Event::GoalProviderCallReserved {
-            goal_id,
-            run_id,
-            agent_run_id,
-            active_ceiling_ms: 0,
-        },
-    ];
-    for event in crashed {
-        store
-            .append(session_id, event)
-            .await
-            .expect("crash-left journal prefix");
+            Event::GoalRunLinked {
+                goal_id,
+                run_id,
+                phase: arany::GoalPhase::Implementation,
+            },
+            Event::MessageAccepted {
+                skill: None,
+                run_id,
+                text: "Use the only Provider call".into(),
+                images: Vec::new(),
+            },
+            Event::RunStarted {
+                run_id,
+                config: arany::RunConfig {
+                    supervisor: None,
+                    worker_policy: None,
+                    agent_definitions: None,
+                    roster: None,
+                    providers: None,
+                    provider: "scripted".into(),
+                    model: "scripted-model".into(),
+                    effort: None,
+                    custom_profile_provenance: None,
+                    saved_api_account_id: None,
+                    chatgpt_provenance: None,
+                    output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                    context_window_tokens: None,
+                    policy: CollaborationPolicy::Single,
+                    output_token_cap: 4096,
+                    provider_concurrency: 1,
+                    workspace_device: identity.device,
+                    workspace_inode: identity.inode,
+                    user_instruction_digest: None,
+                    instruction_sources: Vec::new(),
+                    launch_directory: String::new(),
+                    include_digests: Vec::new(),
+                    history_run_ids: Vec::new(),
+                    excluded_history_runs: 0,
+                    context_usage: None,
+                    compaction_event_sequence: None,
+                    compaction_content_digest: None,
+                    tool_policy: None,
+                },
+                active_deadline_ms: None,
+            },
+            Event::AgentSpawned {
+                profile: None,
+                assignment: None,
+                definition: None,
+                run_id,
+                agent_run_id,
+                role: arany::AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                grant: None,
+            },
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            },
+        ];
+        for event in crashed {
+            store
+                .append(session_id, event)
+                .await
+                .expect("crash-left journal prefix");
+        }
+        let before = store.load_session(session_id).await.expect("seed Events");
+        store.close().await.expect("seed Store shutdown");
+
+        let provider = ScriptedProvider::new(vec![finish_with("Unexpected resumed call")]);
+        let requests = Arc::clone(&provider.requests);
+        let provider = Arc::new(provider);
+        let engine = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("reopened state"),
+            EngineConfig::default(),
+        )
+        .expect("Engine");
+        let mut resumed = request(&workspace, "Resume the crashed Goal");
+        resumed.session_id = Some(session_id);
+        resumed.title = None;
+        resumed.include_paths.clear();
+        resumed.goal = arany::GoalRequest::resume(goal_id, true);
+        let result = run_to_end(&engine, &provider, resumed).await;
+        assert!(requests.lock().expect("Provider requests").is_empty());
+        if !includes_known {
+            assert!(
+                matches!(result, Err(EngineError::GoalIncludesUnavailable)),
+                "unknown includes take precedence over budget closure: {result:?}"
+            );
+            engine.close().await.expect("Engine shutdown");
+            let (after, view) = replayed(&state_path, session_id).await;
+            assert_eq!(
+                after, before,
+                "unknown includes refuse without changing the journal"
+            );
+            assert_eq!(view.goal(goal_id).expect("Goal").include_paths, None);
+            assert_eq!(view.interrupted_goal_id(), Some(goal_id));
+            continue;
+        }
+        assert!(
+            matches!(result, Err(EngineError::GoalBudgetExhausted)),
+            "the exhausted crash-left Goal reports its budget, not a store or replay error"
+        );
+
+        let mut again = request(&workspace, "Resume the closed Goal");
+        again.session_id = Some(session_id);
+        again.title = None;
+        again.include_paths.clear();
+        again.goal = arany::GoalRequest::resume(goal_id, true);
+        assert!(
+            matches!(
+                run_to_end(&engine, &provider, again).await,
+                Err(EngineError::GoalUnavailable)
+            ),
+            "a closed Goal is not resumable"
+        );
+        engine.close().await.expect("Engine shutdown");
+
+        let (_, view) = replayed(&state_path, session_id).await;
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, arany::GoalStatus::Failed);
+        assert!(goal.report.is_some(), "closed Goal keeps its report");
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.interrupted_goal_id(), None);
     }
-    store.close().await.expect("seed Store shutdown");
-
-    let provider = ScriptedProvider::new(Vec::new());
-    let requests = Arc::clone(&provider.requests);
-    let provider = Arc::new(provider);
-    let engine = engine_support::open(
-        StateRoot::open_existing(&state_path).expect("reopened state"),
-        EngineConfig::default(),
-    )
-    .expect("Engine");
-    let mut resumed = request(&workspace, "Resume the crashed Goal");
-    resumed.session_id = Some(session_id);
-    resumed.title = None;
-    resumed.include_paths.clear();
-    resumed.goal = arany::GoalRequest::resume(goal_id, true);
-    assert!(
-        matches!(
-            run_to_end(&engine, &provider, resumed).await,
-            Err(EngineError::GoalBudgetExhausted)
-        ),
-        "the exhausted crash-left Goal reports its budget, not a store or replay error"
-    );
-    assert!(requests.lock().expect("Provider requests").is_empty());
-
-    let mut again = request(&workspace, "Resume the closed Goal");
-    again.session_id = Some(session_id);
-    again.title = None;
-    again.include_paths.clear();
-    again.goal = arany::GoalRequest::resume(goal_id, true);
-    assert!(
-        matches!(
-            run_to_end(&engine, &provider, again).await,
-            Err(EngineError::GoalUnavailable)
-        ),
-        "a closed Goal is not resumable"
-    );
-    engine.close().await.expect("Engine shutdown");
-
-    let (_, view) = replayed(&state_path, session_id).await;
-    let goal = view.goal(goal_id).expect("Goal");
-    assert_eq!(goal.status, arany::GoalStatus::Failed);
-    assert!(goal.report.is_some(), "closed Goal keeps its report");
-    assert_eq!(view.runs.len(), 1);
-    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
-    assert_eq!(view.interrupted_goal_id(), None);
 }
 
 struct PendingChildren {
@@ -3529,9 +3663,9 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         dispositions,
         [
             ProviderCallDisposition::ToolRequested,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
         ],
         "each unnarrowable plan call is refused and never recorded"
     );
@@ -3718,6 +3852,304 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 }
 
 #[tokio::test]
+async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_refusal_limit() {
+    for (cwd, attempts, valid) in [
+        ("docs/specs", 1, true),
+        ("./doc/spec", 1, false),
+        ("docs/specs/", 1, false),
+        ("./docs/specs", 1, false),
+        ("../outside", 1, false),
+        ("./doc/spec", 3, false),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        std::fs::create_dir_all(workspace.join("docs/specs")).expect("directory");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let command = arany::ToolCall::Command {
+            program: "rg".into(),
+            args: vec!["--glob=*.md,spec.md".into(), "x".repeat(543)],
+            cwd: cwd.into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            std::iter::once(crate::tool_outcome(facts_read()))
+                .chain((0..attempts).map(|_| crate::tool_outcome(command.clone())))
+                .chain([finish_with("The proposal was explained")])
+                .collect(),
+        ));
+        let mut input = request(&workspace, "Read, search the docs, and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("known refusal continuation");
+        let limited = attempts == 3;
+        assert_eq!(
+            outcome.run.status,
+            if limited {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            }
+        );
+        engine.close().await.expect("shutdown");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(
+            run.failure,
+            limited.then_some(arany::RunFailure::RefusalLimit)
+        );
+        assert_eq!(
+            run.tools.len(),
+            if valid { 2 } else { 1 },
+            "invalid arguments create no effect intent"
+        );
+        assert_eq!(
+            run.agents[0].provider_calls[1].disposition,
+            if valid {
+                ProviderCallDisposition::ToolRequested
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
+        if !valid {
+            assert_eq!(run.agents[0].provider_calls[1].output_tokens, Some(8));
+            assert!(
+                run.agents[0].provider_calls[1..1 + attempts]
+                    .iter()
+                    .all(|call| {
+                        call.refusal.as_ref().is_some_and(|refusal| {
+                            refusal.cause == arany::ProposalRefusalCause::InvalidPath
+                        }) && call.failure_reason
+                            == Some(arany::ProviderFailureReason::ProposalRefused)
+                    })
+            );
+            assert!(events.iter().all(|event| !matches!(&event.event, Event::ToolStarted { intent, .. } if intent.call == command)));
+            let requests = provider.requests.lock().expect("requests");
+            let step = &requests[2].input.tools.as_ref().expect("Tools").steps[1];
+            assert_eq!(
+                step.refusal.as_ref().expect("refused Tool result").cause,
+                arany::ProposalRefusalCause::InvalidPath
+            );
+            assert!(step.observations.is_empty());
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.input.outcome_correction),
+                "argument refusal does not spend the wire correction"
+            );
+            assert_eq!(requests.len(), if limited { 4 } else { 3 });
+        }
+        if limited {
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let recovered = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new user turn");
+            assert_eq!(recovered.run.status, RunStatus::Finished);
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, outcome.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let failure = requests[4]
+                .input
+                .previous_run_failure
+                .expect("committed failure cause");
+            assert_eq!(
+                failure.refusal_cause,
+                Some(arany::ProposalRefusalCause::InvalidPath)
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn outcome_correction_notice_is_spent_after_the_corrective_tool_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let provider = ScriptedProvider::new(vec![
+        finish_with("rejected placeholder"),
+        crate::tool_outcome(facts_read()),
+        finish_with("The answer after correction"),
+    ]);
+    *provider
+        .responses
+        .lock()
+        .expect("responses")
+        .front_mut()
+        .expect("first") = Err(ProviderError::InvalidOutcomeContract);
+    let provider = Arc::new(provider);
+    let mut input = request(&workspace, "Read the facts and answer");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("corrective Tool continuation");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("shutdown");
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let requests = provider.requests.lock().expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.input.outcome_correction)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+    assert!(provider.responses.lock().expect("responses").is_empty());
+}
+
+#[tokio::test]
+async fn malformed_outcomes_get_one_journaled_correction_and_keep_the_failure_cause() {
+    for failures in [1, 2] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut script = vec![crate::tool_outcome(facts_read())];
+        script.extend((0..failures).map(|_| finish_with("rejected placeholder")));
+        script.push(finish_with("The answer from the valid response"));
+        let provider = ScriptedProvider::new(script);
+        for response in provider
+            .responses
+            .lock()
+            .expect("responses")
+            .iter_mut()
+            .skip(1)
+            .take(failures)
+        {
+            *response = Err(ProviderError::InvalidOutcomeContract);
+        }
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Read the facts and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded outcome correction");
+        engine.close().await.expect("close before replay");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(run.tools.len(), 1, "the read is never redispatched");
+        assert_eq!(run.agents[0].provider_calls.len(), 3);
+        assert_eq!(
+            run.failure,
+            (failures == 2).then_some(arany::RunFailure::ProviderCall)
+        );
+        assert_eq!(
+            run.assistant_message.as_deref(),
+            (failures == 1).then_some("The answer from the valid response")
+        );
+        for end in 1..=events.len() {
+            SessionView::replay(outcome.session_id, &events[..end])
+                .expect("every committed prefix replays");
+        }
+        let calls = &run.agents[0].provider_calls;
+        assert_eq!(
+            calls[1].failure_reason,
+            Some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        assert_eq!(
+            calls[2].failure_reason,
+            (failures == 2).then_some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert_eq!(requests.len(), 3);
+            assert!(!requests[1].input.outcome_correction);
+            assert!(requests[2].input.outcome_correction);
+            assert_eq!(
+                requests[1].input.tools.as_ref().expect("Tools").steps[0].observations,
+                requests[2].input.tools.as_ref().expect("Tools").steps[0].observations,
+                "settled observations survive correction"
+            );
+        }
+        if failures == 2 {
+            let refusal = events.iter().position(|event| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)))
+                .expect("first malformed call");
+            let second = events.iter().enumerate().skip(refusal + 1).find_map(|(index, event)| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)).then_some(index))
+                .expect("second malformed call");
+            let mut forbidden = events[..=second].to_vec();
+            let mut extra = forbidden
+                .iter()
+                .rev()
+                .find(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .expect("prior admitted reservation")
+                .clone();
+            extra.sequence = forbidden.last().expect("last Event").sequence + 1;
+            forbidden.push(extra);
+            assert!(
+                SessionView::replay(outcome.session_id, &forbidden).is_err(),
+                "replay refuses a third attempt"
+            );
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let follow_up = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new turn");
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, follow_up.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let feedback = requests[3]
+                .input
+                .previous_run_failure
+                .expect("prior failure after Tools");
+            assert_eq!(
+                feedback.stop,
+                arany::RunStop::Failed(arany::RunFailure::ProviderCall)
+            );
+            assert_eq!(
+                feedback.provider_failure,
+                Some(arany::ProviderFailureReason::OutcomeContract)
+            );
+            assert!(
+                !requests[3].input.outcome_correction,
+                "a new Run has its own correction bound"
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
+    }
+}
+
+#[tokio::test]
 async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "original");
@@ -3846,8 +4278,8 @@ async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file(
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
-    // 71 bytes of the 37,768 admitted are the rendered AGENTS.md heading and wrapper.
-    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_697)).expect("instructions");
+    // 71 bytes of the 36,744 admitted are the rendered AGENTS.md heading and wrapper.
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(36_673)).expect("instructions");
     std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
     std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
     std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");
@@ -6430,6 +6862,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             workspace_identity: identity,
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             phase: arany::GoalPhase::Implementation,
             autonomous: false,
@@ -8176,7 +8609,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let page = format!("{}\n", "x".repeat(99)).repeat(130);
     let workspace = facts_workspace(temp.path(), &page);
     for name in ["big1.txt", "big2.txt"] {
-        std::fs::write(workspace.join(name), "b".repeat(72 * 1024)).expect("include");
+        std::fs::write(workspace.join(name), "b".repeat(68 * 1024)).expect("include");
     }
     let state_path = temp.path().join("state");
     let command = arany::ToolCall::Command {
@@ -8223,7 +8656,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         .as_ref()
         .unwrap()
         .max_context_bytes;
-    assert!((220 * 1024..=224 * 1024).contains(&allowance));
+    assert!((228 * 1024..=232 * 1024).contains(&allowance));
     assert_eq!(run.tools.len(), 5);
     assert_eq!(run.tools[4].intent.call, command);
     assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
@@ -8233,6 +8666,14 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
+    assert!(requests.iter().all(|request| {
+        !request.input.outcome_correction
+            && request.input.previous_run_failure.is_none()
+            && request.input.last_answer_refused.is_none()
+    }));
+    assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
+    assert!(provider.compact_responses.lock().unwrap().is_empty());
+    assert!(provider.responses.lock().unwrap().is_empty());
     let context = requests[4].input.tools.as_ref().unwrap();
     assert_eq!(context.observation_count(), 4);
     assert!(context.steps[0].cleared);
@@ -8241,8 +8682,25 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let used = arany::test_support::tool_context_bytes(&uncleared);
     assert!((52 * 1024..=64 * 1024).contains(&used));
     let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
-    assert!(used + reserve > allowance as usize);
-    assert!(arany::test_support::tool_context_bytes(context) + reserve <= allowance as usize);
+    let margin = 2 * 1024;
+    assert!(used + reserve > allowance as usize + margin);
+    assert!(
+        arany::test_support::tool_context_bytes(context) + reserve + margin <= allowance as usize
+    );
+    let after_command = requests[5].input.tools.as_ref().unwrap();
+    assert_eq!(
+        after_command
+            .steps
+            .iter()
+            .filter(|step| step.cleared)
+            .count(),
+        1
+    );
+    assert!(
+        arany::test_support::tool_context_bytes(after_command) + reserve + margin
+            <= allowance as usize,
+        "the denied Command must leave continuation room on both platforms"
+    );
     let clearing = events
         .iter()
         .position(|event| {

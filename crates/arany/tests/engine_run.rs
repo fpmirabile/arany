@@ -81,7 +81,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 content: "hello".into(),
             })
         };
-        let attempts = if known_reason { 1 } else { 3 };
+        let attempts = if known_reason { 2 } else { 3 };
         let provider = ScriptedProvider::new(
             (0..attempts)
                 .map(|_| refused_write())
@@ -91,12 +91,15 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .collect(),
         );
         if known_reason {
-            *provider
+            for response in provider
                 .responses
                 .lock()
                 .expect("responses")
-                .front_mut()
-                .expect("first response") = Err(ProviderError::InvalidOutcomeContract);
+                .iter_mut()
+                .take(attempts)
+            {
+                *response = Err(ProviderError::InvalidOutcomeContract);
+            }
         }
         let observed = provider.requests.clone();
         let provider = Arc::new(provider);
@@ -125,7 +128,14 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .any(|event| matches!(event.event, Event::ToolStarted { .. }))
         );
         let call = &view.runs[0].agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            call.disposition,
+            if known_reason {
+                ProviderCallDisposition::InvalidResponse
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
         assert_eq!(
             call.failure_reason,
             Some(if known_reason {
@@ -155,6 +165,15 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         assert_eq!(requests.len(), attempts + 1);
         assert!(provider.responses.lock().expect("responses").is_empty());
         let follow_up_request = &requests[attempts];
+        let feedback = follow_up_request
+            .input
+            .previous_run_failure
+            .expect("committed failure cause");
+        assert_eq!(
+            feedback.stop,
+            arany::RunStop::Failed(first.run.failure.expect("failed Run"))
+        );
+        assert_eq!(feedback.provider_failure, call.failure_reason);
         assert_eq!(
             follow_up_request.input.objective,
             "why couldn't you write it?"
@@ -175,7 +194,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 "last_call": if known_reason {
                     serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
                 } else {
-                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_arguments"}})
+                    serde_json::json!({"disposition": "rejected", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_path"}})
                 },
             })
         );
@@ -1149,6 +1168,7 @@ fn an_earlier_prestart_interruption_does_not_block_later_compaction_or_fork() {
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Unfinished question".into(),
                     workspace_identity,
@@ -1606,6 +1626,7 @@ fn database_capacity_is_admitted_before_provider_usage() {
         };
         for policy in [CollaborationPolicy::Single, CollaborationPolicy::Team { max_active_children: 8 }] {
             let mut attempt = next();
+            attempt.objective = "large paste ".repeat(800);
             attempt.policy = policy;
             assert!(matches!(run_to_end(&engine, &provider, attempt).await, Err(EngineError::Store(arany::StoreError::StorageFull))));
             assert!(calls.lock().unwrap().is_empty(), "database capacity rejection must precede inference");
@@ -1822,7 +1843,12 @@ fn bounded_answer_output_must_fit_canonical_json() {
             if !accepted {
                 assert!(view.runs[0].agents.iter().any(|agent| {
                     agent.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::InvalidResponse
+                        call.disposition
+                            == if child {
+                                ProviderCallDisposition::InvalidResponse
+                            } else {
+                                ProviderCallDisposition::Rejected
+                            }
                     })
                 }));
             }
@@ -1941,7 +1967,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
             outcome.run.agents[0]
                 .provider_calls
                 .iter()
-                .all(|call| { call.disposition == ProviderCallDisposition::InvalidResponse })
+                .all(|call| { call.disposition == ProviderCallDisposition::Rejected })
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -2019,7 +2045,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
         assert_eq!(outcome.run.agents[0].provider_calls.len(), 3);
         assert_eq!(
             outcome.run.agents[0].provider_calls[0].disposition,
-            ProviderCallDisposition::InvalidResponse
+            ProviderCallDisposition::Rejected
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -3419,7 +3445,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
                 outcome.run.agents[0]
                     .provider_calls
                     .iter()
-                    .all(|call| call.disposition == ProviderCallDisposition::InvalidResponse)
+                    .all(|call| call.disposition == ProviderCallDisposition::Rejected)
             );
             engine.close().await.expect("engine shutdown");
         }
@@ -3525,7 +3551,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         let calls = &outcome.run.agents[0].provider_calls;
         assert_eq!(calls.len(), 4);
         assert!(calls[1..].iter().all(|call| {
-            call.disposition == ProviderCallDisposition::InvalidResponse
+            call.disposition == ProviderCallDisposition::Rejected
                 && call.phase == AgentPhase::RootSynthesis
         }));
         assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
@@ -3818,7 +3844,7 @@ fn workspace_limits_and_state_overlap_fail_before_provider_disclosure() {
             .expect("first maximum include");
         std::fs::write(workspace.join("notes/b.txt"), vec![b'b'; 128 * 1024])
             .expect("second maximum include");
-        let mut too_much_context = request(&workspace, "Question");
+        let mut too_much_context = request(&workspace, &"large paste ".repeat(800));
         too_much_context.include_paths = vec!["notes/a.txt".into(), "notes/b.txt".into()];
         too_much_context.policy = CollaborationPolicy::Auto {
             max_active_children: 3,
@@ -4168,6 +4194,7 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         let state_path = temp.path().join("state");
         let provider =
             ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer { text: "ok".into() })]);
+        let requests = Arc::clone(&provider.requests);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
@@ -4175,14 +4202,43 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
         )
         .expect("engine");
         let mut next = request(&workspace, &"\0".repeat(64 * 1024));
+        let objective = next.objective.clone();
         next.images = vec![image_fixture(arany::MAX_IMAGE_BYTES)];
+        let images = next.images.clone();
         let outcome = run_to_end(&engine, &provider, next)
             .await
             .expect("maximal objective and image Run");
         assert_eq!(outcome.run.status, RunStatus::Finished);
+        assert_eq!(outcome.run.objective, objective);
+        assert_eq!(outcome.run.images, images);
+        {
+            let calls = requests.lock().expect("requests");
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].input.objective, objective);
+            assert_eq!(
+                calls[0]
+                    .input
+                    .images
+                    .iter()
+                    .map(|value| value.image.clone())
+                    .collect::<Vec<_>>(),
+                images
+            );
+        }
         let session_id = outcome.session_id;
         engine.close().await.expect("engine shutdown");
 
+        std::fs::remove_file(workspace.join("notes/facts.txt")).expect("remove original include");
+        let reopened = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("state"),
+            EngineConfig::default(),
+        )
+        .expect("reopened Engine");
+        let fork = reopened
+            .fork_session(session_id, workspace.clone(), None)
+            .await
+            .expect("fork canonical history without inputs");
+        reopened.close().await.expect("close reopened Engine");
         let store = Store::open(StateRoot::admit(&state_path).expect("state readmission"))
             .expect("reopened store");
         let events = store
@@ -4201,6 +4257,20 @@ fn maximal_escaped_objective_with_the_largest_image_fits_its_events() {
             (accepted, started),
             (1, 1),
             "the maximal Run is durably admitted and replayable"
+        );
+        for id in [session_id, fork] {
+            let view = store
+                .load_view(id)
+                .await
+                .expect("strict replay")
+                .expect("Session");
+            assert_eq!(view.runs[0].objective, objective);
+            assert_eq!(view.runs[0].images, images);
+        }
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            1,
+            "reopen and fork never call Provider"
         );
         store.close().await.expect("store shutdown");
     });
@@ -5268,6 +5338,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             expected_phases.push(phase);
                         }
                     }
+                    if failure_reason == Some(arany::ProviderFailureReason::OutcomeContract) && !cancel {
+                        responses.push_back(Err(ProviderError::InvalidOutcomeContract));
+                        expected_phases.push(phase);
+                    }
                     if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
                             responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
@@ -5325,6 +5399,12 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     assert_eq!(record.phase, phase);
                     assert_eq!(record.disposition, call_disposition);
                     assert_eq!(record.failure_reason, failure_reason);
+                    if failure_reason == Some(arany::ProviderFailureReason::ProposalRefused) {
+                        assert_eq!(record.refusal.as_ref().expect("semantic refusal").cause,
+                            arany::ProposalRefusalCause::AnswerInvalid);
+                    }
+                    assert!(provider.responses.lock().expect("responses").is_empty(),
+                        "{phase:?}, {case}, cancellation {cancel}");
                     assert_eq!(record.response_id, None);
                     assert_eq!(record.input_tokens, None);
                     assert_eq!(
@@ -5880,7 +5960,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             }
         }
         let call = &run.agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(call.disposition, ProviderCallDisposition::Rejected);
         assert_eq!(
             call.failure_reason,
             Some(arany::ProviderFailureReason::ProposalRefused)

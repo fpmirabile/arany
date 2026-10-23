@@ -59,11 +59,13 @@ pub(crate) use events::{
     goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version,
 };
 pub(crate) use events::{
-    add_command_selection, expiring_intent_text, expiring_payload, intent_without_expiry,
-    pre_command_selection_payload, pre_git_write_payload, pre_glob_payload, pre_host_git_payload,
-    pre_host_payload, pre_multiedit_payload, pre_typed_prefix_payload, rebind_intent_pins,
-    replace_intent_pin, run_started_fits, run_started_v18_payload, run_started_v18_to_v19,
-    run_started_v19_payload, run_started_v19_to_v20,
+    add_command_selection, expiring_intent_text, expiring_payload, goal_started_v7_payload,
+    goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
+    pre_git_write_payload, pre_glob_payload, pre_host_git_payload, pre_host_payload,
+    pre_multiedit_payload, pre_typed_prefix_payload, provider_call_v18_payload,
+    provider_call_v18_to_v19, rebind_intent_pins, replace_intent_pin, run_started_fits,
+    run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
+    run_started_v19_to_v20,
 };
 pub(crate) use lineage::{PrefixHasher, PrefixRow, prefix_digest};
 #[cfg(test)]
@@ -85,7 +87,7 @@ pub(crate) use reducer::{
     ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
     private_criterion_evidence, private_failure, verification_passed, wave_settled,
 };
-pub use stop::{GoalLimit, RunStop, escape_status_text};
+pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionListItem {

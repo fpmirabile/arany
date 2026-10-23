@@ -468,7 +468,8 @@ pub fn unplanned_goal_metadata_bytes() -> u32 {
         facts,
     ))
     .expect("Goal metadata");
-    u32::try_from(encoded.len() + 8 * 1024 + 64).expect("bounded Goal metadata")
+    u32::try_from(encoded.len() + 8 * 1024 + 64 + crate::provider::MAX_HARNESS_FEEDBACK_BYTES)
+        .expect("bounded Goal metadata")
 }
 
 pub fn include_data(path: &str, text: &str) -> String {
@@ -660,7 +661,7 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
         (
             "invalid answer",
             Ok(ProviderOutcome::Answer(Answer { text: "".into() })),
-            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::Rejected,
             Some(crate::ProviderFailureReason::ProposalRefused),
         ),
         (
