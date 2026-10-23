@@ -7,8 +7,8 @@ use reqwest::{
     Client, Url,
     header::{self, HeaderValue},
 };
-use serde::{Deserialize, Deserializer, de};
-use std::{collections::HashSet, fmt, time::Duration};
+use serde::{Deserialize, Deserializer};
+use std::{collections::HashSet, time::Duration};
 
 const OPENAI_MODELS: &str = "https://api.openai.com/v1/models";
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
@@ -69,31 +69,12 @@ fn bounded_rows<'de, D>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    struct RowsVisitor;
-
-    impl<'de> de::Visitor<'de> for RowsVisitor {
-        type Value = Vec<CatalogRow>;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("at most 4096 model rows")
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let mut rows = Vec::new();
-            while let Some(row) = sequence.next_element::<CatalogRow>()? {
-                if rows.len() == MAX_MODELS {
-                    return Err(de::Error::custom("too many model rows"));
-                }
-                rows.push(row);
-            }
-            Ok(rows)
-        }
-    }
-
-    deserializer.deserialize_seq(RowsVisitor)
+    crate::validate::bounded_sequence::<D, CatalogRow, CatalogRow, MAX_MODELS>(
+        deserializer,
+        format_args!("at most {MAX_MODELS} model rows"),
+        "too many model rows",
+        |_| Ok(()),
+    )
 }
 
 pub async fn list_native_models(profile: &str) -> Result<Vec<ModelEntry>, ProviderError> {

@@ -5,11 +5,8 @@ use super::fs;
 use super::types::{MAX_SKILLS, MAX_SNAPSHOT_BYTES, ToolCall, valid_name, valid_relative};
 use super::types::{MAX_TOOL_RESULT_BYTES, hex_digest};
 use cap_std::fs::Dir;
-use serde::de::{DeserializeSeed, Error, MapAccess, SeqAccess, Visitor};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::fmt;
 use std::path::Path;
 
 pub(super) fn valid(call: &ToolCall) -> bool {
@@ -252,120 +249,6 @@ fn pin_files(
     Ok(())
 }
 
-struct Budget {
-    nodes: usize,
-    bytes: usize,
-    max_nodes: usize,
-    max_bytes: usize,
-    max_depth: usize,
-    count_keys: bool,
-}
-struct Bounded<'a> {
-    budget: &'a mut Budget,
-    depth: usize,
-}
-
-impl<'de> DeserializeSeed<'de> for Bounded<'_> {
-    type Value = Value;
-    fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
-        if self.depth > self.budget.max_depth || self.budget.nodes >= self.budget.max_nodes {
-            return Err(D::Error::custom("metadata limit"));
-        }
-        self.budget.nodes += 1;
-        deserializer.deserialize_any(self)
-    }
-}
-
-impl Bounded<'_> {
-    fn scalar<E: Error>(&mut self, value: &str) -> Result<(), E> {
-        self.budget.bytes = self
-            .budget
-            .bytes
-            .checked_add(value.len())
-            .ok_or_else(|| E::custom("metadata limit"))?;
-        if self.budget.bytes > self.budget.max_bytes {
-            return Err(E::custom("metadata limit"));
-        }
-        Ok(())
-    }
-}
-
-impl<'de> Visitor<'de> for Bounded<'_> {
-    type Value = Value;
-    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("bounded portable Skill metadata")
-    }
-    fn visit_str<E: Error>(mut self, value: &str) -> Result<Value, E> {
-        self.scalar(value)?;
-        Ok(json!(value))
-    }
-    fn visit_string<E: Error>(mut self, value: String) -> Result<Value, E> {
-        self.scalar(&value)?;
-        Ok(json!(value))
-    }
-    fn visit_bool<E: Error>(self, value: bool) -> Result<Value, E> {
-        Ok(json!(value))
-    }
-    fn visit_i64<E: Error>(self, value: i64) -> Result<Value, E> {
-        Ok(json!(value))
-    }
-    fn visit_u64<E: Error>(self, value: u64) -> Result<Value, E> {
-        Ok(json!(value))
-    }
-    fn visit_f64<E: Error>(self, value: f64) -> Result<Value, E> {
-        if value.is_finite() {
-            Ok(json!(value))
-        } else {
-            Err(E::custom("nonfinite metadata"))
-        }
-    }
-    fn visit_unit<E: Error>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_none<E: Error>(self) -> Result<Value, E> {
-        Ok(Value::Null)
-    }
-    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Value, A::Error> {
-        let mut values = Vec::new();
-        while let Some(value) = sequence.next_element_seed(Bounded {
-            budget: self.budget,
-            depth: self.depth + 1,
-        })? {
-            values.push(value);
-        }
-        Ok(Value::Array(values))
-    }
-    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Value, A::Error> {
-        let mut values = serde_json::Map::new();
-        let mut seen = BTreeSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(key.clone()) {
-                return Err(A::Error::custom("duplicate metadata key"));
-            }
-            self.budget.bytes = self
-                .budget
-                .bytes
-                .checked_add(key.len())
-                .ok_or_else(|| A::Error::custom("metadata limit"))?;
-            if self.budget.bytes > self.budget.max_bytes {
-                return Err(A::Error::custom("metadata limit"));
-            }
-            if self.budget.count_keys {
-                self.budget.nodes += 1;
-                if self.budget.nodes > self.budget.max_nodes {
-                    return Err(A::Error::custom("metadata limit"));
-                }
-            }
-            let value = map.next_value_seed(Bounded {
-                budget: self.budget,
-                depth: self.depth + 1,
-            })?;
-            values.insert(key, value);
-        }
-        Ok(Value::Object(values))
-    }
-}
-
 // Discovery reads this literal opt-out only, without evaluating YAML.
 pub(super) fn disables_model_invocation(bytes: &[u8]) -> bool {
     let Ok(text) = std::str::from_utf8(bytes) else {
@@ -468,19 +351,13 @@ pub(super) fn definition_document(bytes: &[u8]) -> Result<(Value, &str), ToolErr
     let yaml = frontmatter(text).ok_or(ToolError::Configuration)?;
     check_yaml_tokens(yaml)?;
     let mut documents = yaml_serde::Deserializer::from_str(yaml);
-    let mut budget = Budget {
-        count_keys: true,
-        nodes: 0,
-        bytes: 0,
-        max_nodes: 4096,
-        max_bytes: MAX_TOOL_RESULT_BYTES,
-        max_depth: 32,
-    };
-    let value = Bounded {
-        budget: &mut budget,
-        depth: 0,
-    }
-    .deserialize(documents.next().ok_or(ToolError::Configuration)?)
+    let value = crate::validate::deserialize_value_bounded(
+        documents.next().ok_or(ToolError::Configuration)?,
+        MAX_TOOL_RESULT_BYTES,
+        4096,
+        32,
+        true,
+    )
     .map_err(|_| ToolError::Configuration)?;
     if documents.next().is_some() || !value.is_object() {
         return Err(ToolError::Configuration);
@@ -505,26 +382,12 @@ pub(crate) fn parse_json_bounded(
     max_nodes: usize,
     max_depth: usize,
 ) -> Result<Value, ToolError> {
-    if bytes.len() > max_bytes {
-        return Err(ToolError::Limit);
-    }
-    let mut budget = Budget {
-        count_keys: false,
-        nodes: 0,
-        bytes: 0,
-        max_nodes,
-        max_bytes,
-        max_depth,
-    };
-    let mut decoder = serde_json::Deserializer::from_slice(bytes);
-    let value = Bounded {
-        budget: &mut budget,
-        depth: 0,
-    }
-    .deserialize(&mut decoder)
-    .map_err(|_| ToolError::Operation)?;
-    decoder.end().map_err(|_| ToolError::Operation)?;
-    Ok(value)
+    crate::validate::parse_json_bounded(bytes, max_bytes, max_nodes, max_depth).map_err(|error| {
+        match error {
+            crate::validate::JsonError::Limit => ToolError::Limit,
+            crate::validate::JsonError::Operation => ToolError::Operation,
+        }
+    })
 }
 
 #[cfg(test)]
