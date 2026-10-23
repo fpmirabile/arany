@@ -61,6 +61,7 @@ Open only the linked files whose triggers apply; they are not automatic imports.
 5. **No historical residue**: remove superseded code cleanly. Keep one current internal format at runtime without compatibility readers. Every change to a stored format version ships its migration step and fixture (enforced by a test); state older than the migration floor is archived intact and replaced with a fresh store with a notice. Reject, never silently alter, anything neither migratable nor archivable. External protocol support stays with its owning contract. Documentation describes the current system; git history records the old one.
 6. **Never inspect or print `.env`**: read `.env.example` only. Commands may load secrets without echoing them or dumping the process environment.
 7. **Unsafe Rust is exceptional**: keep `unsafe` isolated behind a safe interface, document its invariants, and require a dedicated review and test strategy.
+8. **Clean code shape**: name every limit, size, timeout, ratio and retry count once, beside its owner, and derive every other use from that constant, including user- and model-facing text. Extract shared logic into its owner instead of copying it across modules. Use domain types and enums for identities and states (Provider names, phases, dispositions) instead of raw strings or flag booleans. Keep functions single-purpose: a function past 80 lines, nesting past 4 levels or 5 parameters is a split signal to resolve or justify in review. [rust-clean-code](./agents/skills/rust-clean-code/SKILL.md) owns the detail.
 
 ## Auto-learning
 
