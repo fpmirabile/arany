@@ -6,9 +6,9 @@ use super::super::types::{
     ToolCall,
 };
 use super::{
-    CAPTURE_BYTES, Captured, MAX_GIT_RUNTIME, REF_BYTES, Repository, VIEW, environment, failure,
-    inspect, object_id, owned, pathspecs_of, read_optional, records, resolve, valid_branch,
-    verify_pin, write_view_base,
+    Captured, GIT_CAPTURE_BYTES, MAX_GIT_RUNTIME, REF_BYTES, Repository, VIEW, environment,
+    failure, inspect, object_id, owned, pathspecs_of, read_optional, records, resolve,
+    valid_branch, verify_pin, write_view_base,
 };
 use crate::validate::{hex_digest, valid_relative};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
@@ -144,7 +144,7 @@ impl Git<'_> {
 
     // A nonzero exit or overlong output becomes the model-facing failure.
     async fn checked(&self, argv: &[&str]) -> Result<Result<Captured, String>, ToolError> {
-        let captured = self.run(argv, None, CAPTURE_BYTES).await?;
+        let captured = self.run(argv, None, GIT_CAPTURE_BYTES).await?;
         Ok(if captured.overflow {
             Err(failure(
                 "git output exceeded its bound",
@@ -552,7 +552,11 @@ async fn switch(
     }
     // Exit 1 only reports entries that still differ after the refresh.
     let refresh = git
-        .run(&["update-index", "-q", "--refresh"], None, CAPTURE_BYTES)
+        .run(
+            &["update-index", "-q", "--refresh"],
+            None,
+            GIT_CAPTURE_BYTES,
+        )
         .await?;
     if !matches!(refresh.status, Some(0 | 1)) {
         return Ok(Err(status_failure(&refresh, git.max_bytes, git.hidden)));

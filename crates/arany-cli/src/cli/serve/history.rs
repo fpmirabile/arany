@@ -217,8 +217,8 @@ fn event_page(
     for envelope in events.iter().filter(|event| event.sequence > since) {
         let event = EventLine::from(envelope);
         // A line's newline reserves the comma separating page entries.
-        let size = encode_line(&event).map_or(MAX_LINE_BYTES + 1, |line| line.len());
-        if result.events.len() == MAX_EVENT_PAGE || size > MAX_LINE_BYTES - bytes {
+        let size = encode_line(&event).map_or(MAX_RPC_LINE_BYTES + 1, |line| line.len());
+        if result.events.len() == MAX_EVENT_PAGE || size > MAX_RPC_LINE_BYTES - bytes {
             let last = result
                 .events
                 .last()

@@ -261,7 +261,7 @@ pub(in crate::cli) async fn read_bounded_line(
         let end = buffer.iter().position(|byte| *byte == b'\n').map(|n| n + 1);
         let count = end.unwrap_or(buffer.len());
         if !oversized {
-            if count > MAX_LINE_BYTES - line.len() {
+            if count > MAX_RPC_LINE_BYTES - line.len() {
                 oversized = true;
                 line.clear();
             } else {

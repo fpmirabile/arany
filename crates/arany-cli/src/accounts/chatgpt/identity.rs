@@ -1,8 +1,7 @@
 use super::AuthorizationError;
 use aws_lc_rs::signature::{RSA_PKCS1_2048_8192_SHA256, RsaPublicKeyComponents};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Deserializer, de};
-use std::fmt;
+use serde::{Deserialize, Deserializer};
 
 pub(super) const ISSUER: &str = "https://auth.openai.com";
 const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
@@ -233,37 +232,16 @@ fn single_audience<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
 {
-    struct AudienceVisitor;
-
-    impl<'de> de::Visitor<'de> for AudienceVisitor {
-        type Value = String;
-
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("one audience as a string or a one-element string array")
-        }
-
-        fn visit_str<E>(self, value: &str) -> Result<String, E>
-        where
-            E: de::Error,
-        {
-            Ok(value.to_owned())
-        }
-
-        fn visit_seq<A>(self, mut sequence: A) -> Result<String, A::Error>
-        where
-            A: de::SeqAccess<'de>,
-        {
-            let audience = sequence
-                .next_element::<String>()?
-                .ok_or_else(|| de::Error::custom("missing audience"))?;
-            if sequence.next_element::<de::IgnoredAny>()?.is_some() {
-                return Err(de::Error::custom("additional audiences are not trusted"));
-            }
-            Ok(audience)
-        }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Audience {
+        Text(String),
+        Single([String; 1]),
     }
 
-    deserializer.deserialize_any(AudienceVisitor)
+    Ok(match Audience::deserialize(deserializer)? {
+        Audience::Text(value) | Audience::Single([value]) => value,
+    })
 }
 
 fn present_authorized_party<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

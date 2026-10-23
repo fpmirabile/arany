@@ -18,7 +18,7 @@ use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
-const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
+const NATIVE_CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
 const PROBE_COUNT_LABEL: &str = "three";
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
@@ -474,7 +474,7 @@ fn fingerprint_with_workspace(
     let contract = probe_fingerprint_contract();
     let mut message = Vec::with_capacity(256);
     for field in [
-        CHECK_VERSION,
+        NATIVE_CHECK_VERSION,
         env!("CARGO_PKG_VERSION"),
         protocol,
         profile,

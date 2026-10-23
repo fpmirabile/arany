@@ -1,5 +1,5 @@
 use super::{
-    CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect_layout, read_optional, valid_branch,
+    GIT_CAPTURE_BYTES, STDERR_BYTES, VIEW_CONFIG, inspect_layout, read_optional, valid_branch,
 };
 use crate::tools::config::Config;
 use crate::tools::types::{EffectIntent, HostIntent, ToolCall, ToolDisposition, ToolObservation};
@@ -15,7 +15,7 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 
-const UNKNOWN: &str =
+const UNKNOWN_HOST_GIT_OUTCOME: &str =
     "host: remote outcome unknown. Inspect remote state; never retry automatically.";
 pub(crate) const NON_FAST_FORWARD: &str = "host: remote reported no ref update (non-fast-forward).";
 const REFUSED: &str = "host: destination, source, authentication, pinned executable or repository layout unavailable (HEAD limit 256 B; repository config 64 KiB); nothing dispatched.";
@@ -938,7 +938,7 @@ pub(crate) async fn run(
         && backing_identity(workspace).ok() != backing
     {
         outcome.disposition = ToolDisposition::Uncertain;
-        outcome.output = UNKNOWN.into();
+        outcome.output = UNKNOWN_HOST_GIT_OUTCOME.into();
     }
     outcome
 }
@@ -1022,7 +1022,7 @@ async fn supervise(
             result = tokio::time::timeout_at(deadline, async {
                 tokio::try_join!(
                     async { crate::tools::guard::reap_owned_child(&mut child).await.map_err(|_| ToolError::Operation) },
-                    capture(out, CAPTURE_BYTES), discard(err, STDERR_BYTES)
+                    capture(out, GIT_CAPTURE_BYTES), discard(err, STDERR_BYTES)
                 )
             }) => result.ok().and_then(Result::ok).map(|(status, bytes, ())| (status, bytes)),
         }
@@ -1076,7 +1076,7 @@ async fn supervise(
         } else if rejected {
             NON_FAST_FORWARD
         } else {
-            UNKNOWN
+            UNKNOWN_HOST_GIT_OUTCOME
         },
         Some(receipt),
     )

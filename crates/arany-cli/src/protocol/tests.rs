@@ -191,7 +191,7 @@ fn codec_round_trips_requests_notifications_responses_and_errors() {
     }
     assert_eq!(decode_line(&[0xff]), Err(CodecError::Parse));
     assert_eq!(
-        decode_line(&vec![b' '; MAX_LINE_BYTES + 1]),
+        decode_line(&vec![b' '; MAX_RPC_LINE_BYTES + 1]),
         Err(CodecError::TooLarge)
     );
     let mut request = Request {
@@ -201,11 +201,11 @@ fn codec_round_trips_requests_notifications_responses_and_errors() {
         params: Some(json!("")),
     };
     let overhead = encode_line(&request).unwrap().len();
-    request.params = Some(json!("x".repeat(MAX_LINE_BYTES - overhead)));
+    request.params = Some(json!("x".repeat(MAX_RPC_LINE_BYTES - overhead)));
     let line = encode_line(&request).unwrap();
-    assert_eq!(line.len(), MAX_LINE_BYTES);
+    assert_eq!(line.len(), MAX_RPC_LINE_BYTES);
     assert!(decode_line(&line).is_ok());
-    request.params = Some(json!("x".repeat(MAX_LINE_BYTES - overhead + 1)));
+    request.params = Some(json!("x".repeat(MAX_RPC_LINE_BYTES - overhead + 1)));
     assert_eq!(encode_line(&request), Err(CodecError::TooLarge));
 }
 
@@ -503,7 +503,7 @@ fn every_conformance_message_validates_against_the_schema() {
             encode_line(&decode_line(&serde_json::to_vec(&message).unwrap()).unwrap())
                 .unwrap()
                 .len()
-                <= MAX_LINE_BYTES
+                <= MAX_RPC_LINE_BYTES
         );
     }
     for name in [

@@ -467,6 +467,29 @@ impl Startup {
         }
     }
 
+    async fn prepare_composer(&mut self, view: &SessionView, reuse_saved_selection: bool) -> bool {
+        permissions::refresh_mode(
+            &mut self.composer,
+            view.defaults.provider.as_deref(),
+            self.admission.tools,
+            self.admission.workspace_permissions.as_ref(),
+        );
+        self.restore_catalog(view, reuse_saved_selection).await;
+        let skills_supported = permissions::supports_tools(view.defaults.provider.as_deref());
+        refresh_runtime_skills(
+            &self.admission,
+            &mut self.composer,
+            &mut self.setup_notice,
+            skills_supported,
+        );
+        seed_setup_catalog(
+            &mut self.composer,
+            &view.defaults,
+            self.setup_catalog.as_deref(),
+        );
+        skills_supported
+    }
+
     async fn open_session(
         mut self,
         goal_resume: Option<arany::GoalId>,
@@ -489,25 +512,7 @@ impl Startup {
             return Ok(ControlFlow::Break(()));
         }
         let engine = self.open_engine()?;
-        permissions::refresh_mode(
-            &mut self.composer,
-            view.defaults.provider.as_deref(),
-            self.admission.tools,
-            self.admission.workspace_permissions.as_ref(),
-        );
-        self.restore_catalog(&view, reuse_saved_selection).await;
-        let skills_supported = permissions::supports_tools(view.defaults.provider.as_deref());
-        refresh_runtime_skills(
-            &self.admission,
-            &mut self.composer,
-            &mut self.setup_notice,
-            skills_supported,
-        );
-        seed_setup_catalog(
-            &mut self.composer,
-            &view.defaults,
-            self.setup_catalog.as_deref(),
-        );
+        let skills_supported = self.prepare_composer(&view, reuse_saved_selection).await;
         let setup_notice = self.take_setup_notice();
         let saved_session_id = (view.created_sequence != 0).then_some(session_id);
         let archive_notice = self
