@@ -224,6 +224,12 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
                 crate::session::pre_command_selection_payload("HookFinished", payload)
             },
         },
+        EventStep {
+            kind: "ProviderCallRecorded",
+            from: 18,
+            transform: crate::session::provider_call_v18_to_v19,
+            canonical: crate::session::provider_call_v18_payload,
+        },
         glob_step!("ToolStarted", 13),
         glob_step!("ToolFinished", 19),
         glob_step!("HookStarted", 3),

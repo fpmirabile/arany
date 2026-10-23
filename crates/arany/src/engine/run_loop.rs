@@ -473,6 +473,7 @@ impl<'a> RunLoop<'a> {
                     }
                     Err(error) => return Err(error),
                 };
+            root_request.input.outcome_correction = false;
             self.settle_active_segment(active_segment)?;
             let validity = self.validate_primary_outcome(&first, phase == AgentPhase::RootPlan)?;
             let facts = RunFacts::observe(self)?;
@@ -550,6 +551,21 @@ impl<'a> RunLoop<'a> {
                         break end;
                     }
                 }
+                PrimaryDecision::CorrectOutcome => {
+                    root_request.input.outcome_correction = true;
+                }
+                PrimaryDecision::RefusedTool(cause, requests, turn) => {
+                    pending_turn_bytes = turn.len();
+                    match self.record_refused_tool_step(root_request, requests, turn)? {
+                        tool_compaction::ContextCapacity::Fits => {}
+                        tool_compaction::ContextCapacity::Full => {
+                            break PrimaryEnd::Stopped(StopCause::ContextFull);
+                        }
+                    }
+                    if self.primary_refusal()?.1 {
+                        break PrimaryEnd::Stopped(StopCause::Refused(cause));
+                    }
+                }
                 PrimaryDecision::Refused(cause) => {
                     if self.primary_refusal()?.1 {
                         break PrimaryEnd::Stopped(StopCause::Refused(cause));
@@ -571,6 +587,46 @@ impl<'a> RunLoop<'a> {
             self.record_context_full(root_request, pending_turn_bytes);
         }
         self.settle_primary(end).await
+    }
+
+    fn record_refused_tool_step(
+        &self,
+        request: &mut ProviderRequest,
+        requests: Vec<crate::ToolRequest>,
+        turn: crate::provider::ProviderTurn,
+    ) -> Result<tool_compaction::ContextCapacity, EngineError> {
+        let (Some(context), Some(runtime)) = (request.input.tools.as_mut(), self.controls.tools)
+        else {
+            return Ok(tool_compaction::ContextCapacity::Fits);
+        };
+        let step = crate::tools::ToolStep {
+            refusal: Some(
+                self.primary_refusal()?
+                    .0
+                    .ok_or(EngineError::InvalidHistory)?,
+            ),
+            cleared: false,
+            plan: None,
+            turn,
+            requests,
+            observations: Vec::new(),
+            facts: Some(crate::provider::GoalContextFacts::maximum()),
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+            hook_feedback: Default::default(),
+        };
+        if matches!(
+            tool_compaction::context_capacity(
+                context.with_step_len(&step),
+                runtime.context_limit_bytes(),
+                0
+            ),
+            tool_compaction::ContextCapacity::Full
+        ) {
+            return Ok(tool_compaction::ContextCapacity::Full);
+        }
+        context.steps.push(step);
+        Ok(tool_compaction::ContextCapacity::Fits)
     }
 
     fn record_context_full(&self, request: &ProviderRequest, pending_turn_bytes: usize) {
@@ -1001,6 +1057,12 @@ impl<'a> RunLoop<'a> {
         if !serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() <= call.argument_limit()) {
             return Err(ArgumentBytes);
         }
+        if call
+            .path_argument()
+            .is_some_and(|(path, root)| !crate::tools::types::valid_relative(path, root))
+        {
+            return Err(InvalidPath);
+        }
         if !call.valid() {
             return Err(InvalidArguments);
         }
@@ -1072,6 +1134,7 @@ impl<'a> RunLoop<'a> {
             .as_mut()
             .ok_or(EngineError::InvalidRequest)?;
         tools.steps.push(crate::tools::ToolStep {
+            refusal: None,
             plan: Some(plan),
             turn,
             requests: Vec::new(),
@@ -1352,6 +1415,7 @@ fn call_record(
             outcome: ProviderOutcome::Plan(_),
             ..
         }) if valid_response => ProviderCallDisposition::PlanRecorded,
+        CallResult::Response(_) if refusal.is_some() => ProviderCallDisposition::Rejected,
         CallResult::Response(_) => ProviderCallDisposition::InvalidResponse,
         CallResult::Failed(failure) => match failure {
             CallFailure::Timeout => ProviderCallDisposition::TimedOut,
@@ -1481,6 +1545,12 @@ enum PrimaryDecision {
     ToolStep(Vec<crate::ToolRequest>, crate::provider::ProviderTurn),
     // The refusal is journaled; the loop continues unless the refusal streak is full.
     Refused(ProposalRefusalCause),
+    RefusedTool(
+        ProposalRefusalCause,
+        Vec<crate::ToolRequest>,
+        crate::provider::ProviderTurn,
+    ),
+    CorrectOutcome,
     // A wave proposal waits for the workers to settle.
     Defer,
     Stop(StopCause),
@@ -1534,6 +1604,22 @@ fn decide_primary_call(
             if facts.active_time_exhausted {
                 return PrimaryDecision::Stop(StopCause::ActiveTime);
             }
+            if matches!(
+                result,
+                CallResult::Failed(CallFailure::InvalidResponse(Some(
+                    ProviderFailureReason::OutcomeContract
+                )))
+            ) && facts.outcome_correction_pending
+            {
+                if let Some(cause) = facts.observed() {
+                    return PrimaryDecision::Stop(cause);
+                }
+                return if facts.tool_admitted() {
+                    PrimaryDecision::CorrectOutcome
+                } else {
+                    PrimaryDecision::Stop(StopCause::Budget)
+                };
+            }
             let CallResult::Response(ProviderResponse { outcome, turn, .. }) = result else {
                 return PrimaryDecision::Fail(RunFailure::ProviderCall);
             };
@@ -1541,6 +1627,9 @@ fn decide_primary_call(
                 // An empty Tool list names no operation to refuse.
                 (Err(_), ProviderOutcome::Tools(requests)) if requests.is_empty() => {
                     PrimaryDecision::Fail(RunFailure::ProviderCall)
+                }
+                (Err(cause), ProviderOutcome::Tools(requests)) => {
+                    PrimaryDecision::RefusedTool(cause, requests, turn)
                 }
                 (Err(cause), _) => PrimaryDecision::Refused(cause),
                 (Ok(()), _) if !admitted => PrimaryDecision::Stop(StopCause::Budget),
@@ -1594,6 +1683,8 @@ mod decision_tests {
         Delegate,
         ToolStep,
         Refused(ProposalRefusalCause),
+        RefusedTool(ProposalRefusalCause),
+        CorrectOutcome,
         Defer,
         Stop(StopCause),
         Fail(RunFailure),
@@ -1616,6 +1707,8 @@ mod decision_tests {
             PrimaryDecision::Delegate(..) => Kind::Delegate,
             PrimaryDecision::ToolStep(..) => Kind::ToolStep,
             PrimaryDecision::Refused(cause) => Kind::Refused(*cause),
+            PrimaryDecision::RefusedTool(cause, ..) => Kind::RefusedTool(*cause),
+            PrimaryDecision::CorrectOutcome => Kind::CorrectOutcome,
             PrimaryDecision::Defer => Kind::Defer,
             PrimaryDecision::Stop(cause) => Kind::Stop(*cause),
             PrimaryDecision::Fail(failure) => Kind::Fail(*failure),
@@ -1762,7 +1855,61 @@ mod decision_tests {
         let ok = Ok(());
         let refused = Err(ProposalRefusalCause::AnswerInvalid);
         let lease = Err(ProposalRefusalCause::LeaseOverlap);
+        let malformed = || {
+            CallResult::Failed(CallFailure::InvalidResponse(Some(
+                ProviderFailureReason::OutcomeContract,
+            )))
+        };
+        let corrective = open.with(|facts| facts.outcome_correction_pending = true);
         let rows: Vec<Row> = vec![
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective,
+                Kind::CorrectOutcome,
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                open,
+                Kind::Fail(RunFailure::ProviderCall),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.calls_left = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.tokens_open = false),
+                Kind::Stop(StopCause::Budget),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.uncertain = true),
+                Kind::Stop(StopCause::Uncertain),
+                false,
+            ),
+            (
+                loop_,
+                malformed(),
+                ok,
+                corrective.with(|facts| facts.cancel_requested = true),
+                Kind::Stop(StopCause::Cancelled),
+                false,
+            ),
             (loop_, answer(), ok, open, Kind::Finish, true),
             (
                 loop_,
@@ -1848,6 +1995,14 @@ mod decision_tests {
                 false,
             ),
             (loop_, tools(1), ok, open, Kind::ToolStep, true),
+            (
+                loop_,
+                tools(1),
+                Err(ProposalRefusalCause::InvalidPath),
+                open,
+                Kind::RefusedTool(ProposalRefusalCause::InvalidPath),
+                false,
+            ),
             (
                 loop_,
                 tools(0),

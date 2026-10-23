@@ -81,7 +81,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 content: "hello".into(),
             })
         };
-        let attempts = if known_reason { 1 } else { 3 };
+        let attempts = if known_reason { 2 } else { 3 };
         let provider = ScriptedProvider::new(
             (0..attempts)
                 .map(|_| refused_write())
@@ -91,12 +91,15 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .collect(),
         );
         if known_reason {
-            *provider
+            for response in provider
                 .responses
                 .lock()
                 .expect("responses")
-                .front_mut()
-                .expect("first response") = Err(ProviderError::InvalidOutcomeContract);
+                .iter_mut()
+                .take(attempts)
+            {
+                *response = Err(ProviderError::InvalidOutcomeContract);
+            }
         }
         let observed = provider.requests.clone();
         let provider = Arc::new(provider);
@@ -125,7 +128,14 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 .any(|event| matches!(event.event, Event::ToolStarted { .. }))
         );
         let call = &view.runs[0].agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(
+            call.disposition,
+            if known_reason {
+                ProviderCallDisposition::InvalidResponse
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
         assert_eq!(
             call.failure_reason,
             Some(if known_reason {
@@ -155,6 +165,15 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
         assert_eq!(requests.len(), attempts + 1);
         assert!(provider.responses.lock().expect("responses").is_empty());
         let follow_up_request = &requests[attempts];
+        let feedback = follow_up_request
+            .input
+            .previous_run_failure
+            .expect("committed failure cause");
+        assert_eq!(
+            feedback.stop,
+            arany::RunStop::Failed(first.run.failure.expect("failed Run"))
+        );
+        assert_eq!(feedback.provider_failure, call.failure_reason);
         assert_eq!(
             follow_up_request.input.objective,
             "why couldn't you write it?"
@@ -175,7 +194,7 @@ async fn failed_write_turn_stays_in_history_after_reopen() {
                 "last_call": if known_reason {
                     serde_json::json!({"disposition": "invalid_response", "failure_reason": "outcome_contract", "refusal": null})
                 } else {
-                    serde_json::json!({"disposition": "invalid_response", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_arguments"}})
+                    serde_json::json!({"disposition": "rejected", "failure_reason": "proposal_refused", "refusal": {"operation": "arany_write", "cause": "invalid_path"}})
                 },
             })
         );
@@ -1824,7 +1843,12 @@ fn bounded_answer_output_must_fit_canonical_json() {
             if !accepted {
                 assert!(view.runs[0].agents.iter().any(|agent| {
                     agent.provider_calls.last().is_some_and(|call| {
-                        call.disposition == ProviderCallDisposition::InvalidResponse
+                        call.disposition
+                            == if child {
+                                ProviderCallDisposition::InvalidResponse
+                            } else {
+                                ProviderCallDisposition::Rejected
+                            }
                     })
                 }));
             }
@@ -1943,7 +1967,7 @@ fn invalid_delegation_fails_the_run_without_committing_an_answer() {
             outcome.run.agents[0]
                 .provider_calls
                 .iter()
-                .all(|call| { call.disposition == ProviderCallDisposition::InvalidResponse })
+                .all(|call| { call.disposition == ProviderCallDisposition::Rejected })
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -2021,7 +2045,7 @@ fn team_policy_rejects_a_direct_primary_finish() {
         assert_eq!(outcome.run.agents[0].provider_calls.len(), 3);
         assert_eq!(
             outcome.run.agents[0].provider_calls[0].disposition,
-            ProviderCallDisposition::InvalidResponse
+            ProviderCallDisposition::Rejected
         );
         engine.close().await.expect("engine shutdown");
         let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap()).unwrap();
@@ -3421,7 +3445,7 @@ fn collaboration_capacity_corpus_rejects_invalid_delegation() {
                 outcome.run.agents[0]
                     .provider_calls
                     .iter()
-                    .all(|call| call.disposition == ProviderCallDisposition::InvalidResponse)
+                    .all(|call| call.disposition == ProviderCallDisposition::Rejected)
             );
             engine.close().await.expect("engine shutdown");
         }
@@ -3527,7 +3551,7 @@ fn delegation_during_synthesis_is_invalid_and_fails_the_run() {
         let calls = &outcome.run.agents[0].provider_calls;
         assert_eq!(calls.len(), 4);
         assert!(calls[1..].iter().all(|call| {
-            call.disposition == ProviderCallDisposition::InvalidResponse
+            call.disposition == ProviderCallDisposition::Rejected
                 && call.phase == AgentPhase::RootSynthesis
         }));
         assert_eq!(outcome.run.failure, Some(arany::RunFailure::RefusalLimit));
@@ -5314,6 +5338,10 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                             expected_phases.push(phase);
                         }
                     }
+                    if failure_reason == Some(arany::ProviderFailureReason::OutcomeContract) && !cancel {
+                        responses.push_back(Err(ProviderError::InvalidOutcomeContract));
+                        expected_phases.push(phase);
+                    }
                     if case == "invalid answer" && !cancel {
                         for _ in 0..2 {
                             responses.push_back(Ok(ProviderOutcome::Answer(Answer { text: String::new() })));
@@ -5371,6 +5399,12 @@ fn direct_cancellation_drops_the_call_and_persists_a_cancelled_run() {
                     assert_eq!(record.phase, phase);
                     assert_eq!(record.disposition, call_disposition);
                     assert_eq!(record.failure_reason, failure_reason);
+                    if failure_reason == Some(arany::ProviderFailureReason::ProposalRefused) {
+                        assert_eq!(record.refusal.as_ref().expect("semantic refusal").cause,
+                            arany::ProposalRefusalCause::AnswerInvalid);
+                    }
+                    assert!(provider.responses.lock().expect("responses").is_empty(),
+                        "{phase:?}, {case}, cancellation {cancel}");
                     assert_eq!(record.response_id, None);
                     assert_eq!(record.input_tokens, None);
                     assert_eq!(
@@ -5926,7 +5960,7 @@ async fn write_proposal_refusals_are_durable_bounded_and_spend_goal_calls() {
             }
         }
         let call = &run.agents[0].provider_calls[0];
-        assert_eq!(call.disposition, ProviderCallDisposition::InvalidResponse);
+        assert_eq!(call.disposition, ProviderCallDisposition::Rejected);
         assert_eq!(
             call.failure_reason,
             Some(arany::ProviderFailureReason::ProposalRefused)

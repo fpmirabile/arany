@@ -119,15 +119,15 @@ fn multiedit_subscription_stream_preserves_defaults_and_advertises_only_admitted
             .unwrap()
             .unwrap();
         let decoded = wire::decode_streamed_run(&completed, &scope_for(&coding));
-        assert_eq!(decoded.is_ok(), accepted);
-        if accepted {
-            let ProviderOutcome::Tools(calls) = decoded.unwrap().outcome else {
-                panic!("MultiEdit call")
-            };
-            assert!(
-                matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if !edits[0].replace_all)
-            );
-        }
+        let decoded = decoded.expect("typed MultiEdit reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("MultiEdit call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted);
+        assert!(
+            matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if !edits[0].replace_all)
+        );
         assert!(wire::decode_streamed_run(&completed, &scope_for(&request())).is_err());
     }
 }
@@ -1513,13 +1513,19 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         let mut fixture = reply.clone();
         fixture["output"][1]["arguments"] =
             json!(json!({"path":"README.md","offset":offset,"limit":limit}).to_string());
+        let decoded = wire::decode_run(
+            &serde_json::to_vec(&fixture).unwrap(),
+            &wire::RunScope::new(&coding, &conversation, TOKEN),
+        )
+        .expect("typed range reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("Read call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted);
         assert_eq!(
-            wire::decode_run(
-                &serde_json::to_vec(&fixture).unwrap(),
-                &wire::RunScope::new(&coding, &conversation, TOKEN)
-            )
-            .is_ok(),
-            accepted
+            serde_json::to_value(&calls[0].call).unwrap(),
+            json!({"operation":"read", "path":"README.md", "offset":offset, "limit":limit})
         );
     }
     let decoded = wire::decode_run(
@@ -1534,6 +1540,7 @@ fn chatgpt_replay_drops_item_ids_and_keeps_ciphertext() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            refusal: None,
             plan: None,
             turn: decoded.turn,
             requests: match decoded.outcome {
@@ -1668,6 +1675,7 @@ fn optional_plan_is_separate_from_effect_schemas_and_has_a_correlated_result() {
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            refusal: None,
             plan: Some(*plan),
             turn: decoded.turn,
             requests: Vec::new(),

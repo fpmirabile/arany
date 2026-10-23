@@ -545,6 +545,7 @@ fn delegate_function_call_is_answered_by_a_fixed_output_before_the_child_results
         .unwrap()
         .steps
         .push(crate::tools::ToolStep {
+            refusal: None,
             plan: None,
             turn: delegated.turn,
             requests: Vec::new(),
@@ -986,20 +987,6 @@ fn inbound_function_calls_decode_one_native_request_or_outcome() {
             json!([function_call("arany_unknown", &json!({}))]),
         ),
         (
-            "read bounds",
-            json!([function_call(
-                "arany_read",
-                &json!({"path":"README.md","offset":null,"limit":65537})
-            )]),
-        ),
-        (
-            "path escape",
-            json!([function_call(
-                "arany_read",
-                &json!({"path":"../outside","offset":null,"limit":null})
-            )]),
-        ),
-        (
             "apply_changeset",
             json!([function_call("arany_apply_changeset", &json!({}))]),
         ),
@@ -1057,7 +1044,93 @@ fn function_call_raw(name: &str, arguments: &str) -> Value {
 }
 
 #[test]
-fn rejected_native_calls_report_their_diagnostic_stage() {
+fn command_path_shape_reaches_engine_validation_and_gets_a_correlated_refusal() {
+    use crate::session::{ProposalRefusal, ProposalRefusalCause};
+    for (cwd, expected, valid) in [
+        ("docs/specs", "docs/specs", true),
+        ("./doc/spec", "doc/spec", true),
+        ("docs/specs/", "docs/specs", true),
+        ("./docs/specs", "docs/specs", true),
+        ("././docs/specs/", "docs/specs", true),
+        ("../outside", "../outside", false),
+        ("/", "/", false),
+        ("docs/specs//", "docs/specs/", false),
+    ] {
+        let mut request = primary_request(MODEL);
+        let arguments =
+            json!({"program":"rg", "args":["--glob=*.md,spec.md", "x".repeat(543)], "cwd":cwd});
+        let fixture = response(
+            "completed",
+            json!([function_call("arany_command", &arguments)]),
+        );
+        let parsed = decode_streamed(&request, &fixture).expect("well-formed native Tool call");
+        let ProviderOutcome::Tools(calls) = &parsed.outcome else {
+            panic!("Command")
+        };
+        assert_eq!(calls[0].call.path_argument(), Some((expected, true)));
+        assert_eq!(calls[0].call.valid(), valid);
+        if cwd == "docs/specs" {
+            assert_eq!(serde_json::to_vec(&calls[0].call).unwrap().len(), 634);
+        }
+        let shape = format!(
+            "{:?}",
+            crate::diagnostics::ToolArgumentShape::from_call(&calls[0].call)
+        );
+        assert!(shape.contains("program_chars: Some(2)"));
+        assert!(shape.contains("args_count: Some(2)"));
+        assert!(shape.contains("largest_arg_bytes: Some(543)"));
+        if valid {
+            continue;
+        }
+        assert_eq!(parsed.usage.input_tokens, Some(12));
+        assert_eq!(parsed.usage.output_tokens, Some(8));
+        let ProviderOutcome::Tools(calls) = parsed.outcome else {
+            panic!("Command")
+        };
+        let step = crate::tools::ToolStep {
+            refusal: Some(ProposalRefusal {
+                operation: "arany_command".into(),
+                cause: ProposalRefusalCause::InvalidPath,
+            }),
+            cleared: false,
+            plan: None,
+            turn: parsed.turn,
+            requests: calls,
+            observations: Vec::new(),
+            facts: None,
+            steering_notes: Vec::new(),
+            calls_remaining: None,
+            hook_feedback: Default::default(),
+        };
+        request.input.tools.as_mut().unwrap().steps.push(step);
+        let wire = body(&request);
+        let result = wire["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "function_call_output")
+            .expect("correlated error");
+        assert_eq!(result["call_id"], "call_test");
+        let output: Value = serde_json::from_str(result["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output["error"]["cause"], "invalid_path");
+        assert_eq!(output["dispatched"], false);
+        assert!(
+            output["error"]["remediation"]
+                .as_str()
+                .unwrap()
+                .contains("Workspace-relative")
+        );
+        assert!(
+            !result["output"]
+                .as_str()
+                .unwrap()
+                .contains(&"x".repeat(543))
+        );
+    }
+}
+
+#[test]
+fn typed_argument_failures_reach_the_engine_but_wire_bounds_still_reject() {
     use crate::diagnostics::SubscriptionFailureStage as Stage;
     let request = primary_request(MODEL);
     for (call, expected) in [
@@ -1074,7 +1147,7 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
             Stage::OutcomeToolEmptyEdit,
         ),
         (
-            json!({"operation":"read","path":"./README.md","offset":null,"limit":null}),
+            json!({"operation":"read","path":"../README.md","offset":null,"limit":null}),
             Stage::OutcomeToolPath,
         ),
         (
@@ -1124,14 +1197,20 @@ fn rejected_native_calls_report_their_diagnostic_stage() {
                 &arguments
             )]),
         );
-        assert_eq!(
-            decode_streamed(&request, &fixture).unwrap_err(),
-            ResponseError::Outcome
-        );
-        assert!(matches!(
-            ResponseError::Outcome.provider_error(),
-            ProviderError::InvalidOutcomeContract
-        ));
+        if expected == Stage::OutcomeToolArgumentSize {
+            assert_eq!(
+                decode_streamed(&request, &fixture).unwrap_err(),
+                ResponseError::Outcome
+            );
+        } else {
+            let decoded = decode_streamed(&request, &fixture)
+                .expect("typed arguments reach Engine validation");
+            let ProviderOutcome::Tools(requests) = decoded.outcome else {
+                panic!("native Tool request")
+            };
+            assert_eq!(requests.len(), 1);
+            assert!(!requests[0].call.valid());
+        }
         let bytes =
             serde_json::to_vec(&json!({"type":"response.completed","response":fixture})).unwrap();
         assert_eq!(outcome_failure_stage(&bytes, MODEL), expected);
@@ -1378,8 +1457,19 @@ fn multiedit_defaults_bounds_and_availability_hold_on_both_response_routes() {
             "completed",
             json!([function_call("arany_multiedit", &invalid)]),
         );
-        assert!(decode(&request, &fixture).is_err(), "{pointer}");
-        assert!(decode_streamed(&request, &fixture).is_err(), "{pointer}");
+        if pointer == "/edits/0/new_string" {
+            let ProviderOutcome::Tools(calls) = decode(&request, &fixture)
+                .expect("typed size refusal")
+                .outcome
+            else {
+                panic!("Tool")
+            };
+            assert!(!calls[0].call.valid());
+            assert!(decode_streamed(&request, &fixture).is_ok());
+        } else {
+            assert!(decode(&request, &fixture).is_err(), "{pointer}");
+            assert!(decode_streamed(&request, &fixture).is_err(), "{pointer}");
+        }
     }
 }
 
@@ -2016,14 +2106,24 @@ fn read_arguments_require_nullable_line_ranges() {
         (json!(0), json!(1), false),
         (json!(1), json!(0), false),
         (json!(1), json!(2001), false),
-        (json!(-1), json!(1), false),
-        (json!(1.5), json!(1), false),
     ] {
         let args = json!({"path":"README.md","offset":offset,"limit":limit});
         let fixture = response("completed", json!([function_call("arany_read", &args)]));
-        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{args}");
+        let decoded = decode(&request, &fixture).expect("typed range reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("Read call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{args}");
+        assert_eq!(
+            serde_json::to_value(&calls[0].call).unwrap(),
+            json!({"operation":"read", "path":"README.md", "offset":offset, "limit":limit})
+        );
     }
     for args in [
+        json!({"path":"README.md","offset":-1,"limit":1}),
+        json!({"path":"README.md","offset":1.5,"limit":1}),
+        json!({"path":"README.md","offset":u64::from(u32::MAX) + 1,"limit":1}),
         json!({"path":"README.md","offset":null}),
         json!({"path":"README.md","limit":null}),
     ] {

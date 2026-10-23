@@ -270,7 +270,14 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
                     .set_read_timeout(Some(Duration::from_secs(5)))
                     .expect("cancel deadline");
                 let mut byte = [0];
-                assert_eq!(stream.read(&mut byte).expect("cancelled socket"), 0);
+                assert_eq!(
+                    stream
+                        .read_exact(&mut byte)
+                        .expect_err("cancelled socket returned response bytes")
+                        .kind(),
+                    std::io::ErrorKind::UnexpectedEof,
+                    "cancelled socket must close"
+                );
                 closed_sender.send(()).expect("socket closure observation");
                 return;
             }
@@ -390,7 +397,8 @@ fn active_exit_during_provider_call(exit: ActiveExit, inline: bool) {
         }
         if expect_help {
             patterns.push(if inline {
-                b"Commands"
+                // Only armed help has this token; cursor moves can replace the space before close.
+                b"Enter/Esc"
             } else {
                 b"Command: /exit; Exit Session; during Run: view-only\r\n"
             });

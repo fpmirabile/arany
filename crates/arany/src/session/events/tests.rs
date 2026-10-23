@@ -1575,7 +1575,7 @@ mod child_grant_tests {
         assert!(
             Event::decode(
                 child.kind(),
-                payload_version(child.kind()).expect("payload version") - 1,
+                child.version() - 1,
                 &payload,
                 Some(run_id),
                 Some(agent_run_id)
@@ -2492,7 +2492,7 @@ fn refusal_and_run_failure_payloads_require_current_versions_and_exact_pairings(
         rate_limits: None,
         delegation: None,
         phase: crate::provider::AgentPhase::RootPlan,
-        disposition: ProviderCallDisposition::InvalidResponse,
+        disposition: ProviderCallDisposition::Rejected,
         requested_tools: 0,
         response_id: None,
         input_tokens: None,
@@ -2718,24 +2718,24 @@ fn clearing_event_has_one_strict_current_payload() {
         covered_tool_count: 4,
         cleared_bytes: 1234,
     };
-    assert_eq!(payload_version(event.kind()), Some(1));
+    let current = event.version();
     let payload = event.payload().unwrap();
     assert_eq!(
-        Event::decode(event.kind(), 1, &payload, Some(run), None).unwrap(),
+        Event::decode(event.kind(), current, &payload, Some(run), None).unwrap(),
         event
     );
     for (version, body, agent) in [
-        (0, payload.clone(), None),
-        (2, payload.clone(), None),
-        (1, payload.clone(), Some(AgentRunId::new())),
-        (1, r#"{"covered_tool_count":4}"#.into(), None),
+        (current - 1, payload.clone(), None),
+        (current + 1, payload.clone(), None),
+        (current, payload.clone(), Some(AgentRunId::new())),
+        (current, r#"{"covered_tool_count":4}"#.into(), None),
         (
-            1,
+            current,
             r#"{"covered_tool_count":0,"cleared_bytes":1}"#.into(),
             None,
         ),
         (
-            1,
+            current,
             r#"{"covered_tool_count":4,"cleared_bytes":1,"extra":true}"#.into(),
             None,
         ),

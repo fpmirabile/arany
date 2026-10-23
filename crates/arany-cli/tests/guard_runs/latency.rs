@@ -684,13 +684,21 @@ async fn refused_and_failed_reads_never_enter_the_success_distribution() {
         assert!(!recorder.has_pending());
         assert_eq!(samples.len(), 1);
         assert!(!samples[0].successful());
-        let (events, _) =
+        let (events, view) =
             arany::test_support::goals::replayed(&temp.path().join("state"), samples[0].session_id)
                 .await;
         if invalid {
             assert_eq!(
                 samples[0].provider_disposition,
-                Some(ProviderCallDisposition::InvalidResponse)
+                Some(ProviderCallDisposition::Rejected)
+            );
+            assert_eq!(
+                view.runs[0].agents[0].provider_calls[0]
+                    .refusal
+                    .as_ref()
+                    .unwrap()
+                    .cause,
+                arany::ProposalRefusalCause::InvalidArguments
             );
             assert!(samples[0].started_sequence.is_none());
             assert!(

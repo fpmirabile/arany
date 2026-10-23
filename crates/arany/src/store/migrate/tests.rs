@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 48] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 49] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -71,6 +71,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 48] = [
         include_str!("hookfinished-without-expiry.json"),
     ),
     ("GoalFinished", 7, GOAL_FINISHED_V7, GOAL_FINISHED_V8),
+    ("ProviderCallRecorded", 18, REFUSAL_V18, REFUSAL_V19),
     ("ToolPermissionDecided", 4, VERDICT_V4, VERDICT_V4),
     (
         "ToolFinished",
@@ -146,6 +147,44 @@ const GOAL_FINISHED_V7: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa
 const GOAL_FINISHED_V8: &str = r#"{"goal_id":"01a15ecf-a92a-7707-8af6-ce3c5a16fa5f","status":"failed","active_ms":0,"report":{"summary":"Goal failed.","changes":[],"evidence":[],"unresolved":[],"cached_input_tokens":0},"exhausted":true,"budget_refusal":null}"#;
 
 #[test]
+fn refusal_reclassification_preserves_evidence_and_rejects_new_causes_in_old_payloads() {
+    let step = REGISTRY
+        .event_step("ProviderCallRecorded", 18)
+        .expect("migration");
+    assert_eq!((step.canonical)(REFUSAL_V18).as_deref(), Some(REFUSAL_V18));
+    let expected: Value = serde_json::from_str(REFUSAL_V19).unwrap();
+    assert_eq!(
+        (step.transform)(serde_json::from_str(REFUSAL_V18).unwrap()),
+        Some(expected.clone())
+    );
+    let source: Value = serde_json::from_str(REFUSAL_V18).unwrap();
+    let mut intermediate = source.clone();
+    for from in [16, 17] {
+        let host_admission = REGISTRY
+            .event_step("ProviderCallRecorded", from)
+            .expect("main migration");
+        assert_eq!(
+            (host_admission.canonical)(&intermediate.to_string()).as_deref(),
+            Some(REFUSAL_V18)
+        );
+        intermediate =
+            (host_admission.transform)(intermediate).expect("main admits the old refusal");
+        assert_eq!(
+            intermediate, source,
+            "host admission preserves the refusal classification"
+        );
+    }
+    assert_eq!((step.transform)(intermediate), Some(expected));
+    for forged in [
+        REFUSAL_V18.replace("invalid_arguments", "invalid_path"),
+        REFUSAL_V18.replace("invalid_response", "rejected"),
+    ] {
+        assert!((step.canonical)(&forged).is_none());
+        assert!((step.transform)(serde_json::from_str(&forged).unwrap()).is_none());
+    }
+}
+
+#[test]
 fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     for (kind, from, input, expected) in &EVENT_FIXTURES[..8] {
         let step = REGISTRY.event_step(kind, *from).unwrap();
@@ -203,6 +242,9 @@ fn multiedit_identity_steps_reject_forged_old_calls_and_worker_capabilities() {
     }
 }
 const VERDICT_V4: &str = r#"{"intent_digest":[3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3,3],"decision":"allow","mode":"default","basis":"rule","source":"rule","approved":true,"hook_restriction":null,"hooks":0,"narrowed":false}"#;
+const REFUSAL_V18: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"invalid_response","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
+const REFUSAL_V19: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"rejected","requested_tools":0,"response_id":"response-1","input_tokens":12,"output_tokens":8,"cache_read_input_tokens":null,"cache_creation_input_tokens":null,"wire_provenance":null,"failure_reason":"proposal_refused","refusal":{"operation":"arany_command","cause":"invalid_arguments"}}"#;
+
 const GLOB_PROVIDERCALLRECORDED: &str = r#"{"delegation":null,"phase":"root_plan","disposition":"finished","requested_tools":0,"response_id":"response-1","input_tokens":100,"output_tokens":10,"cache_read_input_tokens":40,"cache_creation_input_tokens":20,"wire_provenance":null,"failure_reason":null,"refusal":null}"#;
 const GLOB_TOOLSTARTED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"active_ceiling_ms":1000}"#;
 const GLOB_TOOLFINISHED: &str = r#"{"intent":{"target":{"kind":"workspace"},"id":"01a15ecf-a92b-736a-91a6-560b8bc09501","run_id":"01a15ecf-a92a-7707-8af6-ce3d36320b67","agent_run_id":"01a15ecf-a92a-7707-8af6-ce3e0c00af83","policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"enforcement_digest":[2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2],"workspace_device":1,"workspace_inode":2,"call":{"operation":"read","path":"src/lib.rs","offset":null,"limit":1024},"limits":{"result_bytes":65536,"runtime_ms":60000,"cache_transfer_ms":0,"memory_bytes":536870912,"max_processes":64,"scratch_bytes":67108864,"project_bytes":67108864,"cache_requested_bytes":67108864,"cache_bytes":67108864,"cache_candidate_bytes":67108864,"network":"none","resource_class":"default","resource_profile":"linux_kernel"},"expires_at_ms":1,"use_count":1},"disposition":"succeeded","enforcement_cause":null,"limit_cause":null,"output":"{\"sha256\":\"2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881\"}","attestation":{"in_process":{"policy_digest":[1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"workspace_device":1,"workspace_inode":2}},"cache_update":"not_applicable","checkpoint":null}"#;

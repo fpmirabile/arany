@@ -49,7 +49,14 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
     if let Some(tools) = &input.tools {
         append_steps(&mut messages, tools, request)?;
     }
-    if let Some(refusal) = &input.last_answer_refused {
+    if let Some(refusal) = &input.last_answer_refused
+        && !input.tools.as_ref().is_some_and(|tools| {
+            tools
+                .steps
+                .last()
+                .is_some_and(|step| step.refusal.as_ref() == Some(refusal))
+        })
+    {
         let note = refusal_note(refusal);
         if note.to_string().len() > MAX_TOOL_CATALOG_BYTES {
             return Err(ProviderError::Rejected);
@@ -59,8 +66,33 @@ pub(crate) fn conversation(request: &ProviderRequest) -> Result<Conversation, Pr
             json!({"last_answer_refused": note}),
         )]));
     }
+    let system = system_blocks(request);
+    let correction = input.outcome_correction.then(|| data_block(
+        "harness_outcome_correction",
+        json!({
+            "cause": "outcome_contract",
+            "remediation": "This is the single corrective call for the preceding rejected Provider outcome. Return a permitted native function call with valid arguments, or plain assistant text for the final answer. Rejected output was not accepted; never repeat prior effects.",
+        }),
+    ));
+    let correction_bytes = correction.as_ref().map_or(0, |block| match block {
+        Block::Text(text) => text.len(),
+        Block::Image { .. } | Block::AssistantTurn(_) | Block::ToolResult { .. } => 0,
+    });
+    if system
+        .iter()
+        .filter(|block| matches!(block, SystemBlock::PreviousRunFailure(_)))
+        .map(|block| block.text().len())
+        .sum::<usize>()
+        + correction_bytes
+        > super::conversation::MAX_HARNESS_FEEDBACK_BYTES
+    {
+        return Err(ProviderError::Rejected);
+    }
+    if let Some(correction) = correction {
+        messages.push(user(vec![correction]));
+    }
     Ok(Conversation {
-        system: system_blocks(request),
+        system,
         tools,
         messages,
         outcome: if input.role == PromptRole::ToolReview {
@@ -107,6 +139,9 @@ fn system_blocks(request: &ProviderRequest) -> Vec<SystemBlock> {
         AgentPhase::RootPlan | AgentPhase::RootSynthesis
     ) {
         system.push(SystemBlock::Policy(request.collaboration));
+    }
+    if let Some(failure) = request.input.previous_run_failure {
+        system.push(SystemBlock::PreviousRunFailure(failure));
     }
     system
 }
@@ -290,6 +325,18 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
             is_error: false,
         });
     }
+    if let Some(refusal) = &step.refusal {
+        let tool_request = requests.next().ok_or(ProviderError::Rejected)?;
+        let output = json!({"error": refusal_note(refusal), "dispatched": false, "effect": "none"});
+        if output.to_string().len() > crate::tools::types::MAX_TOOL_REFUSAL_BYTES {
+            return Err(ProviderError::Rejected);
+        }
+        results.push(Block::ToolResult {
+            id: tool_request.id.clone(),
+            output,
+            is_error: true,
+        });
+    }
     let mut integrations = Vec::new();
     for (index, observation) in step.observations.iter().enumerate() {
         let narrowed = step.narrowed(index);
@@ -339,7 +386,12 @@ fn step_results(step: &ToolStep, request: &ProviderRequest) -> Result<Vec<Block>
 fn refusal_note(refusal: &crate::session::ProposalRefusal) -> Value {
     use crate::session::ProposalRefusalCause::*;
     let remediation = match refusal.cause {
-        InvalidArguments => "Send one call with valid arguments matching its schema.",
+        InvalidArguments => {
+            "Invalid Tool arguments; send one call matching the offered schema and its bounds."
+        }
+        InvalidPath => {
+            "Invalid path: expected a canonical Workspace-relative path of at most 512 UTF-8 bytes; directory cwd may be . or docs/specs. Leading ./ and one trailing directory / are normalized; file trailing /, absolute paths, empty components, traversal and private paths are forbidden."
+        }
         Phase => "Choose an outcome allowed in this phase; team planning requires Delegate.",
         PlanInvalid => "Send a valid arany_plan; do not replace a recorded contract.",
         PlanBudgetOutsideGoal => "The plan budget must not exceed the Goal budget.",

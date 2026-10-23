@@ -1479,6 +1479,9 @@ fn run_failure_notice(cause: arany::RunFailure) -> Option<&'static str> {
 fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
     use arany::ProposalRefusalCause as Cause;
     match cause {
+        Cause::InvalidPath => {
+            "Arany refused an invalid or protected Workspace path. The proposed action did not run."
+        }
         Cause::InvalidArguments => {
             "Arany refused invalid operation arguments. The proposed action did not run."
         }
@@ -1519,10 +1522,7 @@ fn refusal_notice(cause: arany::ProposalRefusalCause) -> &'static str {
 fn provider_failure_notice(call: &ProviderCallRecord) -> Option<&'static str> {
     use arany::ProviderFailureReason;
     match (call.disposition, call.failure_reason) {
-        (
-            ProviderCallDisposition::InvalidResponse,
-            Some(ProviderFailureReason::ProposalRefused),
-        ) => {
+        (ProviderCallDisposition::Rejected, Some(ProviderFailureReason::ProposalRefused)) => {
             return call
                 .refusal
                 .as_ref()

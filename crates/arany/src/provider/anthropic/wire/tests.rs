@@ -250,7 +250,16 @@ fn inbound_tool_use_stop_yields_one_request_and_keeps_text_and_thinking_in_turn(
             "tool_use",
             json!([tool_use("toolu_1", "arany_read", input.clone())]),
         );
-        assert_eq!(decode(&request, &fixture).is_ok(), accepted, "{input}");
+        let decoded = decode(&request, &fixture).expect("typed range reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("Read call")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{input}");
+        assert_eq!(
+            serde_json::to_value(&calls[0].call).unwrap(),
+            json!({"operation":"read", "path":"src/main.rs", "offset":offset, "limit":limit})
+        );
     }
     assert_eq!(answer.response_id.as_deref(), Some("msg_example"));
     assert_eq!(answer.usage.input_tokens, Some(19));
@@ -364,7 +373,6 @@ fn plan_is_a_separate_optional_function() {
     for bad in [
         json!({"path": "src/new.rs", "content": "x"}),
         json!({"path": "src/new.rs", "expected_digest": null, "content": "x", "plan_contract": {"mission": "x"}}),
-        json!({"path": "../outside", "expected_digest": null, "content": "x"}),
         json!({"operation": "write", "path": "a", "expected_digest": null, "content": "x"}),
         json!({"path": "a", "expected_digest": null, "content": "x", "network": true}),
     ] {
@@ -515,17 +523,12 @@ fn inbound_rejects_max_tokens_refusal_mixed_and_over_cap() {
             &request,
             &response("tool_use", json!([tool_use("toolu_1", name, input)])),
         );
-        assert_eq!(
-            matches!(
-                decoded,
-                Ok(ProviderResponse {
-                    outcome: ProviderOutcome::Tools(_),
-                    ..
-                })
-            ),
-            accepted,
-            "{name} accepted={accepted}"
-        );
+        let decoded = decoded.expect("typed content reaches Engine validation");
+        let ProviderOutcome::Tools(calls) = decoded.outcome else {
+            panic!("write or edit")
+        };
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].call.valid(), accepted, "{name} valid={accepted}");
     }
 }
 
@@ -1499,16 +1502,18 @@ fn multiedit_defaults_and_content_bounds_hold_in_messages_and_streams() {
             "tool_use",
             json!([tool_use("toolu_1", "arany_multiedit", input.clone())]),
         );
-        assert_eq!(decode(&request, &fixture).is_ok(), accepted);
+        let well_typed = replace_all != Some(json!("false"));
+        assert_eq!(decode(&request, &fixture).is_ok(), well_typed);
         let streamed = streamed_tool_use("arany_multiedit", &input.to_string())
             .unwrap()
             .unwrap();
         let decoded = decode_streamed_tool(&streamed, 128_000);
-        assert_eq!(decoded.is_ok(), accepted);
-        if accepted {
+        assert_eq!(decoded.is_ok(), well_typed);
+        if well_typed {
             let ProviderOutcome::Tools(calls) = decoded.unwrap().outcome else {
                 panic!("MultiEdit call")
             };
+            assert_eq!(calls[0].call.valid(), accepted);
             assert!(
                 matches!(&calls[0].call, crate::ToolCall::MultiEdit { edits, .. } if edits[0].replace_all == (replace_all == Some(json!(true))))
             );
@@ -2109,6 +2114,7 @@ fn delegate_tool_use_is_answered_by_a_fixed_result_before_the_child_results() {
                 .unwrap()
                 .steps
                 .push(crate::tools::ToolStep {
+                    refusal: None,
                     plan: None,
                     turn: delegated.turn,
                     requests: Vec::new(),

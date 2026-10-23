@@ -3663,9 +3663,9 @@ async fn plan_active_limit_below_elapsed_call_time_fails_the_run() {
         dispositions,
         [
             ProviderCallDisposition::ToolRequested,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
-            ProviderCallDisposition::InvalidResponse,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
+            ProviderCallDisposition::Rejected,
         ],
         "each unnarrowable plan call is refused and never recorded"
     );
@@ -3852,6 +3852,304 @@ async fn interruption_while_the_call_record_commits_stops_that_call() {
 }
 
 #[tokio::test]
+async fn command_argument_refusals_continue_without_dispatch_and_stop_at_the_refusal_limit() {
+    for (cwd, attempts, valid) in [
+        ("docs/specs", 1, true),
+        ("./doc/spec", 1, false),
+        ("docs/specs/", 1, false),
+        ("./docs/specs", 1, false),
+        ("../outside", 1, false),
+        ("./doc/spec", 3, false),
+    ] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        std::fs::create_dir_all(workspace.join("docs/specs")).expect("directory");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let command = arany::ToolCall::Command {
+            program: "rg".into(),
+            args: vec!["--glob=*.md,spec.md".into(), "x".repeat(543)],
+            cwd: cwd.into(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(
+            std::iter::once(crate::tool_outcome(facts_read()))
+                .chain((0..attempts).map(|_| crate::tool_outcome(command.clone())))
+                .chain([finish_with("The proposal was explained")])
+                .collect(),
+        ));
+        let mut input = request(&workspace, "Read, search the docs, and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("known refusal continuation");
+        let limited = attempts == 3;
+        assert_eq!(
+            outcome.run.status,
+            if limited {
+                RunStatus::Failed
+            } else {
+                RunStatus::Finished
+            }
+        );
+        engine.close().await.expect("shutdown");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(
+            run.failure,
+            limited.then_some(arany::RunFailure::RefusalLimit)
+        );
+        assert_eq!(
+            run.tools.len(),
+            if valid { 2 } else { 1 },
+            "invalid arguments create no effect intent"
+        );
+        assert_eq!(
+            run.agents[0].provider_calls[1].disposition,
+            if valid {
+                ProviderCallDisposition::ToolRequested
+            } else {
+                ProviderCallDisposition::Rejected
+            }
+        );
+        if !valid {
+            assert_eq!(run.agents[0].provider_calls[1].output_tokens, Some(8));
+            assert!(
+                run.agents[0].provider_calls[1..1 + attempts]
+                    .iter()
+                    .all(|call| {
+                        call.refusal.as_ref().is_some_and(|refusal| {
+                            refusal.cause == arany::ProposalRefusalCause::InvalidPath
+                        }) && call.failure_reason
+                            == Some(arany::ProviderFailureReason::ProposalRefused)
+                    })
+            );
+            assert!(events.iter().all(|event| !matches!(&event.event, Event::ToolStarted { intent, .. } if intent.call == command)));
+            let requests = provider.requests.lock().expect("requests");
+            let step = &requests[2].input.tools.as_ref().expect("Tools").steps[1];
+            assert_eq!(
+                step.refusal.as_ref().expect("refused Tool result").cause,
+                arany::ProposalRefusalCause::InvalidPath
+            );
+            assert!(step.observations.is_empty());
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| !request.input.outcome_correction),
+                "argument refusal does not spend the wire correction"
+            );
+            assert_eq!(requests.len(), if limited { 4 } else { 3 });
+        }
+        if limited {
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let recovered = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new user turn");
+            assert_eq!(recovered.run.status, RunStatus::Finished);
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, outcome.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let failure = requests[4]
+                .input
+                .previous_run_failure
+                .expect("committed failure cause");
+            assert_eq!(
+                failure.refusal_cause,
+                Some(arany::ProposalRefusalCause::InvalidPath)
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
+    }
+}
+
+#[tokio::test]
+async fn outcome_correction_notice_is_spent_after_the_corrective_tool_call() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = facts_workspace(temp.path(), "facts");
+    let state_path = temp.path().join("state");
+    let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+    let provider = ScriptedProvider::new(vec![
+        finish_with("rejected placeholder"),
+        crate::tool_outcome(facts_read()),
+        finish_with("The answer after correction"),
+    ]);
+    *provider
+        .responses
+        .lock()
+        .expect("responses")
+        .front_mut()
+        .expect("first") = Err(ProviderError::InvalidOutcomeContract);
+    let provider = Arc::new(provider);
+    let mut input = request(&workspace, "Read the facts and answer");
+    input.include_paths.clear();
+    let outcome = run_with(
+        &engine,
+        &provider,
+        input,
+        RunControls {
+            tools: ToolGrant::Configured,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("corrective Tool continuation");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    engine.close().await.expect("shutdown");
+    let (_, view) = replayed(&state_path, outcome.session_id).await;
+    assert_eq!(view.runs[0].tools.len(), 1);
+    let requests = provider.requests.lock().expect("requests");
+    assert_eq!(
+        requests
+            .iter()
+            .map(|request| request.input.outcome_correction)
+            .collect::<Vec<_>>(),
+        [false, true, false]
+    );
+    assert!(provider.responses.lock().expect("responses").is_empty());
+}
+
+#[tokio::test]
+async fn malformed_outcomes_get_one_journaled_correction_and_keep_the_failure_cause() {
+    for failures in [1, 2] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = facts_workspace(temp.path(), "facts");
+        let state_path = temp.path().join("state");
+        let engine = facts_engine(StateRoot::admit(&state_path).expect("state"), &state_path);
+        let mut script = vec![crate::tool_outcome(facts_read())];
+        script.extend((0..failures).map(|_| finish_with("rejected placeholder")));
+        script.push(finish_with("The answer from the valid response"));
+        let provider = ScriptedProvider::new(script);
+        for response in provider
+            .responses
+            .lock()
+            .expect("responses")
+            .iter_mut()
+            .skip(1)
+            .take(failures)
+        {
+            *response = Err(ProviderError::InvalidOutcomeContract);
+        }
+        let provider = Arc::new(provider);
+        let mut input = request(&workspace, "Read the facts and answer");
+        input.include_paths.clear();
+        let outcome = run_with(
+            &engine,
+            &provider,
+            input,
+            RunControls {
+                tools: ToolGrant::Configured,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded outcome correction");
+        engine.close().await.expect("close before replay");
+        let (events, view) = replayed(&state_path, outcome.session_id).await;
+        let run = &view.runs[0];
+        assert_eq!(run.tools.len(), 1, "the read is never redispatched");
+        assert_eq!(run.agents[0].provider_calls.len(), 3);
+        assert_eq!(
+            run.failure,
+            (failures == 2).then_some(arany::RunFailure::ProviderCall)
+        );
+        assert_eq!(
+            run.assistant_message.as_deref(),
+            (failures == 1).then_some("The answer from the valid response")
+        );
+        for end in 1..=events.len() {
+            SessionView::replay(outcome.session_id, &events[..end])
+                .expect("every committed prefix replays");
+        }
+        let calls = &run.agents[0].provider_calls;
+        assert_eq!(
+            calls[1].failure_reason,
+            Some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        assert_eq!(
+            calls[2].failure_reason,
+            (failures == 2).then_some(arany::ProviderFailureReason::OutcomeContract)
+        );
+        {
+            let requests = provider.requests.lock().expect("requests");
+            assert_eq!(requests.len(), 3);
+            assert!(!requests[1].input.outcome_correction);
+            assert!(requests[2].input.outcome_correction);
+            assert_eq!(
+                requests[1].input.tools.as_ref().expect("Tools").steps[0].observations,
+                requests[2].input.tools.as_ref().expect("Tools").steps[0].observations,
+                "settled observations survive correction"
+            );
+        }
+        if failures == 2 {
+            let refusal = events.iter().position(|event| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)))
+                .expect("first malformed call");
+            let second = events.iter().enumerate().skip(refusal + 1).find_map(|(index, event)| matches!(event.event, Event::ProviderCallRecorded { ref record, .. } if record.failure_reason == Some(arany::ProviderFailureReason::OutcomeContract)).then_some(index))
+                .expect("second malformed call");
+            let mut forbidden = events[..=second].to_vec();
+            let mut extra = forbidden
+                .iter()
+                .rev()
+                .find(|event| matches!(event.event, Event::GoalProviderCallReserved { .. }))
+                .expect("prior admitted reservation")
+                .clone();
+            extra.sequence = forbidden.last().expect("last Event").sequence + 1;
+            forbidden.push(extra);
+            assert!(
+                SessionView::replay(outcome.session_id, &forbidden).is_err(),
+                "replay refuses a third attempt"
+            );
+            let engine = engine_support::open(
+                StateRoot::open_existing(&state_path).expect("state"),
+                EngineConfig::default(),
+            )
+            .expect("reopen");
+            let mut next = request(&workspace, "What was the error?");
+            next.session_id = Some(outcome.session_id);
+            next.title = None;
+            next.include_paths.clear();
+            let follow_up = run_to_end(&engine, &provider, next)
+                .await
+                .expect("new turn");
+            engine.close().await.expect("shutdown");
+            replayed(&state_path, follow_up.session_id).await;
+            let requests = provider.requests.lock().expect("requests");
+            let feedback = requests[3]
+                .input
+                .previous_run_failure
+                .expect("prior failure after Tools");
+            assert_eq!(
+                feedback.stop,
+                arany::RunStop::Failed(arany::RunFailure::ProviderCall)
+            );
+            assert_eq!(
+                feedback.provider_failure,
+                Some(arany::ProviderFailureReason::OutcomeContract)
+            );
+            assert!(
+                !requests[3].input.outcome_correction,
+                "a new Run has its own correction bound"
+            );
+        }
+        assert!(provider.responses.lock().expect("responses").is_empty());
+    }
+}
+
+#[tokio::test]
 async fn pending_tool_refusal_does_not_clear_or_compact_settled_results() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "original");
@@ -3980,8 +4278,8 @@ async fn near_full_context_refuses_write_before_dispatch_and_preserves_the_file(
 async fn tool_context_overflow_fails_with_the_context_cause() {
     let temp = tempfile::tempdir().expect("temporary root");
     let workspace = facts_workspace(temp.path(), "v1");
-    // 71 bytes of the 37,768 admitted are the rendered AGENTS.md heading and wrapper.
-    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(37_697)).expect("instructions");
+    // 71 bytes of the 36,744 admitted are the rendered AGENTS.md heading and wrapper.
+    std::fs::write(workspace.join("AGENTS.md"), "a".repeat(36_673)).expect("instructions");
     std::fs::write(workspace.join("notes/facts.txt"), "f".repeat(40 * 1024)).expect("facts");
     std::fs::write(workspace.join("big1.txt"), "b".repeat(127 * 1024)).expect("include");
     std::fs::write(workspace.join("big2.txt"), "c".repeat(127 * 1024)).expect("include");
@@ -8311,7 +8609,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let page = format!("{}\n", "x".repeat(99)).repeat(130);
     let workspace = facts_workspace(temp.path(), &page);
     for name in ["big1.txt", "big2.txt"] {
-        std::fs::write(workspace.join(name), "b".repeat(72 * 1024)).expect("include");
+        std::fs::write(workspace.join(name), "b".repeat(68 * 1024)).expect("include");
     }
     let state_path = temp.path().join("state");
     let command = arany::ToolCall::Command {
@@ -8358,7 +8656,7 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
         .as_ref()
         .unwrap()
         .max_context_bytes;
-    assert!((220 * 1024..=224 * 1024).contains(&allowance));
+    assert!((228 * 1024..=232 * 1024).contains(&allowance));
     assert_eq!(run.tools.len(), 5);
     assert_eq!(run.tools[4].intent.call, command);
     assert_eq!(run.tools[4].intent.limits.result_bytes, 64 * 1024);
@@ -8368,6 +8666,14 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     );
     let requests = provider.requests.lock().unwrap();
     assert_eq!(requests.len(), 6);
+    assert!(requests.iter().all(|request| {
+        !request.input.outcome_correction
+            && request.input.previous_run_failure.is_none()
+            && request.input.last_answer_refused.is_none()
+    }));
+    assert_eq!(provider.compact_requests.lock().unwrap().len(), 1);
+    assert!(provider.compact_responses.lock().unwrap().is_empty());
+    assert!(provider.responses.lock().unwrap().is_empty());
     let context = requests[4].input.tools.as_ref().unwrap();
     assert_eq!(context.observation_count(), 4);
     assert!(context.steps[0].cleared);
@@ -8376,8 +8682,25 @@ async fn command_step_clears_old_results_with_a_small_context_allowance() {
     let used = arany::test_support::tool_context_bytes(&uncleared);
     assert!((52 * 1024..=64 * 1024).contains(&used));
     let reserve = 64 * 1024 + 96 * 1024 + 512 + 16 * 1024 + 128 * 6 + 512;
-    assert!(used + reserve > allowance as usize);
-    assert!(arany::test_support::tool_context_bytes(context) + reserve <= allowance as usize);
+    let margin = 2 * 1024;
+    assert!(used + reserve > allowance as usize + margin);
+    assert!(
+        arany::test_support::tool_context_bytes(context) + reserve + margin <= allowance as usize
+    );
+    let after_command = requests[5].input.tools.as_ref().unwrap();
+    assert_eq!(
+        after_command
+            .steps
+            .iter()
+            .filter(|step| step.cleared)
+            .count(),
+        1
+    );
+    assert!(
+        arany::test_support::tool_context_bytes(after_command) + reserve + margin
+            <= allowance as usize,
+        "the denied Command must leave continuation room on both platforms"
+    );
     let clearing = events
         .iter()
         .position(|event| {
