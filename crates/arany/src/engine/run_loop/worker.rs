@@ -101,6 +101,32 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
     }
 }
 
+fn integration_capacity_stop(
+    result: Result<IntentResult, EngineError>,
+) -> Result<bool, EngineError> {
+    match result {
+        Ok(Err(StopCause::Capacity)) | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
+            Ok(true)
+        }
+        Err(EngineError::GoalBudgetExhausted)
+        | Ok(Ok(_))
+        | Ok(Err(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::ActiveTime
+            | StopCause::Budget
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult,
+        )) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn worker_observation(result: IntentResult) -> Result<Option<ToolObservation>, EngineError> {
     match result {
         Ok((observation, _)) => Ok(Some(observation)),
@@ -1193,27 +1219,8 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        match result {
-            Ok(Err(StopCause::Capacity))
-            | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
-                self.record_capacity_stop().await?
-            }
-            Err(EngineError::GoalBudgetExhausted)
-            | Ok(Ok(_))
-            | Ok(Err(
-                StopCause::Uncertain
-                | StopCause::Cancelled
-                | StopCause::HookStop
-                | StopCause::Paused
-                | StopCause::ActiveTime
-                | StopCause::Budget
-                | StopCause::ContextFull
-                | StopCause::DelegationDeadline
-                | StopCause::Refused(_)
-                | StopCause::ToolStopped
-                | StopCause::InvalidCommandResult,
-            )) => {}
-            Err(error) => return Err(error),
+        if integration_capacity_stop(result)? {
+            self.record_capacity_stop().await?;
         }
         let tool = self
             .ledger()
