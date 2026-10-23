@@ -152,7 +152,7 @@ pub(super) struct Prompt {
 }
 
 fn blocks<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PromptBlock>, D::Error> {
-    crate::cli::bounded_list::<D, PromptBlock, 64>(d, "at most 64 content blocks")
+    crate::files::bounded_list::<D, PromptBlock, 64>(d, "at most 64 content blocks")
 }
 
 #[derive(Deserialize)]

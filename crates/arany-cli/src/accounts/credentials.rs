@@ -530,7 +530,7 @@ fn load_file() -> Result<Option<StoredAccountFile>, CredentialError> {
 
 fn load_file_at(path: &Path) -> Result<Option<StoredAccountFile>, CredentialError> {
     let Some(state) =
-        crate::cli::open_optional_state(path).map_err(|_| CredentialError::StateUnavailable)?
+        crate::files::open_optional_state(path).map_err(|_| CredentialError::StateUnavailable)?
     else {
         return Ok(None);
     };

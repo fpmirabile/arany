@@ -196,7 +196,7 @@ struct AccountIndex {
 fn bounded_model_checks<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<ModelCheck>, D::Error> {
-    crate::cli::bounded_list::<D, ModelCheck, MAX_MODEL_CHECKS>(
+    crate::files::bounded_list::<D, ModelCheck, MAX_MODEL_CHECKS>(
         deserializer,
         "too many model checks",
     )
@@ -1263,7 +1263,7 @@ fn selected_id_at(state: &StateRoot) -> Result<Uuid, AuthorizationError> {
 
 fn open_account_state() -> Result<StateRoot, AuthorizationError> {
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
-    crate::cli::open_optional_state(&path)
+    crate::files::open_optional_state(&path)
         .map_err(|_| AuthorizationError::Unavailable)?
         .ok_or(AuthorizationError::NoSelectedAccount)
 }

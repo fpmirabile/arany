@@ -2,6 +2,7 @@
 
 mod accounts;
 mod cli;
+mod files;
 use arany_cli::{presentation, terminal, terminal::report_error};
 
 #[cfg(all(test, unix))]
