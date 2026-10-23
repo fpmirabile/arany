@@ -26,8 +26,9 @@ mod worker;
 
 use step::Grant;
 pub(super) use step::hooks::LifecycleHook;
-pub(super) use stop::{HookRefusal, SizingRefusal};
-use stop::{PrimaryEnd, RunFacts, Settlement, StepEnd, StopCause};
+pub(super) use stop::HookRefusal;
+use stop::SizingRefusal;
+use stop::{PrimaryEnd, RunFacts, RunProgress, RunRefusal, Settlement, StepEnd, StopCause};
 
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
@@ -433,59 +434,77 @@ impl<'a> RunLoop<'a> {
         &self,
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
-        let end = match self.initialize_definitions(&mut root_request).await? {
-            Admission::Reserved(step::DefinitionInitialization::Ready) => None,
-            Admission::Reserved(step::DefinitionInitialization::Stopped)
+        match self.execute_inner(&mut root_request).await? {
+            RunProgress::Ready(()) => Ok(()),
+            RunProgress::Stopped(RunRefusal::Budget) => Err(EngineError::GoalBudgetExhausted),
+            RunProgress::Stopped(RunRefusal::Capacity) => {
+                Err(crate::tools::ToolError::Limit.into())
+            }
+        }
+    }
+
+    async fn execute_inner(
+        &self,
+        root_request: &mut ProviderRequest,
+    ) -> Result<RunProgress<()>, EngineError> {
+        let end = match self.initialize_definitions(root_request).await? {
+            RunProgress::Ready(step::DefinitionInitialization::Ready) => None,
+            RunProgress::Ready(step::DefinitionInitialization::Stopped)
                 if self.pause_at_boundary() =>
             {
                 Some(PrimaryEnd::Stopped(StopCause::Paused))
             }
-            Admission::Reserved(step::DefinitionInitialization::Stopped)
+            RunProgress::Ready(step::DefinitionInitialization::Stopped)
                 if self.take_active_time_floor() =>
             {
                 Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
             }
-            Admission::Reserved(step::DefinitionInitialization::Stopped) => {
+            RunProgress::Ready(step::DefinitionInitialization::Stopped) => {
                 Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid))
             }
-            Admission::Exhausted => Some(PrimaryEnd::Stopped(StopCause::ActiveTime)),
+            RunProgress::Stopped(RunRefusal::Capacity) => {
+                return Ok(RunProgress::Stopped(RunRefusal::Capacity));
+            }
+            RunProgress::Stopped(RunRefusal::Budget) => {
+                Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
+            }
         };
         if let Some(end) = end {
-            return self.settle_primary(end).await;
+            return self.settle_primary(end).await.map(RunProgress::Ready);
         }
-        let end = match self.initialize_skill(&mut root_request).await? {
-            Admission::Reserved(step::SkillInitialization::Ready) => {
-                return match self.drive_primary(&mut root_request).await? {
-                    Admission::Reserved(()) => Ok(()),
-                    Admission::Exhausted => Err(EngineError::GoalBudgetExhausted),
-                };
+        let end = match self.initialize_skill(root_request).await? {
+            RunProgress::Ready(step::SkillInitialization::Ready) => {
+                return self.drive_primary(root_request).await;
             }
             // A stopped read carries no cause: the observed facts decide, as for a refused reservation.
-            Admission::Reserved(step::SkillInitialization::Stopped) => {
+            RunProgress::Ready(step::SkillInitialization::Stopped) => {
                 PrimaryEnd::Stopped(StopCause::Budget)
             }
-            Admission::Reserved(step::SkillInitialization::Failed(cause)) => {
+            RunProgress::Ready(step::SkillInitialization::Failed(cause)) => {
                 PrimaryEnd::Failed(cause)
             }
-            Admission::Exhausted => PrimaryEnd::Stopped(StopCause::ActiveTime),
+            RunProgress::Stopped(RunRefusal::Capacity) => {
+                return Ok(RunProgress::Stopped(RunRefusal::Capacity));
+            }
+            RunProgress::Stopped(RunRefusal::Budget) => PrimaryEnd::Stopped(StopCause::ActiveTime),
         };
         if matches!(end, PrimaryEnd::Failed(RunFailure::ToolContextFull)) {
-            self.record_context_full(&root_request, 0);
+            self.record_context_full(root_request, 0);
         }
-        self.settle_primary(end).await
+        self.settle_primary(end).await.map(RunProgress::Ready)
     }
 
-    pub(super) fn drive_primary<'b>(
+    fn drive_primary<'b>(
         &'b self,
         root_request: &'b mut ProviderRequest,
-    ) -> step::BoxedStep<'b, Admission<()>> {
+    ) -> step::BoxedStep<'b, RunProgress<()>> {
         Box::pin(self.drive_primary_inner(root_request))
     }
 
     async fn drive_primary_inner(
         &self,
         root_request: &mut ProviderRequest,
-    ) -> Result<Admission<()>, EngineError> {
+    ) -> Result<RunProgress<()>, EngineError> {
         let (end, pending_turn_bytes) = loop {
             let phase = root_request.phase;
             if self.pause_at_boundary() {
@@ -510,16 +529,16 @@ impl<'a> RunLoop<'a> {
                 .apply_primary_decision(root_request, decision, phase, call.budget_action)
                 .await?
             {
-                Admission::Reserved(PrimaryFlow::Continue) => {}
-                Admission::Reserved(PrimaryFlow::Settled) => return Ok(Admission::Reserved(())),
-                Admission::Reserved(PrimaryFlow::End(end, pending)) => break (end, pending),
-                Admission::Exhausted => return Ok(Admission::Exhausted),
+                RunProgress::Ready(PrimaryFlow::Continue) => {}
+                RunProgress::Ready(PrimaryFlow::Settled) => return Ok(RunProgress::Ready(())),
+                RunProgress::Ready(PrimaryFlow::End(end, pending)) => break (end, pending),
+                RunProgress::Stopped(cause) => return Ok(RunProgress::Stopped(cause)),
             }
         };
         if matches!(end, PrimaryEnd::Stopped(StopCause::ContextFull)) {
             self.record_context_full(root_request, pending_turn_bytes);
         }
-        self.settle_primary(end).await.map(Admission::Reserved)
+        self.settle_primary(end).await.map(RunProgress::Ready)
     }
 
     async fn record_primary_call(
@@ -579,7 +598,7 @@ impl<'a> RunLoop<'a> {
         decision: PrimaryDecision,
         phase: AgentPhase,
         budget_action: crate::session::BudgetAction,
-    ) -> Result<Admission<PrimaryFlow>, EngineError> {
+    ) -> Result<RunProgress<PrimaryFlow>, EngineError> {
         let flow = match decision {
             PrimaryDecision::Plan(plan, turn) => {
                 self.record_plan_step(root_request, *plan, turn).await?;
@@ -639,7 +658,7 @@ impl<'a> RunLoop<'a> {
             PrimaryDecision::Fail(failure) => PrimaryFlow::End(PrimaryEnd::Failed(failure), 0),
             PrimaryDecision::Defer => return Err(EngineError::CoordinatorFailed),
         };
-        Ok(Admission::Reserved(flow))
+        Ok(RunProgress::Ready(flow))
     }
 
     async fn apply_primary_answer(

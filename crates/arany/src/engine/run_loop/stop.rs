@@ -49,13 +49,44 @@ impl StopCause {
 }
 
 #[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RunProgress<T> {
+    Ready(T),
+    Stopped(RunRefusal),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RunRefusal {
+    Budget,
+    Capacity,
+}
+
+impl<T> RunProgress<T> {
+    pub(super) fn map<U>(self, map: impl FnOnce(T) -> U) -> RunProgress<U> {
+        match self {
+            Self::Ready(value) => RunProgress::Ready(map(value)),
+            Self::Stopped(cause) => RunProgress::Stopped(cause),
+        }
+    }
+}
+
+impl<T> From<super::Admission<T>> for RunProgress<T> {
+    fn from(admission: super::Admission<T>) -> Self {
+        match admission {
+            super::Admission::Reserved(value) => Self::Ready(value),
+            super::Admission::Exhausted => Self::Stopped(RunRefusal::Budget),
+        }
+    }
+}
+
+#[must_use]
 pub(super) enum StepEnd {
     Continue,
     Stopped(StopCause),
 }
 
 #[must_use]
-pub(in crate::engine) enum SizingRefusal {
+pub(super) enum SizingRefusal {
     DelegationDeadline,
     ActiveTime,
     ContextFull,
@@ -76,10 +107,10 @@ impl From<HookRefusal> for SizingRefusal {
     }
 }
 
-impl SizingRefusal {
+impl HookRefusal {
     pub(in crate::engine) fn into_engine_error(self) -> EngineError {
         match self {
-            Self::ActiveTime | Self::DelegationDeadline => EngineError::GoalBudgetExhausted,
+            Self::ActiveTime => EngineError::GoalBudgetExhausted,
             Self::ContextFull => EngineError::ContextTooLarge,
         }
     }
@@ -371,6 +402,32 @@ mod tests {
     ];
 
     #[test]
+    fn run_progress_keeps_refusals_through_mapping_and_admission() {
+        for (progress, expected) in [
+            (RunProgress::Ready(1), RunProgress::Ready(2)),
+            (
+                RunProgress::Stopped(RunRefusal::Budget),
+                RunProgress::Stopped(RunRefusal::Budget),
+            ),
+            (
+                RunProgress::Stopped(RunRefusal::Capacity),
+                RunProgress::Stopped(RunRefusal::Capacity),
+            ),
+        ] {
+            assert_eq!(progress.map(|value| value + 1), expected);
+        }
+        for (admission, expected) in [
+            (super::super::Admission::Reserved(1), RunProgress::Ready(1)),
+            (
+                super::super::Admission::Exhausted,
+                RunProgress::Stopped(RunRefusal::Budget),
+            ),
+        ] {
+            assert_eq!(RunProgress::from(admission), expected);
+        }
+    }
+
+    #[test]
     fn sizing_and_stop_precedence() {
         for (refusal, expected) in [
             (HookRefusal::ActiveTime, StopCause::ActiveTime),
@@ -379,12 +436,8 @@ mod tests {
             assert_eq!(StopCause::from(SizingRefusal::from(refusal)), expected);
         }
         for (refusal, expected) in [
-            (SizingRefusal::ActiveTime, EngineError::GoalBudgetExhausted),
-            (SizingRefusal::ContextFull, EngineError::ContextTooLarge),
-            (
-                SizingRefusal::DelegationDeadline,
-                EngineError::GoalBudgetExhausted,
-            ),
+            (HookRefusal::ActiveTime, EngineError::GoalBudgetExhausted),
+            (HookRefusal::ContextFull, EngineError::ContextTooLarge),
         ] {
             assert_eq!(
                 std::mem::discriminant(&refusal.into_engine_error()),
