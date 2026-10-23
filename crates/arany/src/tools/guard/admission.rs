@@ -1306,6 +1306,8 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[tokio::test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     async fn seed_ownership_survives_controller_death_at_each_publication_boundary() {
         seed_death_cases(&[
             "reserved",
@@ -1323,7 +1325,11 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    #[cfg_attr(not(arany_ci), ignore = "requires native Linux systemd and Bubblewrap")]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(
+        any(arany_guard, not(arany_ci)),
+        ignore = "requires native Linux systemd and Bubblewrap"
+    )]
     fn native_seed_recovery_terminates_the_owned_unit_before_releasing_storage() {
         let _gate = crate::test_process::NATIVE_GATE
             .lock()
@@ -1820,6 +1826,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     async fn shared_capacity_and_fifo_survive_cancellation_death_and_expiry() {
         let fixture = tempfile::tempdir().unwrap();
         let listener = UnixListener::bind(fixture.path().join("control")).unwrap();

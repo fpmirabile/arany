@@ -1233,3 +1233,89 @@ fn shipped_exec_continues_after_guarded_command_and_replays_closed_events() {
         });
     }
 }
+
+#[test]
+#[ignore = "requires an explicit local Rust sysroot; native offline Guard Cargo journey"]
+fn guarded_offline_cargo_tests_use_selected_runtime_and_registry() {
+    use std::os::unix::fs::DirBuilderExt;
+    let _gate = crate::process::NATIVE_GATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let source = std::env::var_os("ARANY_TEST_RUST_SYSROOT")
+        .expect("explicit physical versioned Rust sysroot");
+    let source = Path::new(&source);
+    assert!(source.is_absolute());
+    assert_eq!(std::fs::canonicalize(source).unwrap(), source);
+    let temp = tempfile::tempdir().unwrap();
+    for name in ["account-home", "home", "workspace"] {
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(temp.path().join(name))
+            .unwrap();
+    }
+    let toolchains = temp.path().join("home/.rustup/toolchains");
+    std::fs::create_dir_all(&toolchains).unwrap();
+    let copied = Command::new("/usr/bin/cp")
+        .args(["--reflink=auto", "-R", "--"])
+        .arg(source)
+        .arg(&toolchains)
+        .env_clear()
+        .current_dir(temp.path())
+        .bounded_output_for(Duration::from_secs(60), 4096)
+        .unwrap();
+    assert!(copied.status.success(), "private Rust clone: {copied:?}");
+    let mut helper = crate::isolation::native_account_isolated_test_command_with_timeout(
+        temp.path(),
+        &std::env::current_exe().unwrap(),
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        1100,
+    );
+    helper
+        .args([
+            "--exact",
+            "tools::native_exec::offline_cargo_helper",
+            "--ignored",
+            "--nocapture",
+        ])
+        .env_clear()
+        .current_dir(temp.path());
+    let output = helper
+        .bounded_output_for(Duration::from_secs(1120), 64 * 1024)
+        .unwrap();
+    if !output.status.success() {
+        let retained = temp.keep();
+        panic!("offline Cargo journey failed; fixture={retained:?}; output={output:?}");
+    }
+    crate::process::assert_single_test_completed(&output.stdout, "offline Cargo journey");
+}
+
+#[tokio::test]
+#[ignore = "isolated helper owned by native offline Cargo journey"]
+async fn offline_cargo_helper() {
+    let root = std::env::var_os("ARANY_TEST_CACHE_CANARY_ROOT").expect("private fixture root");
+    let root = Path::new(&root);
+    let workspace = root.join("workspace");
+    arany::test_support::scenario::offline_cargo_fixture(&root.join("home"), &workspace);
+    let mut permissions = arany::WorkspacePermissions::open(&workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let choices = permissions.runtime_profile_choices();
+    let rust = choices
+        .iter()
+        .find(|choice| choice.group == "Rust")
+        .expect("one explicit private Rust toolchain");
+    assert!(!rust.selected);
+    permissions
+        .remember_profiles(
+            true,
+            arany::ApprovalMode::Request,
+            std::slice::from_ref(&rust.token),
+        )
+        .unwrap();
+    arany::test_support::scenario::guarded_offline_cargo_journey(
+        root,
+        &workspace,
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+    )
+    .await;
+}

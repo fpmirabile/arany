@@ -3873,6 +3873,7 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
         "Usage page 1 of 1\nUsage: Provider-reported tokens\nCommitted through Event {}\nCache reads/writes are included in input\nOutput includes reported reasoning tokens\n\nCurrent/latest Run\nProvider: openai\nModel: gpt-5.4\nInput: 12,340\nOutput: 8\nCache read (included in input): 7\nCache write (included in input): 3\nAPI rate limits: unknown (not reported)\n\nSession totals\nProvider: openai\nModel: gpt-5.4\nInput: 12,340\nOutput: 8\nCache read (included in input): 7\nCache write (included in input): 3\nAPI rate limits: unknown (not reported)\n",
         view.last_sequence
     );
+    let report_ready = format!("{expected}Input:\n");
     for _ in 0..2 {
         let mut command = isolation::account_isolated_script(temp.path());
         command.env_clear().current_dir(&workspace)
@@ -3888,14 +3889,17 @@ fn attached_usage_reopens_complete_token_facts_without_credentials_or_events() {
         fcntl_setfl(&output, flags | OFlags::NONBLOCK).unwrap();
         let mut bytes = Vec::new();
         let mut answered = session_picker::PtyResponses::default();
-        for (needle, action) in [
-            ("Input:", "/usage\n"),
-            ("API rate limits: unknown (not reported)", "/exit\n"),
-        ] {
+        for (needle, action) in [("Input:\n", "/usage\n"), (report_ready.as_str(), "/exit\n")] {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while !String::from_utf8_lossy(&bytes).contains(needle) {
+            while !String::from_utf8_lossy(&bytes)
+                .replace('\r', "")
+                .contains(needle)
+            {
                 session_picker::pump(&mut output, &mut input, &mut bytes, &mut answered);
-                assert!(Instant::now() < deadline, "usage PTY stage");
+                assert!(
+                    Instant::now() < deadline,
+                    "usage PTY stage: waiting for {needle:?}"
+                );
                 std::thread::yield_now();
             }
             input.write_all(action.as_bytes()).unwrap();

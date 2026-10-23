@@ -372,6 +372,12 @@ about every peer implementation. The separate journal is Arany's divergence
 from the documented direct-probe/gateway-log workflows, required by journal-first
 durability, honest uncertainty and strict replay.
 
+### D-27 — Selected Rust and honest Guard-only test omissions
+
+The owner accepted selected offline Rust defaults and conditional IPC omissions on 2026-10-22. Reuse the existing command environment, exact runtime/cache selections and cache transaction; a Cargo-specific executor or wider home mount is unnecessary. [Cargo configuration](https://doc.rust-lang.org/cargo/reference/config.html#buildrustflags) gives encoded Rust flags precedence; [Cargo fingerprints](https://github.com/rust-lang/cargo/blob/cf29d0e0b1f7b03c4ceda5211cc4dc493bfc542e/src/compiler/fingerprint/mod.rs#L1110) include those flags in compilation identity. The fixed marker makes omissions follow the compiled environment while native enforcement remains independent.
+
+[Claude sandbox-runtime](https://github.com/anthropics/sandbox-runtime/blob/aceba124fd725f4a43d7016ed3f5651d61f83115/test/sandbox/wrap-with-sandbox.test.ts) conditions unavailable fixtures on the runner; [Codex test support](https://github.com/openai/codex/blob/86e17e98c7f901277aeeb4649cf1b01462b082f2/codex-rs/core/tests/common/lib.rs) uses sandbox/network markers. Arany uses Rust conditional `ignore` instead of an early successful return so libtest reports omissions honestly. The [Tools contract](../specs/tools.md#persistent-workspace-build-cache) owns behavior; [remaining native evidence and local IPC](../../NEXT_STEPS.md#daily-use-first) are separate from implementation. A successful guarded run with named omissions does not prove the ignored scenarios.
+
 ### Rejected layering
 
 Retained from the 2026-10-04 architecture review (its report is folded into this register):

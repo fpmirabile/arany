@@ -3714,7 +3714,6 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     )
     .unwrap();
     std::os::unix::fs::symlink(temp.path().join("elsewhere"), workspace.join("linked")).unwrap();
-    let _socket = std::os::unix::net::UnixListener::bind(workspace.join("src/socket.rs")).unwrap();
     let whole = in_process_runtime(
         &workspace,
         json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
@@ -3729,7 +3728,7 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
             "{pattern}: {paths:?}"
         );
         for hidden in [
-            "canary", ".env", ".ENV", ".git", ".ssh", "hard_", "link", "socket", "escape",
+            "canary", ".env", ".ENV", ".git", ".ssh", "hard_", "link", "escape",
         ] {
             assert!(!observation.output.contains(hidden), "{pattern}: {hidden}");
         }
@@ -3803,6 +3802,25 @@ async fn glob_never_discloses_protected_or_unadmitted_entries_and_bounds_its_wal
     assert_eq!(scanned.disposition, ToolDisposition::Limit);
     assert_eq!(scanned.limit_cause, Some(super::LimitCause::Resource));
     assert!(scanned.attestation.is_some());
+}
+
+#[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn glob_never_discloses_unix_socket_entries() {
+    let temp = tempfile::tempdir().unwrap();
+    std::fs::write(temp.path().join("visible.rs"), "fn main() {}").unwrap();
+    let _socket =
+        std::os::unix::net::UnixListener::bind(temp.path().join("socket-canary.rs")).unwrap();
+    let runtime = in_process_runtime(
+        temp.path(),
+        json!({"version":1,"workspace_paths":["."],"write":false,"commands":[],"skills":[],"mcp":[]}),
+    );
+    for pattern in ["**", "**/*.rs", "*"] {
+        let observation = glob_result(&runtime, glob(pattern, ".", 100), 1024).await;
+        assert_eq!(glob_paths(&observation), (vec!["visible.rs".into()], false));
+        assert!(!observation.output.contains("socket-canary"));
+    }
 }
 
 #[cfg(unix)]

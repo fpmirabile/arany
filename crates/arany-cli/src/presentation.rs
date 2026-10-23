@@ -1222,9 +1222,10 @@ pub(crate) fn workspace_permission_lines(path: &std::path::Path) -> Vec<String> 
     ]
 }
 
-pub(crate) const RUNTIME_PROFILE_LINES: [&str; 3] = [
+pub(crate) const RUNTIME_PROFILE_LINES: [&str; 4] = [
     "Optional runtime profiles (read only)",
     "Check a toolchain to let commands use that exact version; its bin joins PATH. Check a cache to let commands read it. At most one version per runtime. Nothing is selected until you check it, and checking switches the choice to Trust.",
+    "For offline Cargo tests, select Rust and each required Cargo archive, source and index cache separately; macOS also needs its compiler and SDK. Build requests use one compilation job. Missing dependencies fail without downloading or expanding access.",
     "Caches may hold private package data or credential URLs; a command can print them into bounded output that is journaled and sent to the Provider. Package-manager configuration and credential files stay excluded.",
 ];
 

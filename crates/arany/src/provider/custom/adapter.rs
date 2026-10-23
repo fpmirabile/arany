@@ -185,6 +185,8 @@ mod tests {
     }
 
     #[tokio::test]
+    // Skipped in the Guard: local test IPC capability is missing.
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     async fn readonly_custom_admission_cannot_dispatch_tools_or_child_authority() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();

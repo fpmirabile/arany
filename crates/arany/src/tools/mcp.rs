@@ -205,6 +205,7 @@ pub(super) async fn execute(
         root,
         &config.runtime_grants,
         cache_enabled,
+        super::types::ToolResourceClass::Default,
     )?;
     command.stdin(Stdio::piped());
     let mut child = command.spawn().map_err(|_| ToolError::Operation)?;

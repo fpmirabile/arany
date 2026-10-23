@@ -1863,6 +1863,8 @@ fn provider_identity_maps_only_known_profiles_to_fixed_metadata() {
 }
 
 #[test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 fn loopback_export_is_protobuf_with_a_minimal_resource() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("local Collector");
     listener.set_nonblocking(true).expect("bounded accept");
@@ -1985,6 +1987,8 @@ fn loopback_export_is_protobuf_with_a_minimal_resource() {
 }
 
 #[test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 fn collector_redirect_is_not_followed() {
     let source = TcpListener::bind("127.0.0.1:0").expect("source Collector");
     let target = TcpListener::bind("127.0.0.1:0").expect("redirect target");
@@ -2018,6 +2022,8 @@ fn collector_redirect_is_not_followed() {
 }
 
 #[test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 fn stalled_collector_cannot_hold_shutdown_open() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("slow Collector");
     let address = listener.local_addr().expect("slow Collector address");

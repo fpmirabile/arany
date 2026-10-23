@@ -669,6 +669,9 @@ mod tests {
         std::os::unix::fs::symlink("/usr/bin/python3", python_escape.join("bin/python3")).unwrap();
         let cache = home.join(".cargo/registry/cache");
         std::fs::create_dir_all(&cache).unwrap();
+        for part in ["src", "index"] {
+            std::fs::create_dir_all(home.join(".cargo/registry").join(part)).unwrap();
+        }
         std::fs::create_dir_all(home.join(".cargo")).unwrap();
         std::fs::write(
             home.join(".cargo/config.toml"),
@@ -766,7 +769,14 @@ mod tests {
         let state = StateRoot::admit(&temp.path().join("state")).unwrap();
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).unwrap();
-        let access = WorkspacePermissions::load(&workspace, &state)
+        std::fs::write(
+            workspace.join("rust-toolchain.toml"),
+            r#"[toolchain]
+channel = "stable"
+"#,
+        )
+        .unwrap();
+        let mut access = WorkspacePermissions::load(&workspace, &state)
             .unwrap()
             .with_candidates(Ok(candidates.clone()));
         let choices = access.runtime_profile_choices();
@@ -781,6 +791,38 @@ mod tests {
                 .find(|choice| choice.token == candidate.token)
                 .unwrap();
             assert!(!choice.selected);
+        }
+        assert!(choices.iter().all(|choice| !choice.selected));
+        for kind in [
+            RuntimeKind::CargoCache,
+            RuntimeKind::CargoSource,
+            RuntimeKind::CargoIndex,
+        ] {
+            let candidate = candidates
+                .iter()
+                .find(|candidate| candidate.grant.kind == kind)
+                .unwrap();
+            access
+                .remember_with(
+                    &state,
+                    true,
+                    ApprovalMode::Request,
+                    std::slice::from_ref(&candidate.token),
+                )
+                .unwrap();
+            let saved = WorkspacePermissions::load(&workspace, &state).unwrap();
+            assert_eq!(
+                saved.runtime_grants.as_slice(),
+                std::slice::from_ref(&candidate.grant)
+            );
+            assert!(
+                saved
+                    .config(&workspace)
+                    .unwrap()
+                    .runtime_grants
+                    .iter()
+                    .all(|grant| grant.kind == kind)
+            );
         }
         rust.grant.verify_host().unwrap();
 

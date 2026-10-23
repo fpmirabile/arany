@@ -674,3 +674,495 @@ pub fn completion_boundary_cases() -> [CompletionBoundaryCase; 12] {
         ),
     ]
 }
+
+#[cfg(unix)]
+pub fn offline_cargo_fixture(home: &Path, workspace: &Path) {
+    const REGISTRY: &str = "index.crates.io-1949cf8c6b5b557f";
+    use std::os::unix::fs::PermissionsExt;
+    let archive = include_bytes!("../../tests/fixtures/offline-cargo/dependency.crate");
+    let checksum = crate::tools::types::hex_digest(archive);
+    let registry = home.join(".cargo/registry");
+    let package = "arany-fixture-dependency-0.1.0";
+    let source = registry.join("src").join(REGISTRY).join(package);
+    let files: [(&str, &[u8]); 4] = [
+        (
+            "Cargo.toml",
+            include_bytes!("../../tests/fixtures/offline-cargo/Cargo.toml"),
+        ),
+        (
+            "src/lib.rs",
+            include_bytes!("../../tests/fixtures/offline-cargo/src/lib.rs"),
+        ),
+        (
+            "build.rs",
+            include_bytes!("../../tests/fixtures/offline-cargo/build.rs"),
+        ),
+        (
+            "native.c",
+            include_bytes!("../../tests/fixtures/offline-cargo/native.c"),
+        ),
+    ];
+    for (path, bytes) in files {
+        let path = source.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+    std::fs::write(source.join(".cargo-ok"), b"{\"v\":1}").unwrap();
+    let cache = registry.join("cache").join(REGISTRY);
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join(format!("{package}.crate")), archive).unwrap();
+    let index = registry.join("index").join(REGISTRY);
+    std::fs::create_dir_all(index.join(".cache/ar/an")).unwrap();
+    std::fs::write(
+        index.join("config.json"),
+        br#"{"dl":"https://static.crates.io/crates","api":"https://crates.io"}"#,
+    )
+    .unwrap();
+    let entry = serde_json::json!({
+        "name": "arany-fixture-dependency", "vers": "0.1.0", "deps": [],
+        "cksum": checksum, "features": {}, "yanked": false,
+    });
+    let mut bytes = b"\x03\x02\0\0\0etag: fixture\0\x30.1.0\0".to_vec();
+    bytes.extend_from_slice(&serde_json::to_vec(&entry).unwrap());
+    bytes.push(0);
+    std::fs::write(index.join(".cache/ar/an/arany-fixture-dependency"), bytes).unwrap();
+    std::fs::create_dir_all(workspace.join("src")).unwrap();
+    std::fs::write(
+        workspace.join("Cargo.toml"),
+        r#"[package]
+name = "offline-cargo-fixture"
+version = "0.1.0"
+edition = "2021"
+[dependencies]
+arany-fixture-dependency = "=0.1.0"
+[lints.rust]
+unexpected_cfgs = { level = "deny", check-cfg = ['cfg(arany_guard)'] }
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("Cargo.lock"),
+        format!(
+            r#"version = 4
+[[package]]
+name = "arany-fixture-dependency"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "{checksum}"
+[[package]]
+name = "offline-cargo-fixture"
+version = "0.1.0"
+dependencies = ["arany-fixture-dependency"]
+"#
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("src/lib.rs"),
+        include_bytes!("../../tests/fixtures/offline-cargo/tests.rs"),
+    )
+    .unwrap();
+    std::fs::write(
+        workspace.join("rust-toolchain.toml"),
+        b"[toolchain]\nchannel = \"unselected-repository-channel\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        home.join(".cargo/credentials.toml"),
+        b"UNSELECTED_CARGO_CREDENTIAL_CANARY",
+    )
+    .unwrap();
+    let wrapper = home.join("unselected-wrapper");
+    std::fs::write(
+        &wrapper,
+        br#"#!/bin/sh
+printf 'UNSELECTED_CARGO_CREDENTIAL_CANARY\n' >&2
+exec "$@"
+"#,
+    )
+    .unwrap();
+    std::fs::set_permissions(wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+}
+
+#[cfg(unix)]
+pub async fn guarded_offline_cargo_journey(root: &Path, workspace: &Path, guard: &Path) {
+    use crate::{
+        ApprovalMode, CacheUpdate, Engine, EngineConfig, GoalPlanContract, GoalSuccessCriterion,
+        RunControls, RunStatus, SessionView, StateRoot, Store, ToolApprovals, ToolCall, ToolGrant,
+        ToolResourceClass, WorkspacePermissions,
+    };
+    let home = root.join("home");
+    let registry = home.join(".cargo/registry");
+    let index = registry
+        .join("index/index.crates.io-1949cf8c6b5b557f/.cache/ar/an/arany-fixture-dependency");
+    let source =
+        registry.join("src/index.crates.io-1949cf8c6b5b557f/arany-fixture-dependency-0.1.0");
+    let index_bytes = std::fs::read(&index).unwrap();
+    let source_bytes = std::fs::read(source.join("src/lib.rs")).unwrap();
+    let original_lock = std::fs::read(workspace.join("Cargo.lock")).unwrap();
+    let mut permissions = WorkspacePermissions::open(workspace)
+        .unwrap()
+        .prepare_profile_selection();
+    let choices = permissions.runtime_profile_choices();
+    let mut tokens: Vec<_> = choices
+        .iter()
+        .filter(|choice| choice.selected)
+        .map(|choice| choice.token.clone())
+        .collect();
+    for group in [
+        "Cargo archive cache",
+        "Cargo source cache",
+        "Cargo index cache",
+    ] {
+        let choice = choices
+            .iter()
+            .find(|choice| choice.group == group)
+            .expect("private registry candidate");
+        assert!(!choice.selected);
+        tokens.push(choice.token.clone());
+    }
+    permissions
+        .remember_profiles(true, ApprovalMode::Request, &tokens)
+        .unwrap();
+    let state = root.join("cargo-state");
+    for (case, script, success) in [
+        (
+            "unmarked",
+            "CARGO_ENCODED_RUSTFLAGS='' cargo test --locked --lib --no-run",
+            true,
+        ),
+        (
+            "guarded",
+            r#"set -eu
+test "$CARGO_NET_OFFLINE" = true
+test "$CARGO_BUILD_JOBS" = 1
+if (printf changed > "$(command -v cargo)") 2>/dev/null; then exit 94; fi
+test ! -e "$CARGO_HOME/credentials.toml"
+test "$0" = "offline build 'entry"
+test "$1" = "argument with ' quote"
+if test -n "${SDKROOT-}"; then
+    test -r /Library/Developer/CommandLineTools/usr/bin/llvm-nm
+    if /Library/Developer/CommandLineTools/usr/bin/llvm-nm --version; then exit 93; else test "$?" -eq 1; fi
+fi
+for part in cache src index; do
+    if (printf changed > "$CARGO_HOME/registry/$part/write-marker") 2>/dev/null; then exit 92; fi
+done
+cargo test --locked --lib
+printf retained > "$CARGO_TARGET_DIR/prior-marker"
+"#,
+            true,
+        ),
+        (
+            "warm",
+            // macOS gives each command a new source path, invalidating Cargo fingerprints.
+            r#"set -eu
+test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained
+cargo test --locked --lib --no-run
+cargo test --locked --lib --verbose
+"#,
+            true,
+        ),
+        (
+            "failed-test",
+            r#"printf discarded > "$CARGO_TARGET_DIR/prior-marker"; ARANY_FIXTURE_FAIL=1 cargo test --locked --lib"#,
+            false,
+        ),
+        (
+            "forced-ipc",
+            "cargo test --locked --lib -- --ignored",
+            false,
+        ),
+        ("missing-index", "cargo test --locked --lib", false),
+        ("missing-source", "cargo test --locked --lib", false),
+        ("hostile-config", "cargo test --locked --lib", false),
+        ("cancelled", "cargo test --locked --lib", false),
+        (
+            "cancelled-report",
+            r#"set -eu
+test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained
+cargo test --locked --lib
+printf discarded > "$CARGO_TARGET_DIR/prior-marker"
+printf cache-changed
+"#,
+            false,
+        ),
+        (
+            "retained",
+            r#"test "$(cat "$CARGO_TARGET_DIR/prior-marker")" = retained && cargo test --locked --lib"#,
+            true,
+        ),
+    ] {
+        match case {
+            "missing-index" => std::fs::remove_file(&index).unwrap(),
+            "missing-source" => std::fs::rename(&source, source.with_extension("held")).unwrap(),
+            "hostile-config" => {
+                std::fs::create_dir_all(workspace.join(".cargo")).unwrap();
+                std::fs::write(
+                    workspace.join(".cargo/config.toml"),
+                    format!(
+                        "[build]\nrustc-wrapper = {:?}\n",
+                        home.join("unselected-wrapper").to_str().unwrap()
+                    ),
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+        let call = ToolCall::Command {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                script.into(),
+                "offline build 'entry".into(),
+                "argument with ' quote".into(),
+            ],
+            cwd: String::new(),
+        };
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            plan_outcome(GoalPlanContract {
+                mission: "Run offline registry-backed tests under selected Rust".into(),
+                paths: Vec::new(),
+                commands: vec!["sh".into()],
+                resource_class: ToolResourceClass::Build,
+                command_timeout_ms: Some(60_000),
+                skills: Vec::new(),
+                mcp_tools: Vec::new(),
+                success_criterion: GoalSuccessCriterion::ToolCallSucceeded {
+                    call: Box::new(call.clone()),
+                },
+                budget: crate::GoalBudget::default(),
+            }),
+            tool_outcome(call.clone()),
+            ProviderOutcome::Answer(Answer {
+                text: "Observed the guarded Cargo result.".into(),
+            }),
+        ]));
+        let engine = Engine::open(
+            StateRoot::admit(&state).unwrap(),
+            EngineConfig {
+                guard_executable: Some(guard.to_path_buf()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let (approvals, mut inbox) = ToolApprovals::new(ApprovalMode::Request);
+        let cancellation = RunCancellation::new();
+        let mut request = request(workspace, "Run the offline Cargo fixture");
+        request.include_paths.clear();
+        request.goal.phase = Some(crate::GoalPhase::Implementation);
+        let run = super::engine::run_with(
+            &engine,
+            &provider,
+            request,
+            RunControls {
+                tools: ToolGrant::Trusted(WorkspacePermissions::open(workspace).unwrap()),
+                approvals: Some(approvals),
+                cancellation: cancellation.clone(),
+                ..Default::default()
+            },
+        );
+        let approve = async {
+            let approval = inbox.next().await.expect("one exact command approval");
+            assert_eq!(approval.intent.call, call);
+            assert_eq!(
+                approval.intent.limits.resource_class,
+                ToolResourceClass::Build
+            );
+            let report_gate = (case == "cancelled-report")
+                .then(|| crate::fault::FaultPlan::gate_guard_cache_report(approval.intent.id));
+            if case == "cancelled" {
+                cancellation.cancel();
+            }
+            approval.decide(case != "cancelled");
+            if let Some((entered, release)) = report_gate {
+                let report = entered.await.expect("Cargo completed before publication");
+                assert_eq!(report.disposition, crate::ToolDisposition::Succeeded);
+                let result: serde_json::Value = serde_json::from_str(&report.output).unwrap();
+                assert_eq!(result["exit_code"], 0, "{result}");
+                assert!(
+                    result["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .ends_with("cache-changed")
+                );
+                cancellation.cancel();
+                Some(release)
+            } else {
+                None
+            }
+        };
+        let (outcome, report_release) = tokio::time::timeout(Duration::from_secs(100), async {
+            tokio::join!(run, approve)
+        })
+        .await
+        .expect("bounded Cargo journey");
+        drop(report_release);
+        engine.close().await.unwrap();
+        let session_id = provider.requests.lock().unwrap()[0].session_id;
+        let store = Store::open_read_only(StateRoot::open_existing(&state).unwrap()).unwrap();
+        let events = store.load_session(session_id).await.unwrap();
+        store.close().await.unwrap();
+        let replay = SessionView::replay(session_id, &events).unwrap().unwrap();
+        assert_eq!(replay.runs.len(), 1);
+        let run = &replay.runs[0];
+        if case == "cancelled-report" {
+            assert!(matches!(
+                outcome,
+                Err(crate::EngineError::Tool(crate::ToolError::Uncertain))
+            ));
+        } else {
+            assert_eq!(run, &outcome.unwrap().run);
+        }
+        let observation = run.tools[0]
+            .observation
+            .as_ref()
+            .expect("Cargo observation");
+        assert_eq!(run.tools.len(), 1);
+        assert!(
+            !observation
+                .output
+                .contains("UNSELECTED_CARGO_CREDENTIAL_CANARY"),
+            "{case}: unselected data reached command output"
+        );
+        if matches!(case, "cancelled" | "cancelled-report") {
+            assert_eq!(
+                run.status,
+                if case == "cancelled" {
+                    RunStatus::Cancelled
+                } else {
+                    RunStatus::Interrupted
+                }
+            );
+            assert!(observation.attestation.is_none());
+            if case == "cancelled-report" {
+                assert_eq!(observation.disposition, crate::ToolDisposition::Uncertain);
+                assert_eq!(observation.cache_update, CacheUpdate::NotAttempted);
+            }
+        } else {
+            let result: serde_json::Value = serde_json::from_str(&observation.output).unwrap();
+            assert_eq!(result["exit_code"] == 0, success, "{case}: {result}");
+            if !success {
+                let fragments: &[&str] = match case {
+                    "missing-index" => {
+                        &["no matching package named `arany-fixture-dependency` found"]
+                    }
+                    "missing-source" => {
+                        &["failed to unpack package `arany-fixture-dependency v0.1.0`"]
+                    }
+                    "hostile-config" => &[
+                        "could not execute process",
+                        "unselected-wrapper",
+                        "(never executed)",
+                    ],
+                    _ => &[],
+                };
+                let stderr = result["stderr"].as_str().unwrap();
+                for fragment in fragments {
+                    assert!(stderr.contains(fragment), "{case}: {result}");
+                }
+            }
+            assert_eq!(
+                run.status,
+                if success {
+                    RunStatus::Finished
+                } else {
+                    RunStatus::Failed
+                }
+            );
+            let receipt = observation
+                .attestation
+                .as_ref()
+                .and_then(crate::Attestation::guard)
+                .expect("native Cargo receipt");
+            assert_eq!(receipt.limits, observation.intent.limits);
+            assert_eq!(
+                receipt.enforcement_digest,
+                observation.intent.enforcement_digest
+            );
+            assert_eq!(
+                observation.cache_update,
+                if success {
+                    CacheUpdate::Published
+                } else {
+                    CacheUpdate::NotAttempted
+                }
+            );
+            if matches!(case, "guarded" | "warm" | "retained") {
+                let stdout = result["stdout"].as_str().unwrap();
+                assert!(
+                    stdout.contains("1 passed; 0 failed; 1 ignored"),
+                    "{case}: {result}"
+                );
+                assert!(stdout.contains("local_test_ipc ... ignored, requires local test IPC"));
+            }
+            if case == "warm" {
+                assert!(
+                    result["stderr"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Fresh offline-cargo-fixture"),
+                    "{result}"
+                );
+            }
+            if case == "guarded" && cfg!(target_os = "macos") {
+                assert!(result["stderr"].as_str().unwrap().contains(
+                    "/Library/Developer/CommandLineTools/usr/bin/llvm-nm: Operation not permitted"
+                ));
+            }
+            if case == "forced-ipc" {
+                let stdout = result["stdout"].as_str().unwrap();
+                assert!(stdout.contains("local_test_ipc ... FAILED"), "{result}");
+                assert!(stdout.contains("PermissionDenied"), "{result}");
+            }
+            if case == "failed-test" {
+                assert!(
+                    result["stdout"]
+                        .as_str()
+                        .unwrap()
+                        .contains("0 passed; 1 failed; 1 ignored"),
+                    "{case}: {result}"
+                );
+            }
+            if matches!(case, "failed-test" | "forced-ipc") {
+                assert_eq!(result["exit_code"], 101, "{case}: {result}");
+            }
+        }
+        let requests = provider.requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            if matches!(case, "cancelled" | "cancelled-report") {
+                2
+            } else {
+                3
+            }
+        );
+        for text in [
+            events
+                .iter()
+                .map(|event| event.event.payload().unwrap())
+                .collect::<String>(),
+            format!("{requests:?}"),
+        ] {
+            assert!(!text.contains("UNSELECTED_CARGO_CREDENTIAL_CANARY"));
+        }
+        drop(requests);
+        match case {
+            "missing-index" => std::fs::write(&index, &index_bytes).unwrap(),
+            "missing-source" => std::fs::rename(source.with_extension("held"), &source).unwrap(),
+            "hostile-config" => std::fs::remove_file(workspace.join(".cargo/config.toml")).unwrap(),
+            _ => {}
+        }
+    }
+    assert_eq!(std::fs::read(index).unwrap(), index_bytes);
+    assert_eq!(
+        std::fs::read(source.join("src/lib.rs")).unwrap(),
+        source_bytes
+    );
+    assert_eq!(
+        std::fs::read(workspace.join("Cargo.lock")).unwrap(),
+        original_lock
+    );
+    for part in ["cache", "src", "index"] {
+        assert!(!registry.join(part).join("write-marker").exists());
+    }
+}
