@@ -377,7 +377,7 @@ mod tests {
             program: "sh".into(),
             args: vec![],
             cwd: String::new(),
-            justification: "x".repeat(MAX_LINE_BYTES),
+            justification: "x".repeat(MAX_RPC_LINE_BYTES),
         };
         assert!(!arany::test_support::approval::ask(&approvals, &intent(big)).await);
         assert!(output.try_recv().is_err());

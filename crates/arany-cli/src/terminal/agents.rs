@@ -6,7 +6,7 @@ use crate::presentation::{
 use arany::{AgentRunId, RunId};
 
 const SEARCH_LIMIT: &str = "Search takes up to 64 ASCII characters";
-pub(super) const INVALID_CHOICE: &str = "invalid agent selection";
+pub(super) const INVALID_AGENT_PANEL_CHOICE: &str = "invalid agent selection";
 const NOTHING_FOCUSED: &str = "No agent focused; choose a number first";
 
 #[derive(Default)]
@@ -178,7 +178,7 @@ impl AgentPanel {
                     Some(PanelUpdate::Rearm | PanelUpdate::Redraw) => self.reprint(),
                     Some(update) => update,
                     None => {
-                        self.notice = Some(INVALID_CHOICE);
+                        self.notice = Some(INVALID_AGENT_PANEL_CHOICE);
                         self.reprint()
                     }
                 }
@@ -186,7 +186,7 @@ impl AgentPanel {
             TerminalInput::LineRejected | TerminalInput::LineContinued => {
                 self.choice.clear();
                 self.invalid = false;
-                self.notice = Some(INVALID_CHOICE);
+                self.notice = Some(INVALID_AGENT_PANEL_CHOICE);
                 self.reprint()
             }
             _ => PanelUpdate::Unchanged,
@@ -376,7 +376,7 @@ mod tests {
                 PanelUpdate::Rearm,
                 "{invalid}"
             );
-            assert_eq!(panel.notice, Some(INVALID_CHOICE), "{invalid}");
+            assert_eq!(panel.notice, Some(INVALID_AGENT_PANEL_CHOICE), "{invalid}");
             panel.notice = None;
         }
         assert_eq!(line(&mut panel, "/child 2", &shown), PanelUpdate::Rearm);
@@ -399,7 +399,7 @@ mod tests {
             ),
             PanelUpdate::Rearm
         );
-        assert_eq!(panel.notice, Some(INVALID_CHOICE));
+        assert_eq!(panel.notice, Some(INVALID_AGENT_PANEL_CHOICE));
         assert_eq!(panel.query.filter.len(), MAX_AGENT_SEARCH);
         assert_eq!(line(&mut panel, "/", &shown), PanelUpdate::Rearm);
         assert!(panel.query.filter.is_empty());
@@ -433,7 +433,7 @@ mod tests {
             panel.handle(TerminalInput::LineRejected, &shown, true),
             PanelUpdate::Rearm
         );
-        assert_eq!(panel.notice, Some(INVALID_CHOICE));
+        assert_eq!(panel.notice, Some(INVALID_AGENT_PANEL_CHOICE));
         assert_eq!(line(&mut panel, "q", &shown), PanelUpdate::Closed);
     }
 

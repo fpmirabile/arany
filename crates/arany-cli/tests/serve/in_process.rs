@@ -108,7 +108,7 @@ fn validate(message: &Message) {
             "{value}"
         );
     }
-    assert!(encode_line(message).unwrap().len() <= MAX_LINE_BYTES);
+    assert!(encode_line(message).unwrap().len() <= MAX_RPC_LINE_BYTES);
 }
 fn engine(state: &std::path::Path) -> Engine {
     Engine::open(
@@ -891,7 +891,7 @@ async fn oversized_and_malformed_lines_are_rejected_without_stopping_the_server(
     let reader = read_messages(transport, input, outbound);
     let peer = async {
         client
-            .write_all(&vec![b'x'; MAX_LINE_BYTES + 33])
+            .write_all(&vec![b'x'; MAX_RPC_LINE_BYTES + 33])
             .await
             .unwrap();
         client.write_all(b"\n[]\n{\"id\":1,\"method\":\"initialize\",\"params\":{\"clientInfo\":{\"name\":\"test\",\"version\":\"1\"}}}\n").await.unwrap();

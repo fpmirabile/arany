@@ -204,7 +204,7 @@ impl AttachedArgs {
             && self.prompt.is_none()
     }
 
-    fn admit(self, telemetry: Telemetry) -> Result<Admission, String> {
+    fn validate_text_inputs(&self) -> Result<(), String> {
         if self.model.as_ref().is_some_and(|model| {
             model.is_empty() || model.len() > 128 || model.chars().any(char::is_control)
         }) {
@@ -215,24 +215,33 @@ impl AttachedArgs {
         }) {
             return Err("invalid objective".into());
         }
-        let entry = match (self.resume, self.fork, self.continue_session) {
-            (Some(Some(id)), None, false) => EntryMode::Resume(
-                SessionId::from_str(&id).map_err(|_| "invalid Session ID".to_owned())?,
-            ),
-            (Some(None), None, false) => EntryMode::PickSession,
-            (None, Some(id), false) => EntryMode::Fork(
-                SessionId::from_str(&id).map_err(|_| "invalid Session ID".to_owned())?,
-            ),
-            (None, None, true) => EntryMode::Continue,
-            (None, None, false) => EntryMode::New,
-            _ => return Err("choose only one Session entry mode".into()),
-        };
-        let goal_resume = self
-            .resume_goal
-            .as_deref()
-            .map(arany::GoalId::from_str)
-            .transpose()
-            .map_err(|_| "invalid Goal ID".to_owned())?;
+        Ok(())
+    }
+
+    fn entry_mode(&self) -> Result<EntryMode, String> {
+        match (
+            self.resume.as_ref(),
+            self.fork.as_ref(),
+            self.continue_session,
+        ) {
+            (Some(Some(id)), None, false) => Ok(EntryMode::Resume(
+                SessionId::from_str(id).map_err(|_| "invalid Session ID".to_owned())?,
+            )),
+            (Some(None), None, false) => Ok(EntryMode::PickSession),
+            (None, Some(id), false) => Ok(EntryMode::Fork(
+                SessionId::from_str(id).map_err(|_| "invalid Session ID".to_owned())?,
+            )),
+            (None, None, true) => Ok(EntryMode::Continue),
+            (None, None, false) => Ok(EntryMode::New),
+            _ => Err("choose only one Session entry mode".into()),
+        }
+    }
+
+    fn validate_selection(
+        &self,
+        entry: EntryMode,
+        goal_resume: Option<arany::GoalId>,
+    ) -> Result<(), String> {
         if goal_resume.is_some() && !matches!(entry, EntryMode::Resume(_)) {
             return Err("--resume-goal requires --resume SESSION_ID".into());
         }
@@ -275,6 +284,19 @@ impl AttachedArgs {
         {
             return Err("a prompt requires --provider and --model".into());
         }
+        Ok(())
+    }
+
+    fn admit(self, telemetry: Telemetry) -> Result<Admission, String> {
+        self.validate_text_inputs()?;
+        let entry = self.entry_mode()?;
+        let goal_resume = self
+            .resume_goal
+            .as_deref()
+            .map(arany::GoalId::from_str)
+            .transpose()
+            .map_err(|_| "invalid Goal ID".to_owned())?;
+        self.validate_selection(entry, goal_resume)?;
         let explicit_state_dir = self.state_dir.is_some();
         let (workspace, state_dir) =
             super::admit_workspace(self.workspace, self.state_dir).map_err(str::to_owned)?;

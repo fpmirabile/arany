@@ -29,9 +29,10 @@ pub const CONFIG_CONSENT_PROMPT: &str = concat!(
     "preserves selected profiles. Ctrl+C exits:"
 );
 
+const MAX_FIXTURE_ANNOTATION_BYTES: usize = 2048;
+
 pub fn annotate_native_fixture(message: &str) {
     const PREFIX: &str = "::error title=Arany native fixture::";
-    const MAX_LINE_BYTES: usize = 2048;
     let mut annotation = String::from(PREFIX);
     for character in message.chars() {
         let escaped = match character {
@@ -40,14 +41,14 @@ pub fn annotate_native_fixture(message: &str) {
             '\n' => "%0A",
             character if character.is_control() => "?",
             character => {
-                if annotation.len() + character.len_utf8() + 1 > MAX_LINE_BYTES {
+                if annotation.len() + character.len_utf8() + 1 > MAX_FIXTURE_ANNOTATION_BYTES {
                     break;
                 }
                 annotation.push(character);
                 continue;
             }
         };
-        if annotation.len() + escaped.len() + 1 > MAX_LINE_BYTES {
+        if annotation.len() + escaped.len() + 1 > MAX_FIXTURE_ANNOTATION_BYTES {
             break;
         }
         annotation.push_str(escaped);
@@ -58,14 +59,13 @@ pub fn annotate_native_fixture(message: &str) {
 
 pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
     const PREFIX: &[u8] = b"::error title=Arany native fixture::";
-    const MAX_LINE_BYTES: usize = 2048;
     for captured in [stdout, stderr] {
         for line in captured.split(|byte| *byte == b'\n') {
             let line = line.strip_suffix(b"\r").unwrap_or(line);
             let Some(message) = line.strip_prefix(PREFIX) else {
                 continue;
             };
-            if line.len() > MAX_LINE_BYTES
+            if line.len() > MAX_FIXTURE_ANNOTATION_BYTES
                 || !message.is_ascii()
                 || !(message.starts_with(b"fixture=shipped_exec;")
                     || message.starts_with(b"fixture=direct_cancellation;")
@@ -104,7 +104,7 @@ pub fn relay_native_fixture_annotation(stdout: &[u8], stderr: &[u8]) -> bool {
 
 pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
     const PREFIX: &str = "ARANY_NATIVE_PANIC; case=";
-    const MAX_LINE_BYTES: usize = 256;
+    const MAX_NATIVE_PANIC_LINE_BYTES: usize = 256;
     if !matches!(
         expected_case,
         "shipped_exec"
@@ -117,7 +117,7 @@ pub fn relay_native_panic_location(stderr: &[u8], expected_case: &str) -> bool {
     }
     for line in stderr.split(|byte| *byte == b'\n') {
         let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.len() > MAX_LINE_BYTES {
+        if line.len() > MAX_NATIVE_PANIC_LINE_BYTES {
             continue;
         }
         let Ok(line) = std::str::from_utf8(line) else {

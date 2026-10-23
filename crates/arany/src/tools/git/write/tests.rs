@@ -807,7 +807,7 @@ async fn the_git_child_cannot_write_the_workspace_directly() {
                 tokio::time::Instant::now() + Duration::from_secs(20),
                 super::super::Io {
                     stdin: None,
-                    stdout_bytes: CAPTURE_BYTES,
+                    stdout_bytes: GIT_CAPTURE_BYTES,
                     writable: Some(&scratch),
                 },
             )
