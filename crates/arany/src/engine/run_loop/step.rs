@@ -5,7 +5,7 @@ use super::{
     call_record,
 };
 use crate::engine::hints::HintPublisher;
-use crate::engine::ledger::{Action, duration_ms};
+use crate::engine::ledger::{Action, Admission, duration_ms};
 use crate::engine::{EngineError, RunCancellation, STORE_ACTION_OVERHEAD};
 use crate::provider::{
     AgentPhase, PromptRole, ProviderOutcome, ProviderRequest, ProviderResponse, ProviderTurn,
@@ -852,7 +852,7 @@ impl RunLoop<'_> {
         }
         let mut narrowed = None;
         let mut candidate = None;
-        let verdict = match self
+        let Admission::Reserved(verdict) = self
             .before_dispatch(
                 grant,
                 runtime,
@@ -861,11 +861,9 @@ impl RunLoop<'_> {
                 narrowable,
                 approval_deadline,
             )
-            .await
-        {
-            Ok(verdict) => verdict,
-            Err(EngineError::GoalBudgetExhausted) => return Ok(Err(StopCause::ActiveTime)),
-            Err(error) => return Err(error),
+            .await?
+        else {
+            return Ok(Err(StopCause::ActiveTime));
         };
         let answer = match verdict {
             Verdict::Deny(answer) => answer,
@@ -1076,7 +1074,26 @@ impl RunLoop<'_> {
                     | ToolCall::Mkdir { path } => {
                         !leases.iter().any(|l| crate::worker::overlaps(l, path))
                     }
-                    _ => !call.is_process() || leases.is_empty(),
+                    ToolCall::ParseAgentDefinition { .. }
+                    | ToolCall::List { .. }
+                    | ToolCall::Read { .. }
+                    | ToolCall::Search { .. }
+                    | ToolCall::Command { .. }
+                    | ToolCall::CommandUnguarded { .. }
+                    | ToolCall::ApplyChangeset { .. }
+                    | ToolCall::PrepareWorker { .. }
+                    | ToolCall::McpList { .. }
+                    | ToolCall::McpCall { .. }
+                    | ToolCall::GitStatus { .. }
+                    | ToolCall::GitDiff { .. }
+                    | ToolCall::GitLog { .. }
+                    | ToolCall::GitCommit { .. }
+                    | ToolCall::GitBranch { .. }
+                    | ToolCall::GitSwitch { .. }
+                    | ToolCall::GitPush { .. }
+                    | ToolCall::GhPrCreate { .. }
+                    | ToolCall::Glob { .. }
+                    | ToolCall::Skill { .. } => !call.is_process() || leases.is_empty(),
                 }
             })
         })?;
@@ -1260,7 +1277,7 @@ impl RunLoop<'_> {
         permission: Permission,
         narrowable: bool,
         approval_deadline: Instant,
-    ) -> Result<Verdict, EngineError> {
+    ) -> Result<Admission<Verdict>, EngineError> {
         let config = runtime.permissions();
         let site = grant.site();
         let allow_auto_edits = permission.decision == Decision::Allow
@@ -1330,22 +1347,23 @@ impl RunLoop<'_> {
             &intent.call,
         );
         let approval = match facts.ask() {
-            Some(mode) => Some(
-                Box::pin(self.ask(
-                    grant,
-                    &intent,
-                    mode,
-                    AskOptions {
-                        deadline: approval_deadline,
-                        unguarded_prompt: facts.unguarded_prompt(),
-                        allow_auto_edits: allow_auto_edits
-                            && hooks.restriction != Some(Decision::Ask),
-                        remember_prefix,
-                    },
-                ))
-                .await?,
-            ),
-            None => None,
+            Some(mode) => Box::pin(self.ask(
+                grant,
+                &intent,
+                mode,
+                AskOptions {
+                    deadline: approval_deadline,
+                    unguarded_prompt: facts.unguarded_prompt(),
+                    allow_auto_edits: allow_auto_edits && hooks.restriction != Some(Decision::Ask),
+                    remember_prefix,
+                },
+            ))
+            .await?
+            .map(Some),
+            None => Admission::Reserved(None),
+        };
+        let Admission::Reserved(approval) = approval else {
+            return Ok(Admission::Exhausted);
         };
         let save = approval.as_ref().and_then(|resolution| resolution.save);
         let decided = decide_dispatch(
@@ -1362,15 +1380,14 @@ impl RunLoop<'_> {
         );
         // An in-process read waits for no Guard capacity, so it reserves its action directly.
         let (outcome, queue_pause) = match decided.outcome {
-            Ok(Dispatch::QueuePause) => match self.reserve_active_pause() {
-                Ok(pause) => (
+            Ok(Dispatch::QueuePause) => match self.reserve_active_pause()?.map(|pause| {
+                (
                     decide_queue_pause(true, self.pause_requested()),
                     Some(pause),
-                ),
-                Err(EngineError::GoalBudgetExhausted) => {
-                    (decide_queue_pause(false, self.pause_requested()), None)
-                }
-                Err(error) => return Err(error),
+                )
+            }) {
+                Admission::Reserved(outcome) => outcome,
+                Admission::Exhausted => (decide_queue_pause(false, self.pause_requested()), None),
             },
             Ok(Dispatch::Direct) => (Ok(()), None),
             Err(refusal) => (Err(refusal), None),
@@ -1422,6 +1439,7 @@ impl RunLoop<'_> {
             .await?;
         }
         self.save_remembered_rule(runtime, site, verdict, save)
+            .map(Admission::Reserved)
     }
 
     // The rule is saved only after the human verdict is committed; a failed save refuses dispatch.
@@ -1500,7 +1518,7 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         mode: ApprovalMode,
         options: AskOptions,
-    ) -> Result<Resolution, EngineError> {
+    ) -> Result<Admission<Resolution>, EngineError> {
         match grant {
             Grant::Primary {
                 request,
@@ -1650,24 +1668,21 @@ impl RunLoop<'_> {
             if let Some(pause) = queue_pause {
                 self.settle_active_pause(pause, None)?;
             }
-            let segment = match self.reserve_active_segment(
+            let Admission::Reserved(segment) = self.reserve_active_segment(
                 tool_action_bound(runtime, &intent),
                 crate::session::BudgetAction::Tool,
                 intent.agent_run_id,
-            ) {
-                Ok(segment) => segment,
-                Err(EngineError::GoalBudgetExhausted) => {
-                    return Ok(Answer {
-                        checkpoint: None,
-                        observation: not_dispatched(intent, &NotDispatched::ActiveTime),
-                        stop: None,
-                        active_time: Some(ActiveTime {
-                            segment: None,
-                            exhausted: true,
-                        }),
-                    });
-                }
-                Err(error) => return Err(error),
+            )?
+            else {
+                return Ok(Answer {
+                    checkpoint: None,
+                    observation: not_dispatched(intent, &NotDispatched::ActiveTime),
+                    stop: None,
+                    active_time: Some(ActiveTime {
+                        segment: None,
+                        exhausted: true,
+                    }),
+                });
             };
             let observation = self.capture_worker_base(runtime, intent).await?;
             return Ok(Answer {
@@ -1707,20 +1722,19 @@ impl RunLoop<'_> {
                     tool_action_bound(runtime, &intent),
                     crate::session::BudgetAction::Tool,
                     intent.agent_run_id,
-                ) {
-                    Ok(segment) => (
+                )? {
+                    Admission::Reserved(segment) => (
                         execute_cancellable(runtime, intent, &self.controls.cancellation).await,
                         Some(segment),
                         false,
                         None,
                     ),
-                    Err(EngineError::GoalBudgetExhausted) => (
+                    Admission::Exhausted => (
                         not_dispatched(intent, &NotDispatched::ActiveTime),
                         None,
                         true,
                         None,
                     ),
-                    Err(error) => return Err(error),
                 }
             };
         self.clear_tool_queue();
@@ -1780,12 +1794,12 @@ impl RunLoop<'_> {
                             self.settle_active_pause(pause, Some(admitted_at))?;
                         }
                         match self.reserve_active_segment(action_bound, crate::session::BudgetAction::Tool, actor) {
-                            Ok(segment) => {
+                            Ok(Admission::Reserved(segment)) => {
                                 let window = active_window(&segment, cache_transfer, runtime_ms);
                                 active_segment = Some(segment);
                                 let _ = reply.send(window);
                             }
-                            Err(EngineError::GoalBudgetExhausted) => {
+                            Ok(Admission::Exhausted) => {
                                 active_time_exhausted = true;
                                 let _ = reply.send(Err(ToolError::Limit));
                             }
@@ -1937,7 +1951,7 @@ impl RunLoop<'_> {
         intent: &EffectIntent,
         chain: &[Resolver<'_>],
         site: AskSite,
-    ) -> Result<Resolution, EngineError> {
+    ) -> Result<Admission<Resolution>, EngineError> {
         let initial_mode = self.terminal_mode();
         let mut resolution = Resolution {
             timed_out: false,
@@ -1954,9 +1968,9 @@ impl RunLoop<'_> {
                         AskSite::Delegated { deadline, .. } => {
                             self.review_tool(objective, intent, Some(*deadline)).await
                         }
-                    };
+                    }?;
                     match review {
-                        Ok(decision) => {
+                        Admission::Reserved(decision) => {
                             resolution.approved = match decision {
                                 ToolReviewDecision::Approve => self.terminal_mode() == initial_mode,
                                 ToolReviewDecision::Deny => false,
@@ -1971,7 +1985,7 @@ impl RunLoop<'_> {
                                     if resolution.approved {
                                         resolution.approved = !self.pause_requested()
                                             && !self.controls.cancellation.is_cancelled();
-                                        return Ok(resolution);
+                                        return Ok(Admission::Reserved(resolution));
                                     }
                                 }
                                 AskSite::Primary { .. } => {
@@ -1980,13 +1994,13 @@ impl RunLoop<'_> {
                                 }
                             }
                         }
-                        Err(EngineError::GoalBudgetExhausted)
+                        Admission::Exhausted
                             if matches!(site, AskSite::Primary { .. })
                                 && self.ledger().active_time_exhausted() =>
                         {
                             resolution.active_time_exhausted = true;
                         }
-                        Err(error) => return Err(error),
+                        Admission::Exhausted => return Ok(Admission::Exhausted),
                     }
                 }
                 Resolver::Human => match &site {
@@ -1995,7 +2009,7 @@ impl RunLoop<'_> {
                         approval_deadline,
                     } => {
                         let Some(approvals) = self.controls.approvals else {
-                            return Ok(resolution);
+                            return Ok(Admission::Reserved(resolution));
                         };
                         let mut cancellation = self.controls.cancellation.clone();
                         // A sibling Provider call keeps the shared delegation interval active.
@@ -2034,8 +2048,8 @@ impl RunLoop<'_> {
                             && !self.pause_at_boundary()
                             && let Some(approvals) = self.controls.approvals
                         {
-                            match self.reserve_active_pause() {
-                                Ok(pause) => {
+                            match self.reserve_active_pause()? {
+                                Admission::Reserved(pause) => {
                                     let reply = self
                                         .human_reply(
                                             approvals,
@@ -2071,10 +2085,9 @@ impl RunLoop<'_> {
                                     let resume_at = resolution.approved.then(Instant::now);
                                     self.settle_active_pause(pause, resume_at)?;
                                 }
-                                Err(EngineError::GoalBudgetExhausted) => {
+                                Admission::Exhausted => {
                                     resolution.active_time_exhausted = true;
                                 }
-                                Err(error) => return Err(error),
                             }
                         }
                     }
@@ -2084,7 +2097,7 @@ impl RunLoop<'_> {
                 break;
             }
         }
-        Ok(resolution)
+        Ok(Admission::Reserved(resolution))
     }
 
     async fn review_tool(
@@ -2092,7 +2105,7 @@ impl RunLoop<'_> {
         objective: &str,
         intent: &EffectIntent,
         delegation_deadline: Option<Instant>,
-    ) -> Result<ToolReviewDecision, EngineError> {
+    ) -> Result<Admission<ToolReviewDecision>, EngineError> {
         let mut model = String::new();
         let mut max_output_tokens = 256;
         self.routing.bind(
@@ -2120,13 +2133,17 @@ impl RunLoop<'_> {
             },
         };
         let active_segment = if delegation_deadline.is_none() {
-            Some(self.reserve_active_segment(
+            self.reserve_active_segment(
                 TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD,
                 crate::session::BudgetAction::Tool,
                 intent.agent_run_id,
-            )?)
+            )?
+            .map(Some)
         } else {
-            None
+            Admission::Reserved(None)
+        };
+        let Admission::Reserved(active_segment) = active_segment else {
+            return Ok(Admission::Exhausted);
         };
         let review_deadline = active_segment
             .as_ref()
@@ -2144,17 +2161,15 @@ impl RunLoop<'_> {
             (None, Some(runtime)) => tool_action_ms(runtime, intent),
             _ => 0,
         };
-        if let Err(error) = self
+        let Admission::Reserved(()) = self
             .reserve_provider_call(intent.agent_run_id, Action::Review, pending_ms)
-            .await
-        {
-            if matches!(error, EngineError::GoalBudgetExhausted)
-                && let Some(active_segment) = active_segment
-            {
+            .await?
+        else {
+            if let Some(active_segment) = active_segment {
                 self.settle_active_segment(active_segment)?;
             }
-            return Err(error);
-        }
+            return Ok(Admission::Exhausted);
+        };
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
         let limits = crate::provider::RateLimitSlot::default();
         let result = self
@@ -2197,7 +2212,9 @@ impl RunLoop<'_> {
         } else {
             self.ledger().active_time_exhausted()
         };
-        Ok(tool_review_decision(&result, valid, exhausted))
+        Ok(Admission::Reserved(tool_review_decision(
+            &result, valid, exhausted,
+        )))
     }
 }
 
@@ -3033,7 +3050,7 @@ impl RunLoop<'_> {
     pub(super) async fn initialize_skill(
         &self,
         request: &mut ProviderRequest,
-    ) -> Result<SkillInitialization, EngineError> {
+    ) -> Result<Admission<SkillInitialization>, EngineError> {
         let name = self
             .ledger()
             .view(|view| view.runs.last().and_then(|run| run.skill.clone()))?;
@@ -3041,8 +3058,8 @@ impl RunLoop<'_> {
             name,
             self.pause_at_boundary() || self.controls.cancellation.is_cancelled(),
         ) {
-            SkillReadPlan::Skip => return Ok(SkillInitialization::Ready),
-            SkillReadPlan::Stop => return Ok(SkillInitialization::Stopped),
+            SkillReadPlan::Skip => return Ok(Admission::Reserved(SkillInitialization::Ready)),
+            SkillReadPlan::Stop => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
             SkillReadPlan::Read(name) => name,
         };
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
@@ -3051,12 +3068,12 @@ impl RunLoop<'_> {
             resource: None,
         };
         if !self.ledger().allows_tool(&call) {
-            return Ok(SkillInitialization::Failed(
+            return Ok(Admission::Reserved(SkillInitialization::Failed(
                 crate::session::RunFailure::ToolStopped,
-            ));
+            )));
         }
         let mut intent = match self.primary_intent(runtime, call.clone()).await? {
-            None => return Ok(SkillInitialization::Stopped),
+            None => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
             Some(intent) => intent,
         };
         let tools = request
@@ -3067,9 +3084,9 @@ impl RunLoop<'_> {
         let Some(capacity) =
             runtime.result_capacity(tools.rendered_len(), INVOKED_SKILL_ENVELOPE_BYTES)
         else {
-            return Ok(SkillInitialization::Failed(
+            return Ok(Admission::Reserved(SkillInitialization::Failed(
                 crate::session::RunFailure::ToolContextFull,
-            ));
+            )));
         };
         intent.limits.result_bytes = capacity.min(MAX_TOOL_RESULT_BYTES) as u32;
         let grant = Grant::Primary {
@@ -3078,11 +3095,23 @@ impl RunLoop<'_> {
         };
         let observation = match self
             .run_intent(&grant, runtime, intent, &call, false)
-            .await
-            .and_then(intent_observation)?
+            .await?
         {
-            None => return Ok(SkillInitialization::Stopped),
-            Some((observation, _)) => observation,
+            Ok((observation, _)) => observation,
+            Err(StopCause::ActiveTime) => return Ok(Admission::Exhausted),
+            Err(StopCause::Capacity) => return Err(ToolError::Limit.into()),
+            Err(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            ) => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
         };
         let tools = request
             .input
@@ -3099,7 +3128,7 @@ impl RunLoop<'_> {
             SkillInitialization::Ready => tools.invoked_skill = Some(observation),
             SkillInitialization::Stopped | SkillInitialization::Failed(_) => {}
         }
-        Ok(decision)
+        Ok(Admission::Reserved(decision))
     }
 }
 
@@ -3113,18 +3142,18 @@ impl RunLoop<'_> {
     pub(super) async fn initialize_definitions(
         &self,
         request: &mut ProviderRequest,
-    ) -> Result<DefinitionInitialization, EngineError> {
+    ) -> Result<Admission<DefinitionInitialization>, EngineError> {
         let Some(runtime) = self.controls.tools else {
-            return Ok(DefinitionInitialization::Ready);
+            return Ok(Admission::Reserved(DefinitionInitialization::Ready));
         };
         let Some(pin) = runtime.definitions.pin() else {
-            return Ok(DefinitionInitialization::Ready);
+            return Ok(Admission::Reserved(DefinitionInitialization::Ready));
         };
         let mut outputs = Vec::with_capacity(pin.files.len());
         let mut normalized_bytes = 0;
         for (index, file) in pin.files.iter().enumerate() {
             if self.pause_at_boundary() || self.controls.cancellation.is_cancelled() {
-                return Ok(DefinitionInitialization::Stopped);
+                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
             }
             let call = ToolCall::ParseAgentDefinition {
                 index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
@@ -3133,7 +3162,7 @@ impl RunLoop<'_> {
             let Some(mut intent) = self.primary_intent(runtime, call).await? else {
                 self.active_time_floor
                     .store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(DefinitionInitialization::Stopped);
+                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
             };
             intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
             let grant = Grant::Primary {
@@ -3141,21 +3170,34 @@ impl RunLoop<'_> {
                 review_allowed: false,
             };
             let post_call = intent.call.clone();
-            let Some((observation, _)) = self
+            let observation = match self
                 .run_intent(&grant, runtime, intent, &post_call, false)
-                .await
-                .and_then(intent_observation)?
-            else {
-                return Ok(DefinitionInitialization::Stopped);
+                .await?
+            {
+                Ok((observation, _)) => observation,
+                Err(StopCause::ActiveTime) => return Ok(Admission::Exhausted),
+                Err(StopCause::Capacity) => return Err(ToolError::Limit.into()),
+                Err(
+                    StopCause::Uncertain
+                    | StopCause::Cancelled
+                    | StopCause::HookStop
+                    | StopCause::Paused
+                    | StopCause::Budget
+                    | StopCause::ContextFull
+                    | StopCause::DelegationDeadline
+                    | StopCause::Refused(_)
+                    | StopCause::ToolStopped
+                    | StopCause::InvalidCommandResult,
+                ) => return Ok(Admission::Reserved(DefinitionInitialization::Stopped)),
             };
             if observation.disposition != ToolDisposition::Succeeded
                 || observation.attestation.is_none()
             {
-                return Ok(DefinitionInitialization::Stopped);
+                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
             }
             normalized_bytes += observation.output.len();
             if normalized_bytes > 1024 * 1024 {
-                return Ok(DefinitionInitialization::Stopped);
+                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
             }
             outputs.push(observation.output);
         }
@@ -3165,7 +3207,7 @@ impl RunLoop<'_> {
             outputs.iter().map(String::as_str),
             child_model,
         ) else {
-            return Ok(DefinitionInitialization::Stopped);
+            return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
         };
         let registry = registry.definitions;
         let tools = request
@@ -3209,12 +3251,12 @@ impl RunLoop<'_> {
             || tools.catalog().len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
-            return Ok(DefinitionInitialization::Stopped);
+            return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
         }
         self.definitions
             .set(registry)
             .map_err(|_| EngineError::CoordinatorFailed)?;
-        Ok(DefinitionInitialization::Ready)
+        Ok(Admission::Reserved(DefinitionInitialization::Ready))
     }
 }
 
@@ -3231,28 +3273,6 @@ fn effective_permission_mode(
                 .and_then(|definition| definition.permission_mode),
             Grant::Primary { .. } => None,
         })
-}
-
-pub(super) fn intent_observation(
-    result: IntentResult,
-) -> Result<Option<(ToolObservation, Option<ToolCall>)>, EngineError> {
-    match result {
-        Ok(observation) => Ok(Some(observation)),
-        Err(StopCause::ActiveTime) => Err(EngineError::GoalBudgetExhausted),
-        Err(StopCause::Capacity) => Err(EngineError::Tool(crate::tools::ToolError::Limit)),
-        Err(
-            StopCause::Uncertain
-            | StopCause::Cancelled
-            | StopCause::HookStop
-            | StopCause::Paused
-            | StopCause::Budget
-            | StopCause::ContextFull
-            | StopCause::DelegationDeadline
-            | StopCause::Refused(_)
-            | StopCause::ToolStopped
-            | StopCause::InvalidCommandResult,
-        ) => Ok(None),
-    }
 }
 
 #[cfg(test)]

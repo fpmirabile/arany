@@ -154,9 +154,12 @@ fn active_plan_narrowing_uses_settled_action_usage() {
 #[test]
 fn unlimited_goal_admits_a_finite_build_action_above_the_default_usage_ceiling() {
     let ledger = ledger(unlimited_time());
-    let (_, reserved_ms) = ledger
+    let Admission::Reserved((_, reserved_ms)) = ledger
         .reserve_active(1_845_000, BudgetAction::Provider, None)
-        .expect("maximum macOS Build action plus Store tail");
+        .expect("maximum macOS Build action plus Store tail")
+    else {
+        panic!("expected active reservation")
+    };
     assert_eq!(reserved_ms, 1_850_000);
 }
 
@@ -183,7 +186,10 @@ async fn active_admission_distinguishes_store_headroom_from_elapsed_exhaustion()
         tokio::time::advance(Duration::from_millis(carried)).await;
         assert_eq!(ledger.spent_active_time_exhausted(), elapsed);
         assert_eq!(
-            ledger.reserve_active(action_ms, action, None).is_ok(),
+            matches!(
+                ledger.reserve_active(action_ms, action, None),
+                Ok(Admission::Reserved(_))
+            ),
             admitted
         );
         let refusal = ledger.budget_refusal().unwrap();
@@ -272,9 +278,12 @@ fn carried_time_joins_the_next_reservation_and_the_runs_active_time() {
     edit(&ledger, |_, in_flight| {
         in_flight.origin = Some(Instant::now() - Duration::from_secs(11));
     });
-    let (_, reserved_ms) = ledger
+    let Admission::Reserved((_, reserved_ms)) = ledger
         .reserve_active(1_845_000, BudgetAction::Provider, None)
-        .expect("Build action after carried time");
+        .expect("Build action after carried time")
+    else {
+        panic!("expected active reservation")
+    };
     assert!(reserved_ms >= 1_861_000, "{reserved_ms}");
     assert!(
         matches!(
@@ -318,7 +327,7 @@ async fn finite_token_plan_reduces_parallelism_and_rejects_more_calls_at_the_cap
                 AgentRunId::new()
             )
             .await,
-        Err(EngineError::GoalBudgetExhausted)
+        Ok(Admission::Exhausted)
     ));
 }
 
@@ -338,9 +347,12 @@ fn an_unrecorded_result_counts_toward_the_token_cap() {
 #[tokio::test(start_paused = true)]
 async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
     let ledger = ledger(unlimited_time());
-    let (started, _) = ledger
+    let Admission::Reserved((started, _)) = ledger
         .reserve_active(10_000, BudgetAction::Provider, None)
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected active reservation")
+    };
     tokio::time::advance(Duration::from_millis(100)).await;
     ledger
         .exclude_idle_approval(Duration::from_millis(80))
@@ -349,9 +361,12 @@ async fn child_idle_approval_is_excluded_once_from_the_shared_segment() {
         .settle_active(duration_ms(started.elapsed()), None)
         .unwrap();
     assert_eq!(ledger.run_active_ms().unwrap(), 20);
-    let (started, _) = ledger
+    let Admission::Reserved((started, _)) = ledger
         .reserve_active(10_000, BudgetAction::Provider, None)
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected active reservation")
+    };
     tokio::time::advance(Duration::from_millis(50)).await;
     ledger
         .settle_active(duration_ms(started.elapsed()), None)
@@ -381,9 +396,12 @@ fn open_delegation_reservation_does_not_exhaust_its_own_review() {
         max_active_ms: Some(600_000),
         ..GoalBudget::default()
     });
-    let (_started, reserved_ms) = ledger
+    let Admission::Reserved((_started, reserved_ms)) = ledger
         .reserve_active(600_000, BudgetAction::Provider, None)
-        .unwrap();
+        .unwrap()
+    else {
+        panic!("expected active reservation")
+    };
     assert!(reserved_ms > 0);
     assert!(ledger.active_time_exhausted());
     assert!(!ledger.spent_active_time_exhausted());

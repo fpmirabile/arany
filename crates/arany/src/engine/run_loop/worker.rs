@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::step::{BoxedStep, Grant, intent_observation};
+use super::step::{BoxedStep, Grant, IntentResult};
 use super::stop::StopCause;
 use super::{Action, RunLoop};
 use crate::engine::EngineError;
@@ -99,6 +99,67 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         agent,
         worker,
         cause,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum IntegrationDecision {
+    RecordCapacityStop,
+    Continue,
+}
+
+fn integration_decision(
+    result: Result<IntentResult, EngineError>,
+) -> Result<IntegrationDecision, EngineError> {
+    match result {
+        Ok(Err(StopCause::Capacity)) | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
+            Ok(IntegrationDecision::RecordCapacityStop)
+        }
+        Err(EngineError::GoalBudgetExhausted)
+        | Ok(Ok(_))
+        | Ok(Err(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::ActiveTime
+            | StopCause::Budget
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult,
+        )) => Ok(IntegrationDecision::Continue),
+        Err(error) => Err(error),
+    }
+}
+
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+enum WorkerObservation {
+    Observed(Box<ToolObservation>),
+    ActiveTimeExhausted,
+    CapacityExhausted,
+    Stopped,
+}
+
+fn worker_observation(result: IntentResult) -> WorkerObservation {
+    match result {
+        Ok((observation, _)) => WorkerObservation::Observed(Box::new(observation)),
+        Err(StopCause::ActiveTime) => WorkerObservation::ActiveTimeExhausted,
+        Err(StopCause::Capacity) => WorkerObservation::CapacityExhausted,
+        Err(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::Budget
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult,
+        ) => WorkerObservation::Stopped,
     }
 }
 
@@ -855,7 +916,12 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        Ok(intent_observation(observation)?.map(|(observation, _)| observation))
+        match worker_observation(observation) {
+            WorkerObservation::Observed(observation) => Ok(Some(*observation)),
+            WorkerObservation::ActiveTimeExhausted => Err(EngineError::GoalBudgetExhausted),
+            WorkerObservation::CapacityExhausted => Err(crate::tools::ToolError::Limit.into()),
+            WorkerObservation::Stopped => Ok(None),
+        }
     }
 
     pub(super) fn complete_worker<'a>(
@@ -1111,12 +1177,15 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        Ok(
-            intent_observation(observation)?.and_then(|(o, _)| match o.attestation {
+        match worker_observation(observation) {
+            WorkerObservation::Observed(observation) => Ok(match observation.attestation {
                 Some(Attestation::WorkerData { data, .. }) => Some(data),
                 _ => None,
             }),
-        )
+            WorkerObservation::ActiveTimeExhausted => Err(EngineError::GoalBudgetExhausted),
+            WorkerObservation::CapacityExhausted => Err(crate::tools::ToolError::Limit.into()),
+            WorkerObservation::Stopped => Ok(None),
+        }
     }
 
     async fn integrate_worker(
@@ -1168,12 +1237,9 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        match result.and_then(intent_observation) {
-            Ok(_) | Err(EngineError::GoalBudgetExhausted) => {}
-            Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
-                self.record_capacity_stop().await?
-            }
-            Err(error) => return Err(error),
+        match integration_decision(result)? {
+            IntegrationDecision::RecordCapacityStop => self.record_capacity_stop().await?,
+            IntegrationDecision::Continue => {}
         }
         let tool = self
             .ledger()
@@ -1453,6 +1519,74 @@ fn cleanup_base(loop_: &RunLoop<'_>, id: AgentRunId) -> Result<[u8; 32], EngineE
 #[cfg(test)]
 mod terminal_tests {
     use super::*;
+    use crate::provider::test_support::observation;
+
+    fn stop_outcomes() -> [(StopCause, WorkerObservation, IntegrationDecision); 12] {
+        use IntegrationDecision::{Continue, RecordCapacityStop};
+        use WorkerObservation::{ActiveTimeExhausted, CapacityExhausted, Stopped};
+        [
+            (StopCause::Uncertain, Stopped, Continue),
+            (StopCause::Cancelled, Stopped, Continue),
+            (StopCause::HookStop, Stopped, Continue),
+            (StopCause::Paused, Stopped, Continue),
+            (StopCause::ActiveTime, ActiveTimeExhausted, Continue),
+            (StopCause::Budget, Stopped, Continue),
+            (StopCause::Capacity, CapacityExhausted, RecordCapacityStop),
+            (StopCause::ContextFull, Stopped, Continue),
+            (StopCause::DelegationDeadline, Stopped, Continue),
+            (
+                StopCause::Refused(crate::session::ProposalRefusalCause::InvalidArguments),
+                Stopped,
+                Continue,
+            ),
+            (StopCause::ToolStopped, Stopped, Continue),
+            (StopCause::InvalidCommandResult, Stopped, Continue),
+        ]
+    }
+
+    #[test]
+    fn integration_decisions_preserve_capacity_stops_continuation_and_errors() {
+        let observed = observation(ToolCall::List { path: ".".into() }, "worker output");
+        for (result, expected) in [
+            (
+                Err(EngineError::Tool(crate::tools::ToolError::Limit)),
+                IntegrationDecision::RecordCapacityStop,
+            ),
+            (Ok(Ok((observed, None))), IntegrationDecision::Continue),
+            (
+                Err(EngineError::GoalBudgetExhausted),
+                IntegrationDecision::Continue,
+            ),
+        ] {
+            assert_eq!(integration_decision(result).expect("decision"), expected);
+        }
+        for (cause, _, expected) in stop_outcomes() {
+            assert_eq!(
+                integration_decision(Ok(Err(cause))).expect("stop decision"),
+                expected,
+                "{cause:?}"
+            );
+        }
+        assert!(matches!(
+            integration_decision(Err(EngineError::CoordinatorFailed)),
+            Err(EngineError::CoordinatorFailed)
+        ));
+    }
+
+    #[test]
+    fn worker_observations_preserve_payloads_and_distinguish_exhaustion_from_stops() {
+        let observed = observation(ToolCall::List { path: ".".into() }, "worker output");
+        assert_eq!(
+            worker_observation(Ok((
+                observed.clone(),
+                Some(ToolCall::List { path: ".".into() })
+            ))),
+            WorkerObservation::Observed(Box::new(observed))
+        );
+        for (cause, expected, _) in stop_outcomes() {
+            assert_eq!(worker_observation(Err(cause)), expected, "{cause:?}");
+        }
+    }
 
     #[test]
     fn worker_terminals_keep_their_fact_order() {

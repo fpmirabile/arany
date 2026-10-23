@@ -13,6 +13,21 @@ use tokio::time::Instant;
 #[cfg(test)]
 mod tests;
 
+#[must_use]
+pub(super) enum Admission<T> {
+    Reserved(T),
+    Exhausted,
+}
+
+impl<T> Admission<T> {
+    pub(super) fn map<U>(self, map: impl FnOnce(T) -> U) -> Admission<U> {
+        match self {
+            Self::Reserved(value) => Admission::Reserved(map(value)),
+            Self::Exhausted => Admission::Exhausted,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum Action {
     ProviderCall { previews: bool, steering: bool },
@@ -418,7 +433,7 @@ impl GoalLedger {
         &self,
         action: Action,
         actor: AgentRunId,
-    ) -> Result<Reservation<'_>, EngineError> {
+    ) -> Result<Admission<Reservation<'_>>, EngineError> {
         let admission = self.admission.lock().await;
         if !(self.can_start_provider_call() && self.remaining_calls() != Some(0)) {
             self.capture_budget_refusal(
@@ -435,13 +450,13 @@ impl GoalLedger {
                 },
                 Some(actor),
             )?;
-            return Err(EngineError::GoalBudgetExhausted);
+            return Ok(Admission::Exhausted);
         }
-        Ok(Reservation {
+        Ok(Admission::Reserved(Reservation {
             ledger: self,
             child: matches!(action, Action::Child { .. }),
             _admission: admission,
-        })
+        }))
     }
 
     pub(super) fn settle(
@@ -574,7 +589,7 @@ impl GoalLedger {
         action_ms: u64,
         action: BudgetAction,
         actor: Option<AgentRunId>,
-    ) -> Result<(Instant, u64), EngineError> {
+    ) -> Result<Admission<(Instant, u64)>, EngineError> {
         self.update(|goal, in_flight| {
             let now = Instant::now();
             let started = in_flight.origin.unwrap_or(now);
@@ -608,11 +623,11 @@ impl GoalLedger {
                     }
                     in_flight.budget_refusal.get_or_insert(refusal);
                 }
-                return Err(EngineError::GoalBudgetExhausted);
+                return Ok(Admission::Exhausted);
             }
             in_flight.reserved_ms = Some(reservation);
             in_flight.origin = None;
-            Ok((started, reservation))
+            Ok(Admission::Reserved((started, reservation)))
         })?
     }
 
