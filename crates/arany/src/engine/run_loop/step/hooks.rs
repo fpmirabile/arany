@@ -131,6 +131,20 @@ struct HookPlan {
     timeout_ms: u32,
 }
 
+fn hook_plan(
+    runtime: &ToolRuntime,
+    group: u8,
+    handler: u8,
+    hook: &CommandHook,
+) -> Option<HookPlan> {
+    Some(HookPlan {
+        group,
+        handler,
+        call: hook_call(runtime, hook)?,
+        timeout_ms: u32::try_from(hook.timeout_seconds().saturating_mul(1000)).unwrap_or(u32::MAX),
+    })
+}
+
 impl HookFold {
     pub(super) fn none() -> Self {
         Self {
@@ -266,13 +280,7 @@ impl RunLoop<'_> {
         matched
             .into_iter()
             .map(|(group, handler, hook)| {
-                Ok(HookPlan {
-                    group,
-                    handler,
-                    call: hook_call(runtime, hook).ok_or("hook program is not pinned")?,
-                    timeout_ms: u32::try_from(hook.timeout_seconds().saturating_mul(1000))
-                        .unwrap_or(u32::MAX),
-                })
+                hook_plan(runtime, group, handler, hook).ok_or("hook program is not pinned")
             })
             .collect()
     }
@@ -764,14 +772,8 @@ impl RunLoop<'_> {
                 matched
                     .into_iter()
                     .map(|(group, handler, hook)| {
-                        Ok(HookPlan {
-                            group,
-                            handler,
-                            call: hook_call(runtime, hook)
-                                .ok_or(("hook program is not pinned", Some((group, handler))))?,
-                            timeout_ms: u32::try_from(hook.timeout_seconds() * 1000)
-                                .unwrap_or(u32::MAX),
-                        })
+                        hook_plan(runtime, group, handler, hook)
+                            .ok_or(("hook program is not pinned", Some((group, handler))))
                     })
                     .collect::<Result<Vec<_>, _>>()
             })
