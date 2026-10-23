@@ -5,7 +5,7 @@ use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{Cancellation, ToolError, ToolRuntime};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
-use crate::validate::digest;
+use crate::validate::{digest, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;
@@ -2134,6 +2134,71 @@ fn prepare_command_baseline(
 mod tests {
     use super::*;
 
+    pub(super) fn assert_enforcement_prose(selection: &[u8], worker: &[u8]) {
+        use crate::tools::selection::{CONTROL_BYTES, CONTROL_FILES, CONTROL_TOTAL_BYTES, RULES};
+        use crate::tools::types::MEMORY_BYTES;
+        use crate::tools::worker::WORKER_PREPARATION_MS;
+
+        let worker = std::str::from_utf8(worker).unwrap();
+        let selection = std::str::from_utf8(selection).unwrap();
+        let preparation_seconds = worker
+            .split_once("bulk-preparation-at-most-")
+            .unwrap()
+            .1
+            .split_once('s')
+            .unwrap()
+            .0
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(
+            Duration::from_secs(preparation_seconds),
+            Duration::from_millis(u64::from(WORKER_PREPARATION_MS))
+        );
+        let memory_mib = selection
+            .split_once("memory")
+            .unwrap()
+            .1
+            .split_once('m')
+            .unwrap()
+            .0
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(memory_mib * 1024 * 1024, MEMORY_BYTES);
+        let wait_seconds = selection
+            .split_once("wait")
+            .unwrap()
+            .1
+            .split_once('s')
+            .unwrap()
+            .0
+            .parse::<u64>()
+            .unwrap();
+        assert_eq!(wait_seconds * 1000, super::admission::CAPACITY_WAIT_MS);
+        let mut controls = selection.split_once("controls-").unwrap().1.split('-');
+        let control_bytes = controls
+            .next()
+            .unwrap()
+            .strip_suffix('k')
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * 1024;
+        let total_bytes = controls
+            .next()
+            .unwrap()
+            .strip_suffix('k')
+            .unwrap()
+            .parse::<usize>()
+            .unwrap()
+            * 1024;
+        let files = controls.next().unwrap().parse::<usize>().unwrap();
+        let rules = controls.next().unwrap().parse::<usize>().unwrap();
+        assert_eq!(
+            [control_bytes, total_bytes, files, rules],
+            [CONTROL_BYTES, CONTROL_TOTAL_BYTES, CONTROL_FILES, RULES]
+        );
+    }
+
     #[test]
     fn selected_rust_environment_is_class_scoped_and_digest_bound() {
         use super::super::toolchains::{RuntimeKind, RuntimeManager};
@@ -3684,7 +3749,7 @@ mod tests {
             "commands": [{
                 "name": "sh",
                 "executable": shell.to_str().unwrap(),
-                "sha256": super::super::types::hex_digest(&std::fs::read(&shell).unwrap()),
+                "sha256": crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),
                 "interpreter": true,
                 "inputs": []
             }],

@@ -2,7 +2,8 @@ use super::commands::{Submission, help_entry, help_len};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind, native_marker};
 use super::{Composer, TerminalMode, backend::TerminalBackend, input::CursorQuery};
 use crate::presentation::{
-    AgentInspectorModel, DraftAction, PresentationModel, model_id_preview, safe_truncate,
+    AgentInspectorModel, DraftAction, MAX_ROW_WIDTH, PresentationModel, model_id_preview,
+    safe_truncate,
 };
 #[cfg(test)]
 use arany::ModelEntry;
@@ -745,7 +746,7 @@ pub(super) fn draw_setup_frame(
     }
     if area.height > 4 {
         frame.render_widget(
-            Paragraph::new(safe_truncate(instruction, 240)).wrap(Wrap { trim: false }),
+            Paragraph::new(safe_truncate(instruction, MAX_ROW_WIDTH)).wrap(Wrap { trim: false }),
             Rect::new(
                 area.x,
                 area.y + 2,
@@ -879,7 +880,7 @@ pub(super) fn draw_setup_choices_frame(
         return;
     }
     let compact = area.width < 20;
-    let instruction = safe_truncate(instruction, 240);
+    let instruction = safe_truncate(instruction, MAX_ROW_WIDTH);
     let supporting_rows = if instruction.width() <= usize::from(area.width) {
         4
     } else {

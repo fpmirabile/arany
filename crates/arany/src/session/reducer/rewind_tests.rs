@@ -313,7 +313,7 @@ fn rewind_planner_folds_runs_gaps_exec_bits_deletes_and_inherited_prefix_only() 
     let p = plan(&view, &view.rewinds.checkpoints[1]).unwrap();
     assert_eq!(
         p.files[0].restore_to.as_ref().unwrap().sha256,
-        crate::tools::types::hex_digest(b"new")
+        crate::validate::hex_digest(b"new")
     );
     assert_eq!(p.files[0].expected_current, None);
     assert!(p.files[0].history_drift);
@@ -748,12 +748,12 @@ fn rewind_reverse_changeset_transfer_has_an_exact_48_mebibyte_boundary() {
         files: vec![FilePlan {
             path: actual.files[0].path.clone(),
             expected_current: Some(FileState {
-                sha256: crate::tools::types::hex_digest(b"old"),
+                sha256: crate::validate::hex_digest(b"old"),
                 bytes: 3,
                 executable: true,
             }),
             restore_to: Some(FileState {
-                sha256: crate::tools::types::hex_digest(b"new!"),
+                sha256: crate::validate::hex_digest(b"new!"),
                 bytes: 4,
                 executable: false,
             }),

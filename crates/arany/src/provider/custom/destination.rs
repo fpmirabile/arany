@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-const MAX_ADDRESSES: usize = 8;
+pub(crate) const MAX_ADDRESSES: usize = 8;
 const DNS_DEADLINE: Duration = Duration::from_secs(5);
 const CALL_DEADLINE: Duration = Duration::from_secs(120);
 

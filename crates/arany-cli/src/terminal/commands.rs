@@ -1,9 +1,8 @@
-use arany::{Effort, ModelEntry, resolve_native_effort};
+use arany::{Effort, MAX_CATALOG_MODELS, ModelEntry, resolve_native_effort};
 use uuid::Uuid;
 
 const MAX_INPUT_BYTES: usize = 8 * 1024;
 const MAX_COMMAND_NAME_BYTES: usize = 32;
-const MAX_CATALOG_MODELS: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InteractiveCommand {

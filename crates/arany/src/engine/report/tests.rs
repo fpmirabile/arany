@@ -90,7 +90,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             intent: intent.clone(),
             disposition: ToolDisposition::Succeeded,
             output: serde_json::json!({
-                "sha256": crate::tools::types::hex_digest(b"evidence")
+                "sha256": crate::validate::hex_digest(b"evidence")
             })
             .to_string(),
             approval_cause: None,
@@ -511,7 +511,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
     let tool = &mut checkpoint_view.runs[0].tools[1];
     tool.intent.call = ToolCall::Write {
         path: "src/file.rs".into(),
-        expected_digest: Some(crate::tools::types::hex_digest(b"before")),
+        expected_digest: Some(crate::validate::hex_digest(b"before")),
         content: "after".into(),
     };
     let observation = tool.observation.as_mut().unwrap();

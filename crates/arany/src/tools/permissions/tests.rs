@@ -567,7 +567,7 @@ fn changeset_rules_require_all_paths_for_allow_and_any_path_for_deny_or_ask() {
                 path: (*path).into(),
                 before: WorkerBaseVersion::Absent,
                 after: WorkerBaseVersion::File {
-                    sha256: crate::tools::types::hex_digest(b"x"),
+                    sha256: crate::validate::hex_digest(b"x"),
                     bytes: 1,
                     executable: false,
                 },
@@ -656,14 +656,14 @@ fn permission_limits_accept_boundaries_and_reject_overflow() {
         ),
         Err(ConfigError::Limit(_))
     ));
-    let exact = format!("Read({})", "a".repeat(MAX_PATTERN_BYTES - 6));
+    let exact = format!("Read({})", "a".repeat(MAX_RULE_PATTERN_BYTES - 6));
     assert!(
         PermissionConfig::parse(
             &serde_json::to_vec(&json!({"permissions":{"deny":[exact]}})).unwrap()
         )
         .is_ok()
     );
-    let over = format!("Read({})", "a".repeat(MAX_PATTERN_BYTES - 5));
+    let over = format!("Read({})", "a".repeat(MAX_RULE_PATTERN_BYTES - 5));
     assert!(
         PermissionConfig::parse(
             &serde_json::to_vec(&json!({"permissions":{"deny":[over]}})).unwrap()
@@ -752,7 +752,11 @@ fn hook_matchers_use_exact_alternatives_or_bounded_unanchored_regex() {
         let group = &parsed.hooks().groups(HookEvent::PreToolUse)[0];
         assert!(group.matches(yes).unwrap(), "{matcher}");
         assert!(!group.matches(no).unwrap(), "{matcher}");
-        assert!(group.matches(&"x".repeat(MAX_PATTERN_BYTES + 1)).is_err());
+        assert!(
+            group
+                .matches(&"x".repeat(MAX_RULE_PATTERN_BYTES + 1))
+                .is_err()
+        );
         for subject in ["Bash\n", "Bash\0", "Bash\u{1b}"] {
             assert!(group.matches(subject).is_err());
         }

@@ -480,7 +480,7 @@ impl GoalPlanContract {
                 GoalSuccessCriterion::WorkspaceFileContent { content, .. },
                 GoalSuccessState::WorkspaceFile { sha256 },
             ) => {
-                let expected = crate::tools::types::hex_digest(content.as_bytes());
+                let expected = crate::validate::hex_digest(content.as_bytes());
                 sha256.as_deref() == Some(&expected)
             }
             _ => false,

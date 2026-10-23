@@ -10,6 +10,8 @@ use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
+pub(super) const CAPACITY_WAIT_MS: u64 = 30_000;
+
 const MAX_WAITERS: usize = 1024;
 const ADMISSION_SCAN_LIMIT: usize = MAX_WAITERS + 64 * 4 + 16;
 const RESERVATION_VERSION: u32 = if cfg!(target_os = "linux") { 2 } else { 1 };
@@ -873,12 +875,12 @@ async fn recover_private_in(
     ids: &[uuid::Uuid],
 ) -> Result<(), ToolError> {
     let mut recovery = RecoveryBudget {
-        remaining: Duration::from_secs(30),
+        remaining: Duration::from_millis(CAPACITY_WAIT_MS),
         attempts: RECOVERY_ATTEMPTS,
     };
     let now = crate::tools::now_ms();
     recovery
-        .recover(directory, parent, now.saturating_add(30_000), now)
+        .recover(directory, parent, now.saturating_add(CAPACITY_WAIT_MS), now)
         .await?;
     for id in ids {
         for suffix in ["unit", "seed", "seed.next"] {
@@ -1012,10 +1014,10 @@ pub(super) async fn acquire_in(
     queued: impl Fn(bool),
     now: impl Fn() -> u64,
 ) -> Result<Permit, ToolError> {
-    let expires_at_ms = expires_at_ms.min(now().saturating_add(30_000));
+    let expires_at_ms = expires_at_ms.min(now().saturating_add(CAPACITY_WAIT_MS));
     let mut ticket: Option<Ticket> = None;
     let mut recovery = RecoveryBudget {
-        remaining: Duration::from_secs(30),
+        remaining: Duration::from_millis(CAPACITY_WAIT_MS),
         attempts: RECOVERY_ATTEMPTS,
     };
     recovery

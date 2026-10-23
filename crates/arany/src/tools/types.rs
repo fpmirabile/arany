@@ -3,7 +3,7 @@ use crate::session::worker::{
     ChangesetSource, EffectTarget, WorkerDataRef, WorkerMutation, WorkerPreparation,
 };
 use crate::session::{AgentRunId, RunId};
-use crate::validate::{digest, forbidden, valid_digest, valid_relative};
+use crate::validate::{digest, forbidden, hex_digest, valid_digest, valid_relative};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -558,13 +558,6 @@ pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super
     Ok(())
 }
 
-pub(crate) fn hex_digest(bytes: &[u8]) -> String {
-    digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicyReceipt {
@@ -743,6 +736,8 @@ pub enum ToolResourceProfile {
     MacosSupervised,
 }
 
+const DEFAULT_COMMAND_TIMEOUT_MS: u32 = 120_000;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolResourceSettings {
@@ -757,7 +752,7 @@ pub struct ToolResourceSettings {
 impl Default for ToolResourceSettings {
     fn default() -> Self {
         Self {
-            default_command_timeout_ms: 120_000,
+            default_command_timeout_ms: DEFAULT_COMMAND_TIMEOUT_MS,
             max_command_timeout_ms: MAX_COMMAND_TIMEOUT_MS,
             build_memory_bytes: MAX_BUILD_MEMORY_BYTES,
             build_processes: MAX_BUILD_PROCESSES_OR_THREADS,

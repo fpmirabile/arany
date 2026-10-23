@@ -3,7 +3,7 @@ use arany::{AgentRole, AgentStatus, CollaborationPolicy, RunStatus, SessionView}
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
-const MAX_ROW_CELLS: usize = 240;
+pub(crate) const MAX_ROW_WIDTH: usize = 240;
 const MAX_ROW_BYTES: usize = 1024;
 const MAX_VISIBLE_AGENTS: usize = 3;
 
@@ -35,7 +35,7 @@ impl PresentationModel {
     }
 
     fn project(view: &SessionView, width: u16, preparing: bool) -> Self {
-        let width = usize::from(width).min(MAX_ROW_CELLS);
+        let width = usize::from(width).min(MAX_ROW_WIDTH);
         let run = view.runs.last().filter(|_| !preparing);
         let state = if preparing {
             "preparing"
@@ -223,11 +223,11 @@ pub(crate) fn linear_session_lines(view: &SessionView) -> Vec<String> {
         },
         format!(
             "Title: {}",
-            safe_truncate(&view.conversation_title(), MAX_ROW_CELLS)
+            safe_truncate(&view.conversation_title(), MAX_ROW_WIDTH)
         ),
         format!("State: {}", chat_state_label(run.map(|run| run.status))),
-        format!("Provider: {}", safe_truncate(provider, MAX_ROW_CELLS)),
-        format!("Model: {}", safe_truncate(model, MAX_ROW_CELLS)),
+        format!("Provider: {}", safe_truncate(provider, MAX_ROW_WIDTH)),
+        format!("Model: {}", safe_truncate(model, MAX_ROW_WIDTH)),
     ];
     if requires_setup(view, run.map(|run| run.status)) {
         lines.push("Setup: type /setup to choose an account".into());
@@ -294,7 +294,7 @@ pub(super) fn agent_state_label(status: AgentStatus) -> &'static str {
 }
 
 pub(crate) fn safe_truncate(value: &str, width: usize) -> String {
-    let width = width.min(MAX_ROW_CELLS);
+    let width = width.min(MAX_ROW_WIDTH);
     if width == 0 {
         return String::new();
     }
@@ -335,7 +335,7 @@ pub(crate) fn safe_truncate(value: &str, width: usize) -> String {
 }
 
 pub(crate) fn model_id_preview(id: &str, width: usize) -> String {
-    let width = width.min(MAX_ROW_CELLS);
+    let width = width.min(MAX_ROW_WIDTH);
     if width < 3 || !id.bytes().all(|byte| byte.is_ascii_graphic()) || id.len() <= width {
         return safe_truncate(id, width);
     }

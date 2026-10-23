@@ -627,7 +627,7 @@ pub async fn exercise_private_guard_target(
         std::fs::read(workspace.join("owned/a")).map_err(|_| crate::tools::ToolError::Operation)?;
     let call = ToolCall::MultiEdit {
         file_path: "owned/a".into(),
-        expected_digest: crate::tools::types::hex_digest(&original),
+        expected_digest: crate::validate::hex_digest(&original),
         edits: vec![
             crate::LiteralEdit {
                 old_string: "original".into(),
@@ -709,7 +709,7 @@ pub async fn exercise_private_guard_target(
         idle.assignment(),
         ToolCall::MultiEdit {
             file_path: "owned/a".into(),
-            expected_digest: crate::tools::types::hex_digest(&original),
+            expected_digest: crate::validate::hex_digest(&original),
             edits: vec![
                 crate::LiteralEdit {
                     old_string: "original".into(),
@@ -744,7 +744,7 @@ pub async fn exercise_private_guard_target(
         lost.assignment(),
         ToolCall::MultiEdit {
             file_path: "owned/a".into(),
-            expected_digest: crate::tools::types::hex_digest(&original),
+            expected_digest: crate::validate::hex_digest(&original),
             edits: vec![
                 crate::LiteralEdit {
                     old_string: "original".into(),

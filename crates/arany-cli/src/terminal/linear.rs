@@ -1,5 +1,5 @@
 use crate::presentation::{
-    AgentInspectorModel, MAX_AGENT_ROWS, escape_terminal, image_message_lines,
+    AgentInspectorModel, MAX_AGENT_ROWS, MAX_ROW_WIDTH, escape_terminal, image_message_lines,
     linear_session_lines, safe_truncate, user_message_lines,
 };
 #[cfg(test)]
@@ -421,7 +421,7 @@ impl LinearState {
             title,
             instruction,
             notice,
-            (240, true),
+            (MAX_ROW_WIDTH, true),
         )
     }
 
@@ -433,7 +433,7 @@ impl LinearState {
         instruction: &str,
         notice: Option<&str>,
     ) -> io::Result<()> {
-        let instruction_limit = if step == 3 { 512 } else { 240 };
+        let instruction_limit = if step == 3 { 512 } else { MAX_ROW_WIDTH };
         self.write_setup_with_limit(
             writer,
             step,
@@ -471,7 +471,7 @@ impl LinearState {
                 if step == 0 { "Settings" } else { "Setup" },
                 safe_truncate(title, 160)
             )?;
-            let displayed_instruction = if instruction_limit > 240 {
+            let displayed_instruction = if instruction_limit > MAX_ROW_WIDTH {
                 if instruction.len() > instruction_limit
                     || !instruction
                         .bytes()
@@ -487,7 +487,7 @@ impl LinearState {
             self.last_setup = Some((step, title.to_owned(), instruction.to_owned()));
         }
         if let Some(notice) = notice {
-            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+            writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
         }
         if self.prompt_needed && takes_input {
             writeln!(writer, "Input:")?;
@@ -550,7 +550,7 @@ impl LinearState {
             self.last_unsaved = unsaved;
         }
         if let Some(notice) = notice {
-            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+            writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
         }
         if self.prompt_needed {
             writeln!(writer, "Input:")?;
@@ -595,12 +595,17 @@ impl LinearState {
                 "Settings: type NUMBER VALUE to change a row; empty Enter saves; q cancels"
             )?;
             for (index, row) in rows.iter().enumerate() {
-                writeln!(writer, "Choice {}: {}", index + 1, safe_truncate(row, 240))?;
+                writeln!(
+                    writer,
+                    "Choice {}: {}",
+                    index + 1,
+                    safe_truncate(row, MAX_ROW_WIDTH)
+                )?;
             }
             self.last_setup = Some((0, "Settings".into(), listing));
         }
         if let Some(notice) = notice {
-            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+            writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
         }
         if self.prompt_needed {
             self.write_prompt(writer, "Input:")?;
@@ -632,7 +637,7 @@ impl LinearState {
                 writer,
                 "Choice {}: {}",
                 index + 1,
-                safe_truncate(&item.title, 240)
+                safe_truncate(&item.title, MAX_ROW_WIDTH)
             )?;
             writeln!(
                 writer,
@@ -644,11 +649,11 @@ impl LinearState {
                 "Access: {}; model: {}",
                 safe_truncate(
                     crate::presentation::session_access_label(&item.defaults),
-                    240
+                    MAX_ROW_WIDTH
                 ),
                 safe_truncate(
                     item.defaults.model.as_deref().unwrap_or("Default model"),
-                    240
+                    MAX_ROW_WIDTH
                 )
             )?;
         }
@@ -753,7 +758,7 @@ impl LinearState {
             writeln!(writer, "{}", escape_terminal(line))?;
         }
         if let Some(notice) = notice {
-            writeln!(writer, "Notice: {}", safe_truncate(notice, 240))?;
+            writeln!(writer, "Notice: {}", safe_truncate(notice, MAX_ROW_WIDTH))?;
         }
         if prompt {
             self.write_prompt(

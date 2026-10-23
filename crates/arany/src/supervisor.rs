@@ -813,7 +813,7 @@ fn subject(
                 } else if let ToolCall::Write { path, content, .. } = &o.intent.call {
                     step.edits.push((
                         hash(path.as_bytes()),
-                        hash(crate::tools::types::hex_digest(content.as_bytes()).as_bytes()),
+                        hash(crate::validate::hex_digest(content.as_bytes()).as_bytes()),
                     ));
                 } else if let ToolCall::Edit { path, .. }
                 | ToolCall::MultiEdit {

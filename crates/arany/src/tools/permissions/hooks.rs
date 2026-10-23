@@ -1,5 +1,5 @@
 use super::{
-    ConfigError, Decision, MAX_PATTERN_BYTES, PermissionMode, compile, peer_name, valid_call,
+    ConfigError, Decision, MAX_RULE_PATTERN_BYTES, PermissionMode, compile, peer_name, valid_call,
 };
 use crate::tools::{EffectIntent, ToolCall, ToolObservation};
 use regex::Regex;
@@ -133,7 +133,7 @@ impl HookConfig {
 
 impl HookGroup {
     pub fn matches(&self, value: &str) -> Result<bool, ConfigError> {
-        if value.len() > MAX_PATTERN_BYTES || value.chars().any(char::is_control) {
+        if value.len() > MAX_RULE_PATTERN_BYTES || value.chars().any(char::is_control) {
             return Err(ConfigError::Hook(
                 "invalid match subject; block the pending action",
             ));
@@ -167,7 +167,7 @@ impl HookGroup {
 
 impl Matcher {
     fn parse(value: &str) -> Result<Self, ConfigError> {
-        if value.len() > MAX_PATTERN_BYTES || value.chars().any(char::is_control) {
+        if value.len() > MAX_RULE_PATTERN_BYTES || value.chars().any(char::is_control) {
             return Err(ConfigError::Hook(
                 "matcher must be control-free and at most 1024 bytes",
             ));

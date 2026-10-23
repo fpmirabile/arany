@@ -5,6 +5,8 @@ use super::types::{CommandResult, ToolCall};
 use crate::validate::{MAX_PATH_BYTES, valid_name, valid_relative};
 use serde_json::{Value, json};
 
+pub(super) const MAX_ARGUMENT_BYTES: usize = 4096;
+
 const WORKER_CAPTURE_RESULT_BYTES: usize = 512;
 
 #[derive(Clone, Copy)]
@@ -42,7 +44,7 @@ pub(super) fn valid_command(program: &str, args: &[String], cwd: &str) -> bool {
         && args.len() <= 64
         && args
             .iter()
-            .all(|arg| arg.len() <= 4096 && !arg.contains('\0'))
+            .all(|arg| arg.len() <= MAX_ARGUMENT_BYTES && !arg.contains('\0'))
 }
 
 pub(super) fn schema(name: &str) -> Option<Vec<(&'static str, Value)>> {

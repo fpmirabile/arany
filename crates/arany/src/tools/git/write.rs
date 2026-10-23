@@ -3,14 +3,14 @@ use super::super::config::{GitIdentity, Program};
 use super::super::permissions::HiddenPaths;
 use super::super::types::{
     EffectIntent, FileChange, FileVersion, MAX_FILE_BYTES, MAX_SNAPSHOT_BYTES, MAX_SNAPSHOT_FILES,
-    ToolCall, hex_digest,
+    ToolCall,
 };
 use super::{
     CAPTURE_BYTES, Captured, MAX_GIT_RUNTIME, REF_BYTES, Repository, VIEW, environment, failure,
     inspect, object_id, owned, pathspecs_of, read_optional, records, resolve, valid_branch,
     verify_pin, write_view_base,
 };
-use crate::validate::valid_relative;
+use crate::validate::{hex_digest, valid_relative};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, OpenOptions};
 use serde_json::{Value, json};

@@ -85,6 +85,13 @@ pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
     Sha256::digest(bytes).into()
 }
 
+pub(crate) fn hex_digest(bytes: &[u8]) -> String {
+    digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 pub(crate) fn deserialize_value_bounded<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
     max_bytes: usize,

@@ -8,6 +8,7 @@ use crate::tools::types::{
     EffectIntent, MAX_BUILD_PROCESSES_OR_THREADS, MAX_CHANGESET_BYTES, MAX_CHANGESET_FILES,
     ToolCall, ToolLimits, ToolObservation, ToolResourceClass,
 };
+use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{ToolError, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, digest};
 use std::io::{Read, Write};
@@ -58,13 +59,17 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     Ok(())
 }
 
+const LINUX_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling";
+
+const LINUX_SELECTION_CONTRACT: &[u8] = b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-preparation-runtime-grants-ro-attested";
+
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     let mut bytes = b"arany-guard-v15:shared-fifo-capacity;owned-host-seed;retained-reservation;no-buffered-go-before-ready;pinned-skill-digest-pre-go;fixed-root-owned-unshare-bootstrap-user-map-current-recursive-private-no-retained-caps;private-mount,user,pid,net,ipc,uts;no-userns;no-new-privs;zero-caps;tsync-seccomp-all-threads;per-thread-nnp-zero-caps-attested;not-dumpable;cpu25000/100000;memory536870912;swap0;oom-group1;pids64;scratch67108864;workspace67108864;nofile64;core0;no-inherited-host-handles;typed-native-or-fresh-snapshot;namespace-descendant-stop-kill-positive-absence-before-command-changeset;strict-bounded-no-follow-changeset;owned-cgroup-cleanup;runtime-root-/usr-excludes-workspace-state-account;versioned-exact-ro-runtime-cache-mounts;cache-volume-at-cache-limit-sized-tmpfs;toolchains-at-exact-host-paths-rejecting-profile-overlap;bounded-namespace-mountinfo-private-root-and-unique-exact-mounts-no-descendants-before-ready-and-after-go;typed-git-read-pinned-usr-git-after-go-read-only-workspace-scratch-repository-view-no-repository-config-closed-env-descendants-stopped".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
-    bytes.extend_from_slice(b";worker-private-image-framed-v1-no-host-workspace;bulk-preparation-at-most-120s-under-action-ceiling");
+    bytes.extend_from_slice(LINUX_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-selected-resources");
-    bytes.extend_from_slice(b";command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-monotonic-action-deadline-memory512m-capture-retained-shmem-payload-ceiling-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2-preparation-runtime-grants-ro-attested");
+    bytes.extend_from_slice(LINUX_SELECTION_CONTRACT);
     bytes.extend_from_slice(&profile::profile_digest()?);
     bytes.extend_from_slice(&(MAX_CHANGESET_FILES as u64).to_le_bytes());
     bytes.extend_from_slice(&(MAX_CHANGESET_BYTES as u64).to_le_bytes());
@@ -843,7 +848,7 @@ fn action_deadlines(
     let go_deadline = if bulk.is_zero() {
         go_deadline
     } else {
-        go_deadline.min(capacity_started + Duration::from_secs(120))
+        go_deadline.min(capacity_started + Duration::from_millis(u64::from(WORKER_PREPARATION_MS)))
     };
     let completion = active_window.map_or_else(
         || {
@@ -1828,6 +1833,24 @@ async fn prepare_ready(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enforcement_prose_matches_resource_limits() {
+        use crate::validate::hex_digest;
+
+        assert_eq!(
+            hex_digest(LINUX_WORKER_CONTRACT),
+            "d98dda7eac0d3078c424ff02e1a77a277220b0119898d9b21e044585a6832e27"
+        );
+        assert_eq!(
+            hex_digest(LINUX_SELECTION_CONTRACT),
+            "96197a2d4a4f93c182b0f63a13bc9bec4c155aa05919a9880a6b6e6e1e7ad109"
+        );
+        super::super::tests::assert_enforcement_prose(
+            LINUX_SELECTION_CONTRACT,
+            LINUX_WORKER_CONTRACT,
+        );
+    }
+
     #[tokio::test]
     async fn selection_protocol_preserves_outcomes_and_deadline() {
         crate::tools::guard::selection_phase::tests::protocol_outcomes().await;

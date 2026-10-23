@@ -7,6 +7,7 @@ use crate::session::WorkspaceIdentity;
 use crate::tools::Cancellation;
 use crate::tools::executable::EXECUTABLES;
 use crate::tools::types::{MAX_PROCESSES_OR_THREADS, MEMORY_BYTES};
+use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{EffectIntent, ToolCall, ToolError, ToolObservation, ToolRuntime};
 use crate::validate::{MAX_PATH_BYTES, digest};
 
@@ -240,15 +241,19 @@ pub(super) fn check_available() -> Result<(), ToolError> {
     unit::check_available()
 }
 
+const MACOS_WORKER_CONTRACT: &[u8] = b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling";
+
+const MACOS_SELECTION_CONTRACT: &[u8] = b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2";
+
 pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     if !cfg!(any(target_arch = "aarch64", target_arch = "x86_64")) {
         return Err(ToolError::ProtectionUnavailable);
     }
     let mut bytes = b"arany-macos-guard-v15:shared-fifo-capacity;durable-observed-attachment;boot-bound-locked-root-recovery;persisted-supervisor-before-task;image-inode-device-mount-ownership;no-buffered-go-before-ready;typed-files-pinned-skills;file-no-fork-exec;closed-inherited-fds;live-no-follow-handles;metadata-only-directory-ancestors;workspace-call-write;guard-read-only;file-cpu-default-unblocked-immutable;supervised-resources;one-use-launchd-coalition;authenticated-private-control;atomic-audit-token-signals;owned-unit-cleanup;exact-child-kill-reap;strict-bounded-no-follow-command-changeset-after-coalition-emptiness-before-detach;bounded-go-receipt;versioned-exact-ro-runtime-and-cache-grants;admitted-cache-volume-grant;mount-table-no-descendant-under-selected-physical-runtime-before-seatbelt-and-before-go".to_vec();
     bytes.extend_from_slice(&super::super::output::DRAIN_BYTES.to_le_bytes());
-    bytes.extend_from_slice(b";worker-private-image-framed-v1-fixed-capacity-non-spawning;bulk-preparation-at-most-120s-under-action-ceiling");
+    bytes.extend_from_slice(MACOS_WORKER_CONTRACT);
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
-    bytes.extend_from_slice(b";definition-parser-task-bytes-only-no-workspace-grant;command-selection-v1-ignore-0.4.33-frozen-controls-32k-256k-256-4096-lines4096-expanded64k-1m-stars16-recursive4-braces4-calls8388608-phase5s-report1s-uptime-raw-action-deadline-capture-cpu-delta-phase-only-selection-limits-no-post-capture-sampling-memory512m-wait30s-input-exclusions-before-open-oversize-omission-full-output-validation-filesystem-cause-select-errors-v2");
+    bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
     bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));
@@ -1033,7 +1038,7 @@ async fn worker_ready(
 ) -> Result<Ready, ToolError> {
     tokio::time::timeout(
         (PREPARATION_DEADLINE + super::super::worker::transfer_time(intent))
-            .min(Duration::from_secs(120)),
+            .min(Duration::from_millis(u64::from(WORKER_PREPARATION_MS))),
         async {
             stdin
                 .write_all(task)
@@ -1243,6 +1248,24 @@ async fn execute_worker(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn enforcement_prose_matches_resource_limits() {
+        use crate::validate::hex_digest;
+
+        assert_eq!(
+            hex_digest(MACOS_WORKER_CONTRACT),
+            "798b3db8dab2b75accfbc4eabdc643f5275248da221a78edfe572e96ae9f9db2"
+        );
+        assert_eq!(
+            hex_digest(MACOS_SELECTION_CONTRACT),
+            "cc40b0271747622b7e7a0e5ef6ae0f0ba8b5a29b736ad90c88ad9302708d254c"
+        );
+        super::super::tests::assert_enforcement_prose(
+            MACOS_SELECTION_CONTRACT,
+            MACOS_WORKER_CONTRACT,
+        );
+    }
+
     use super::*;
     use crate::test_process::BoundedOutput;
     use crate::tools::config::Config;

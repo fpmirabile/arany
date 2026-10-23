@@ -428,7 +428,7 @@ impl Fixture {
             &intent,
             ToolDisposition::Succeeded,
             Some(Attestation::for_site(&intent)),
-            &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"new")}).to_string(),
+            &serde_json::json!({"sha256":crate::validate::hex_digest(b"new")}).to_string(),
         );
         let criterion = GoalSuccessCriterion::WorkspaceFileContent {
             path: "src/a".into(),
@@ -2134,7 +2134,7 @@ fn worker_protocol_no_change_conflict_and_denial_settle_without_publication() {
             entries: vec![WorkerManifestEntry {
                 path: "src/a".into(),
                 version: WorkerBaseVersion::File {
-                    sha256: crate::tools::types::hex_digest(b"new"),
+                    sha256: crate::validate::hex_digest(b"new"),
                     bytes: 3,
                     executable: false,
                 },
@@ -2299,7 +2299,7 @@ fn worker_protocol_verification_cannot_skip_a_later_workspace_mutation() {
         f.primary,
         ToolCall::Write {
             path: "src/a".into(),
-            expected_digest: Some(crate::tools::types::hex_digest(b"new")),
+            expected_digest: Some(crate::validate::hex_digest(b"new")),
             content: "other".into(),
         },
         EffectTarget::Workspace,
@@ -2309,7 +2309,7 @@ fn worker_protocol_verification_cannot_skip_a_later_workspace_mutation() {
         &intent,
         ToolDisposition::Succeeded,
         Some(Attestation::for_site(&intent)),
-        &serde_json::json!({"sha256":crate::tools::types::hex_digest(b"other"), "bytes":5, "executable":false, "before":{"sha256":crate::tools::types::hex_digest(b"new"),"bytes":3,"executable":false}}).to_string(),
+        &serde_json::json!({"sha256":crate::validate::hex_digest(b"other"), "bytes":5, "executable":false, "before":{"sha256":crate::validate::hex_digest(b"new"),"bytes":3,"executable":false}}).to_string(),
     );
     refused(&f, verification, "stale positive evidence after a mutation");
 }

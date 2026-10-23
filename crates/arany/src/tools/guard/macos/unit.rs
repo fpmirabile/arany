@@ -11,7 +11,9 @@ use super::{
 };
 use crate::private_fs::{PrivateDirectory, open_directory};
 use crate::tools::Cancellation;
+use crate::tools::process::MAX_ARGUMENT_BYTES;
 use crate::tools::types::{CommandResult, ToolDisposition, ToolLimits, ToolResourceClass};
+use crate::tools::worker::WORKER_PREPARATION_MS;
 use crate::tools::{EffectIntent, ToolError, ToolObservation, ToolRuntime};
 use core_foundation::array::CFArray;
 use core_foundation::base::TCFType;
@@ -641,7 +643,7 @@ impl Unit {
                 .iter()
                 .copied()
                 .chain(std::iter::once(stderr))
-                .any(|value| value.len() > 4096 || value.contains('\0'))
+                .any(|value| value.len() > MAX_ARGUMENT_BYTES || value.contains('\0'))
         {
             return Err(ToolError::Limit);
         }
@@ -876,7 +878,7 @@ fn action_deadlines(
     let go_deadline = if super::super::super::worker::transfer_time(intent).is_zero() {
         go_deadline
     } else {
-        go_deadline.min(fallback_started + Duration::from_secs(120))
+        go_deadline.min(fallback_started + Duration::from_millis(u64::from(WORKER_PREPARATION_MS)))
     };
     let completion_deadline = active_window.map_or_else(
         || {
@@ -2351,18 +2353,18 @@ done
             crate::tools::config::Program {
                 name: "shell".into(),
                 executable: shell.into(),
-                sha256: crate::tools::types::hex_digest(&std::fs::read(shell).unwrap()),
+                sha256: crate::validate::hex_digest(&std::fs::read(shell).unwrap()),
                 interpreter: true,
                 inputs: vec![crate::tools::config::ProgramInput {
                     path: workspace.join("runtime-input").to_str().unwrap().into(),
                     destination: "fixture.txt".into(),
-                    sha256: crate::tools::types::hex_digest(b"pinned synthetic input"),
+                    sha256: crate::validate::hex_digest(b"pinned synthetic input"),
                 }],
             },
             crate::tools::config::Program {
                 name: "native".into(),
                 executable: workspace.join("script").to_str().unwrap().into(),
-                sha256: crate::tools::types::hex_digest(
+                sha256: crate::validate::hex_digest(
                     &std::fs::read(workspace.join("script")).unwrap(),
                 ),
                 interpreter: false,
@@ -2376,7 +2378,7 @@ done
             commands.push(crate::tools::config::Program {
                 name: "sysctl-probe".into(),
                 executable: sysctl_probe.to_str().unwrap().into(),
-                sha256: crate::tools::types::hex_digest(&std::fs::read(&sysctl_probe).unwrap()),
+                sha256: crate::validate::hex_digest(&std::fs::read(&sysctl_probe).unwrap()),
                 interpreter: false,
                 inputs: Vec::new(),
             });
@@ -2384,7 +2386,7 @@ done
             commands.push(crate::tools::config::Program {
                 name: "rust-startup-probe".into(),
                 executable: rust_probe.to_str().unwrap().into(),
-                sha256: crate::tools::types::hex_digest(&std::fs::read(rust_probe).unwrap()),
+                sha256: crate::validate::hex_digest(&std::fs::read(rust_probe).unwrap()),
                 interpreter: false,
                 inputs: Vec::new(),
             });
@@ -2419,12 +2421,12 @@ done
                     program: crate::tools::config::Program {
                         name: "mcp-shell".into(),
                         executable: shell.into(),
-                        sha256: crate::tools::types::hex_digest(&std::fs::read(shell).unwrap()),
+                        sha256: crate::validate::hex_digest(&std::fs::read(shell).unwrap()),
                         interpreter: true,
                         inputs: vec![crate::tools::config::ProgramInput {
                             path: workspace.join("server.sh").to_str().unwrap().into(),
                             destination: "server.sh".into(),
-                            sha256: crate::tools::types::hex_digest(MCP_SCRIPT.as_bytes()),
+                            sha256: crate::validate::hex_digest(MCP_SCRIPT.as_bytes()),
                         }],
                     },
                     args: vec!["/inputs/mcp-shell/server.sh".into()],
@@ -3443,7 +3445,7 @@ int main(int argc, char **argv) {
                     source.path(),
                     &ToolCall::Write {
                         path: "selected".into(),
-                        expected_digest: Some(crate::tools::types::hex_digest(b"before edit")),
+                        expected_digest: Some(crate::validate::hex_digest(b"before edit")),
                         content: "after typed edit".into(),
                     },
                     &snapshot_runtime(source.path()).config,

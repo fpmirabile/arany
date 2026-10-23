@@ -3153,7 +3153,7 @@ mod goal_replay_tests {
                     mcp_tools: Vec::new(),
                     success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
                         path: "src/lib.rs".into(),
-                        sha256: crate::tools::types::hex_digest(b"done"),
+                        sha256: crate::validate::hex_digest(b"done"),
                     },
                     budget: GoalBudget {
                         max_active_ms: Some(limit),
@@ -4643,7 +4643,7 @@ mod goal_replay_tests {
                 _ => unreachable!(),
             };
             serde_json::to_string(&crate::session::rewind::FilePublicationResult {
-                sha256: crate::tools::types::hex_digest(content),
+                sha256: crate::validate::hex_digest(content),
                 bytes: content.len() as u32,
                 executable: false,
                 before: expected.map(|sha256| crate::session::rewind::FileState {
@@ -4672,7 +4672,7 @@ mod goal_replay_tests {
             })
             .unwrap()
         } else {
-            serde_json::json!({ "sha256": crate::tools::types::hex_digest(content) }).to_string()
+            serde_json::json!({ "sha256": crate::validate::hex_digest(content) }).to_string()
         };
         ToolObservation {
             enforcement_cause: None,
@@ -4702,7 +4702,7 @@ mod goal_replay_tests {
             mcp_tools: Vec::new(),
             success_criterion: GoalSuccessCriterion::WorkspaceFileDigest {
                 path: "src/main.rs".into(),
-                sha256: crate::tools::types::hex_digest(b"before"),
+                sha256: crate::validate::hex_digest(b"before"),
             },
             budget: GoalBudget::default(),
         };
@@ -5039,7 +5039,7 @@ mod goal_replay_tests {
         assert_eq!(
             view.goals[0].success_state,
             crate::session::GoalSuccessState::WorkspaceFile {
-                sha256: Some(crate::tools::types::hex_digest(b"after")),
+                sha256: Some(crate::validate::hex_digest(b"after")),
             }
         );
     }
@@ -8566,7 +8566,7 @@ mod goal_replay_tests {
                     if multiedit {
                         ToolCall::MultiEdit {
                             file_path: "src/lib.rs".into(),
-                            expected_digest: crate::tools::types::hex_digest(before.as_bytes()),
+                            expected_digest: crate::validate::hex_digest(before.as_bytes()),
                             edits: vec![crate::LiteralEdit {
                                 old_string: before.into(),
                                 new_string: after.into(),
@@ -8576,9 +8576,7 @@ mod goal_replay_tests {
                     } else {
                         ToolCall::Write {
                             path: "src/lib.rs".into(),
-                            expected_digest: Some(crate::tools::types::hex_digest(
-                                before.as_bytes(),
-                            )),
+                            expected_digest: Some(crate::validate::hex_digest(before.as_bytes())),
                             content: after.into(),
                         }
                     },

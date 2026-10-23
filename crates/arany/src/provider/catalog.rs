@@ -12,7 +12,7 @@ use std::{collections::HashSet, time::Duration};
 
 const OPENAI_MODELS: &str = "https://api.openai.com/v1/models";
 const ANTHROPIC_MODELS: &str = "https://api.anthropic.com/v1/models";
-const MAX_MODELS: usize = 4096;
+pub const MAX_CATALOG_MODELS: usize = 4096;
 const MAX_PAGES: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -69,9 +69,9 @@ fn bounded_rows<'de, D>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    crate::validate::bounded_sequence::<D, CatalogRow, CatalogRow, MAX_MODELS>(
+    crate::validate::bounded_sequence::<D, CatalogRow, CatalogRow, MAX_CATALOG_MODELS>(
         deserializer,
-        format_args!("at most {MAX_MODELS} model rows"),
+        format_args!("at most {MAX_CATALOG_MODELS} model rows"),
         "too many model rows",
         |_| Ok(()),
     )
@@ -232,7 +232,7 @@ async fn list_at(
                 };
                 (page.data, next)
             };
-            if rows.len() > MAX_MODELS - entries.len() {
+            if rows.len() > MAX_CATALOG_MODELS - entries.len() {
                 return Err(ProviderError::InvalidOutcome);
             }
             for row in rows {
@@ -602,7 +602,7 @@ mod tests {
             Err(ProviderError::InvalidOutcome)
         ));
 
-        let rows = (0..=MAX_MODELS)
+        let rows = (0..=MAX_CATALOG_MODELS)
             .map(|index| format!("{{\"id\":\"model-{index}\"}}"))
             .collect::<Vec<_>>()
             .join(",");
@@ -615,7 +615,7 @@ mod tests {
 
     #[test]
     fn catalog_page_model_rows_are_bounded_without_transport() {
-        let rows = (0..MAX_MODELS)
+        let rows = (0..MAX_CATALOG_MODELS)
             .map(|index| format!("{{\"id\":\"model-{index}\"}}"))
             .collect::<Vec<_>>()
             .join(",");
@@ -625,9 +625,9 @@ mod tests {
                 .expect("largest bounded page")
                 .data
                 .len(),
-            MAX_MODELS
+            MAX_CATALOG_MODELS
         );
-        let rows = format!("{rows},{{\"id\":\"model-{MAX_MODELS}\"}}");
+        let rows = format!("{rows},{{\"id\":\"model-{MAX_CATALOG_MODELS}\"}}");
         let many = format!("{{\"data\":[{rows}]}}");
         assert!(
             serde_json::from_str::<OpenAiPage>(&many)

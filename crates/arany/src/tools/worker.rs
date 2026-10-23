@@ -3,12 +3,14 @@ use super::{
     ToolError, ToolObservation, ToolRuntime, fs, types::*,
 };
 use crate::session::{AgentRunId, worker::*};
-use crate::validate::{digest, valid_relative};
+use crate::validate::{digest, hex_digest, valid_relative};
 use cap_std::fs::Dir;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub(super) const WORKER_PREPARATION_MS: u32 = 120_000;
 
 pub(crate) async fn recover_private(ids: &[uuid::Uuid]) -> Result<(), ToolError> {
     super::guard::recover_private(ids).await
@@ -1213,7 +1215,7 @@ impl Transfer {
             || intent.limits.scratch_bytes != SCRATCH_BYTES
             || !command && intent.limits.cache_bytes != 0
             || intent.limits.cache_candidate_bytes != 0
-            || !command && intent.limits.runtime_ms > 120_000
+            || !command && intent.limits.runtime_ms > WORKER_PREPARATION_MS
             || !config.write
             || !self.grant.valid()
             || self.target != intent.target
@@ -1326,7 +1328,9 @@ pub(super) fn decode_handover(
 
 pub(crate) fn transfer_time(intent: &EffectIntent) -> std::time::Duration {
     if matches!(intent.target, EffectTarget::WorkerView { .. }) || handover_ref(intent).is_some() {
-        std::time::Duration::from_millis(u64::from(intent.limits.runtime_ms.min(120_000)))
+        std::time::Duration::from_millis(u64::from(
+            intent.limits.runtime_ms.min(WORKER_PREPARATION_MS),
+        ))
     } else {
         std::time::Duration::ZERO
     }
