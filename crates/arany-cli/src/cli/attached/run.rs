@@ -382,8 +382,7 @@ fn exits_after_settled_run(
     ) && run_settled(view, starting_sequence)
 }
 
-// An explicit /exit abandons what the settled Run would hand back (a held linear draft or an
-// undelivered note), so the deferred Ctrl+D meets an empty composer and exits.
+// /exit drops held drafts and notes so the deferred Ctrl+D exits on an empty composer.
 fn abandon_drafts_for_exit(
     composer: &mut Composer,
     held: &mut Option<HeldDraft>,
@@ -1342,7 +1341,7 @@ impl<'a> RunProgress<'a> {
             ActiveStop::Pausing => "Already pausing at the next step",
             ActiveStop::Cancelling => "Run is already cancelling",
         };
-        // Classic filters the history notice from the status row, so a redraw without it shows the pausing state there; linear prints notices as lines.
+        // Classic hides the history notice from the status row; linear prints notices as lines.
         if self
             .draw(ui, Some(TerminalNotice::History(notice)))
             .is_err()
@@ -1863,8 +1862,7 @@ impl RunUi<'_> {
 
 const EVENT_DRAIN_LIMIT: usize = 64;
 
-// Applies one burst: `first`, then Events already ready, at most EVENT_DRAIN_LIMIT in commit
-// order, so input is polled again before the next burst.
+// Bounded so input is polled again before the next burst.
 async fn apply_burst(
     state_dir: &std::path::Path,
     view: &mut SessionView,
