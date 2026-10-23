@@ -775,6 +775,8 @@ mod tests {
     use rustix::fs::OFlags;
     use std::{io::Write, os::fd::OwnedFd, os::unix::net::UnixStream};
 
+    const KEYBOARD_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
     #[test]
     fn enter_encodings_preserve_newline_and_submission_identity() {
         for (bytes, expected) in [
@@ -872,11 +874,16 @@ mod tests {
             (b"\x1b[?0u\x1b[?1;2c".as_slice(), Disambiguated),
             (b"\x1b[?1;2c", Legacy),
             (b"\x1b[?1;2u\x1b[?1;2c", Legacy),
-            (b"".as_slice(), Legacy),
         ] {
             keyboard_probe_case(reply, expected);
         }
         let queries = TerminalQueries::default();
+        assert_eq!(
+            queries
+                .probe_keyboard_within(&mut Vec::new(), Duration::ZERO)
+                .unwrap(),
+            Legacy
+        );
         queries.0.0.lock().unwrap().keyboard = super::super::KeyboardProbe::Waiting(Instant::now());
         queries.keyboard_reply(super::super::KeyboardReply::Flags);
         assert!(queries.0.0.lock().unwrap().keyboard == super::super::KeyboardProbe::Unsupported);
@@ -926,7 +933,12 @@ mod tests {
             reply,
             request: Vec::new(),
         };
-        assert_eq!(queries.probe_keyboard(&mut output).unwrap(), expected);
+        assert_eq!(
+            queries
+                .probe_keyboard_within(&mut output, KEYBOARD_REPLY_TIMEOUT)
+                .unwrap(),
+            expected
+        );
         assert_eq!(output.request, b"\x1b[?u\x1b[c");
         queries.keyboard_reply(super::super::KeyboardReply::Flags);
         assert!(

@@ -652,6 +652,15 @@ struct QueryState {
 impl TerminalQueries {
     #[cfg(unix)]
     fn probe_keyboard(&self, output: &mut impl io::Write) -> io::Result<KeyboardSupport> {
+        self.probe_keyboard_within(output, KEYBOARD_PROBE_TIMEOUT)
+    }
+
+    #[cfg(unix)]
+    fn probe_keyboard_within(
+        &self,
+        output: &mut impl io::Write,
+        timeout: Duration,
+    ) -> io::Result<KeyboardSupport> {
         let (state, ready) = &*self.0;
         let mut state = state
             .lock()
@@ -662,7 +671,7 @@ impl TerminalQueries {
                 "terminal input closed",
             ));
         }
-        let deadline = Instant::now() + KEYBOARD_PROBE_TIMEOUT;
+        let deadline = Instant::now() + timeout;
         state.keyboard = KeyboardProbe::Waiting(deadline);
         if let Err(error) = output
             .write_all(super::KEYBOARD_QUERY)
