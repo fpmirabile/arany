@@ -258,9 +258,7 @@ impl StateRoot {
         let path = dirs.state_dir().ok_or(StoreError::InvalidStateDirectory)?;
         #[cfg(not(target_os = "linux"))]
         let path = dirs.data_local_dir();
-        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
-        if let Some(fixture) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
-            let fixture = PathBuf::from(fixture);
+        if let Some(fixture) = Self::debug_account_root() {
             let parent = fixture
                 .parent()
                 .filter(|parent| fixture.is_absolute() && *parent != Path::new("/"))
@@ -277,13 +275,28 @@ impl StateRoot {
         if std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").is_some() {
             return Err(StoreError::InvalidStateDirectory);
         }
-        #[cfg(test)]
-        crate::test_support::isolate_account_root();
         #[cfg(any(test, feature = "test-support"))]
         if let Some(path) = crate::test_support::account_root() {
             return Ok(path.to_path_buf());
         }
+        if let Some(path) = Self::debug_account_root() {
+            if !path.is_absolute() {
+                return Err(StoreError::InvalidStateDirectory);
+            }
+            return Ok(path);
+        }
         Self::configured_account_path()
+    }
+
+    fn debug_account_root() -> Option<PathBuf> {
+        #[cfg(all(debug_assertions, any(target_os = "linux", target_os = "macos")))]
+        {
+            std::env::var_os("ARANY_TEST_ACCOUNT_ROOT").map(PathBuf::from)
+        }
+        #[cfg(not(all(debug_assertions, any(target_os = "linux", target_os = "macos"))))]
+        {
+            None
+        }
     }
 
     fn configured_account_path() -> Result<PathBuf, StoreError> {
@@ -291,14 +304,6 @@ impl StateRoot {
         {
             use nix::unistd::{User, geteuid};
 
-            #[cfg(debug_assertions)]
-            if let Some(path) = std::env::var_os("ARANY_TEST_ACCOUNT_ROOT") {
-                let path = PathBuf::from(path);
-                if !path.is_absolute() {
-                    return Err(StoreError::InvalidStateDirectory);
-                }
-                return Ok(path);
-            }
             let user = User::from_uid(geteuid())
                 .map_err(|_| StoreError::InvalidStateDirectory)?
                 .ok_or(StoreError::InvalidStateDirectory)?;

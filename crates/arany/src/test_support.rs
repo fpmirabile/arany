@@ -60,6 +60,8 @@ pub fn isolate_account_root() -> &'static std::path::Path {
 }
 
 pub(crate) fn account_root() -> Option<&'static std::path::Path> {
+    #[cfg(test)]
+    isolate_account_root();
     ACCOUNT_ROOT.get().map(std::path::PathBuf::as_path)
 }
 

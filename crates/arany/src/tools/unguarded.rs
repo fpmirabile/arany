@@ -508,6 +508,8 @@ pub(crate) fn pin(
 }
 
 pub fn tool_host_main() -> std::process::ExitCode {
+    use std::os::unix::process::CommandExt;
+
     let mut args = std::env::args_os().skip(2);
     let Some(executable) = args.next().and_then(|arg| arg.into_string().ok()) else {
         return std::process::ExitCode::FAILURE;
@@ -519,11 +521,17 @@ pub fn tool_host_main() -> std::process::ExitCode {
     else {
         return std::process::ExitCode::FAILURE;
     };
-    host_exec(&executable, &args)
+    let Ok(mut command) = host_command(&executable, &args) else {
+        return std::process::ExitCode::FAILURE;
+    };
+    let _error = command.exec();
+    std::process::ExitCode::FAILURE
 }
 
-fn host_exec(executable: &str, args: &[String]) -> std::process::ExitCode {
-    use std::os::unix::process::CommandExt;
+fn host_command(
+    executable: &str,
+    args: &[String],
+) -> Result<std::process::Command, std::process::ExitCode> {
     let resolved = Path::new(executable).canonicalize().ok();
     if !Path::new(executable).is_absolute()
         || executable.len() > 4096
@@ -544,28 +552,11 @@ fn host_exec(executable: &str, args: &[String]) -> std::process::ExitCode {
             })
         || rustix::process::setsid().is_err()
     {
-        return std::process::ExitCode::FAILURE;
-    }
-    #[cfg(test)]
-    {
-        assert_eq!(
-            rustix::process::getsid(None).unwrap(),
-            rustix::process::getpid()
-        );
-        assert!(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/tty")
-                .is_err()
-        );
+        return Err(std::process::ExitCode::FAILURE);
     }
     let mut command = std::process::Command::new(executable);
     command.args(args);
-    #[cfg(test)]
-    command.env_remove("ARANY_TEST_HOST_ARGS");
-    let _error = command.exec();
-    std::process::ExitCode::FAILURE
+    Ok(command)
 }
 
 const UNCONFIRMED: &str =
@@ -1381,15 +1372,28 @@ mod tests {
 
     #[test]
     fn host_launcher() {
+        use std::os::unix::process::CommandExt;
+
         let Ok(value) = std::env::var("ARANY_TEST_HOST_ARGS") else {
             return;
         };
         let (executable, args): (std::path::PathBuf, Vec<String>) =
             serde_json::from_str(&value).unwrap();
+        let mut command = host_command(executable.to_str().unwrap(), &args).unwrap();
         assert_eq!(
-            host_exec(executable.to_str().unwrap(), &args),
-            std::process::ExitCode::SUCCESS
+            rustix::process::getsid(None).unwrap(),
+            rustix::process::getpid()
         );
+        assert!(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .is_err()
+        );
+        command.env_remove("ARANY_TEST_HOST_ARGS");
+        let _error = command.exec();
+        panic!("host command exec failed");
     }
 
     struct Fixture {
