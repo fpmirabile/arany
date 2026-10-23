@@ -120,6 +120,10 @@ pub enum EngineError {
     },
     #[error("no exhausted Goal is available to continue")]
     GoalNotContinuable,
+    #[error("Goal include paths are unknown; start a new Goal with explicit inputs")]
+    GoalIncludesUnavailable,
+    #[error("objective plus includes too large")]
+    GoalInputTooLarge,
     #[error("Engine has an active operation")]
     Busy,
     #[error("Guard executable unavailable")]
@@ -746,6 +750,7 @@ enum GoalEntry {
 struct GoalAdmission {
     id: GoalId,
     objective: String,
+    include_paths: Option<Vec<String>>,
     phase: GoalPhase,
     budget: GoalBudget,
     autonomous: bool,
@@ -754,6 +759,22 @@ struct GoalAdmission {
     entry: GoalEntry,
     usage: GoalUsage,
     continues: Option<GoalId>,
+}
+
+impl GoalAdmission {
+    fn started_event(&self, objective: &str, workspace_identity: WorkspaceIdentity) -> Event {
+        Event::GoalStarted {
+            goal_id: self.id,
+            objective: objective.to_owned(),
+            include_paths: self.include_paths.clone(),
+            workspace_identity,
+            budget: self.budget,
+            phase: self.phase,
+            autonomous: self.autonomous,
+            resource_settings: self.resource_settings,
+            continues: self.continues,
+        }
+    }
 }
 
 fn goal_context_metadata_reservation(
@@ -850,6 +871,7 @@ fn resolve_goal_admission(
         Ok(GoalAdmission {
             id,
             objective: goal.objective.clone(),
+            include_paths: goal.include_paths.clone(),
             phase: goal.phase,
             budget: goal.budget,
             autonomous: goal.autonomous,
@@ -857,16 +879,26 @@ fn resolve_goal_admission(
             plan_contract: goal.plan_contract.clone(),
             entry,
             usage: goal.resume_usage(view),
-            continues: None,
+            continues: goal.continues,
         })
     } else if let Some(source_id) = request.goal.continues {
         let source = history
             .and_then(crate::session::SessionView::continuable_goal)
             .filter(|source| source.id == source_id && request.objective.trim().is_empty())
             .ok_or(EngineError::GoalNotContinuable)?;
+        let paths = source
+            .include_paths
+            .as_ref()
+            .ok_or(EngineError::GoalIncludesUnavailable)?;
+        if !request.include_paths.is_empty()
+            && request.include_paths != paths.iter().map(PathBuf::from).collect::<Vec<_>>()
+        {
+            return Err(EngineError::InvalidRequest);
+        }
         Ok(GoalAdmission {
             id: GoalId::new(),
             objective: source.objective.clone(),
+            include_paths: Some(paths.clone()),
             phase: source.phase,
             budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
             autonomous: source.autonomous,
@@ -887,6 +919,17 @@ fn resolve_goal_admission(
         Ok(GoalAdmission {
             id: GoalId::new(),
             objective: request.objective.clone(),
+            include_paths: Some(
+                request
+                    .include_paths
+                    .iter()
+                    .map(|path| {
+                        path.to_str()
+                            .map(str::to_owned)
+                            .ok_or(EngineError::InvalidWorkspacePath)
+                    })
+                    .collect::<Result<_, _>>()?,
+            ),
             phase: request.goal.phase.ok_or(EngineError::InvalidRequest)?,
             budget: request.goal.budget.ok_or(EngineError::InvalidRequest)?,
             autonomous: request.goal.autonomous,
@@ -1657,16 +1700,7 @@ impl Engine {
                 self.append_goal_lifecycle(
                     session_id,
                     Some(ledger),
-                    Event::GoalStarted {
-                        goal_id: goal.id,
-                        objective: objective.to_owned(),
-                        workspace_identity,
-                        budget: goal.budget,
-                        phase: goal.phase,
-                        autonomous: goal.autonomous,
-                        resource_settings: goal.resource_settings,
-                        continues: goal.continues,
-                    },
+                    goal.started_event(objective, workspace_identity),
                 )
                 .await?;
             }
@@ -1868,6 +1902,9 @@ impl Engine {
                 return Err(EngineError::RosterSelectionMismatch);
             }
         }
+        if request.goal.id.is_some() && goal.include_paths.is_none() {
+            return Err(EngineError::GoalIncludesUnavailable);
+        }
         let objective = if request.objective.trim().is_empty()
             && (request.goal.id.is_some() || request.goal.continues.is_some())
         {
@@ -2011,21 +2048,39 @@ impl Engine {
             .as_ref()
             .map(crate::tools::ToolRuntime::context)
             .transpose()?;
+        let include_paths = goal
+            .include_paths
+            .as_ref()
+            .ok_or(EngineError::GoalIncludesUnavailable)?
+            .iter()
+            .map(PathBuf::from)
+            .collect::<Vec<_>>();
         let inputs = match &tools {
             Some(runtime) => WorkspaceInputs::load_pinned(
                 &request.workspace,
                 &self.state,
                 request.launch_directory.as_deref(),
-                &request.include_paths,
+                &include_paths,
                 Some(runtime.workspace_identity()),
             )?,
             None => WorkspaceInputs::load(
                 &request.workspace,
                 &self.state,
                 request.launch_directory.as_deref(),
-                &request.include_paths,
+                &include_paths,
             )?,
         };
+        if goal.entry == GoalEntry::New {
+            let event = goal.started_event(objective, workspace_identity);
+            if event
+                .payload()
+                .map_err(|_| EngineError::InvalidRequest)?
+                .len()
+                > crate::store::MAX_GOAL_STARTED_BYTES
+            {
+                return Err(EngineError::GoalInputTooLarge);
+            }
+        }
         let root_identity = inputs.root_identity()?;
         if root_identity != workspace_identity {
             return Err(crate::tools::ToolError::ChangedInput.into());

@@ -91,6 +91,8 @@ pub enum Submission<'a> {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CommandParseError {
+    #[error("Commands and Skills cannot be mixed with text attachments; draft retained")]
+    Attachments,
     #[error("empty input")]
     Empty,
     #[error("message is too long; shorten it")]

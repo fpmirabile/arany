@@ -59,9 +59,10 @@ pub(crate) use events::{
     goal_finished_v7_payload, goal_finished_v7_to_v8, payload_version,
 };
 pub(crate) use events::{
-    add_command_selection, expiring_intent_text, expiring_payload, intent_without_expiry,
-    pre_command_selection_payload, pre_git_write_payload, pre_glob_payload, pre_host_git_payload,
-    pre_host_payload, pre_multiedit_payload, pre_typed_prefix_payload, provider_call_v18_payload,
+    add_command_selection, expiring_intent_text, expiring_payload, goal_started_v7_payload,
+    goal_started_v7_to_v8, intent_without_expiry, pre_command_selection_payload,
+    pre_git_write_payload, pre_glob_payload, pre_host_git_payload, pre_host_payload,
+    pre_multiedit_payload, pre_typed_prefix_payload, provider_call_v18_payload,
     provider_call_v18_to_v19, rebind_intent_pins, replace_intent_pin, run_started_fits,
     run_started_v18_payload, run_started_v18_to_v19, run_started_v19_payload,
     run_started_v19_to_v20,

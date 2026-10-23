@@ -1424,6 +1424,7 @@ fn goal_view() -> GoalView {
             },
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id: GoalId::new(),
             objective: "objective".into(),
             workspace_identity: WorkspaceIdentity {

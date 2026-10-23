@@ -172,6 +172,7 @@ fn bounded_report_preserves_usage_uncertainty_ahead_of_many_tool_facts() {
             .collect(),
     };
     let goal = GoalView {
+        include_paths: Some(Vec::new()),
         id: goal_id,
         objective: "Report bounded evidence".into(),
         workspace_identity: WorkspaceIdentity {
@@ -1008,6 +1009,7 @@ fn unguarded_success_is_evidence_that_names_the_host_run_and_survives_omission()
         provider_retries: Vec::new(),
     };
     let goal = GoalView {
+        include_paths: Some(Vec::new()),
         continues: None,
         budget_closed: false,
         budget_refusal: None,

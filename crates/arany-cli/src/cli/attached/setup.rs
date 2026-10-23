@@ -1092,7 +1092,7 @@ pub(super) async fn review_warning(
                 notice = Some("Resize: reread");
             }
             TerminalInput::Suspend => {
-                terminal.suspend_and_resume(0)?;
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
                 page = 0;
                 accept_selected = false;
             }
@@ -1137,7 +1137,7 @@ pub(super) async fn await_operation<T>(
                     return Ok(None);
                 }
                 TerminalInput::Shutdown(signal) => return Err(SetupError::Shutdown(signal)),
-                TerminalInput::Suspend => terminal.suspend_and_resume(0)?,
+                TerminalInput::Suspend => terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?,
                 TerminalInput::LineRejected | TerminalInput::LineContinued => terminal.discard_draft_input(),
                 _ => {}
             },
@@ -1254,7 +1254,8 @@ async fn choose_display(
                 terminal.discard_draft_input();
                 notice = Some("Invalid choice line; Ctrl+C cancels");
             }
-            TerminalInput::Suspend => terminal.suspend_and_resume(input.len())?,
+            TerminalInput::Suspend => terminal
+                .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES.saturating_sub(input.len()))?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 terminal.discard_draft_input();
                 return Ok(None);
@@ -1333,7 +1334,7 @@ async fn read_api_key_hidden(
                 notice = Some("Invalid or overlong API key line; retry");
             }
             TerminalInput::Suspend => {
-                terminal.suspend_and_resume(0)?;
+                terminal.suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)?;
                 terminal.begin_secret_input()?;
             }
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
@@ -1425,7 +1426,7 @@ async fn read_workspace_id(
                 terminal.discard_draft_input();
                 notice = Some("Error: invalid workspace ID line; retry");
             }
-            TerminalInput::Suspend => terminal.suspend_and_resume(draft.text().len())?,
+            TerminalInput::Suspend => terminal.suspend_and_resume(draft.input_capacity())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 terminal.discard_draft_input();
                 return Ok(None);

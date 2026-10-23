@@ -44,7 +44,9 @@ pub use commands::{
     CommandAvailability, CommandParseError, InteractiveCommand, Submission, command_completions,
     parse_submission, skill_invocation, transcript_agents,
 };
-pub use composer::{CompletionLayout, Composer, ComposerEdit, NewlineShortcut};
+pub use composer::{
+    CompletionLayout, Composer, ComposerDraft, ComposerEdit, MAX_DRAFT_BYTES, NewlineShortcut,
+};
 use history::History;
 use input::TerminalReader;
 pub use input::{ShutdownSignal, TerminalInput};
@@ -466,7 +468,7 @@ pub struct AttachedTerminal {
     agent_panel: Option<AgentPanel>,
     agent_chat: Option<AgentChat>,
     child_drafts: Vec<agent_chat::ChildDraft>,
-    primary_draft_bytes: usize,
+    primary_input_capacity: usize,
     help_selected: Option<usize>,
     usage_panel: Option<UsagePanel>,
     clipboard: Option<ClipboardRead>,
@@ -782,7 +784,7 @@ impl AttachedTerminal {
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
-            primary_draft_bytes: 0,
+            primary_input_capacity: crate::terminal::MAX_DRAFT_BYTES,
             help_selected: None,
             usage_panel: None,
             clipboard: None,
@@ -1116,6 +1118,38 @@ impl AttachedTerminal {
             && matches!(input, TerminalInput::PageUp | TerminalInput::PageDown)
     }
 
+    pub fn handle_draft_detail(&mut self, composer: &mut Composer, input: TerminalInput) -> bool {
+        if self.is_linear()
+            || (self.mode == TerminalMode::Fullscreen && self.transcript_open)
+            || self.scrollback_dump
+            || self.history_mut().find_open()
+        {
+            return false;
+        }
+        let limit = composer.paste_detail().and_then(|(_, text, _)| {
+            let size = self.terminal.as_mut()?.size().ok()?;
+            Some(view::paste_detail_scroll_limit(
+                text,
+                usize::from(size.width),
+                usize::from(size.height),
+            ))
+        });
+        if let Some(limit) = limit {
+            composer.clamp_detail_scroll(limit);
+        }
+        let handled = composer.inspect_input(input);
+        if let Some(limit) = limit {
+            composer.clamp_detail_scroll(limit);
+        }
+        if handled {
+            self.cancel_clipboard_paste();
+            if input == TerminalInput::Paste {
+                let _ = self.take_paste();
+            }
+        }
+        handled
+    }
+
     pub fn handle_transcript_input(
         &mut self,
         input: TerminalInput,
@@ -1177,7 +1211,7 @@ impl AttachedTerminal {
     pub fn set_mode(
         &mut self,
         mode: TerminalMode,
-        draft_bytes: usize,
+        input_capacity: usize,
     ) -> Result<(), TerminalError> {
         if self.is_linear() {
             return Err(TerminalError::Io(io::Error::new(
@@ -1191,7 +1225,7 @@ impl AttachedTerminal {
         self.release()?;
         self.mode = mode;
         self.reacquire_after_output()?;
-        self.restore_draft_input(draft_bytes)
+        self.restore_draft_input(input_capacity)
     }
 
     #[must_use]
@@ -1465,19 +1499,19 @@ impl AttachedTerminal {
                 self.input
                     .as_mut()
                     .expect("active terminal input")
-                    .restore_draft_bytes(composer.text().len())
-                    .expect("admitted Composer draft length");
+                    .restore_input_capacity(composer.input_capacity())
+                    .expect("admitted Composer input capacity");
                 self.clipboard_preview = self.is_linear() && edit == ComposerEdit::Changed;
                 Ok(edit)
             }
         }
     }
 
-    pub fn restore_draft_input(&mut self, bytes: usize) -> Result<(), TerminalError> {
+    pub fn restore_draft_input(&mut self, capacity: usize) -> Result<(), TerminalError> {
         self.input
             .as_mut()
             .expect("active terminal input")
-            .restore_draft_bytes(bytes)
+            .restore_input_capacity(capacity)
             .map_err(TerminalError::Io)
     }
 
@@ -1508,7 +1542,7 @@ impl AttachedTerminal {
     }
 
     #[cfg(unix)]
-    pub fn suspend_and_resume(&mut self, draft_bytes: usize) -> Result<(), TerminalError> {
+    pub fn suspend_and_resume(&mut self, input_capacity: usize) -> Result<(), TerminalError> {
         let screen_reader = self.requested_screen_reader;
         let secret_input = self.secret_echo.is_some();
         let mut panel = self.agent_panel.take();
@@ -1532,7 +1566,7 @@ impl AttachedTerminal {
             .input
             .as_mut()
             .expect("active terminal input")
-            .restore_draft_bytes(draft_bytes)?;
+            .restore_input_capacity(input_capacity)?;
         self.replace_released(resumed);
         if reading_panel {
             self.transcript_open = true;
@@ -1542,7 +1576,7 @@ impl AttachedTerminal {
     }
 
     #[cfg(not(unix))]
-    pub fn suspend_and_resume(&mut self, _draft_bytes: usize) -> Result<(), TerminalError> {
+    pub fn suspend_and_resume(&mut self, _input_capacity: usize) -> Result<(), TerminalError> {
         Err(TerminalError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             "terminal suspension is unavailable",
@@ -1724,6 +1758,12 @@ impl AttachedTerminal {
             ratatui::layout::Position::ORIGIN,
             self.terminal.as_mut().expect("owned terminal").size()?,
         ));
+        if let Some((label, text, scroll)) = composer.paste_detail() {
+            let palette = self.palette();
+            return self.draw_frame(screen.height, |frame, area| {
+                view::draw_paste_detail(frame, area, &label, text, scroll, palette);
+            });
+        }
         if self.mode == TerminalMode::Fullscreen && self.transcript_open {
             return self.draw_pager(view, notice, screen);
         }
@@ -2787,7 +2827,7 @@ impl AttachedTerminal {
         replacement.dialog_armed = self.dialog_armed;
         replacement.agent_chat = self.agent_chat.take();
         replacement.child_drafts = std::mem::take(&mut self.child_drafts);
-        replacement.primary_draft_bytes = self.primary_draft_bytes;
+        replacement.primary_input_capacity = self.primary_input_capacity;
         replacement.native = std::mem::take(&mut self.native);
         replacement.active_run = self.active_run;
         if let Some(new) = &mut replacement.linear {
@@ -3488,10 +3528,19 @@ mod pointer_tests {
                 };
                 let mut terminal = super::clipboard::cleanup_tests::released_terminal(None);
                 terminal.mode = TerminalMode::Fullscreen;
+                let mut composer = Composer::default();
+                let payload = "paste ".repeat(200);
+                composer.insert_paste(&payload).unwrap();
+                composer.apply(TerminalInput::Home);
                 // Handled input never reaches the composer, so the hidden draft cannot change.
                 for (pager, dump) in [(true, false), (false, true)] {
                     terminal.transcript_open = pager;
                     terminal.scrollback_dump = dump;
+                    for input in [TerminalInput::Tab, TerminalInput::Submit] {
+                        assert!(!terminal.handle_draft_detail(&mut composer, input));
+                        assert!(composer.paste_detail().is_none());
+                        assert_eq!(composer.text(), payload);
+                    }
                     terminal.clipboard_paste = Some(Ok(ClipboardContent::Text("pasted".into())));
                     assert!(
                         terminal
@@ -3505,6 +3554,17 @@ mod pointer_tests {
                     );
                 }
                 terminal.scrollback_dump = false;
+                assert!(terminal.history.handle(TerminalInput::HistoryFind, &view));
+                assert!(!terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
+                assert!(terminal.history.find_open());
+                assert!(composer.paste_detail().is_none());
+                assert!(terminal.history.handle(TerminalInput::Escape, &view));
+                terminal.mode = TerminalMode::Classic;
+                terminal.transcript_open = true;
+                assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Tab));
+                assert!(composer.paste_detail().is_some());
+                assert!(terminal.handle_draft_detail(&mut composer, TerminalInput::Escape));
+                assert_eq!(composer.text(), payload);
             });
     }
 

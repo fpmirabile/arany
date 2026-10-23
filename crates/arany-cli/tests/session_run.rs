@@ -831,14 +831,14 @@ fn terminal_readers_preserve_shared_output_and_setup_redraw() {
                     terminal.draw(&view, &draft, None).unwrap();
                     terminal.toggle_transcript(&details).unwrap();
                     terminal
-                        .set_mode(TerminalMode::Fullscreen, draft.text().len())
+                        .set_mode(TerminalMode::Fullscreen, draft.input_capacity())
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
                     terminal
                         .handle_history_input(TerminalInput::PageUp, &view, &draft, false)
                         .await;
                     terminal
-                        .set_mode(TerminalMode::Classic, draft.text().len())
+                        .set_mode(TerminalMode::Classic, draft.input_capacity())
                         .unwrap();
                     terminal.draw(&view, &draft, None).unwrap();
                     assert_eq!(draft.text(), "retained 🚀 draft");
@@ -2129,6 +2129,7 @@ fn an_empty_session_and_defaults_are_durable_without_workspace_overlap() {
             .append(
                 id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id: pending_goal_id,
                     objective: "pending objective".into(),
                     workspace_identity: WorkspaceIdentity { device: workspace_device, inode: workspace_inode },
@@ -2807,6 +2808,7 @@ fn incomplete_run_replays_as_interrupted_and_a_new_run_can_start() {
                     workspace_identity: identity,
                 },
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     objective: "Question".into(),
                     workspace_identity: identity,
@@ -3160,7 +3162,8 @@ impl arany::Provider for HeldProvider {
                 request.input.workspace_guidance.is_empty(),
                 "holder call instructions"
             );
-            assert!(request.input.includes.is_empty(), "holder call includes");
+            assert_eq!(request.input.includes.len(), 1, "holder call includes");
+            assert!(request.input.includes[0].contains("Pinned lock fixture"));
             assert!(request.input.history.is_empty(), "holder call history");
             assert!(
                 request.input.context_summary.is_none(),
@@ -3216,7 +3219,7 @@ fn process_lock_holder() {
                 images: Vec::new(),
                 workspace: workspace.into(),
                 launch_directory: None,
-                include_paths: Vec::new(),
+                include_paths: vec!["held-include.txt".into()],
                 policy: CollaborationPolicy::Single,
                 goal: arany::GoalRequest::default(),
             },
@@ -3239,6 +3242,8 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let temp = tempfile::tempdir().expect("private temporary directory");
         let workspace = temp.path().join("workspace");
         std::fs::create_dir(&workspace).expect("Workspace directory");
+        let pinned_include = workspace.join("held-include.txt");
+        std::fs::write(&pinned_include, "Pinned lock fixture").expect("pinned include");
         let state_path = temp.path().join("state");
         let session_id = create_session(
             StateRoot::admit(&state_path).expect("state admission"),
@@ -3323,14 +3328,21 @@ fn exec_process_rejects_a_busy_session_and_recovers_after_holder_death() {
         let goal_id = view
             .interrupted_goal_id()
             .expect("held Goal became interrupted");
+        assert_eq!(
+            view.goal(goal_id).unwrap().include_paths,
+            Some(vec!["held-include.txt".into()])
+        );
         store.close().await.expect("close interrupted Store");
 
+        std::fs::remove_file(&pinned_include).expect("remove the originally admitted input");
+        // Reading the replacement must fail locally with a different error, before Provider dispatch.
+        std::fs::write(workspace.join("missing.txt"), [0xff]).expect("unrecorded include");
         let released = contender(Some(goal_id));
         assert!(!released.status.success());
         assert_eq!(released.stdout, b"");
         assert_eq!(
             released.stderr,
-            b"error: \"missing.txt\": explicit include does not exist\n"
+            b"error: \"held-include.txt\": explicit include does not exist\n"
         );
 
         let store =

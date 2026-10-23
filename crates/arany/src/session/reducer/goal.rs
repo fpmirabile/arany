@@ -22,6 +22,7 @@ impl SessionView {
         &mut self,
         goal_id: &GoalId,
         objective: &str,
+        include_paths: &Option<Vec<String>>,
         workspace_identity: WorkspaceIdentity,
         budget: &GoalBudget,
         resource_settings: &crate::tools::ToolResourceSettings,
@@ -35,6 +36,7 @@ impl SessionView {
             if source.is_none_or(|source| {
                 source.id != source_id
                     || source.objective != objective
+                    || source.include_paths != *include_paths
                     || source.phase != *phase
                     || source.autonomous != autonomous
             }) {
@@ -60,6 +62,7 @@ impl SessionView {
         self.goals.push(GoalView {
             id: *goal_id,
             objective: objective.to_owned(),
+            include_paths: include_paths.clone(),
             workspace_identity,
             budget: *budget,
             resource_settings: *resource_settings,
@@ -749,6 +752,7 @@ pub(super) fn apply(
         Event::GoalStarted {
             goal_id,
             objective,
+            include_paths,
             workspace_identity,
             budget,
             resource_settings,
@@ -759,6 +763,7 @@ pub(super) fn apply(
             current.start_goal(
                 goal_id,
                 objective,
+                include_paths,
                 *workspace_identity,
                 budget,
                 resource_settings,

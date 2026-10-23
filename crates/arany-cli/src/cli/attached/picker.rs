@@ -60,7 +60,7 @@ pub(super) async fn pick_quick_action(
             TerminalInput::End => selected = 4,
             TerminalInput::Submit => return Ok(QuickChoice::Selected(action(selected))),
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(composer.text().len())
+                .suspend_and_resume(composer.input_capacity())
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape
             | TerminalInput::Interrupt
@@ -183,7 +183,7 @@ async fn pick_session_inline(
             }
             TerminalInput::Submit => return Ok(PickerChoice::Selected(items[selected].id)),
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(0)
+                .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 return Ok(PickerChoice::Closed);
@@ -275,7 +275,7 @@ async fn pick_session_linear(
                 terminal.redraw_sessions();
             }
             TerminalInput::Suspend => terminal
-                .suspend_and_resume(0)
+                .suspend_and_resume(crate::terminal::MAX_DRAFT_BYTES)
                 .map_err(|error| error.to_string())?,
             TerminalInput::Escape | TerminalInput::Interrupt | TerminalInput::EndOfInput => {
                 terminal.discard_draft_input();

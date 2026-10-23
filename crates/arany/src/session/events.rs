@@ -158,7 +158,7 @@ pub(crate) const PAYLOAD_VERSIONS: [(&str, i64); 42] = [
     ("WorkerVerificationRecorded", 1),
     ("WorkerHandoverRecorded", 2),
     ("ToolResultsCleared", 1),
-    ("GoalStarted", 7),
+    ("GoalStarted", 8),
     ("GoalFinished", 8),
     ("SupervisorVerdictRecorded", 1),
     ("WorkspaceRewindStarted", 1),
@@ -255,6 +255,7 @@ pub enum Event {
     GoalStarted {
         goal_id: GoalId,
         objective: String,
+        include_paths: Option<Vec<String>>,
         workspace_identity: WorkspaceIdentity,
         budget: GoalBudget,
         phase: GoalPhase,
@@ -525,6 +526,8 @@ struct MessagePayload {
 struct GoalStartedPayload {
     goal_id: GoalId,
     objective: String,
+    #[serde(deserialize_with = "Option::deserialize")]
+    include_paths: Option<Vec<String>>,
     workspace_device: u64,
     workspace_inode: u64,
     budget: GoalBudget,
@@ -890,6 +893,7 @@ impl Event {
             Self::GoalStarted {
                 goal_id,
                 objective,
+                include_paths,
                 workspace_identity:
                     WorkspaceIdentity {
                         device: workspace_device,
@@ -903,6 +907,7 @@ impl Event {
             } => serialize(&GoalStartedPayload {
                 goal_id: *goal_id,
                 objective: objective.clone(),
+                include_paths: include_paths.clone(),
                 workspace_device: *workspace_device,
                 workspace_inode: *workspace_inode,
                 budget: *budget,
@@ -1185,6 +1190,7 @@ impl Event {
                 Self::GoalStarted {
                     goal_id: data.goal_id,
                     objective: data.objective,
+                    include_paths: data.include_paths,
                     workspace_identity: WorkspaceIdentity {
                         device: data.workspace_device,
                         inode: data.workspace_inode,
@@ -1767,6 +1773,22 @@ pub(crate) fn run_started_fits(config: &RunConfig) -> bool {
         active_deadline_ms: Some(u64::MAX),
     })
     .is_ok_and(|payload| payload.len() <= crate::store::MAX_EVENT_BYTES)
+}
+
+pub(crate) fn goal_started_v7_to_v8(mut value: serde_json::Value) -> Option<serde_json::Value> {
+    let fields = value.as_object_mut()?;
+    if fields.contains_key("include_paths") {
+        return None;
+    }
+    fields.insert("include_paths".into(), serde_json::Value::Null);
+    Some(value)
+}
+
+pub(crate) fn goal_started_v7_payload(payload: &str) -> Option<String> {
+    let value = goal_started_v7_to_v8(serde_json::from_str(payload).ok()?)?;
+    let text = serialize(&parse::<GoalStartedPayload>(&value.to_string()).ok()?).ok()?;
+    let field = r#""include_paths":null,"#;
+    (text.matches(field).count() == 1).then(|| text.replacen(field, "", 1))
 }
 
 // Version 18 read only the root, so its digest becomes the root source with an unknown name.

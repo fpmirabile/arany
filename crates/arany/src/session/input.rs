@@ -13,7 +13,7 @@ const MAX_INSTRUCTION_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_INSTRUCTION_LEVELS: usize = 32;
 const MAX_INCLUDE_BYTES: usize = 128 * 1024;
 const MAX_INCLUDE_TOTAL_BYTES: usize = 256 * 1024;
-const MAX_INCLUDES: usize = 16;
+pub(crate) const MAX_INCLUDES: usize = 16;
 const MAX_DIRECTORY_ENTRIES: usize = 64;
 const MAX_DIRECTORY_BYTES: usize = 16 * 1024;
 const MAX_DIRECTORY_SCAN: usize = 8192;
@@ -200,6 +200,11 @@ impl WorkspaceInputs {
     }
 }
 
+pub(crate) fn valid_include_path(path: &str) -> bool {
+    path.len() <= crate::tools::types::MAX_RELATIVE_PATH_BYTES
+        && crate::tools::types::valid_relative(path.strip_suffix('/').unwrap_or(path), false)
+}
+
 fn read_relative(
     root: &Dir,
     path: &Path,
@@ -207,7 +212,7 @@ fn read_relative(
 ) -> Result<Option<InputSnapshot>, InputError> {
     let path = path
         .to_str()
-        .filter(|path| path.len() <= 4096)
+        .filter(|path| path.len() <= crate::tools::types::MAX_RELATIVE_PATH_BYTES)
         .ok_or(InputError::InvalidPath)?
         .to_owned();
     let normalized = path.strip_suffix('/').unwrap_or(&path);
@@ -217,6 +222,9 @@ fn read_relative(
     let names = relative_components(Path::new(normalized))?;
     if normalized.split('/').any(crate::tools::types::forbidden) {
         return Err(crate::tools::ToolError::ProtectedPath.into());
+    }
+    if !valid_include_path(&path) {
+        return Err(InputError::InvalidPath);
     }
     let mut directory = root.try_clone()?;
     for name in &names[..names.len() - 1] {

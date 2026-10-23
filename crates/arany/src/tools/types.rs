@@ -579,11 +579,13 @@ pub(crate) fn valid_revision(value: &str) -> bool {
     name_valid && suffix.is_empty() && steps <= 4
 }
 
+pub(crate) const MAX_RELATIVE_PATH_BYTES: usize = 512;
+
 pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
     if value.is_empty() || value == "." {
         return root;
     }
-    value.len() <= 512
+    value.len() <= MAX_RELATIVE_PATH_BYTES
         && !value.chars().any(char::is_control)
         && !value.contains('\\')
         && value

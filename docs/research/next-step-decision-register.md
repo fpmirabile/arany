@@ -300,7 +300,13 @@ owns methodology; [next steps](../../NEXT_STEPS.md#daily-use-first) owns the rem
 named-host evidence and provisional objectives. This does not claim macOS, cold
 disk, long-history, large-snapshot or live Provider latency support.
 
-### D-24 — User-local known-owner storage metadata
+### D-24 — Pasted text and continuation inputs
+
+Owner decision, 2026-10-22: follow Codex's scalar threshold, duplicate labels and inline expansion, with process-local unsubmitted chips and canonical submitted text. Arany retains its smaller objective and journal bounds; collapse cannot save input tokens. The pinned [Codex composer](https://github.com/openai/codex/blob/342ed69a174c206c1de52a59491b131e0753cfa5/codex-rs/tui/src/bottom_pane/chat_composer/paste_input.rs#L152-L193) supplies the presentation precedent. In-process inert inspection avoids introducing a separately admitted external editor.
+
+Like Claude Code and Codex replaying history without re-expanding old message text, Goal continuation and ordinary resume reuse admitted inputs. Parsing stored objectives would turn literal pasted `@` text into new file disclosure. The journal previously stored only include digests, which cannot recover paths, so a minimal nullable admitted-path list and registered migration are required. Unknown legacy paths remain unknown; guessing from text would violate honest uncertainty and per-effect isolation. [Goals](../specs/goals.md#budget-continuation), [Terminal](../specs/terminal.md#paste-and-attachments) and [Execution](../specs/execution.md#journal-migration) own behavior and limits.
+
+### D-25 — User-local known-owner storage metadata
 
 The 2026-10-22 lead default permits explicit local aggregated private-storage
 metadata, including secret-containing files only in category totals. Ownership
