@@ -58,6 +58,11 @@ fn explicit_includes_reject_unsafe_components_and_objects_before_disclosure() {
             ("notes/facts.txt/", "not a directory"),
             ("linked/secret.txt", "path is a symbolic link"),
             ("notes/linked.txt", "path is a symbolic link"),
+            (".env", "protected path"),
+            ("notes/.env.local", "protected path"),
+            (".git/config", "protected path"),
+            ("notes/line\nfeed", "Workspace input path is invalid"),
+            ("notes\\facts.txt", "Workspace input path is invalid"),
         ] {
             let mut candidate = request(&workspace, "Question");
             candidate.include_paths = vec![path.into()];

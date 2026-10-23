@@ -187,7 +187,7 @@ fn read(_cancelled: &AtomicBool, _cleanup: &mut Cleanup) -> Result<ClipboardCont
 
 #[cfg(target_os = "linux")]
 fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardContent, &'static str> {
-    use super::composer::MAX_DRAFT_BYTES;
+    use super::composer::MAX_PASTE_BYTES;
     use std::process::Command;
     use std::time::{Duration, Instant};
 
@@ -226,7 +226,7 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
     let limit = if image {
         arany::MAX_IMAGE_BYTES
     } else {
-        MAX_DRAFT_BYTES
+        MAX_PASTE_BYTES
     };
     let bytes = run_process(&mut command, cancelled, deadline, limit, cleanup)?;
     if image {
@@ -354,7 +354,7 @@ fn read(cancelled: &AtomicBool, cleanup: &mut Cleanup) -> Result<ClipboardConten
         &mut command,
         cancelled,
         Instant::now() + Duration::from_secs(2),
-        super::composer::MAX_DRAFT_BYTES.max(arany::MAX_IMAGE_BYTES) + 2,
+        super::composer::MAX_PASTE_BYTES.max(arany::MAX_IMAGE_BYTES) + 2,
         cleanup,
     )?;
     native_content(&bytes)
@@ -369,7 +369,7 @@ fn native_command(name: Option<&str>) -> Result<std::process::Command, &'static 
     command
         .arg(name.unwrap_or(""))
         .arg(arany::MAX_IMAGE_BYTES.to_string())
-        .arg(super::composer::MAX_DRAFT_BYTES.to_string());
+        .arg(super::composer::MAX_PASTE_BYTES.to_string());
     Ok(command)
 }
 
@@ -379,7 +379,7 @@ fn native_content(bytes: &[u8]) -> Result<ClipboardContent, &'static str> {
         [b'P', b'\n', payload @ ..] => {
             ImageAttachment::from_png(payload).map(ClipboardContent::Image)
         }
-        [b'T', b'\n', payload @ ..] if payload.len() <= super::composer::MAX_DRAFT_BYTES => {
+        [b'T', b'\n', payload @ ..] if payload.len() <= super::composer::MAX_PASTE_BYTES => {
             String::from_utf8(payload.to_vec())
                 .map(ClipboardContent::Text)
                 .map_err(|_| "clipboard text is not valid UTF-8")
@@ -1077,7 +1077,7 @@ pub(super) mod cleanup_tests {
             agent_panel: None,
             agent_chat: None,
             child_drafts: Vec::new(),
-            primary_draft_bytes: 0,
+            primary_input_capacity: crate::terminal::MAX_DRAFT_BYTES,
             help_selected: None,
             usage_panel: None,
             clipboard: None,
@@ -1932,7 +1932,7 @@ function run(args) {
             assert!(native_content(bytes).is_err());
         }
         let mut oversized = b"T\n".to_vec();
-        oversized.extend(vec![b'x'; super::super::composer::MAX_DRAFT_BYTES + 1]);
+        oversized.extend(vec![b'x'; super::super::composer::MAX_PASTE_BYTES + 1]);
         assert!(native_content(&oversized).is_err());
         let image = arany::test_support::test_image();
         let png = STANDARD.decode(image.base64()).unwrap();
@@ -1983,7 +1983,7 @@ function run(args) {
             ),
             (
                 "public.utf8-plain-text",
-                vec![b'x'; super::super::composer::MAX_DRAFT_BYTES + 1],
+                vec![b'x'; super::super::composer::MAX_PASTE_BYTES + 1],
                 false,
                 false,
             ),

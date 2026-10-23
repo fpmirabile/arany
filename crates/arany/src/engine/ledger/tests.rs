@@ -6,6 +6,7 @@ use crate::session::{
 
 fn goal_view(goal_id: GoalId, budget: GoalBudget) -> GoalView {
     GoalView {
+        include_paths: Some(Vec::new()),
         id: goal_id,
         objective: String::new(),
         workspace_identity: WorkspaceIdentity {

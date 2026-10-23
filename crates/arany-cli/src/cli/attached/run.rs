@@ -1391,6 +1391,7 @@ mod tests {
             let (master, slave) = crate::test_process::cloexec_pty(None);
             let mut input = master.try_clone().unwrap();
             let mut cancelled = false;
+            let mut recovery_prompts = 0;
             let mut command = Command::new(std::env::current_exe().unwrap());
             command
                 .env_clear()
@@ -1414,10 +1415,28 @@ mod tests {
                 Duration::from_secs(30),
                 64 * 1024,
                 |bytes| {
+                    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
+                    let prompts = text.matches("Submission recovery").count();
+                    if prompts > recovery_prompts {
+                        recovery_prompts = prompts;
+                        match prompts {
+                            1 => input.write_all(b"\n").unwrap(),
+                            2 => {
+                                std::fs::rename(
+                                    temp.path().join("recovery-state"),
+                                    temp.path().join("openai"),
+                                )
+                                .unwrap();
+                                input.write_all(b"\n").unwrap();
+                            }
+                            3 => input.write_all(b"Exit (discard local draft)\n").unwrap(),
+                            _ => panic!("unexpected submission recovery prompt"),
+                        }
+                        return;
+                    }
                     if cancelled {
                         return;
                     }
-                    let text = String::from_utf8_lossy(bytes).replace("\r\n", "\n");
                     // Release builds reject the account override, so startup offers recovery instead of consent.
                     if text.contains(crate::test_process::READ_ONLY_CONSENT_PROMPT) {
                         input.write_all(b"\x04").unwrap();
@@ -1440,6 +1459,7 @@ mod tests {
                 "native chat regression",
             );
             assert!(cancelled, "startup must reach consent or recovery and exit");
+            assert_eq!(recovery_prompts, 3, "history retry, recovery, and exit");
             return;
         };
         let root = std::path::PathBuf::from(root);
@@ -1639,6 +1659,68 @@ mod tests {
             );
             store.close().await.unwrap();
             engine.close().await.unwrap();
+            if profile == "openai" {
+                let mut recovery_view = view.clone();
+                let mut recovery_composer = Composer::default();
+                recovery_composer
+                    .insert_paste(&"payload ".repeat(200))
+                    .unwrap();
+                recovery_composer.insert_paste(" @visible.txt").unwrap();
+                recovery_composer
+                    .attach_image(arany::test_support::test_image())
+                    .unwrap();
+                let submitted = recovery_composer.take_draft();
+                let backup = root.join("recovery-state");
+                std::fs::rename(&state, &backup).unwrap();
+                super::super::reconcile_failed_submission(
+                    &mut terminal,
+                    &state,
+                    &mut recovery_view,
+                    &mut recovery_composer,
+                    submitted.clone(),
+                    view.last_sequence,
+                )
+                .await
+                .unwrap();
+                assert_eq!(recovery_composer.take_draft(), submitted);
+                super::super::reconcile_failed_submission(
+                    &mut terminal,
+                    &state,
+                    &mut recovery_view,
+                    &mut recovery_composer,
+                    submitted.clone(),
+                    0,
+                )
+                .await
+                .unwrap();
+                assert!(
+                    recovery_composer.is_empty(),
+                    "accepted draft cannot be retried"
+                );
+                std::fs::rename(&state, &backup).unwrap();
+                let error = super::super::reconcile_failed_submission(
+                    &mut terminal,
+                    &state,
+                    &mut recovery_view,
+                    &mut recovery_composer,
+                    submitted,
+                    view.last_sequence,
+                )
+                .await
+                .unwrap_err();
+                assert!(error.contains("Acceptance is unknown"));
+                assert!(
+                    recovery_composer.is_empty(),
+                    "unknown draft cannot be retried"
+                );
+                std::fs::rename(&backup, &state).unwrap();
+                assert_eq!(
+                    observed.lock().unwrap().len(),
+                    2,
+                    "recovery makes no Provider call"
+                );
+                assert_eq!(recovery_view.runs.len(), 2);
+            }
         }
         let choice = match arany::WorkspacePermissions::open(&workspace) {
             Ok(access) => Some(

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
-    if objective.len() > 8 * 1024 {
+    if objective.len() > crate::session::MAX_USER_MESSAGE_BYTES {
         return Err(ToolError::Limit);
     }
     let mut paths = Vec::new();
@@ -50,7 +50,7 @@ pub fn mention_paths(objective: &str) -> Result<Vec<PathBuf>, ToolError> {
             if !paths.contains(&path) {
                 paths.push(path);
             }
-            if paths.len() > 16 {
+            if paths.len() > crate::session::input::MAX_INCLUDES {
                 return Err(ToolError::Limit);
             }
         }

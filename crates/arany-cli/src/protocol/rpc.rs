@@ -103,6 +103,8 @@ pub enum Reason {
     GoalAdmissionUncertain,
     GoalBudgetExhausted,
     GoalNotContinuable,
+    GoalIncludesUnavailable,
+    GoalInputTooLarge,
     GuardUnavailable,
     SessionNotIdle,
     ForkNotAtRunBoundary,
@@ -166,6 +168,8 @@ impl From<&arany::EngineError> for Reason {
             }
             arany::EngineError::GoalBudgetExhausted => Reason::GoalBudgetExhausted,
             arany::EngineError::GoalNotContinuable => Reason::GoalNotContinuable,
+            arany::EngineError::GoalIncludesUnavailable => Reason::GoalIncludesUnavailable,
+            arany::EngineError::GoalInputTooLarge => Reason::GoalInputTooLarge,
             arany::EngineError::Busy => Reason::Busy,
             arany::EngineError::GuardUnavailable => Reason::GuardUnavailable,
             arany::EngineError::SessionNotIdle => Reason::SessionNotIdle,

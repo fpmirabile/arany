@@ -20,7 +20,7 @@ const _: () =
 const _: () = assert!(AUTO_COMPACTION_HISTORY_BYTES < MAX_COMPACTION_INPUT_BYTES);
 pub(crate) const MAX_COMPACTION_OUTPUT_TOKENS: u32 = 1024;
 pub(crate) const MAX_COMPACTION_SUMMARY_BYTES: usize = 8 * 1024;
-// The attached composer and `arany --prompt` draft bound. Larger objectives can exceed the automatic reserve; they fail closed.
+// The editable draft bound; larger pasted or exec objectives can exceed this reserve and fail closed.
 const ATTACHED_DRAFT_RESERVE_BYTES: usize = 8 * 1024;
 // One turn's worst case: its draft, steering context, assistant answer, separators and image metadata.
 const TURN_RESERVE_BYTES: usize = ATTACHED_DRAFT_RESERVE_BYTES

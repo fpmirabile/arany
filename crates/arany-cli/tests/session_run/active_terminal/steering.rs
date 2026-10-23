@@ -478,9 +478,9 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
             b"Steering note sent to the agent",
             b"No room for more steering notes this Run",
             b"Task: working",
-            b"A draft is already retained; line not kept",
-            b"A draft is already retained; line not kept",
-            b"Draft retained: 4200 characters; Enter submits",
+            b"Both drafts retained; wait for the Run to finish",
+            b"Both drafts retained; wait for the Run to finish",
+            b"Draft retained: 7202 characters; Enter submits",
             b"Input:",
             b"Input:",
         ],
@@ -515,15 +515,19 @@ fn held_linear_draft_yields_to_controls_and_returns_at_run_end() {
     write_input(&attached.input, b"/status\n");
     stage(&attached.stages, 5, "status runs while the draft is held");
     write_input(&attached.input, b"x\n");
-    stage(&attached.stages, 6, "text line is not kept");
-    let mut continued = vec![b'c'; 4000];
+    stage(&attached.stages, 6, "newer text line is retained");
+    let mut continued = vec![b'c'; 3000];
     continued.push(0x04);
     write_input(&attached.input, &continued);
-    stage(&attached.stages, 7, "continued text is not kept");
+    stage(&attached.stages, 7, "continued text is retained");
     release_synthesis_sender
         .send(())
         .expect("release synthesis call");
-    stage(&attached.stages, 8, "held draft returned at Run end");
+    stage(
+        &attached.stages,
+        8,
+        "held and newer drafts merge at Run end",
+    );
     stage(&attached.stages, 9, "idle prompt after Run");
     // Idle Ctrl+C clears the retained draft so the exit line is not appended to it.
     write_input(&attached.input, b"\x03");

@@ -61,6 +61,7 @@ pub enum AgentStatus {
 pub struct GoalView {
     pub id: GoalId,
     pub objective: String,
+    pub include_paths: Option<Vec<String>>,
     pub workspace_identity: WorkspaceIdentity,
     pub budget: GoalBudget,
     pub resource_settings: crate::tools::ToolResourceSettings,

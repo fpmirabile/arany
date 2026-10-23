@@ -3,6 +3,102 @@ use arany::WorkspaceIdentity;
 use arany::test_support::goals::*;
 
 #[tokio::test]
+async fn resumed_goal_uses_recorded_includes_and_replay_rejects_protected_paths() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace");
+    std::fs::write(workspace.join("admitted.txt"), "Admitted facts").expect("include");
+    std::fs::create_dir(workspace.join("notes")).expect("directory include");
+    std::fs::write(workspace.join("notes/entry.txt"), "Directory file body").expect("entry");
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(vec![
+        ProviderOutcome::Answer(Answer {
+            text: "first".into(),
+        }),
+        ProviderOutcome::Answer(Answer {
+            text: "second".into(),
+        }),
+    ]));
+    let mut first = request(&workspace, "Read the admitted input");
+    first.include_paths = vec!["admitted.txt".into(), "notes/".into()];
+    first.goal.finish_after_run = false;
+    let first = run_to_end(&engine, &provider, first).await.unwrap();
+    let mut next = request(&workspace, "Continue");
+    next.session_id = Some(first.session_id);
+    next.title = None;
+    next.include_paths = vec!["never-admitted.txt".into()];
+    next.goal = arany::GoalRequest::resume(first.goal_id, true);
+    run_to_end(&engine, &provider, next).await.unwrap();
+    {
+        let calls = provider.requests.lock().unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[1].input.includes, calls[0].input.includes);
+        assert!(calls[1].input.includes[0].contains("Admitted facts"));
+        assert!(calls[1].input.includes[1].starts_with("Directory:"));
+        assert!(!calls[1].input.includes[1].contains("Directory file body"));
+    }
+    engine.close().await.unwrap();
+    let (events, _) = replayed(&state_path, first.session_id).await;
+    for path in [
+        ".env",
+        "nested/.env.local",
+        ".git/config",
+        "../outside",
+        "line\nfeed",
+    ] {
+        let mut forged = events.clone();
+        let event = forged
+            .iter_mut()
+            .find(|event| matches!(event.event, Event::GoalStarted { .. }))
+            .unwrap();
+        if let Event::GoalStarted { include_paths, .. } = &mut event.event {
+            *include_paths = Some(vec![path.into()]);
+        }
+        assert!(
+            event.event.payload().is_err(),
+            "protected recorded path {path:?}"
+        );
+        assert!(SessionView::replay(first.session_id, &forged).is_err());
+    }
+}
+
+#[tokio::test]
+async fn objective_plus_includes_overflow_has_a_typed_pre_admission_error() {
+    let temp = tempfile::tempdir().expect("temporary root");
+    let workspace = temp.path().join("workspace");
+    let component = "\"".repeat(170);
+    let relative = format!("{component}/{component}/{component}");
+    let path = workspace.join(&relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "").unwrap();
+    let state_path = temp.path().join("state");
+    let engine = engine_support::open(
+        StateRoot::admit(&state_path).unwrap(),
+        EngineConfig::default(),
+    )
+    .unwrap();
+    let provider = Arc::new(ScriptedProvider::new(Vec::new()));
+    let mut input = request(&workspace, &"\0".repeat(64 * 1024));
+    input.include_paths = vec![relative.into(); 16];
+    let error = run_to_end(&engine, &provider, input).await.unwrap_err();
+    assert!(matches!(error, EngineError::GoalInputTooLarge), "{error:?}");
+    assert_eq!(error.to_string(), "objective plus includes too large");
+    assert!(provider.requests.lock().unwrap().is_empty());
+    engine.close().await.unwrap();
+    assert!(
+        arany::list_sessions(StateRoot::open_existing(&state_path).unwrap(), workspace)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
 async fn budget_incident_path_distinguishes_failed_reads_from_refused_next_actions() {
     for (case, calls, tokens, unknown, expected) in [
         ("calls", Some(3), None, false, Some(arany::GoalLimit::Calls)),
@@ -1330,7 +1426,9 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     )
     .expect("first engine");
     let mut first = request(&workspace, "Ship the migration");
-    first.include_paths.clear();
+    std::fs::write(workspace.join("admitted.txt"), "Original admitted input").expect("include");
+    first.include_paths = vec!["admitted.txt".into()];
+    first.objective = "Ship the migration; literal @never-admit.txt".into();
     first.goal = arany::GoalRequest::new(
         arany::GoalBudget {
             max_provider_calls: Some(1),
@@ -1398,10 +1496,23 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
         Err(EngineError::GoalNotContinuable)
     ));
 
+    let mut changed = continue_request(initial.goal_id);
+    changed.include_paths = vec!["never-admit.txt".into()];
+    assert!(matches!(
+        run_to_end(&engine, &provider, changed).await,
+        Err(EngineError::InvalidRequest)
+    ));
+    let requests = Arc::clone(&provider.requests);
     let continued = run_to_end(&engine, &provider, continue_request(initial.goal_id))
         .await
         .expect("continued Goal Run");
     assert_ne!(continued.goal_id, initial.goal_id);
+    {
+        let calls = requests.lock().expect("requests");
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].input.includes.len(), 1);
+        assert!(calls[0].input.includes[0].contains("Original admitted input"));
+    }
     assert!(matches!(
         run_to_end(&engine, &provider, continue_request(initial.goal_id)).await,
         Err(EngineError::GoalNotContinuable)
@@ -1422,7 +1533,12 @@ async fn exhausted_goal_continues_as_a_new_linked_goal_with_a_fresh_budget_after
     assert_eq!(old.status, arany::GoalStatus::Failed);
     assert_eq!(old.run_ids.len(), 1);
     assert_eq!(new.continues, Some(initial.goal_id));
-    assert_eq!(new.objective, "Ship the migration");
+    assert_eq!(
+        new.objective,
+        "Ship the migration; literal @never-admit.txt"
+    );
+    assert_eq!(new.include_paths, Some(vec!["admitted.txt".into()]));
+    assert_eq!(old.include_paths, new.include_paths);
     assert_eq!(new.budget.max_provider_calls, Some(4));
     assert_eq!(new.status, arany::GoalStatus::Completed);
     assert_eq!(new.run_ids.len(), 1);
@@ -1845,6 +1961,7 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
             .append(
                 session_id,
                 Event::GoalStarted {
+                    include_paths: Some(Vec::new()),
                     goal_id,
                     phase: arany::GoalPhase::Implementation,
                     autonomous: false,
@@ -1933,155 +2050,172 @@ async fn interrupted_preaccept_goal_prefixes_resume_without_spending_runs_or_rep
 }
 
 #[tokio::test]
-async fn exhausted_goal_crashed_inside_its_only_provider_call_closes_on_resume() {
+async fn exhausted_crashed_goal_closes_only_when_its_includes_are_known() {
     use std::os::unix::fs::MetadataExt;
 
-    let temp = tempfile::tempdir().expect("temporary root");
-    let workspace = temp.path().join("workspace");
-    std::fs::create_dir(&workspace).expect("workspace");
-    let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
-    let identity = WorkspaceIdentity {
-        device: metadata.dev(),
-        inode: metadata.ino(),
-    };
-    let state_path = temp.path().join("state");
-    let session_id = SessionId::new();
-    let (goal_id, run_id, agent_run_id) =
-        (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
-    let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
-    // The process died inside the only admitted Provider call: the Run is journaled Active.
-    let crashed = [
-        Event::SessionStarted {
-            title: "Crashed Goal".into(),
-            workspace_identity: identity,
-        },
-        Event::GoalStarted {
-            goal_id,
-            phase: arany::GoalPhase::Implementation,
-            autonomous: false,
-            resource_settings: arany::ToolResourceSettings::default(),
-            objective: "Use the only Provider call".into(),
-            workspace_identity: identity,
-            budget: arany::GoalBudget {
-                max_provider_calls: Some(1),
-                ..arany::GoalBudget::default()
+    for includes_known in [true, false] {
+        let temp = tempfile::tempdir().expect("temporary root");
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let metadata = std::fs::metadata(&workspace).expect("Workspace identity");
+        let identity = WorkspaceIdentity {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        };
+        let state_path = temp.path().join("state");
+        let session_id = SessionId::new();
+        let (goal_id, run_id, agent_run_id) =
+            (arany::GoalId::new(), RunId::new(), arany::AgentRunId::new());
+        let store = Store::open(StateRoot::admit(&state_path).expect("state")).expect("Store");
+        // The process died inside the only admitted Provider call: the Run is journaled Active.
+        let crashed = [
+            Event::SessionStarted {
+                title: "Crashed Goal".into(),
+                workspace_identity: identity,
             },
-            continues: None,
-        },
-        Event::GoalRunLinked {
-            goal_id,
-            run_id,
-            phase: arany::GoalPhase::Implementation,
-        },
-        Event::MessageAccepted {
-            skill: None,
-            run_id,
-            text: "Use the only Provider call".into(),
-            images: Vec::new(),
-        },
-        Event::RunStarted {
-            run_id,
-            config: arany::RunConfig {
-                supervisor: None,
-                worker_policy: None,
-                agent_definitions: None,
-                roster: None,
-                providers: None,
-                provider: "scripted".into(),
-                model: "scripted-model".into(),
-                effort: None,
-                custom_profile_provenance: None,
-                saved_api_account_id: None,
-                chatgpt_provenance: None,
-                output_token_bound: arany::OutputTokenBound::ProviderEnforced,
-                context_window_tokens: None,
-                policy: CollaborationPolicy::Single,
-                output_token_cap: 4096,
-                provider_concurrency: 1,
-                workspace_device: identity.device,
-                workspace_inode: identity.inode,
-                user_instruction_digest: None,
-                instruction_sources: Vec::new(),
-                launch_directory: String::new(),
-                include_digests: Vec::new(),
-                history_run_ids: Vec::new(),
-                excluded_history_runs: 0,
-                context_usage: None,
-                compaction_event_sequence: None,
-                compaction_content_digest: None,
-                tool_policy: None,
+            Event::GoalStarted {
+                include_paths: includes_known.then(Vec::new),
+                goal_id,
+                phase: arany::GoalPhase::Implementation,
+                autonomous: false,
+                resource_settings: arany::ToolResourceSettings::default(),
+                objective: "Use the only Provider call".into(),
+                workspace_identity: identity,
+                budget: arany::GoalBudget {
+                    max_provider_calls: Some(1),
+                    ..arany::GoalBudget::default()
+                },
+                continues: None,
             },
-            active_deadline_ms: None,
-        },
-        Event::AgentSpawned {
-            profile: None,
-            assignment: None,
-            definition: None,
-            run_id,
-            agent_run_id,
-            role: arany::AgentRole::Primary,
-            ordinal: 0,
-            objective: None,
-            grant: None,
-        },
-        Event::GoalProviderCallReserved {
-            goal_id,
-            run_id,
-            agent_run_id,
-            active_ceiling_ms: 0,
-        },
-    ];
-    for event in crashed {
-        store
-            .append(session_id, event)
-            .await
-            .expect("crash-left journal prefix");
+            Event::GoalRunLinked {
+                goal_id,
+                run_id,
+                phase: arany::GoalPhase::Implementation,
+            },
+            Event::MessageAccepted {
+                skill: None,
+                run_id,
+                text: "Use the only Provider call".into(),
+                images: Vec::new(),
+            },
+            Event::RunStarted {
+                run_id,
+                config: arany::RunConfig {
+                    supervisor: None,
+                    worker_policy: None,
+                    agent_definitions: None,
+                    roster: None,
+                    providers: None,
+                    provider: "scripted".into(),
+                    model: "scripted-model".into(),
+                    effort: None,
+                    custom_profile_provenance: None,
+                    saved_api_account_id: None,
+                    chatgpt_provenance: None,
+                    output_token_bound: arany::OutputTokenBound::ProviderEnforced,
+                    context_window_tokens: None,
+                    policy: CollaborationPolicy::Single,
+                    output_token_cap: 4096,
+                    provider_concurrency: 1,
+                    workspace_device: identity.device,
+                    workspace_inode: identity.inode,
+                    user_instruction_digest: None,
+                    instruction_sources: Vec::new(),
+                    launch_directory: String::new(),
+                    include_digests: Vec::new(),
+                    history_run_ids: Vec::new(),
+                    excluded_history_runs: 0,
+                    context_usage: None,
+                    compaction_event_sequence: None,
+                    compaction_content_digest: None,
+                    tool_policy: None,
+                },
+                active_deadline_ms: None,
+            },
+            Event::AgentSpawned {
+                profile: None,
+                assignment: None,
+                definition: None,
+                run_id,
+                agent_run_id,
+                role: arany::AgentRole::Primary,
+                ordinal: 0,
+                objective: None,
+                grant: None,
+            },
+            Event::GoalProviderCallReserved {
+                goal_id,
+                run_id,
+                agent_run_id,
+                active_ceiling_ms: 0,
+            },
+        ];
+        for event in crashed {
+            store
+                .append(session_id, event)
+                .await
+                .expect("crash-left journal prefix");
+        }
+        let before = store.load_session(session_id).await.expect("seed Events");
+        store.close().await.expect("seed Store shutdown");
+
+        let provider = ScriptedProvider::new(vec![finish_with("Unexpected resumed call")]);
+        let requests = Arc::clone(&provider.requests);
+        let provider = Arc::new(provider);
+        let engine = engine_support::open(
+            StateRoot::open_existing(&state_path).expect("reopened state"),
+            EngineConfig::default(),
+        )
+        .expect("Engine");
+        let mut resumed = request(&workspace, "Resume the crashed Goal");
+        resumed.session_id = Some(session_id);
+        resumed.title = None;
+        resumed.include_paths.clear();
+        resumed.goal = arany::GoalRequest::resume(goal_id, true);
+        let result = run_to_end(&engine, &provider, resumed).await;
+        assert!(requests.lock().expect("Provider requests").is_empty());
+        if !includes_known {
+            assert!(
+                matches!(result, Err(EngineError::GoalIncludesUnavailable)),
+                "unknown includes take precedence over budget closure: {result:?}"
+            );
+            engine.close().await.expect("Engine shutdown");
+            let (after, view) = replayed(&state_path, session_id).await;
+            assert_eq!(
+                after, before,
+                "unknown includes refuse without changing the journal"
+            );
+            assert_eq!(view.goal(goal_id).expect("Goal").include_paths, None);
+            assert_eq!(view.interrupted_goal_id(), Some(goal_id));
+            continue;
+        }
+        assert!(
+            matches!(result, Err(EngineError::GoalBudgetExhausted)),
+            "the exhausted crash-left Goal reports its budget, not a store or replay error"
+        );
+
+        let mut again = request(&workspace, "Resume the closed Goal");
+        again.session_id = Some(session_id);
+        again.title = None;
+        again.include_paths.clear();
+        again.goal = arany::GoalRequest::resume(goal_id, true);
+        assert!(
+            matches!(
+                run_to_end(&engine, &provider, again).await,
+                Err(EngineError::GoalUnavailable)
+            ),
+            "a closed Goal is not resumable"
+        );
+        engine.close().await.expect("Engine shutdown");
+
+        let (_, view) = replayed(&state_path, session_id).await;
+        let goal = view.goal(goal_id).expect("Goal");
+        assert_eq!(goal.status, arany::GoalStatus::Failed);
+        assert!(goal.report.is_some(), "closed Goal keeps its report");
+        assert_eq!(view.runs.len(), 1);
+        assert_eq!(view.runs[0].status, RunStatus::Interrupted);
+        assert_eq!(view.interrupted_goal_id(), None);
     }
-    store.close().await.expect("seed Store shutdown");
-
-    let provider = ScriptedProvider::new(Vec::new());
-    let requests = Arc::clone(&provider.requests);
-    let provider = Arc::new(provider);
-    let engine = engine_support::open(
-        StateRoot::open_existing(&state_path).expect("reopened state"),
-        EngineConfig::default(),
-    )
-    .expect("Engine");
-    let mut resumed = request(&workspace, "Resume the crashed Goal");
-    resumed.session_id = Some(session_id);
-    resumed.title = None;
-    resumed.include_paths.clear();
-    resumed.goal = arany::GoalRequest::resume(goal_id, true);
-    assert!(
-        matches!(
-            run_to_end(&engine, &provider, resumed).await,
-            Err(EngineError::GoalBudgetExhausted)
-        ),
-        "the exhausted crash-left Goal reports its budget, not a store or replay error"
-    );
-    assert!(requests.lock().expect("Provider requests").is_empty());
-
-    let mut again = request(&workspace, "Resume the closed Goal");
-    again.session_id = Some(session_id);
-    again.title = None;
-    again.include_paths.clear();
-    again.goal = arany::GoalRequest::resume(goal_id, true);
-    assert!(
-        matches!(
-            run_to_end(&engine, &provider, again).await,
-            Err(EngineError::GoalUnavailable)
-        ),
-        "a closed Goal is not resumable"
-    );
-    engine.close().await.expect("Engine shutdown");
-
-    let (_, view) = replayed(&state_path, session_id).await;
-    let goal = view.goal(goal_id).expect("Goal");
-    assert_eq!(goal.status, arany::GoalStatus::Failed);
-    assert!(goal.report.is_some(), "closed Goal keeps its report");
-    assert_eq!(view.runs.len(), 1);
-    assert_eq!(view.runs[0].status, RunStatus::Interrupted);
-    assert_eq!(view.interrupted_goal_id(), None);
 }
 
 struct PendingChildren {
@@ -6430,6 +6564,7 @@ async fn crash_during_a_call_charges_its_ceiling_and_the_resumed_run_continues()
             workspace_identity: identity,
         },
         Event::GoalStarted {
+            include_paths: Some(Vec::new()),
             goal_id,
             phase: arany::GoalPhase::Implementation,
             autonomous: false,

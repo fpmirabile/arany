@@ -1,4 +1,4 @@
-use super::commands::{Submission, help_entry, help_len, parse_submission};
+use super::commands::{Submission, help_entry, help_len};
 use super::history::{HistoryRow, MAX_ROW_CELLS, MessageKind, native_marker};
 use super::{Composer, TerminalMode, backend::TerminalBackend, input::CursorQuery};
 use crate::presentation::{
@@ -265,6 +265,53 @@ struct ComposerRows {
     cursor_cells: usize,
 }
 
+pub(super) fn paste_detail_scroll_limit(text: &str, width: usize, height: usize) -> usize {
+    text.split('\n')
+        .map(|line| wrap_cells(&crate::presentation::escape_terminal(line), width.max(1), 0).len())
+        .sum::<usize>()
+        .saturating_sub(height.saturating_sub(2))
+}
+
+pub(super) fn draw_paste_detail(
+    frame: &mut Frame,
+    area: Rect,
+    label: &str,
+    text: &str,
+    scroll: usize,
+    palette: Palette,
+) {
+    let width = usize::from(area.width.max(1));
+    let rows: Vec<String> = text
+        .split('\n')
+        .flat_map(|line| wrap_cells(&crate::presentation::escape_terminal(line), width, 0))
+        .collect();
+    let visible = usize::from(area.height.saturating_sub(2));
+    let first = scroll.min(rows.len().saturating_sub(visible));
+    if area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(safe_truncate(label, width)).style(palette.selection()),
+            Rect::new(area.x, area.y, area.width, 1),
+        );
+    }
+    for (index, row) in rows.iter().skip(first).take(visible).enumerate() {
+        frame.render_widget(
+            Paragraph::new(row.as_str()),
+            Rect::new(area.x, area.y + 1 + index as u16, area.width, 1),
+        );
+    }
+    if area.height > 1 {
+        let footer = format!(
+            "{}/{} · Up/Down PgUp/PgDn · Esc close",
+            first + 1,
+            rows.len()
+        );
+        frame.render_widget(
+            Paragraph::new(safe_truncate(&footer, width)),
+            Rect::new(area.x, area.bottom() - 1, area.width, 1),
+        );
+    }
+}
+
 fn wrapped_composer(composer: &Composer, width: usize) -> ComposerRows {
     let mut display = ComposerRows {
         lines: vec![String::new()],
@@ -274,10 +321,11 @@ fn wrapped_composer(composer: &Composer, width: usize) -> ComposerRows {
     if width == 0 {
         return display;
     }
+    let (text, cursor) = composer.display_text();
     let mut cells = 0;
-    for (offset, grapheme) in composer.text().grapheme_indices(true) {
+    for (offset, grapheme) in text.grapheme_indices(true) {
         if grapheme == "\n" {
-            if offset == composer.cursor_byte_offset() {
+            if offset == cursor {
                 display.cursor_row = if cells < width {
                     display.lines.len() - 1
                 } else {
@@ -295,7 +343,7 @@ fn wrapped_composer(composer: &Composer, width: usize) -> ComposerRows {
             display.lines.push(String::new());
             cells = 0;
         }
-        if offset == composer.cursor_byte_offset() {
+        if offset == cursor {
             display.cursor_row = display.lines.len() - 1;
             display.cursor_cells = cells;
         }
@@ -306,7 +354,7 @@ fn wrapped_composer(composer: &Composer, width: usize) -> ComposerRows {
         display.lines.push(String::new());
         cells = 0;
     }
-    if composer.cursor_byte_offset() == composer.text().len() {
+    if cursor == text.len() {
         display.cursor_row = display.lines.len() - 1;
         display.cursor_cells = cells;
     }
@@ -1652,8 +1700,14 @@ fn draw_composer(
             Rect::new(composer_area.x, composer_area.y + 1, 2, 1),
         );
         let command = model.draft_action != DraftAction::Retain
-            && matches!(parse_submission(draft), Ok(Submission::Command { .. }));
-        let hint = if picker_focused {
+            && matches!(composer.submission(), Ok(Submission::Command { .. }));
+        let hint = if composer.selected_paste().is_some() {
+            if composer_area.width >= 28 {
+                " Tab: inspect · Del: remove "
+            } else {
+                " Tab / Del "
+            }
+        } else if picker_focused {
             if composer_area.width < 40 {
                 " Draft kept "
             } else {

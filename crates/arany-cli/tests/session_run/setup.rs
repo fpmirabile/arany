@@ -3719,7 +3719,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 &mut transcript,
                 &mut answered,
                 interrupted_start,
-                b"Notice: Draft retained: 8 characters; Enter submits\r\n",
+                b"Notice: Draft retained: 44 characters; Enter submits\r\n",
             );
             wait_for_after(
                 &mut output,
@@ -3750,7 +3750,7 @@ fn stalled_credential_bus_does_not_strand_unconfigured_start() {
                 &mut transcript,
                 &mut answered,
                 continuation_start,
-                b"Notice: Draft: 15 characters; Enter submits\r\n",
+                b"Notice: Draft: 51 characters; Enter submits\r\n",
             );
         } else {
             wait_composer_column(
