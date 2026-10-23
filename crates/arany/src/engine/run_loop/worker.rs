@@ -101,12 +101,17 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
     }
 }
 
-fn integration_capacity_stop(
+enum IntegrationDecision {
+    RecordCapacityStop,
+    Continue,
+}
+
+fn integration_decision(
     result: Result<IntentResult, EngineError>,
-) -> Result<bool, EngineError> {
+) -> Result<IntegrationDecision, EngineError> {
     match result {
         Ok(Err(StopCause::Capacity)) | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
-            Ok(true)
+            Ok(IntegrationDecision::RecordCapacityStop)
         }
         Err(EngineError::GoalBudgetExhausted)
         | Ok(Ok(_))
@@ -122,7 +127,7 @@ fn integration_capacity_stop(
             | StopCause::Refused(_)
             | StopCause::ToolStopped
             | StopCause::InvalidCommandResult,
-        )) => Ok(false),
+        )) => Ok(IntegrationDecision::Continue),
         Err(error) => Err(error),
     }
 }
@@ -1219,8 +1224,9 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        if integration_capacity_stop(result)? {
-            self.record_capacity_stop().await?;
+        match integration_decision(result)? {
+            IntegrationDecision::RecordCapacityStop => self.record_capacity_stop().await?,
+            IntegrationDecision::Continue => {}
         }
         let tool = self
             .ledger()
