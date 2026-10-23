@@ -1,4 +1,4 @@
-use arany::SessionId;
+use arany::{MAX_ENCODED_IMAGE_BYTES, MAX_MESSAGE_IMAGES, MAX_USER_MESSAGE_BYTES, SessionId};
 use arany_cli::protocol::{
     methods::{ClientInfo, PermissionMode, deserialize_permission_mode},
     rpc::*,
@@ -194,8 +194,8 @@ impl Prompt {
                 PromptBlock::ResourceLink { name, uri } => &["[@", name, "](", uri, ")"],
                 PromptBlock::Resource { resource } => {
                     if resource.blob.is_some()
-                        || resource.uri.len() > 64 * 1024
-                        || resource.text.len() > 64 * 1024
+                        || resource.uri.len() > MAX_USER_MESSAGE_BYTES
+                        || resource.text.len() > MAX_USER_MESSAGE_BYTES
                     {
                         return Err(());
                     }
@@ -218,8 +218,8 @@ impl Prompt {
                 }
                 PromptBlock::Image { mime_type, data } => {
                     if mime_type != "image/png"
-                        || images.len() >= arany::MAX_MESSAGE_IMAGES
-                        || data.len() > arany::MAX_IMAGE_BYTES.div_ceil(3) * 4
+                        || images.len() >= MAX_MESSAGE_IMAGES
+                        || data.len() > MAX_ENCODED_IMAGE_BYTES
                     {
                         return Err(());
                     }
@@ -231,7 +231,7 @@ impl Prompt {
                 }
             };
             for part in parts {
-                if part.len() > 64 * 1024 - combined.len() {
+                if part.len() > MAX_USER_MESSAGE_BYTES - combined.len() {
                     return Err(());
                 }
                 combined.push_str(part);

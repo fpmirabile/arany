@@ -1,10 +1,10 @@
 use super::TerminalInput;
+use super::agent_chat::MAX_CHOICE_BYTES;
 use crate::presentation::{
     AgentFocus, AgentInspectorModel, AgentQuery, AgentRow, MAX_AGENT_SEARCH,
 };
 use arany::{AgentRunId, RunId};
 
-const MAX_CHOICE_BYTES: usize = 16;
 const SEARCH_LIMIT: &str = "Search takes up to 64 ASCII characters";
 pub(super) const INVALID_CHOICE: &str = "invalid agent selection";
 const NOTHING_FOCUSED: &str = "No agent focused; choose a number first";

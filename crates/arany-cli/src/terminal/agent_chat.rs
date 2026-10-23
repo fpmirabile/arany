@@ -10,7 +10,7 @@ use crate::presentation::{
 use arany::{AgentRunId, ChildSteeringTarget, RunId, RunSteering, SessionId, SessionView};
 use std::io;
 
-const MAX_CHOICE_BYTES: usize = 16;
+pub(super) const MAX_CHOICE_BYTES: usize = 16;
 const NO_CHILDREN: &str = "No child agents in this Run";
 const NO_SUCH_AGENT: &str = "No such agent in this Run; /transcript agents lists them";
 const MISSING_AGENT: &str = "That agent is no longer in this Run; back to primary";

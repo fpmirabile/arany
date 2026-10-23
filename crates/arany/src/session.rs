@@ -24,7 +24,7 @@ pub(crate) fn content_ceiling(context_window_tokens: Option<u32>) -> usize {
     })
 }
 pub(crate) const MAX_HISTORY_RUNS: usize = 32;
-pub(crate) const MAX_USER_MESSAGE_BYTES: usize = 64 * 1024;
+pub const MAX_USER_MESSAGE_BYTES: usize = 64 * 1024;
 pub(crate) const MAX_STEERING_NOTE_BYTES: usize = 8 * 1024;
 // The history header is fixed; each note's "\n[N] " label is charged inside MAX_STEERING_NOTE_BYTES.
 pub(crate) const MAX_STEERING_CONTEXT_BYTES: usize = MAX_STEERING_NOTE_BYTES + 256;
