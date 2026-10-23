@@ -99,9 +99,12 @@ fn sign_out_blocks_use_clears_file_token_and_keeps_registration() {
                 &reopened,
                 &workspace,
                 &selected,
-                "model-one",
-                Effort::Medium,
-                1_799_999_000,
+                RunModel {
+                    slug: "model-one",
+                    effort: Effort::Medium,
+                    now: 1_799_999_010,
+                },
+                Ok(&[])
             ),
             Err(AuthorizationError::NoSelectedAccount)
         ));
@@ -749,6 +752,181 @@ fn keyring_reauthorization_fails_closed_after_an_uncertain_write() {
     assert!(restored.model_checks.is_empty());
 }
 
+fn model_account() -> (tempfile::TempDir, StateRoot, PathBuf, SelectedAccount) {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = StateRoot::admit(&temp.path().join("state")).unwrap();
+    let credentials = credentials("oaiapp_checked", "subject-one");
+    let id = save_private_file_at(
+        &state,
+        &workspace,
+        credentials.clone(),
+        accepted(&credentials),
+        None,
+    )
+    .unwrap();
+    let selected = refresh_selected_with(&state, &workspace, id, 1_799_000_000, |_| {
+        panic!("fresh token must not rotate")
+    })
+    .unwrap();
+    (temp, state, workspace, selected)
+}
+
+#[test]
+fn catalog_admission_uses_matching_metadata_without_a_check() {
+    for (slug, catalog_window, expected) in [
+        ("model-one", Some(272_000), Some(272_000)),
+        ("model-one", Some(32_768), Some(32_768)),
+        ("model-one", Some(2_000_000), Some(2_000_000)),
+        ("model-one", None, None),
+        ("model-two", Some(272_000), None),
+    ] {
+        let (_temp, state, workspace, selected) = model_account();
+        let catalog = [super::super::ChatGptModel {
+            slug: slug.into(),
+            display_name: "First model".into(),
+            context_window_tokens: catalog_window,
+        }];
+        let (_, window) = admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Ok(&catalog),
+        )
+        .unwrap();
+        assert_eq!(window, expected);
+        assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
+    }
+}
+
+#[test]
+fn catalog_failure_uses_the_latest_same_slug_check_across_efforts() {
+    let (_temp, state, workspace, selected) = model_account();
+    for (slug, effort, window, now) in [
+        ("model-one", Effort::High, Some(272_000), 1_799_999_001),
+        ("model-one", Effort::Low, Some(320_000), 1_799_999_000),
+        ("model-two", Effort::High, Some(500_000), 1_799_999_002),
+    ] {
+        record_model_check_at(&state, &workspace, &selected, slug, effort, window, now).unwrap();
+    }
+    let catalog = [super::super::ChatGptModel {
+        slug: "model-one".into(),
+        display_name: "First model".into(),
+        context_window_tokens: Some(400_000),
+    }];
+    let without_window = [super::super::ChatGptModel {
+        slug: "model-one".into(),
+        display_name: "First model".into(),
+        context_window_tokens: None,
+    }];
+    for (slug, live, expected) in [
+        (
+            "model-one",
+            Err(&AuthorizationError::Unavailable),
+            Some(272_000),
+        ),
+        ("model-one", Ok(catalog.as_slice()), Some(400_000)),
+        ("model-one", Ok(without_window.as_slice()), None),
+        ("model-one", Ok([].as_slice()), None),
+        ("model-three", Err(&AuthorizationError::Unavailable), None),
+    ] {
+        let (_, window) = admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            RunModel {
+                slug,
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            live,
+        )
+        .unwrap();
+        assert_eq!(window, expected);
+    }
+}
+
+#[test]
+fn catalog_failure_ignores_stale_and_future_checks() {
+    let (_temp, state, workspace, selected) = model_account();
+    let checked_at = 1_799_999_000;
+    record_model_check_at(
+        &state,
+        &workspace,
+        &selected,
+        "model-one",
+        Effort::High,
+        Some(272_000),
+        checked_at,
+    )
+    .unwrap();
+    for (now, expected) in [
+        (checked_at - 1, None),
+        (checked_at + MODEL_CHECK_AGE_SECONDS - 1, Some(272_000)),
+        (checked_at + MODEL_CHECK_AGE_SECONDS, None),
+    ] {
+        let (_, window) = admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now,
+            },
+            Err(&AuthorizationError::Unavailable),
+        )
+        .unwrap();
+        assert_eq!(window, expected);
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn slow_admission_catalog_falls_back_after_five_seconds() {
+    use std::time::Duration;
+    const DELAYED_REPLY: Duration = Duration::from_secs(6);
+
+    let (_temp, state, workspace, selected) = model_account();
+    let checked_at = 1_799_999_000;
+    record_model_check_at(
+        &state,
+        &workspace,
+        &selected,
+        "model-one",
+        Effort::High,
+        Some(272_000),
+        checked_at,
+    )
+    .unwrap();
+    let started = tokio::time::Instant::now();
+    let catalog = super::super::catalog::read_for_run(async {
+        tokio::time::sleep(DELAYED_REPLY).await;
+        Ok(Vec::new())
+    })
+    .await;
+    assert!(matches!(&catalog, Err(AuthorizationError::Unavailable)));
+    assert_eq!(started.elapsed(), Duration::from_secs(5));
+    let (_, window) = admitted_model_at(
+        &state,
+        &workspace,
+        &selected,
+        RunModel {
+            slug: "model-one",
+            effort: Effort::High,
+            now: checked_at + 1,
+        },
+        catalog.as_deref(),
+    )
+    .unwrap();
+    assert_eq!(window, Some(272_000));
+}
+
 #[test]
 fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
     let temp = tempfile::tempdir().unwrap();
@@ -773,9 +951,12 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         &state,
         &workspace,
         &selected,
-        "model-one",
-        Effort::High,
-        now,
+        RunModel {
+            slug: "model-one",
+            effort: Effort::High,
+            now: 1_799_999_010,
+        },
+        Err(&AuthorizationError::Unavailable),
     )
     .expect("consented account needs no synthetic check");
     assert_eq!(window, None);
@@ -801,9 +982,12 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
                 &state,
                 &workspace,
                 &selected,
-                "model-one",
-                Effort::High,
-                now
+                RunModel {
+                    slug: "model-one",
+                    effort: Effort::High,
+                    now: 1_799_999_010,
+                },
+                Err(&AuthorizationError::Unavailable)
             ),
             Err(expected)
         );
@@ -814,9 +998,12 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
             &state,
             &workspace,
             &selected,
-            "bad model",
-            Effort::High,
-            now
+            RunModel {
+                slug: "bad model",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable)
         ),
         Err(AuthorizationError::InvalidSelection)
     ));
@@ -834,23 +1021,26 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
     let fingerprint = model_check_fingerprint(&selected, "model-one", Effort::High).unwrap();
     assert_ne!(admitted, fingerprint);
     assert!(model_check_valid(&index, id, fingerprint, now));
-    for (model, effort, at, window) in [
-        ("model-one", Effort::High, now, Some(272_000)),
-        ("model-one", Effort::High, now - 1, None),
-        (
-            "model-one",
-            Effort::High,
-            now + MODEL_CHECK_AGE_SECONDS,
-            None,
-        ),
-        ("model-two", Effort::High, now, None),
-        ("model-one", Effort::Low, now, None),
+    for (model, effort, window) in [
+        ("model-one", Effort::High, Some(272_000)),
+        ("model-two", Effort::High, None),
+        ("model-one", Effort::Low, Some(272_000)),
     ] {
         assert_eq!(
-            admitted_model_at(&state, &workspace, &selected, model, effort, at)
-                .map(|(_, window)| window),
+            admitted_model_at(
+                &state,
+                &workspace,
+                &selected,
+                RunModel {
+                    slug: model,
+                    effort,
+                    now: 1_799_999_010,
+                },
+                Err(&AuthorizationError::Unavailable)
+            )
+            .map(|(_, window)| window),
             Ok(window),
-            "only the current exact check supplies its catalog window"
+            "the last same-slug check supplies the cached window across efforts"
         );
     }
     let mut out_of_range = serde_json::to_value(&index).unwrap();
@@ -861,18 +1051,31 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
             &state,
             &workspace,
             &selected,
-            "model-one",
-            Effort::High,
-            now
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable)
         )
         .unwrap(),
         (admitted, Some(272_000))
     );
     for (model, effort) in [("model-two", Effort::High), ("model-one", Effort::Low)] {
-        let (other, window) =
-            admitted_model_at(&state, &workspace, &selected, model, effort, now).unwrap();
+        let (other, window) = admitted_model_at(
+            &state,
+            &workspace,
+            &selected,
+            RunModel {
+                slug: model,
+                effort,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable),
+        )
+        .unwrap();
         assert_ne!(admitted, other);
-        assert_eq!(window, None);
+        assert_eq!(window, (model == "model-one").then_some(272_000));
     }
     assert!(!model_check_valid(&index, id, fingerprint, now - 1));
     assert!(!model_check_valid(
@@ -905,7 +1108,18 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         1_799_999_900
     ));
     assert_eq!(
-        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High, now).unwrap(),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &renewed,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable)
+        )
+        .unwrap(),
         (admitted, Some(272_000))
     );
 
@@ -918,14 +1132,35 @@ fn model_check_evidence_is_exact_temporary_and_cleared_by_new_sign_in() {
         fingerprint
     );
     assert!(matches!(
-        admitted_model_at(&state, &workspace, &altered, "model-one", Effort::High, now),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &altered,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable)
+        ),
         Err(AuthorizationError::InvalidIdentity)
     ));
 
     clear_model_check_at(&state, &workspace, &renewed, "model-one", Effort::High).unwrap();
     assert!(AccountIndex::read(&state).unwrap().model_checks.is_empty());
     assert_eq!(
-        admitted_model_at(&state, &workspace, &renewed, "model-one", Effort::High, now).unwrap(),
+        admitted_model_at(
+            &state,
+            &workspace,
+            &renewed,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Err(&AuthorizationError::Unavailable)
+        )
+        .unwrap(),
         (admitted, None)
     );
     record_model_check_at(
@@ -985,9 +1220,12 @@ fn replaced_or_stale_account_cannot_publish_model_evidence() {
             &state,
             &workspace,
             &selected,
-            "model-one",
-            Effort::High,
-            1_799_000_000
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Ok(&[])
         ),
         Err(AuthorizationError::InvalidIdentity)
     ));
@@ -1003,9 +1241,12 @@ fn replaced_or_stale_account_cannot_publish_model_evidence() {
             &state,
             &workspace,
             &stale,
-            "model-one",
-            Effort::High,
-            1_799_000_000
+            RunModel {
+                slug: "model-one",
+                effort: Effort::High,
+                now: 1_799_999_010,
+            },
+            Ok(&[])
         ),
         Err(AuthorizationError::ConsentRequired)
     ));
@@ -1544,9 +1785,12 @@ fn private_file_accounts_reopen_and_reject_cross_account_drift() {
             &reopened,
             &workspace,
             &selected,
-            "model-one",
-            Effort::Medium,
-            1_799_999_000,
+            RunModel {
+                slug: "model-one",
+                effort: Effort::Medium,
+                now: 1_799_999_010,
+            },
+            Ok(&[])
         ),
         Err(AuthorizationError::PermissionMissing)
     ));
