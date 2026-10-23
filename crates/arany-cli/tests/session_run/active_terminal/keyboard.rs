@@ -1,5 +1,5 @@
 use crate::loopback::ChildGuard;
-use crate::session_picker::{PtyResponses, pump};
+use crate::{PtyResponses, pump};
 use arany_cli::terminal::{AttachedTerminal, Composer, TerminalInput, TerminalMode};
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use std::{

@@ -10,19 +10,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub(super) fn tail(bytes: &[u8]) -> String {
-    String::from_utf8_lossy(bytes)
-        .chars()
-        .rev()
-        .take(512)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .flat_map(char::escape_default)
-        .collect()
-}
-
-pub(super) use crate::screen_rows;
+pub(super) use crate::{PtyResponses, pump, screen_rows, tail};
 
 pub(super) fn screen_contains(
     transcript: &[u8],
@@ -82,74 +70,6 @@ pub(super) fn checkpoint_screen(
     }
     *answered = PtyResponses::default();
     transcript.len()
-}
-
-pub(super) struct PtyResponses {
-    pub(super) cursor_queries: usize,
-    consent_from: usize,
-    auto_consent: bool,
-}
-
-impl Default for PtyResponses {
-    fn default() -> Self {
-        Self {
-            cursor_queries: 0,
-            consent_from: 0,
-            auto_consent: true,
-        }
-    }
-}
-
-impl PtyResponses {
-    pub(super) fn manual_consent() -> Self {
-        Self {
-            auto_consent: false,
-            ..Self::default()
-        }
-    }
-}
-
-pub(super) fn pump(
-    output: &mut impl Read,
-    input: &mut impl Write,
-    transcript: &mut Vec<u8>,
-    answered: &mut PtyResponses,
-) {
-    loop {
-        let mut chunk = [0; 4096];
-        match output.read(&mut chunk) {
-            Ok(0) => break,
-            Ok(count) => {
-                assert!(
-                    transcript.len() + count <= 64 * 1024,
-                    "bounded PTY transcript: {} bytes captured; last bytes: {}",
-                    transcript.len(),
-                    tail(&transcript[transcript.len().saturating_sub(300)..])
-                );
-                transcript.extend_from_slice(&chunk[..count]);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => panic!("PTY read failed: {error}"),
-        }
-    }
-    let queries = transcript
-        .windows(4)
-        .filter(|part| *part == b"\x1b[6n")
-        .count();
-    assert!(queries <= 128, "bounded cursor queries");
-    super::reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
-    if answered.auto_consent {
-        let mut declined = false;
-        super::process::decline_workspace_consent(
-            input,
-            &transcript[answered.consent_from..],
-            &mut declined,
-        );
-        if declined {
-            answered.consent_from = transcript.len();
-        }
-    }
 }
 
 fn mouse_modes_enabled(bytes: &[u8]) -> Vec<u32> {

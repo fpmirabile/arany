@@ -154,6 +154,91 @@ fn reply_positioned_cursor_queries(
 }
 
 #[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(crate) fn tail(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .chars()
+        .rev()
+        .take(512)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .flat_map(char::escape_default)
+        .collect()
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(crate) struct PtyResponses {
+    pub(crate) cursor_queries: usize,
+    consent_from: usize,
+    auto_consent: bool,
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+impl Default for PtyResponses {
+    fn default() -> Self {
+        Self {
+            cursor_queries: 0,
+            consent_from: 0,
+            auto_consent: true,
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+impl PtyResponses {
+    pub(crate) fn manual_consent() -> Self {
+        Self {
+            auto_consent: false,
+            ..Self::default()
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
+pub(crate) fn pump(
+    output: &mut impl std::io::Read,
+    input: &mut impl std::io::Write,
+    transcript: &mut Vec<u8>,
+    answered: &mut PtyResponses,
+) {
+    loop {
+        let mut chunk = [0; 4096];
+        match output.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(count) => {
+                assert!(
+                    transcript.len() + count <= 64 * 1024,
+                    "bounded PTY transcript: {} bytes captured; last bytes: {}",
+                    transcript.len(),
+                    tail(&transcript[transcript.len().saturating_sub(300)..])
+                );
+                transcript.extend_from_slice(&chunk[..count]);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => panic!("PTY read failed: {error}"),
+        }
+    }
+    let queries = transcript
+        .windows(4)
+        .filter(|part| *part == b"\x1b[6n")
+        .count();
+    assert!(queries <= 128, "bounded cursor queries");
+    reply_positioned_cursor_queries(input, transcript, &mut answered.cursor_queries);
+    if answered.auto_consent {
+        let mut declined = false;
+        process::decline_workspace_consent(
+            input,
+            &transcript[answered.consent_from..],
+            &mut declined,
+        );
+        if declined {
+            answered.consent_from = transcript.len();
+        }
+    }
+}
+
+#[cfg(any(target_os = "linux", all(target_os = "macos", debug_assertions)))]
 fn screen_rows(transcript: &[u8], columns: usize, rows: usize) -> Vec<String> {
     terminal_grid(transcript, columns, rows).1
 }
