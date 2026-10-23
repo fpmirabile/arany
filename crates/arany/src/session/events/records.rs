@@ -1,5 +1,6 @@
 use super::*;
 use crate::provider::AgentPhase;
+use crate::validate::MAX_PATH_BYTES;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "snake_case", deny_unknown_fields)]
@@ -205,7 +206,7 @@ impl RunConfig {
             let directory = components(&source.directory);
             launch.starts_with(&directory).then_some(directory.len())
         });
-        self.launch_directory.len() <= 4096
+        self.launch_directory.len() <= MAX_PATH_BYTES
             && launch.len() < crate::session::input::MAX_INSTRUCTION_LEVELS
             && launch
                 .iter()

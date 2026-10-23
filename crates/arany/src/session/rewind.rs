@@ -43,7 +43,7 @@ pub struct FileState {
 }
 impl FileState {
     fn valid(&self) -> bool {
-        crate::tools::types::valid_digest(&self.sha256) && self.bytes <= 1024 * 1024
+        crate::validate::valid_digest(&self.sha256) && self.bytes <= 1024 * 1024
     }
 }
 
@@ -193,7 +193,7 @@ pub(crate) fn valid_id(id: Uuid) -> bool {
 fn sorted_paths<'a>(paths: impl Iterator<Item = &'a str>) -> bool {
     let mut prior = None;
     for path in paths {
-        if !crate::tools::types::valid_relative(path, false)
+        if !crate::validate::valid_relative(path, false)
             || path.len() > 512
             || prior.is_some_and(|p| p >= path)
         {
@@ -598,7 +598,7 @@ pub fn plan(view: &SessionView, target: &CheckpointTarget) -> Result<RewindPlan,
     for (_, publication) in steps {
         let (changes, unavailable) = publication.changes(pruned_through)?;
         for mut change in changes {
-            if !crate::tools::types::valid_relative(&change.path, false)
+            if !crate::validate::valid_relative(&change.path, false)
                 || change.restore_to.as_ref().is_some_and(|v| !v.valid())
                 || change.expected_current.as_ref().is_some_and(|v| !v.valid())
             {

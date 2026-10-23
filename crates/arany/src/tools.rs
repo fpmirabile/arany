@@ -638,7 +638,7 @@ impl ToolRuntime {
                 permissions::PermissionConfig::parse(&bytes)
                     .map(|config| PermissionSnapshot {
                         config: std::sync::Arc::new(config),
-                        digest: types::digest(&bytes),
+                        digest: crate::validate::digest(&bytes),
                     })
                     .map_err(|_| ToolError::Configuration)
             })

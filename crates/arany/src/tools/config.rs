@@ -3,6 +3,7 @@ use super::fs::{open_absolute, read_regular};
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use crate::store::{RecordFormat, RecordKind, StateRoot};
+use crate::validate::{digest, valid_digest, valid_name, valid_relative};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 

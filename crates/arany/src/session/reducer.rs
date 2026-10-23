@@ -4,7 +4,7 @@ use super::events::{
     ProviderCallDisposition, ProviderCallRecord, ReplayError, RunConfig, RunDisposition, RunId,
     SessionDefaults, SessionId, WorkspaceIdentity,
 };
-use crate::provider::AgentPhase;
+use crate::provider::{AgentPhase, ProviderIdentity, ProviderRole};
 
 mod agent;
 mod worker;
@@ -776,6 +776,20 @@ impl RunView {
             .providers
             .as_ref()
             .map(|routes| routes.get(role).as_slice())
+    }
+
+    pub(crate) fn current_identity<'a>(
+        &'a self,
+        actor: AgentRunId,
+        role: ProviderRole,
+        initial: &'a ProviderIdentity,
+    ) -> &'a ProviderIdentity {
+        self.provider_fallbacks
+            .iter()
+            .rev()
+            .find(|(agent_run_id, fallback)| *agent_run_id == actor && fallback.role == role)
+            .map(|(_, fallback)| &fallback.to)
+            .unwrap_or(initial)
     }
 
     pub(crate) fn primary(&self) -> Option<&AgentView> {

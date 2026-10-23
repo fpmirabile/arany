@@ -1,7 +1,8 @@
 use super::config::Config;
 use super::permissions::{Decision, PermissionMode};
-use super::types::{ToolCall, digest, valid_name};
+use super::types::ToolCall;
 use super::{ToolError, fs};
+use crate::validate::{digest, valid_name};
 use base64::Engine as _;
 use cap_std::fs::{Dir, MetadataExt as _};
 use serde::{Deserialize, Serialize};
@@ -151,7 +152,7 @@ fn optional_directory(root: &Dir, name: &str) -> Result<Option<Dir>, ToolError> 
 }
 
 fn valid_filename(name: &str) -> bool {
-    name.strip_suffix(".md").is_some_and(valid_name) && super::types::valid_relative(name, false)
+    name.strip_suffix(".md").is_some_and(valid_name) && crate::validate::valid_relative(name, false)
 }
 
 fn scan(
@@ -172,7 +173,7 @@ fn scan(
             .file_name()
             .into_string()
             .map_err(|_| ToolError::Path)?;
-        if !super::types::valid_relative(&name, false) {
+        if !crate::validate::valid_relative(&name, false) {
             return Err(ToolError::Path);
         }
         let file = fs::open_file(dir, &name)?;

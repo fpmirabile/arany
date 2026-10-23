@@ -1218,7 +1218,7 @@ impl<'a> RunLoop<'a> {
         }
         if call
             .path_argument()
-            .is_some_and(|(path, root)| !crate::tools::types::valid_relative(path, root))
+            .is_some_and(|(path, root)| !crate::validate::valid_relative(path, root))
         {
             return Err(InvalidPath);
         }

@@ -3,10 +3,7 @@ use crate::session::worker::{
     ChangesetSource, EffectTarget, WorkerDataRef, WorkerMutation, WorkerPreparation,
 };
 use crate::session::{AgentRunId, RunId};
-pub(crate) use crate::validate::{
-    FORBIDDEN_NAMES, MAX_RELATIVE_PATH_BYTES, digest, forbidden, valid_digest, valid_name,
-    valid_relative, valid_revision,
-};
+use crate::validate::{digest, forbidden, valid_digest, valid_relative};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

@@ -646,20 +646,20 @@ impl GoalPlanContract {
                 }
             }
             GoalSuccessCriterion::WorkspaceFileDigest { path, sha256 } => {
-                if !crate::tools::types::valid_relative(path, false)
-                    || !crate::tools::types::valid_digest(sha256)
+                if !crate::validate::valid_relative(path, false)
+                    || !crate::validate::valid_digest(sha256)
                 {
                     return Err(ReplayError::InvalidPayload);
                 }
             }
             GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
-                if !crate::tools::types::valid_relative(path, false) || content.len() > 8 * 1024 {
+                if !crate::validate::valid_relative(path, false) || content.len() > 8 * 1024 {
                     return Err(ReplayError::InvalidPayload);
                 }
             }
         }
         if self.paths.iter().any(|path| {
-            path != "." && !crate::tools::types::valid_relative(path, false)
+            path != "." && !crate::validate::valid_relative(path, false)
                 || path.len() > 512
                 || self
                     .paths
@@ -669,18 +669,19 @@ impl GoalPlanContract {
             || self
                 .commands
                 .iter()
-                .any(|command| !crate::tools::types::valid_name(command) || command.len() > 64)
+                .any(|command| !crate::validate::valid_name(command) || command.len() > 64)
             || self.skills.iter().any(|binding| {
-                !crate::tools::types::valid_name(&binding.name)
+                !crate::validate::valid_name(&binding.name)
                     || binding.name.len() > 64
-                    || binding.resource.as_ref().is_some_and(|resource| {
-                        !crate::tools::types::valid_relative(resource, false)
-                    })
+                    || binding
+                        .resource
+                        .as_ref()
+                        .is_some_and(|resource| !crate::validate::valid_relative(resource, false))
             })
             || self.mcp_tools.iter().any(|binding| {
-                !crate::tools::types::valid_name(&binding.server)
+                !crate::validate::valid_name(&binding.server)
                     || binding.server.len() > 64
-                    || !crate::tools::types::valid_name(&binding.tool)
+                    || !crate::validate::valid_name(&binding.tool)
                     || binding.tool.len() > 128
             })
         {

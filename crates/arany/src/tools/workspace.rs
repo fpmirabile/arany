@@ -7,6 +7,7 @@ use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
 use super::{ToolError, fs};
 use crate::session::WorkspaceIdentity;
 use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
+use crate::validate::MAX_PATH_BYTES;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -186,7 +187,7 @@ fn parse(bytes: &[u8]) -> Result<Permissions, TrustRecordError> {
     if record.workspaces.len() > 128
         || record.workspaces.iter().any(|entry| {
             !entry.path.is_absolute()
-                || entry.path.as_os_str().len() > 4096
+                || entry.path.as_os_str().len() > MAX_PATH_BYTES
                 || entry.inode == 0
                 || validate_selection(&entry.runtime_grants).is_err()
         })

@@ -1,4 +1,5 @@
 use super::{StateRoot, StoreError, nonblocking};
+use crate::validate::MAX_PATH_BYTES;
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, File, MetadataExt, OpenOptions};
 use sha2::{Digest, Sha256};
@@ -39,7 +40,6 @@ pub(crate) const AGGREGATE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const IDENTITY_METADATA_BYTES: u64 = 1024;
 const MAX_DIRECTORY_ENTRIES: usize = MAX_IDENTITIES * 8 + 2;
 const MAX_ARCHIVE_ENTRIES: usize = 16_384;
-const MAX_PATH_BYTES: usize = 4096;
 const MAX_PATH_DEPTH: usize = 32;
 const MAX_PATH_INDEX_BYTES: usize = 8 * 1024 * 1024;
 const MAGIC: &[u8; 12] = b"ARANYCACHE\0\x01";

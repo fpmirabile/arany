@@ -5,6 +5,7 @@ use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use super::{Cancellation, ToolError, ToolRuntime};
 use crate::store::{BuildCacheIdentity, BuildCacheLease, StoreError};
+use crate::validate::digest;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::Path;

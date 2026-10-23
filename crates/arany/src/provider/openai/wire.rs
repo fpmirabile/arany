@@ -238,10 +238,8 @@ fn tool_failure_stage(
     call: &crate::tools::ToolCall,
 ) -> crate::diagnostics::SubscriptionFailureStage {
     use crate::diagnostics::SubscriptionFailureStage as Stage;
-    use crate::tools::{
-        ToolCall,
-        types::{MAX_EDIT_CONTENT_BYTES, valid_digest, valid_name, valid_relative},
-    };
+    use crate::tools::{ToolCall, types::MAX_EDIT_CONTENT_BYTES};
+    use crate::validate::{valid_digest, valid_name, valid_relative};
     if serde_json::to_vec(call).is_ok_and(|bytes| bytes.len() > call.argument_limit()) {
         return Stage::OutcomeToolArgumentSize;
     }

@@ -613,13 +613,13 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
 }
 
 pub(crate) fn stop_subject(agent: crate::session::AgentRunId, call_index: usize) -> [u8; 32] {
-    crate::tools::types::digest(
+    crate::validate::digest(
         &serde_json::to_vec(&(agent, call_index)).expect("hook subject serializes"),
     )
 }
 
 pub(crate) fn compact_subject(trigger: &str, call_index: usize) -> [u8; 32] {
-    crate::tools::types::digest(
+    crate::validate::digest(
         &serde_json::to_vec(&(trigger, call_index)).expect("hook subject serializes"),
     )
 }

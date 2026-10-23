@@ -400,7 +400,7 @@ impl RunLoop<'_> {
         else {
             return Ok(HookFold::deny("hook input exceeds its limit", 0));
         };
-        let input_digest = crate::tools::types::digest(input.as_bytes());
+        let input_digest = crate::validate::digest(input.as_bytes());
         let subject_digest = intent.digest();
         let runtime = runtime.with_hook_stdin(&input);
         // The complete Guard task must encode before any hook starts; a rejected task would strand it.
@@ -522,7 +522,7 @@ impl RunLoop<'_> {
             return Ok(fold);
         }
         let (input, runtime) = self.post_hook_input(runtime, config, observation, &plans)?;
-        let input_digest = crate::tools::types::digest(input.as_bytes());
+        let input_digest = crate::validate::digest(input.as_bytes());
         let subject_digest = observation.intent.digest();
         let mut results = Vec::new();
         for plan in plans {
@@ -654,7 +654,7 @@ impl RunLoop<'_> {
                         agent: hook.agent,
                         event: hook.event,
                         plan: &plan,
-                        digests: (digest, crate::tools::types::digest(input.as_bytes())),
+                        digests: (digest, crate::validate::digest(input.as_bytes())),
                     },
                     hook.deadline,
                 )
@@ -953,7 +953,7 @@ impl RunLoop<'_> {
                 handler,
                 subject_digest: digest,
                 intent: intent.clone(),
-                input_digest: crate::tools::types::digest(input.as_bytes()),
+                input_digest: crate::validate::digest(input.as_bytes()),
                 active_ceiling_ms,
             },
         })
