@@ -582,7 +582,7 @@ async fn oversized_steer_line_is_rejected_by_the_line_cap_and_the_next_line_is_s
     let (outbound, mut output) = mpsc::channel(OUTBOUND_CAPACITY);
     let reader = read_messages(transport, input, outbound);
     let peer = async {
-        let note = "a".repeat(MAX_LINE_BYTES);
+        let note = "a".repeat(MAX_RPC_LINE_BYTES);
         let line = json!({"id":1,"method":"turn/steer","params":{"threadId":"t","turnId":"r","input":[{"type":"text","text":note}]}});
         client.write_all(line.to_string().as_bytes()).await.unwrap();
         client

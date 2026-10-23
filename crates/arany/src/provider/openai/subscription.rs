@@ -1,4 +1,4 @@
-use super::{ENDPOINT, wire};
+use super::{OPENAI_ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
@@ -119,7 +119,7 @@ impl Provider for ChatGptProvider {
         invoke_at_observed(
             RunCall {
                 client: &self.client,
-                endpoint: Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+                endpoint: Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
                 access_token: &self.access_token,
                 effort: self.effort,
                 max_output_tokens: self.identity.limits.max_output_tokens,
@@ -141,7 +141,7 @@ impl Provider for ChatGptProvider {
         }
         compact_at_observed(
             &self.client,
-            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+            Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint"),
             &self.access_token,
             &request,
             self.effort,
@@ -165,7 +165,7 @@ pub(super) async fn probe_model(
     effort: Effort,
 ) -> Result<(), ProviderError> {
     let client = client()?;
-    let endpoint = Url::parse(ENDPOINT).expect("compiled Responses endpoint");
+    let endpoint = Url::parse(OPENAI_ENDPOINT).expect("compiled Responses endpoint");
     timeout(
         PROBE_TOTAL_DEADLINE,
         probe_model_at(&client, endpoint, access_token, model, effort),

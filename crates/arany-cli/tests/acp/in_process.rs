@@ -56,7 +56,7 @@ fn validate(value: &Value) {
         jsonschema::validator_for(&part).unwrap().is_valid(payload),
         "{definition}: {value}"
     );
-    assert!(encode_line(value).unwrap().len() <= MAX_LINE_BYTES);
+    assert!(encode_line(value).unwrap().len() <= MAX_RPC_LINE_BYTES);
     assert!(
         value.get("method").is_none_or(|m| matches!(
             m.as_str(),
@@ -932,7 +932,10 @@ async fn malformed_oversized_and_hostile_params_recover_over_stdio() {
     let (mut writer, mut reader, task) = start(&state, scripted());
     writer.write_all(b"{broken\n").await.unwrap();
     assert_eq!(next(&mut reader).await["error"]["code"], -32700);
-    writer.write_all(&vec![b'x'; MAX_LINE_BYTES]).await.unwrap();
+    writer
+        .write_all(&vec![b'x'; MAX_RPC_LINE_BYTES])
+        .await
+        .unwrap();
     writer.write_all(b"\n").await.unwrap();
     assert_eq!(
         next(&mut reader).await["error"]["data"]["reason"],
@@ -1526,7 +1529,10 @@ async fn frame_recovery_uses_real_codec_and_stdio_without_private_state() {
     let writer_task = tokio::spawn(serve::write_messages(output, writer_rx));
     let producer = tokio::spawn(async move {
         source.write_all(b"{broken\n").await.unwrap();
-        source.write_all(&vec![b'x'; MAX_LINE_BYTES]).await.unwrap();
+        source
+            .write_all(&vec![b'x'; MAX_RPC_LINE_BYTES])
+            .await
+            .unwrap();
         source.write_all(b"\n").await.unwrap();
         source.write_all(&encode_line(&json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}})).unwrap()).await.unwrap();
         source.write_all(&encode_line(&json!({"jsonrpc":"2.0","id":2,"method":"authenticate","params":{"methodId":"arany-setup"}})).unwrap()).await.unwrap();
@@ -2141,7 +2147,7 @@ async fn load_and_resume_translate_pinned_schema_without_private_state() {
         finish["params"]["update"]["content"][0]["content"]["text"]
             .as_str()
             .unwrap()
-            .contains(tools::UNKNOWN)
+            .contains(tools::UNKNOWN_ACP_TOOL_OUTCOME)
     );
     let loaded = adapter.next().await;
     assert_eq!(loaded["id"], 9);
@@ -2878,7 +2884,7 @@ async fn bounded_tool_output_and_oversized_permissions_without_private_state() {
     let mut big = intent.clone();
     big.call = arany::ToolCall::Command {
         program: "sh".into(),
-        args: vec!["x".repeat(MAX_LINE_BYTES)],
+        args: vec!["x".repeat(MAX_RPC_LINE_BYTES)],
         cwd: ".".into(),
     };
     adapter.permission(&big, 100).await;

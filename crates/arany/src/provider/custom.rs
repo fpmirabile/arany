@@ -15,7 +15,7 @@ pub(crate) use destination::MAX_ADDRESSES;
 use destination::PinnedDestination;
 
 const MAX_PROFILES: usize = 32;
-const OUTPUT_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
+const CUSTOM_OUTPUT_TOKEN_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CustomProfile {
@@ -270,7 +270,7 @@ impl CustomProfile {
             || profile.model.is_empty()
             || profile.model.len() > 128
             || !profile.model.bytes().all(|byte| byte.is_ascii_graphic())
-            || cap != OUTPUT_CAP
+            || cap != CUSTOM_OUTPUT_TOKEN_CAP
             || encoding != expected
             || profile.capability_evidence_version != 2
             || profile.efforts.len() > Effort::ALL.len()
@@ -302,7 +302,7 @@ impl CustomProfile {
     }
 
     pub fn max_output_tokens(&self) -> u32 {
-        OUTPUT_CAP
+        CUSTOM_OUTPUT_TOKEN_CAP
     }
 
     pub fn efforts(&self) -> &[Effort] {

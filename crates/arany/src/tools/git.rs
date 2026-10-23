@@ -176,7 +176,7 @@ pub(super) fn schema(operation: &str) -> Option<Vec<(&'static str, Value)>> {
     })
 }
 
-const CAPTURE_BYTES: usize = 256 * 1024;
+const GIT_CAPTURE_BYTES: usize = 256 * 1024;
 const STDERR_BYTES: usize = 4 * 1024;
 const ERROR_BYTES: usize = 1024;
 const MAX_ROWS: usize = 256;
@@ -744,7 +744,7 @@ impl Default for Io<'_> {
     fn default() -> Self {
         Self {
             stdin: None,
-            stdout_bytes: CAPTURE_BYTES,
+            stdout_bytes: GIT_CAPTURE_BYTES,
             writable: None,
         }
     }
@@ -1667,7 +1667,7 @@ fn tip_subject(
             std::str::from_utf8(path)
                 .is_ok_and(|path| !path.is_empty() && !path.starts_with('"') && shown(path, hidden))
         });
-    let log = log_output(raw, overflow, CAPTURE_BYTES, 1, hidden)?;
+    let log = log_output(raw, overflow, GIT_CAPTURE_BYTES, 1, hidden)?;
     let tip = log["commits"]
         .as_array()
         .and_then(|rows| rows.first())

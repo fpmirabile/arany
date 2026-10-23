@@ -1,5 +1,5 @@
 use super::{
-    BootstrapFailure, BootstrapStage, CAPTURE_BYTES, GuardStage, Ready, TASK_BYTES_CAP,
+    BootstrapFailure, BootstrapStage, GUARD_CAPTURE_BYTES, GuardStage, Ready, TASK_BYTES_CAP,
     TEARDOWN_WAIT, Task, bootstrap_failure, drain_stderr, parse_ready, read_capped,
     read_line_capped, read_observation,
 };
@@ -1123,7 +1123,7 @@ async fn execute_worker(
     let mut stdin = child.stdin.take().ok_or(ToolError::Operation)?;
     let mut stdout = BufReader::new(child.stdout.take().ok_or(ToolError::Operation)?);
     let stderr = child.stderr.take().ok_or(ToolError::Operation)?;
-    let mut stderr_task = tokio::spawn(read_capped(stderr, CAPTURE_BYTES));
+    let mut stderr_task = tokio::spawn(read_capped(stderr, GUARD_CAPTURE_BYTES));
     let (result, status) = {
         let execution = async {
             let capture = fixture::Span::begin(fixture::Stage::WorkerReady);

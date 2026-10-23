@@ -75,7 +75,7 @@ impl Provider for CustomProvider {
         if request.input.tools.is_some()
             || !request.input.images.is_empty()
             || request.model != self.identity.model
-            || !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens)
+            || !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
@@ -94,7 +94,7 @@ impl Provider for CustomProvider {
         if request.input.tools.is_some()
             || !request.input.images.is_empty()
             || request.model != self.identity.model
-            || !(1..=super::OUTPUT_CAP).contains(&request.max_output_tokens)
+            || !(1..=super::CUSTOM_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens)
         {
             return Err(ProviderError::Rejected);
         }
