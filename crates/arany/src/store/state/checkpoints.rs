@@ -309,8 +309,8 @@ fn validate(connection: &Connection, limits: Limits) -> Result<(), StoreError> {
         || scalar(connection, "SELECT COUNT(*) FROM refs", [])? > limits.refs
         || scalar(
             connection,
-            "SELECT COUNT(*) FROM refs WHERE length(path)>4096 OR len<0 OR len>1048576 OR length(digest)!=32 OR (run_id IS NULL)=(rewind_id IS NULL)",
-            [],
+            "SELECT COUNT(*) FROM refs WHERE length(path)>?1 OR len<0 OR len>1048576 OR length(digest)!=32 OR (run_id IS NULL)=(rewind_id IS NULL)",
+            [MAX_PATH_BYTES as i64],
         )? != 0
         || scalar(
             connection,
