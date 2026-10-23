@@ -1,19 +1,16 @@
 use super::conversation::Conversation;
 use super::{
-    CallLimits, CompactionRequest, CompactionResponse, Effort, MAX_RESPONSE_BYTES,
-    NativeApiCredentials, Provenance, Provider, ProviderError, ProviderIdentity, ProviderRequest,
-    ProviderResponse, raw_reflects_secret, render, resolve_native_effort,
+    CompactionRequest, CompactionResponse, Effort, NativeApiCredentials, Provenance, Provider,
+    ProviderError, ProviderIdentity, ProviderRequest, ProviderResponse, native, render,
     resolve_native_effort_for_run, valid_saved_api_account_id, validate_native_api_key,
 };
 use reqwest::Client;
 use serde_json::Value;
-use std::time::Duration;
 use uuid::Uuid;
 
 pub(super) mod wire;
 
 const ENDPOINT: &str = "https://api.anthropic.com/v1/messages";
-const DEADLINE: Duration = Duration::from_secs(600);
 
 pub struct AnthropicProvider {
     client: Client,
@@ -142,7 +139,7 @@ impl AnthropicProvider {
         provider.identity.provenance = Provenance::Native {
             saved_api_account_id,
         };
-        provider.identity.limits.concurrency = 1;
+        provider.identity.limits.concurrency = native::UNREVIEWED_MODEL_CONCURRENCY;
         Ok(provider)
     }
 
@@ -165,25 +162,11 @@ impl AnthropicProvider {
     ) -> Result<Self, ProviderError> {
         credentials.require_profile("anthropic")?;
         validate_native_api_key(credentials.api_key())?;
-        let client = super::http_client(DEADLINE)
+        let client = super::http_client(native::NATIVE_CALL_DEADLINE)
             .https_only(true)
             .build()
             .map_err(|_| ProviderError::Unavailable)?;
-        let max_concurrent_calls =
-            if resolve_native_effort("anthropic", &model, Some(effort)).is_ok() {
-                3
-            } else {
-                1
-            };
-        let mut identity =
-            ProviderIdentity::new("anthropic", model, crate::provider::Provenance::native());
-        identity.effort = Some(effort);
-        identity.limits = CallLimits {
-            concurrency: max_concurrent_calls,
-            max_output_tokens: super::MAX_OUTPUT_TOKEN_CAP,
-            deadline: DEADLINE,
-            ..CallLimits::default()
-        };
+        let identity = native::native_identity("anthropic", model, effort);
         Ok(Self {
             client,
             identity,
@@ -194,15 +177,13 @@ impl AnthropicProvider {
     }
 
     fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
-        let body = wire::encode_request(&request)?;
-        let request = self
-            .client
-            .post(ENDPOINT)
-            .bearer_auth(&self.key)
-            .header("anthropic-version", "2023-06-01")
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .body(body);
+        let request = native::json_request(
+            &self.client,
+            ENDPOINT,
+            &self.key,
+            wire::encode_request(&request)?,
+        )
+        .header("anthropic-version", "2023-06-01");
         Ok(match self.workspace_id.as_deref() {
             Some(id) => request.header("anthropic-workspace-id", id),
             None => request,
@@ -210,19 +191,7 @@ impl AnthropicProvider {
     }
 
     async fn send(&self, request: Value) -> Result<Vec<u8>, ProviderError> {
-        let mut response = self
-            .request(request)?
-            .send()
-            .await
-            .map_err(|error| super::send_failure(&error))?;
-        if !response.status().is_success() {
-            return Err(super::http_failure(&mut response).await);
-        }
-        let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
-        if raw_reflects_secret(&bytes, &self.key) {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        Ok(bytes)
+        native::post_json(self.request(request)?, &self.key).await
     }
 
     fn decode_run(
@@ -273,13 +242,7 @@ impl Provider for AnthropicProvider {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        request.validate_scope()?;
-        super::image::validate_images(&request)?;
-        if request.model != self.identity.model
-            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
-        {
-            return Err(ProviderError::Rejected);
-        }
+        native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body(&request, &conversation, self.effort)?;
         let response = self.send(body).await?;
@@ -291,13 +254,7 @@ impl Provider for AnthropicProvider {
         request: ProviderRequest,
         preview: super::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
-        request.validate_scope()?;
-        super::image::validate_images(&request)?;
-        if request.model != self.identity.model
-            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
-        {
-            return Err(ProviderError::Rejected);
-        }
+        native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let mut body = wire::run_body(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
@@ -360,6 +317,7 @@ pub(super) async fn read_streamed_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::raw_reflects_secret;
 
     fn synthetic_reply(text: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
@@ -391,7 +349,7 @@ mod tests {
         assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
         assert_eq!(
             provider.identity().limits.deadline,
-            Duration::from_secs(600)
+            native::NATIVE_CALL_DEADLINE
         );
         assert!(
             !provider
