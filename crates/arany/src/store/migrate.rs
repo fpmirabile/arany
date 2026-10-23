@@ -93,6 +93,17 @@ macro_rules! git_write_step {
     };
 }
 
+macro_rules! expiry_step {
+    ($kind:literal, $from:literal) => {
+        EventStep {
+            kind: $kind,
+            from: $from,
+            transform: crate::session::intent_without_expiry,
+            canonical: |payload| crate::session::expiring_payload($kind, payload),
+        }
+    };
+}
+
 pub(super) const REGISTRY: Registry<'static> = Registry {
     schema: SchemaFormat {
         floor: 4,
@@ -181,6 +192,10 @@ pub(super) const REGISTRY: Registry<'static> = Registry {
         variant_step!("HookStarted", 7, crate::session::pre_host_payload),
         variant_step!("HookFinished", 12, crate::session::pre_host_payload),
         variant_step!("ProviderCallRecorded", 17, crate::session::pre_host_payload),
+        expiry_step!("ToolStarted", 18),
+        expiry_step!("ToolFinished", 24),
+        expiry_step!("HookStarted", 8),
+        expiry_step!("HookFinished", 13),
         EventStep {
             kind: "GoalFinished",
             from: 7,
@@ -683,11 +698,24 @@ fn repin(recorded: &mut [u8; 32], pins: Option<&Pins>) -> Result<(), StoreError>
     }
 }
 
+fn repin_intents(value: &mut Value, pins: &HashMap<[u8; 32], [u8; 32]>) {
+    if let Some(source) = value
+        .get_mut("host")
+        .and_then(|host| host.get_mut("source_intent"))
+        && let Ok(old) = serde_json::from_value::<[u8; 32]>(source.clone())
+        && let Some(new) = pins.get(&old)
+    {
+        *source = serde_json::json!(new);
+    }
+    crate::session::rebind_intent_pins(value, &|old| pins.get(old).copied());
+}
+
 fn rewrite_events(
     transaction: &rusqlite::Transaction<'_>,
     registry: &Registry<'_>,
 ) -> Result<i64, StoreError> {
     let mut lanes = HashMap::<SessionId, Lane>::new();
+    let mut intent_pins = HashMap::<[u8; 32], [u8; 32]>::new();
     // Whole-Session prefix digests after fork and compaction boundaries and after each ToolFinished.
     let mut boundaries = HashMap::<(SessionId, u64), Pins>::new();
     let mut statement = transaction.prepare(ROWS_AFTER_SQL)?;
@@ -706,11 +734,73 @@ fn rewrite_events(
         for row in rows {
             let (sequence, original) = (row.sequence, (row.version, row.payload.clone()));
             let historical = registry.historical_payload(&row.kind, row.version, &row.payload)?;
-            let mut envelope = upgraded_row(registry, row)?.decode()?;
             let historical = match historical {
                 Some(payload) => payload,
-                None => envelope.event.payload()?,
+                None => Event::decode(
+                    &row.kind,
+                    row.version,
+                    &row.payload,
+                    row.run_id
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(|_| StoreError::InvalidHistory)?,
+                    row.agent_run_id
+                        .as_deref()
+                        .map(str::parse)
+                        .transpose()
+                        .map_err(|_| StoreError::InvalidHistory)?,
+                )?
+                .payload()?,
             };
+            let original_intent =
+                serde_json::from_str::<Value>(&row.payload)
+                    .ok()
+                    .and_then(|value| {
+                        value
+                            .get("intent")
+                            .or_else(|| value.get("observation")?.get("intent"))
+                            .cloned()
+                    });
+            let mut row = upgraded_row(registry, row)?;
+            let mut value: Value =
+                serde_json::from_str(&row.payload).map_err(|_| StoreError::InvalidHistory)?;
+            repin_intents(&mut value, &intent_pins);
+            if let Some(old) =
+                original_intent.filter(|intent| intent.get("expires_at_ms").is_some())
+            {
+                let old_text =
+                    crate::session::expiring_intent_text(&old).ok_or(StoreError::InvalidHistory)?;
+                let old_digest: [u8; 32] = Sha256::digest(old_text.as_bytes()).into();
+                let intent = value
+                    .get("intent")
+                    .or_else(|| value.get("observation")?.get("intent"))
+                    .ok_or(StoreError::InvalidHistory)?;
+                let current: crate::tools::EffectIntent = serde_json::from_value(intent.clone())
+                    .map_err(|_| StoreError::InvalidHistory)?;
+                let new_digest = current.digest();
+                let intermediate =
+                    crate::session::intent_without_expiry(serde_json::json!({"intent": old}))
+                        .ok_or(StoreError::InvalidHistory)?;
+                let intermediate: crate::tools::EffectIntent =
+                    serde_json::from_value(intermediate["intent"].clone())
+                        .map_err(|_| StoreError::InvalidHistory)?;
+                crate::session::replace_intent_pin(&mut value, &intermediate.digest(), &new_digest);
+                crate::session::replace_intent_pin(&mut value, &old_digest, &new_digest);
+                if intent_pins.len() >= MAX_VALIDATION_EVENTS {
+                    return Err(StoreError::ReplayLimit);
+                }
+                if intent_pins
+                    .insert(old_digest, new_digest)
+                    .is_some_and(|prior| prior != new_digest)
+                {
+                    return Err(StoreError::InvalidHistory);
+                }
+            }
+            row.payload = value.to_string();
+            row.payload_bytes =
+                i64::try_from(row.payload.len()).map_err(|_| StoreError::InvalidHistory)?;
+            let mut envelope = row.decode()?;
             let session = envelope.session_id;
             let lane = lanes.entry(session).or_default();
             let head = (lane.historical.digest(), lane.upgraded.digest());

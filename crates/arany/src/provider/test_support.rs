@@ -121,7 +121,6 @@ fn intent(call: crate::tools::ToolCall) -> crate::tools::EffectIntent {
         workspace_inode: 2,
         call,
         limits: crate::tools::ToolLimits::default(),
-        expires_at_ms: 1,
         use_count: 1,
     }
 }
@@ -139,6 +138,7 @@ pub(crate) fn observation(
         intent,
         disposition: crate::tools::ToolDisposition::Succeeded,
         output: output.into(),
+        approval_cause: None,
         cache_update: crate::tools::CacheUpdate::NotApplicable,
     }
 }

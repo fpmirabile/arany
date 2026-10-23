@@ -21,7 +21,7 @@ pub(crate) const NON_FAST_FORWARD: &str = "host: remote reported no ref update (
 const REFUSED: &str = "host: destination, source, authentication, pinned executable or repository layout unavailable (HEAD limit 256 B; repository config 64 KiB); nothing dispatched.";
 const PREPARATION_TIMEOUT: &str =
     "host: preparation exceeded the runtime deadline; nothing dispatched.";
-const CANCELLED: &str = "host: approval expired or cancelled; nothing dispatched.";
+const CANCELLED: &str = "host: cancelled; nothing dispatched.";
 const MAX_PRIVATE_BYTES: usize = 32 * 1024 * 1024;
 
 pub(crate) fn valid(call: &ToolCall) -> bool {
@@ -957,6 +957,7 @@ fn observation(
         cache_update: CacheUpdate::NotApplicable,
         enforcement_cause: None,
         limit_cause: None,
+        approval_cause: None,
     }
 }
 
@@ -1003,7 +1004,7 @@ async fn supervise(
     executable_sha256: String,
     mut cancellation: Cancellation,
 ) -> ToolObservation {
-    if cancellation.is_cancelled() || crate::tools::now_ms() >= intent.expires_at_ms {
+    if cancellation.is_cancelled() {
         return observation(intent, ToolDisposition::Denied, CANCELLED, None);
     }
     if tokio::time::Instant::now() >= deadline {
@@ -1134,7 +1135,6 @@ mod tests {
                 runtime_ms: 10_000,
                 ..ToolLimits::default()
             },
-            expires_at_ms: crate::tools::now_ms() + 60_000,
             use_count: 1,
         }
     }
@@ -2165,7 +2165,7 @@ done
     }
 
     #[tokio::test]
-    async fn host_git_supervision_cancellation_timeout_and_expired_approval() {
+    async fn host_git_supervision_cancellation_and_preparation_runtime_timeouts() {
         for cancel in [false, true] {
             let root = tempfile::tempdir().unwrap();
             let marker = root.path().join("effect");
@@ -2189,7 +2189,6 @@ done
                     network: NetworkGrant::Host,
                     ..ToolLimits::default()
                 },
-                expires_at_ms: crate::tools::now_ms() + 60_000,
                 use_count: 1,
             };
             let (ready, child_ready) = std::os::unix::net::UnixStream::pair().unwrap();
@@ -2262,16 +2261,35 @@ done
                     .to_string()
                     .contains("credential-canary")
             );
-            let mut expired = intent;
-            expired.expires_at_ms = 1;
-            let mut command = Command::new("/bin/sh");
-            command
-                .args(["-c", "printf twice >> effect"])
-                .current_dir(root.path());
-            let denied = supervise(command, expired, "0".repeat(64), Cancellation::new()).await;
-            assert_eq!(denied.disposition, ToolDisposition::Denied);
-            assert!(denied.attestation.is_none());
-            assert_eq!(std::fs::read(marker).unwrap(), b"once");
+            for cancelled in [false, true] {
+                let mut command = Command::new("/bin/sh");
+                command
+                    .args(["-c", "printf twice >> effect"])
+                    .current_dir(root.path());
+                let cancellation = Cancellation::new();
+                if cancelled {
+                    cancellation.cancel();
+                }
+                let denied = super::supervise(
+                    tokio::time::Instant::now(),
+                    command,
+                    intent.clone(),
+                    "0".repeat(64),
+                    cancellation,
+                )
+                .await;
+                assert_eq!(denied.disposition, ToolDisposition::Denied);
+                assert!(denied.attestation.is_none());
+                assert_eq!(
+                    denied.output,
+                    if cancelled {
+                        super::CANCELLED
+                    } else {
+                        super::PREPARATION_TIMEOUT
+                    }
+                );
+                assert_eq!(std::fs::read(&marker).unwrap(), b"once");
+            }
         }
     }
 

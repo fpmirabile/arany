@@ -35,7 +35,6 @@ mod goal_success_tests {
             workspace_inode: 2,
             call,
             limits: ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         ToolObservation {
@@ -46,6 +45,7 @@ mod goal_success_tests {
             intent,
             disposition,
             output,
+            approval_cause: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         }
     }
@@ -1672,7 +1672,6 @@ mod payload_version_tests {
                 limit: Some(16),
             },
             limits: crate::tools::ToolLimits::default(),
-            expires_at_ms: 1,
             use_count: 1,
         };
         crate::tools::ToolObservation {
@@ -1686,6 +1685,7 @@ mod payload_version_tests {
             intent,
             disposition: crate::tools::ToolDisposition::Succeeded,
             output: "{}".into(),
+            approval_cause: None,
             cache_update: crate::tools::CacheUpdate::NotApplicable,
         }
     }
@@ -1761,13 +1761,56 @@ mod payload_version_tests {
             agent_run_id: agent,
             observation: read_observation(run, agent),
         };
+        for cause in [
+            crate::tools::ApprovalCause::Cancelled,
+            crate::tools::ApprovalCause::Paused,
+            crate::tools::ApprovalCause::ChannelUnavailable,
+            crate::tools::ApprovalCause::Declined,
+            crate::tools::ApprovalCause::ChildTimeout,
+        ] {
+            let mut stopped = finished.clone();
+            let Event::ToolFinished { observation, .. } = &mut stopped else {
+                unreachable!()
+            };
+            observation.disposition = crate::tools::ToolDisposition::Denied;
+            observation.attestation = None;
+            observation.approval_cause = Some(cause);
+            observation.output = "Opaque historical detail".into();
+            assert_eq!(
+                Event::decode(
+                    stopped.kind(),
+                    stopped.version(),
+                    &stopped.payload().unwrap(),
+                    Some(run),
+                    Some(agent)
+                )
+                .unwrap(),
+                stopped
+            );
+        }
         let payload = finished.payload().expect("payload");
         let current = finished.version();
+        assert_eq!(payload_version("ToolFinished"), Some(current));
 
         assert_eq!(
             Event::decode("ToolFinished", current, &payload, Some(run), Some(agent))
                 .expect("current"),
             finished
+        );
+        let mut missing_cause: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        missing_cause
+            .as_object_mut()
+            .unwrap()
+            .remove("approval_cause");
+        assert!(
+            Event::decode(
+                finished.kind(),
+                finished.version(),
+                &missing_cause.to_string(),
+                Some(run),
+                Some(agent)
+            )
+            .is_err()
         );
         let mut missing: serde_json::Value = serde_json::from_str(&payload).unwrap();
         missing.as_object_mut().unwrap().remove("checkpoint");
@@ -1867,6 +1910,11 @@ mod payload_version_tests {
                 Err(ReplayError::UnknownEvent)
             ));
         }
+        assert_eq!(payload_version("ToolStarted"), Some(started.version()));
+        assert_eq!(
+            payload_version("ToolPermissionDecided"),
+            Some(verdict.version())
+        );
     }
 
     #[test]
@@ -2009,7 +2057,8 @@ mod payload_version_tests {
         for event in bumped {
             let (run_id, agent_run_id) = event.scope();
             let payload = event.payload().expect("payload");
-            let version = event.version();
+            let version = payload_version(event.kind()).expect("registered kind");
+            assert_eq!(event.version(), version, "{}", event.kind());
             assert_eq!(
                 Event::decode(event.kind(), version, &payload, run_id, agent_run_id)
                     .expect("current"),

@@ -419,6 +419,8 @@ impl Provider for TeamProvider {
             self.gates[6].acquire_many(2).await.unwrap().forget();
             tokio::time::pause();
             tokio::time::advance(std::time::Duration::from_secs(3600)).await;
+            // Resume before native Guard work: blocking tasks inhibit paused-clock auto-advance.
+            tokio::time::resume();
         }
         if self.case == "primary_denial" && request.phase == AgentPhase::RootSynthesis && step == 2
         {
@@ -444,6 +446,7 @@ impl Provider for TeamProvider {
 }
 
 pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
+    let _deadline = super::engine::deadline(case, std::time::Duration::from_secs(180));
     use std::os::unix::fs::PermissionsExt;
     super::isolate_account_root();
     let directory = tempfile::tempdir().unwrap();
@@ -670,9 +673,6 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     }
     let result = result.unwrap_or_else(|e| panic!("{case}: team Run: {e:?}"));
     drop(handle);
-    if case == "primary_time" {
-        tokio::time::resume();
-    }
     assert!(
         provider.violations.lock().unwrap().is_empty(),
         "{case}: {:?}",
@@ -1035,6 +1035,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
                     attestation: None,
                     enforcement_cause: None,
                     limit_cause: None,
+                    approval_cause: None,
                     cache_update: CacheUpdate::NotApplicable,
                 },
             });
@@ -1224,6 +1225,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
 }
 
 pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObservation {
+    let _deadline = super::engine::deadline(case, std::time::Duration::from_secs(180));
     use super::goals::ForegroundWorkerProvider;
     use std::os::unix::fs::PermissionsExt;
     let directory = tempfile::tempdir().unwrap();
@@ -1540,6 +1542,10 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
 }
 
 pub async fn recover_open_worker_command(guard: &Path) -> TeamObservation {
+    let _deadline = super::engine::deadline(
+        "open worker command recovery",
+        std::time::Duration::from_secs(360),
+    );
     use super::goals::ForegroundWorkerProvider;
     use std::os::unix::fs::PermissionsExt;
     let mut original = Box::pin(runtime_command_case(guard, "command_success")).await;

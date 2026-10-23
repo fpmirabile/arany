@@ -107,7 +107,6 @@ impl Repo {
                 result_bytes: 16 * 1024,
                 ..Default::default()
             },
-            expires_at_ms: 1,
             use_count: 1,
         };
         tokio::runtime::Builder::new_current_thread()

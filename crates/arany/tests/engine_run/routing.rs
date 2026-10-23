@@ -463,8 +463,8 @@ async fn refused_fallback_admission_settles_the_known_compaction_failure() {
     for sequence in last + 1..=10_000 - i64::try_from(slots).unwrap() {
         transaction
             .execute(
-                "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',6,'{\"title\":\"x\"}',0)",
-                rusqlite::params![sequence, result.session_id.to_string()],
+                "INSERT INTO events (sequence,session_id,kind,event_version,payload,created_at_ms) VALUES (?1,?2,'SessionRenamed',?3,'{\"title\":\"x\"}',0)",
+                rusqlite::params![sequence, result.session_id.to_string(), arany::test_support::payload_version("SessionRenamed")],
             )
             .unwrap();
     }

@@ -245,11 +245,11 @@ impl Composer {
             return None;
         }
         let query = &self.text[start + 1..self.cursor];
-        if let Some(quoted) = query.strip_prefix('"') {
-            if quoted.contains(['"', '\\']) {
-                return None;
-            }
-            return Some(quoted.to_owned());
+        if query.starts_with('"') {
+            return serde_json::from_str::<String>(query)
+                .ok()
+                .filter(|_| query.ends_with('"'))
+                .or_else(|| serde_json::from_str(&format!("{query}\"")).ok());
         }
         (!query.chars().any(char::is_whitespace)).then(|| query.to_owned())
     }
@@ -592,10 +592,15 @@ impl Composer {
                     let path = &items[selected];
                     let directory = path.ends_with('/');
                     let browse = directory && input == TerminalInput::Tab;
-                    let replacement = if browse && !path.chars().any(char::is_whitespace) {
+                    let replacement = if browse
+                        && !path.chars().any(char::is_whitespace)
+                        && !path.contains('"')
+                    {
                         format!("@{path}")
                     } else if browse {
-                        format!("@\"{path}")
+                        let mut quoted = serde_json::to_string(path).expect("serializable path");
+                        quoted.pop();
+                        format!("@{quoted}")
                     } else {
                         format!(
                             "@{} ",
@@ -1263,10 +1268,17 @@ mod tests {
             ),
             ("Edit @", "中 é.md", "Edit @\"中 é.md\" "),
             ("Edit @d", "docs/", "Edit @docs/"),
+            ("Edit @\"docs/\"", "docs/guide/", "Edit @docs/guide/"),
+            ("Edit @\"docs\"", "docs/", "Edit @docs/"),
             (
                 "Inspect @hello",
                 "docs/hello world/",
                 "Inspect @\"docs/hello world/",
+            ),
+            (
+                "Inspect @hello",
+                "docs/hello \"world\"/",
+                "Inspect @\"docs/hello \\\"world\\\"/",
             ),
             (
                 "Edit @hwd",
@@ -1300,6 +1312,18 @@ mod tests {
                 assert_eq!(composer.cursor_byte_offset(), expected.len());
                 assert!(composer.file_menu().is_none());
             }
+        }
+        for (draft, query) in [
+            ("@docs/", "docs/"),
+            ("@\"docs/research/\"", "docs/research/"),
+            ("@\"docs/research\"", "docs/research"),
+            ("@\"docs/with spaces/", "docs/with spaces/"),
+            ("@\"docs/with spaces/\"", "docs/with spaces/"),
+            ("@\"docs/a\\\"b/\"", "docs/a\"b/"),
+        ] {
+            let mut composer = Composer::default();
+            composer.insert_paste(draft).unwrap();
+            assert_eq!(composer.file_query().as_deref(), Some(query), "{draft}");
         }
         for text in [
             "user@example.com",
