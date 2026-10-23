@@ -261,7 +261,7 @@ impl TeamProvider {
             }
             return Ok(tool_outcome(ToolCall::Write {
                 path: format!("notes/{index}"),
-                expected_digest: Some(crate::tools::types::hex_digest(original.as_bytes())),
+                expected_digest: Some(crate::validate::hex_digest(original.as_bytes())),
                 content: format!("edited {index}"),
             }));
         }
@@ -463,10 +463,10 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let root = StateRoot::admit(&state).unwrap();
     let commands = if case.starts_with("hook_") || case == "order_hooks" {
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
-        serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
+        serde_json::json!([{"name":"sh", "executable":shell, "sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}])
     } else if matches!(case, "command" | "worker_command") {
         let executable = std::fs::canonicalize("/usr/bin/true").unwrap();
-        serde_json::json!([{"name":"verify", "executable":executable, "sha256":crate::tools::types::hex_digest(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}])
+        serde_json::json!([{"name":"verify", "executable":executable, "sha256":crate::validate::hex_digest(&std::fs::read(&executable).unwrap()),"interpreter":false,"inputs":[]}])
     } else {
         serde_json::json!([])
     };
@@ -1071,7 +1071,7 @@ async fn resume_case(guard: &Path, checkpoint: Option<&'static str>) -> TeamObse
         std::fs::create_dir_all(workspace.join("docs")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         let shell = std::fs::canonicalize("/bin/sh").unwrap();
-        let command = serde_json::json!({"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]});
+        let command = serde_json::json!({"name":"sh","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]});
         std::fs::write(state.join("tools.json"), serde_json::to_vec(&serde_json::json!({"version":1,"workspace_paths":["docs","notes"],"write":true,"commands":[command],"skills":[],"mcp":[]})).unwrap()).unwrap();
         std::fs::write(state.join("permissions.json"), br#"{"hooks":{"PreToolUse":[{"matcher":"Read|Write","hooks":[{"type":"command","command":"exit 0","timeout":5}]}],"PostToolUse":[{"matcher":"Read|Write","hooks":[{"type":"command","command":"exit 0","timeout":5}]}]}}"#).unwrap();
         std::fs::set_permissions(
@@ -1244,7 +1244,7 @@ pub async fn runtime_command_case(guard: &Path, case: &'static str) -> TeamObser
     let shell = std::fs::canonicalize("/bin/sh").unwrap();
     private(&state.join("tools.json"), &serde_json::to_vec(&serde_json::json!({
         "version":1,"workspace_paths":["notes"],"write":true,
-        "commands":[{"name":"sh","executable":shell,"sha256":crate::tools::types::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],
+        "commands":[{"name":"sh","executable":shell,"sha256":crate::validate::hex_digest(&std::fs::read(&shell).unwrap()),"interpreter":true,"inputs":[]}],
         "skills":[],"mcp":[],"child_unguarded":"denied"
     })).unwrap());
     std::fs::create_dir(state.join("agents")).unwrap();

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 pub(super) const CONTROL_BYTES: usize = 32 * 1024;
 pub(super) const CONTROL_TOTAL_BYTES: usize = 256 * 1024;
 pub(super) const CONTROL_FILES: usize = 256;
-const RULES: usize = 4096;
+pub(super) const RULES: usize = 4096;
 const LINE_BYTES: usize = 4096;
 const EXPANDED_LINE_BYTES: usize = 64 * 1024;
 const EXPANDED_BYTES: usize = 1024 * 1024;

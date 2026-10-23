@@ -1,5 +1,6 @@
 use super::{CustomProfile, CustomProfileError, PinnedDestination, transport::CustomTransport};
 use crate::provider::evidence::ProviderEvidenceRecord;
+use crate::provider::native_check::PROBE_TOTAL_DEADLINE;
 use crate::provider::{
     AgentPhase, CompactionItem, CompactionRequest, HistoryTurn, PromptRole, ProviderOutcome,
     ProviderRequest, RunInput,
@@ -13,9 +14,10 @@ use crate::{
     CheckTarget, CheckUsage,
 };
 use sha2::{Digest, Sha256};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+#[cfg(test)]
+use std::time::Duration;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 const CHECK_VERSION: &str = "custom-protocol-text-compaction-conformance-effort-stream-journal-v38";
 
@@ -57,7 +59,8 @@ pub async fn check_custom_profile_with_cancellation(
     let mut journal = CheckJournal::start(check_root, start(&profile)?)
         .await
         .map_err(|error| CustomProfileError::Journal(Box::new(error)))?;
-    let deadline = (tokio::time::Instant::now() + TOTAL_DEADLINE).min(journal.request_deadline());
+    let deadline =
+        (tokio::time::Instant::now() + PROBE_TOTAL_DEADLINE).min(journal.request_deadline());
     let mut cancelled = false;
     let result = tokio::select! {
         biased;

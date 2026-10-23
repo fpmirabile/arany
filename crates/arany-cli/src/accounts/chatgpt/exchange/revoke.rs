@@ -6,7 +6,7 @@ use std::time::Duration;
 
 const DISCOVERY_ENDPOINT: &str = "https://auth.openai.com/.well-known/openid-configuration";
 const MAX_DISCOVERY_BYTES: usize = 16 * 1024;
-const MAX_FORM_BYTES: usize = 25 * 1024;
+const MAX_REVOKE_FORM_BYTES: usize = 25 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
@@ -113,7 +113,7 @@ async fn revoke_at(
         serializer.append_pair(name, value);
     }
     let body = serializer.finish();
-    if body.len() > MAX_FORM_BYTES {
+    if body.len() > MAX_REVOKE_FORM_BYTES {
         return Err(AuthorizationError::ExchangeFailed);
     }
     let mut response = client
@@ -219,7 +219,7 @@ mod tests {
                     .and_then(|value| value.trim().parse::<usize>().ok())
             })
             .unwrap_or(0);
-        assert!(length <= MAX_FORM_BYTES);
+        assert!(length <= MAX_REVOKE_FORM_BYTES);
         while bytes.len() < header_end + length {
             let mut buffer = [0u8; 1024];
             let count = stream.read(&mut buffer).await.expect("read form");

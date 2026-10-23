@@ -24,7 +24,7 @@ use std::path::Path;
 
 pub const MAX_CONFIG_BYTES: usize = 64 * 1024;
 pub const MAX_RULES: usize = 128;
-pub const MAX_PATTERN_BYTES: usize = 1024;
+pub const MAX_RULE_PATTERN_BYTES: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -637,7 +637,7 @@ enum Tool {
 impl Rule {
     fn parse(input: &str, decision: Decision) -> Result<Self, &'static str> {
         if input.is_empty()
-            || input.len() > MAX_PATTERN_BYTES
+            || input.len() > MAX_RULE_PATTERN_BYTES
             || input.chars().any(char::is_control)
         {
             return Err("rule must be nonempty, control-free and at most 1024 bytes");

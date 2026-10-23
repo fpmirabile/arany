@@ -11,6 +11,7 @@ mod destination;
 mod transport;
 pub use adapter::CustomProvider;
 pub use check::{CustomProfileCheck, check_custom_profile, check_custom_profile_with_cancellation};
+pub(crate) use destination::MAX_ADDRESSES;
 use destination::PinnedDestination;
 
 const MAX_PROFILES: usize = 32;

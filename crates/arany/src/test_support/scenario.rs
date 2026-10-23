@@ -680,7 +680,7 @@ pub fn offline_cargo_fixture(home: &Path, workspace: &Path) {
     const REGISTRY: &str = "index.crates.io-1949cf8c6b5b557f";
     use std::os::unix::fs::PermissionsExt;
     let archive = include_bytes!("../../tests/fixtures/offline-cargo/dependency.crate");
-    let checksum = crate::tools::types::hex_digest(archive);
+    let checksum = crate::validate::hex_digest(archive);
     let registry = home.join(".cargo/registry");
     let package = "arany-fixture-dependency-0.1.0";
     let source = registry.join("src").join(REGISTRY).join(package);

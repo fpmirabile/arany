@@ -1,5 +1,6 @@
 use super::{AuthorizationError, VerifiedCredentials, consent::ConsentReceipt};
 use crate::accounts::credentials::AccountStorage;
+use arany::MAX_CATALOG_MODELS;
 #[cfg(test)]
 use reqwest::redirect::Policy;
 use reqwest::{Client, Url, header};
@@ -8,7 +9,6 @@ use std::{collections::HashSet, time::Duration};
 
 const MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
-const MAX_MODELS: usize = 4096;
 const DEADLINE: Duration = Duration::from_secs(20);
 
 pub(crate) struct ChatGptModel {
@@ -157,7 +157,7 @@ fn unsafe_display_character(character: char) -> bool {
 }
 
 fn bounded_models<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error> {
-    crate::files::bounded_list::<D, CatalogRow, MAX_MODELS>(deserializer, "too many models")
+    crate::files::bounded_list::<D, CatalogRow, MAX_CATALOG_MODELS>(deserializer, "too many models")
 }
 
 #[cfg(test)]
@@ -379,7 +379,7 @@ mod tests {
             Err(AuthorizationError::InvalidCatalog)
         ));
         let mut rows = String::from("{\"models\":[");
-        for index in 0..=MAX_MODELS {
+        for index in 0..=MAX_CATALOG_MODELS {
             if index != 0 {
                 rows.push(',');
             }

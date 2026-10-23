@@ -502,7 +502,7 @@ pub(crate) fn pin(
         executable: executable.to_str().ok_or(ToolError::Path)?.to_owned(),
         device: metadata.dev(),
         inode: metadata.ino(),
-        sha256: super::types::hex_digest(&bytes),
+        sha256: crate::validate::hex_digest(&bytes),
         path: path.into(),
         environment_digest: environment_digest(path),
     })
@@ -934,7 +934,7 @@ fn prepare(request: &Request<'_>) -> Result<(Command, usize), ToolError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::types::hex_digest;
+    use crate::validate::hex_digest;
     use std::os::unix::fs::PermissionsExt;
 
     fn host_call(args: &[&str]) -> crate::tools::ToolCall {

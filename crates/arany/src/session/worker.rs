@@ -862,7 +862,7 @@ fn decode_data_inner(
                     .map_err(|_| ReplayError::InvalidPayload)?;
                 if content.len() > 1024 * 1024
                     || base64::engine::general_purpose::STANDARD.encode(&content) != v.content
-                    || crate::tools::types::hex_digest(&content) != v.sha256
+                    || crate::validate::hex_digest(&content) != v.sha256
                 {
                     return Err(ReplayError::InvalidPayload);
                 }

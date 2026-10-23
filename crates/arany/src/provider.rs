@@ -39,7 +39,7 @@ pub(crate) mod test_support;
 mod tool_specs;
 pub use anthropic::AnthropicProvider;
 pub use catalog::{
-    ModelEntry, list_native_models, list_native_models_with_api_key,
+    MAX_CATALOG_MODELS, ModelEntry, list_native_models, list_native_models_with_api_key,
     list_native_models_with_credentials,
 };
 pub(crate) use conversation::{MAX_HARNESS_FEEDBACK_BYTES, max_turn_bytes};
@@ -47,11 +47,11 @@ pub use conversation::{
     PromptRole, ProviderRequest, ProviderTurn, RunInput, StopHookFeedback, ToolUseId,
     WorkspaceGuidance,
 };
-pub(crate) use custom::PROVIDER_PROFILES;
 pub use custom::{
     CustomProfile, CustomProfileCheck, CustomProfileError, CustomProvider, check_custom_profile,
     check_custom_profile_with_cancellation,
 };
+pub(crate) use custom::{MAX_ADDRESSES, PROVIDER_PROFILES};
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
 pub use image::{
     ImageAttachment, ImageOrigin, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES,

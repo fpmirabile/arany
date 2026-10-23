@@ -2,6 +2,7 @@ use super::{ENDPOINT, wire};
 use crate::diagnostics::{
     ResponseShape, StreamCounts, SubscriptionFailureStage as Stage, subscription_failure,
 };
+use crate::provider::native_check::{PROBE_OUTPUT_CAP, PROBE_TOTAL_DEADLINE};
 use crate::provider::{RateLimitSlot, ResponsePreview};
 mod limits;
 use crate::provider::conversation::Conversation;
@@ -27,8 +28,6 @@ const MAX_EVENTS: usize = 8192;
 // Codex's `stream_idle_timeout_ms` default; each received event restarts it.
 const STREAM_IDLE: Duration = Duration::from_secs(300);
 const CALL_CEILING: Duration = Duration::from_secs(600);
-const PROBE_DEADLINE: Duration = Duration::from_secs(180);
-const PROBE_OUTPUT_CAP: u32 = 1024;
 // The route sends no cap, so the Engine's summary byte bound decides compaction acceptance.
 const COMPACTION_VISIBLE_CAP: u32 = crate::provider::DEFAULT_OUTPUT_TOKEN_CAP;
 const COMPACTION_TARGET_BYTES: usize = crate::session::MAX_COMPACTION_SUMMARY_BYTES * 3 / 4;
@@ -165,7 +164,7 @@ pub(super) async fn probe_model(
     let client = client()?;
     let endpoint = Url::parse(ENDPOINT).expect("compiled Responses endpoint");
     timeout(
-        PROBE_DEADLINE,
+        PROBE_TOTAL_DEADLINE,
         probe_model_at(&client, endpoint, access_token, model, effort),
     )
     .await

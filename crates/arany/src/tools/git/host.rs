@@ -1086,7 +1086,8 @@ async fn supervise(
 mod tests {
     use super::*;
     use crate::tools::git::tests::{arm_hostile, fixture, host_git, host_git_output};
-    use crate::tools::types::{NetworkGrant, ToolLimits, hex_digest};
+    use crate::tools::types::{NetworkGrant, ToolLimits};
+    use crate::validate::hex_digest;
 
     async fn supervise(
         command: Command,

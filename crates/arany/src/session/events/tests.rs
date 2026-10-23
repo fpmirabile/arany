@@ -316,7 +316,7 @@ mod goal_success_tests {
 
     #[test]
     fn later_file_edit_invalidates_an_earlier_matching_read() {
-        let expected = crate::tools::types::hex_digest(b"before");
+        let expected = crate::validate::hex_digest(b"before");
         let contract = criterion(GoalSuccessCriterion::WorkspaceFileDigest {
             path: "src/main.rs".into(),
             sha256: expected,
@@ -330,7 +330,7 @@ mod goal_success_tests {
                 },
                 ToolDisposition::Succeeded,
                 serde_json::json!({
-                    "sha256": crate::tools::types::hex_digest(b"before")
+                    "sha256": crate::validate::hex_digest(b"before")
                 })
                 .to_string(),
             ),
@@ -342,7 +342,7 @@ mod goal_success_tests {
                 },
                 ToolDisposition::Succeeded,
                 serde_json::json!({
-                    "sha256": crate::tools::types::hex_digest(b"after")
+                    "sha256": crate::validate::hex_digest(b"after")
                 })
                 .to_string(),
             ),

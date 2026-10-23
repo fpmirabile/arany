@@ -3,7 +3,8 @@ use super::fs::{open_absolute, read_regular};
 use super::toolchains::{RuntimeGrant, validate_selection};
 use super::types::*;
 use crate::store::{RecordFormat, RecordKind, StateRoot};
-use crate::validate::{digest, valid_digest, valid_name, valid_relative};
+use crate::tools::process::MAX_ARGUMENT_BYTES;
+use crate::validate::{digest, hex_digest, valid_digest, valid_name, valid_relative};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -186,7 +187,7 @@ impl Config {
                 || server
                     .args
                     .iter()
-                    .any(|arg| arg.len() > 4096 || arg.contains('\0'))
+                    .any(|arg| arg.len() > MAX_ARGUMENT_BYTES || arg.contains('\0'))
             {
                 return Err(ToolError::Configuration);
             }

@@ -19,8 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 const CHECK_VERSION: &str = "native-goal-contract-outcome-conformance-journal-v37";
-const TOTAL_DEADLINE: Duration = Duration::from_secs(180);
-const PROBE_OUTPUT_CAP: u32 = 1024;
+pub(crate) const PROBE_TOTAL_DEADLINE: Duration = Duration::from_secs(180);
+pub(crate) const PROBE_OUTPUT_CAP: u32 = 1024;
 const EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 #[derive(Debug, thiserror::Error)]
@@ -110,7 +110,8 @@ pub async fn check_native_model(
     let mut journal = CheckJournal::start(root, manifest)
         .await
         .map_err(|error| NativeCheckError::Journal(Box::new(error)))?;
-    let deadline = (tokio::time::Instant::now() + TOTAL_DEADLINE).min(journal.request_deadline());
+    let deadline =
+        (tokio::time::Instant::now() + PROBE_TOTAL_DEADLINE).min(journal.request_deadline());
     let mut cancelled = false;
     let result = tokio::select! {
         biased;

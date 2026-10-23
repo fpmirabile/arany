@@ -3,11 +3,11 @@ use super::config::{Config, Program};
 use super::toolchains::{
     Candidate, MAX_RUNTIME_GRANTS, RuntimeGrant, discover, profile_order, validate_selection,
 };
-use super::types::{MAX_SNAPSHOT_BYTES, hex_digest};
+use super::types::MAX_SNAPSHOT_BYTES;
 use super::{ToolError, fs};
 use crate::session::WorkspaceIdentity;
 use crate::store::{RecordFormat, RecordKind, StateRoot, StoreError};
-use crate::validate::MAX_PATH_BYTES;
+use crate::validate::{MAX_PATH_BYTES, hex_digest};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 

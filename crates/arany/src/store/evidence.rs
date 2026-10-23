@@ -1,4 +1,5 @@
 use super::StoreError;
+use crate::provider::MAX_ADDRESSES;
 use crate::provider::evidence::{
     EvidenceOp, EvidenceRecord, NativeEvidenceRecord, ProviderEvidenceRecord,
 };
@@ -11,7 +12,6 @@ use std::{
 
 const MAX_EVIDENCE_ROWS: i64 = 32;
 const MAX_NATIVE_EVIDENCE_ROWS: i64 = 256;
-const MAX_ADDRESSES: usize = 8;
 const MAX_EVIDENCE_AGE_MS: i64 = 24 * 60 * 60 * 1000;
 
 pub(super) fn apply(

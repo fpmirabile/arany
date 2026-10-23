@@ -975,12 +975,12 @@ mod tests {
             files.push(crate::session::worker::WorkerFileFact {
                 path: path.clone(),
                 before: WorkerBaseVersion::File {
-                    sha256: crate::tools::types::hex_digest(b"old"),
+                    sha256: crate::validate::hex_digest(b"old"),
                     bytes,
                     executable: false,
                 },
                 after: WorkerBaseVersion::File {
-                    sha256: crate::tools::types::hex_digest(b"new"),
+                    sha256: crate::validate::hex_digest(b"new"),
                     bytes: 3,
                     executable: false,
                 },
@@ -1065,7 +1065,7 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .sha256,
-            crate::tools::types::hex_digest(b"external")
+            crate::validate::hex_digest(b"external")
         );
         let kept = engine
             .prepare_rewind(request(vec!["src/a".into()], Vec::new()), &view)
@@ -1141,7 +1141,7 @@ mod tests {
             .execute(
                 "INSERT INTO blobs(digest,bytes,len) VALUES(?1,?2,3)",
                 rusqlite::params![
-                    parse_digest(&crate::tools::types::hex_digest(b"old"))
+                    parse_digest(&crate::validate::hex_digest(b"old"))
                         .unwrap()
                         .as_slice(),
                     b"old".as_slice()

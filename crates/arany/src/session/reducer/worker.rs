@@ -1148,7 +1148,7 @@ pub(super) fn before_event(view: &SessionView, event: &Event) -> Result<(), Repl
                     }
                 }
                 if let ToolCall::Write { content, .. } = &o.intent.call
-                    && !changes.iter().all(|f| matches!(&f.after, WorkerBaseVersion::File { sha256, .. } if *sha256 == crate::tools::types::hex_digest(content.as_bytes()))) { return Err(ReplayError::InvalidTransition); }
+                    && !changes.iter().all(|f| matches!(&f.after, WorkerBaseVersion::File { sha256, .. } if *sha256 == crate::validate::hex_digest(content.as_bytes()))) { return Err(ReplayError::InvalidTransition); }
             }
             if o.disposition == ToolDisposition::Succeeded
                 && matches!(o.intent.target, EffectTarget::WorkerView { .. })
@@ -1901,7 +1901,7 @@ pub(crate) fn private_criterion_evidence(
                 }
                 GoalSuccessCriterion::WorkspaceFileContent { path, content } => {
                     private_file_digest(run, w, o, path).as_ref()
-                        == Some(&crate::tools::types::hex_digest(content.as_bytes()))
+                        == Some(&crate::validate::hex_digest(content.as_bytes()))
                 }
                 _ => false,
             };

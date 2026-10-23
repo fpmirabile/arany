@@ -668,7 +668,7 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             let path = format!("src/changed{index}");
             intent.call = ToolCall::Write {
                 path: path.clone(),
-                expected_digest: Some(crate::tools::types::hex_digest(b"before")),
+                expected_digest: Some(crate::validate::hex_digest(b"before")),
                 content: "new".into(),
             };
             store
@@ -692,11 +692,11 @@ async fn checkpoints_prune_notices_survive_discarded_captures_until_journal_comm
             let mut observation = observation.clone();
             observation.output =
                 serde_json::to_string(&crate::session::rewind::FilePublicationResult {
-                    sha256: crate::tools::types::hex_digest(b"new"),
+                    sha256: crate::validate::hex_digest(b"new"),
                     bytes: 3,
                     executable: false,
                     before: Some(crate::session::rewind::FileState {
-                        sha256: crate::tools::types::hex_digest(b"before"),
+                        sha256: crate::validate::hex_digest(b"before"),
                         bytes: 6,
                         executable: false,
                     }),

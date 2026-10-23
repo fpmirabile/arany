@@ -144,7 +144,7 @@ impl RuntimeGrant {
         let mut identity = path.as_bytes().to_vec();
         identity.extend_from_slice(&self.device.to_le_bytes());
         identity.extend_from_slice(&self.inode.to_le_bytes());
-        let hash = super::types::hex_digest(&identity);
+        let hash = crate::validate::hex_digest(&identity);
         Ok(format!("{}-{}", self.kind.token_prefix(), &hash[..12]))
     }
 

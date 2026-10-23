@@ -3,7 +3,7 @@ use super::config::Config;
 use super::types::*;
 use super::{ToolError, ToolRuntime};
 use crate::session::WorkspaceIdentity;
-use crate::validate::{forbidden, valid_digest, valid_relative};
+use crate::validate::{forbidden, hex_digest, valid_digest, valid_relative};
 use cap_fs_ext::{DirExt, FollowSymlinks, OpenOptionsFollowExt};
 use cap_std::fs::{Dir, DirBuilder, OpenOptions};
 use serde_json::{Value, json};

@@ -21,7 +21,7 @@ pub(crate) use agents::{
     agent_targets, run_targets,
 };
 pub use exec::render_exec;
-pub(crate) use model::{DraftAction, PresentationModel};
+pub(crate) use model::{DraftAction, MAX_ROW_WIDTH, PresentationModel};
 pub(crate) use model::{
     linear_session_lines, model_id_preview, safe_truncate, tool_capacity_notice,
 };

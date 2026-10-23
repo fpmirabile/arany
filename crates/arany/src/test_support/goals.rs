@@ -558,7 +558,7 @@ impl ForegroundWorkerProvider {
             if self.case == "command_stale" && step == 4 {
                 return super::scenario::tool_outcome(ToolCall::Write {
                     path: "notes/b".into(),
-                    expected_digest: Some(crate::tools::types::hex_digest(b"edited b")),
+                    expected_digest: Some(crate::validate::hex_digest(b"edited b")),
                     content: "late edit".into(),
                 });
             }
@@ -889,7 +889,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 super::scenario::tool_outcome(if self.case == "success" {
                     ToolCall::MultiEdit {
                         file_path: path.into(),
-                        expected_digest: crate::tools::types::hex_digest(old),
+                        expected_digest: crate::validate::hex_digest(old),
                         edits: vec![
                             crate::LiteralEdit {
                                 old_string: std::str::from_utf8(old).unwrap().into(),
@@ -906,7 +906,7 @@ impl crate::Provider for ForegroundWorkerProvider {
                 } else {
                     ToolCall::Write {
                         path: path.into(),
-                        expected_digest: Some(crate::tools::types::hex_digest(old)),
+                        expected_digest: Some(crate::validate::hex_digest(old)),
                         content: new.into(),
                     }
                 })

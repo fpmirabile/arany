@@ -6,8 +6,8 @@ use crate::terminal::{
     TerminalInput,
 };
 use arany::{
-    CustomProfile, Effort, ModelEntry, NativeApiCredentials, SessionId, SessionView, StateRoot,
-    list_native_models_with_credentials, resolve_native_effort,
+    CustomProfile, Effort, MAX_CATALOG_MODELS, ModelEntry, NativeApiCredentials, SessionId,
+    SessionView, StateRoot, list_native_models_with_credentials, resolve_native_effort,
 };
 use arany::{RecordFormat, RecordKind};
 use serde::{Deserialize, Serialize};
@@ -21,7 +21,6 @@ use std::{
 const CATALOG_LOADING: &str = "Loading model catalog; Ctrl+C cancels";
 const MAX_PREFERENCE_BYTES: usize = RecordKind::ModelPreferences.limit();
 const MAX_PREFERENCE_SOURCES: usize = 8;
-const MAX_CACHED_MODELS: usize = 4096;
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -63,7 +62,7 @@ fn bounded_sources<'de, D: serde::Deserializer<'de>>(
 fn bounded_models<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<String>, D::Error> {
-    bounded_list::<D, String, MAX_CACHED_MODELS>(
+    bounded_list::<D, String, MAX_CATALOG_MODELS>(
         deserializer,
         "saved model preference limit exceeded",
     )
@@ -137,7 +136,7 @@ fn validate_preferences(preferences: ModelPreferences) -> Result<ModelPreference
             || source.account_id.get_version() != Some(uuid::Version::SortRand)
             || !sources.insert((&source.profile, source.account_id))
             || !valid_selection
-            || source.catalog.len() > MAX_CACHED_MODELS
+            || source.catalog.len() > MAX_CATALOG_MODELS
             || source.catalog.iter().any(|model| {
                 arany::validate_native_model_id(model).is_err() || !models.insert(model)
             })
@@ -1063,14 +1062,14 @@ mod preference_tests {
         let mut changed = document.clone();
         changed["sources"] = json!(vec![source.clone(); MAX_PREFERENCE_SOURCES + 1]);
         cases.push((changed, false));
-        for count in [MAX_CACHED_MODELS, MAX_CACHED_MODELS + 1] {
+        for count in [MAX_CATALOG_MODELS, MAX_CATALOG_MODELS + 1] {
             let mut changed = document.clone();
             changed["sources"][0]["catalog"] = json!(
                 (0..count)
                     .map(|index| format!("model-{index}"))
                     .collect::<Vec<_>>()
             );
-            cases.push((changed, count == MAX_CACHED_MODELS));
+            cases.push((changed, count == MAX_CATALOG_MODELS));
         }
         for (document, accepted) in cases {
             root.record(RecordKind::ModelPreferences)
@@ -1143,7 +1142,7 @@ mod preference_tests {
         assert_eq!(current.sources.len(), MAX_PREFERENCE_SOURCES);
         assert!(current.sources.iter().all(|source| source.account_id != id));
         let mut large = original;
-        large.catalog = (0..MAX_CACHED_MODELS)
+        large.catalog = (0..MAX_CATALOG_MODELS)
             .map(|index| format!("{index:04}{}", "x".repeat(124)))
             .collect();
         write_preferences(&root, large.clone(), true, true).unwrap();

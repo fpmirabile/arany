@@ -376,7 +376,7 @@ impl ToolRuntime {
                 .map(|(path, expected)| {
                     let bytes =
                         fs::read_regular(fs::open_file(&root, path)?, types::MAX_FILE_BYTES)?;
-                    if types::hex_digest(&bytes) != *expected {
+                    if crate::validate::hex_digest(&bytes) != *expected {
                         return Err(ToolError::ChangedInput);
                     }
                     Ok((path.clone(), bytes))
