@@ -1,11 +1,19 @@
+use super::controls::ActiveSubmission;
+use super::{Admission, Feedback, emit_outcome, load_confirmed_outcome};
+use crate::cli::exec::SHUTDOWN_GRACE;
 use crate::cli::provider::routing::RoutingError;
 use crate::cli::provider::select::{Selection, SelectionError, select_provider};
+use crate::terminal::{
+    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
+    TerminalError, TerminalInput, TerminalNotice,
+};
 use arany::{
     AdmittedProviders, CompactionRecord, Engine, RunCancellation, RunControls, RunHandle, RunHints,
-    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, ToolGrant,
-    native_protection_supported,
+    RunId, RunOutcome, RunRequest, RunResult, RunSteering, SessionId, SessionView, SteeringRefused,
+    ToolGrant, native_protection_supported,
 };
 use std::path::Path;
+use std::time::Duration;
 
 #[derive(Clone, Copy)]
 pub(super) struct ToolAccess<'a> {
@@ -52,21 +60,32 @@ pub(super) async fn preflight_selected(
         .map_err(|error| error.to_string())
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "run admission carries independent inputs"
-)]
-pub(super) async fn submit_selected<'a>(
+struct SelectedSubmission<'a> {
     engine: &'a Engine,
-    state_dir: &Path,
-    selection: Selection<'_>,
+    state_dir: &'a Path,
+    selection: Selection<'a>,
     request: RunRequest,
     cancellation: RunCancellation,
     hints: RunHints,
-    tools: ToolAccess<'_>,
+    tools: ToolAccess<'a>,
     steering: RunSteering,
     roster: Option<crate::cli::provider::roster::SelectedRoster>,
+}
+
+async fn submit_selected<'a>(
+    submission: SelectedSubmission<'a>,
 ) -> Result<RunHandle<'a>, RunAttemptError> {
+    let SelectedSubmission {
+        engine,
+        state_dir,
+        selection,
+        request,
+        cancellation,
+        hints,
+        tools,
+        steering,
+        roster,
+    } = submission;
     let mut admission_cancellation = cancellation.clone();
     let admit = async {
         engine
@@ -159,7 +178,7 @@ fn submit_with_providers<'a>(
     Ok(handle)
 }
 
-pub(super) fn finish_run(
+pub(super) fn finish_attempt(
     result: Result<RunResult, arany::EngineError>,
     pause_requested: bool,
 ) -> Result<RunOutcome, RunAttemptError> {
@@ -247,6 +266,1676 @@ pub(super) async fn compact_selected(
     .map_err(|error| error.to_string())
 }
 
+pub(super) enum RunSubmission {
+    Completed(Box<RunOutcome>, bool, Option<String>),
+    InterruptedBeforeRun,
+    Shutdown(String),
+}
+
+enum RunStep<'a> {
+    Admitted(arany::RunHandle<'a>),
+    Completed(Result<Box<RunOutcome>, RunAttemptError>),
+}
+
+fn linear_approval_choice(
+    answer: &str,
+    choices: &[crate::presentation::ToolApprovalChoice],
+) -> Option<crate::presentation::ToolApprovalChoice> {
+    use crate::presentation::ToolApprovalChoice::{No, Yes};
+    match answer.trim().to_ascii_lowercase().as_str() {
+        "" | "no" => Some(No),
+        "yes" => Some(Yes),
+        number => number
+            .parse::<usize>()
+            .ok()
+            .and_then(|number| number.checked_sub(1))
+            .and_then(|index| choices.get(index))
+            .copied(),
+    }
+}
+
+async fn withdraw_abandoned_approval(
+    pending: &mut Option<arany::ToolApproval>,
+    answer: &mut Composer,
+) {
+    match pending.as_mut() {
+        Some(approval) => approval.abandoned().await,
+        None => std::future::pending().await,
+    }
+    pending.take();
+    answer.clear();
+}
+
+fn draft_retained_notice(autonomous: bool) -> &'static str {
+    if autonomous {
+        "Draft retained; press Enter after this Goal to submit"
+    } else {
+        "Draft retained; press Enter after this Run to submit"
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ActiveStop {
+    Running,
+    Pausing,
+    Cancelling,
+}
+
+const STEERING_SENT: &str = "Steering note sent to the agent";
+
+fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
+    match refused {
+        SteeringRefused::RunFull => format!(
+            "No room for more steering notes this Run. {}",
+            draft_retained_notice(autonomous)
+        ),
+        SteeringRefused::TooLarge => "Steering note exceeds 8.0 KB; draft retained".into(),
+        SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
+        SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
+        SteeringRefused::ChildLimit => {
+            "Only eight children accept steering notes at once; draft retained".into()
+        }
+    }
+}
+
+fn settle_recorded_note(
+    delivered: u64,
+    seen: &mut u64,
+    offered: &mut Option<String>,
+    composer: &mut Composer,
+) -> bool {
+    if delivered == *seen {
+        return false;
+    }
+    *seen = delivered;
+    let Some(text) = offered.take() else {
+        return false;
+    };
+    if composer.text() == text && composer.images().is_empty() {
+        composer.take();
+    }
+    true
+}
+
+fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
+    view.runs.last().is_some_and(|run| {
+        run.accepted_sequence > starting_sequence
+            && !matches!(
+                run.status,
+                arany::RunStatus::Pending | arany::RunStatus::Active
+            )
+    })
+}
+
+// Once the current Run's outcome is committed, /exit waits for the Run to return, as Ctrl+D does.
+fn exits_after_settled_run(
+    composer: &Composer,
+    view: &SessionView,
+    starting_sequence: u64,
+) -> bool {
+    matches!(
+        composer.submission(),
+        Ok(crate::terminal::Submission::Command {
+            command: crate::terminal::InteractiveCommand::Exit,
+            argument: None,
+        })
+    ) && run_settled(view, starting_sequence)
+}
+
+// /exit drops held drafts and notes so the deferred Ctrl+D exits on an empty composer.
+fn abandon_drafts_for_exit(
+    composer: &mut Composer,
+    held: &mut Option<HeldDraft>,
+    steering: &RunSteering,
+) {
+    composer.take();
+    composer.take_images();
+    *held = None;
+    let _ = steering.withdraw_note();
+}
+
+fn active_escape(
+    input: TerminalInput,
+    menu_open: bool,
+    clipboard_loading: bool,
+    stop: ActiveStop,
+) -> TerminalInput {
+    match input {
+        TerminalInput::Escape
+            if !clipboard_loading && !menu_open && stop != ActiveStop::Cancelling =>
+        {
+            TerminalInput::Interrupt
+        }
+        input => input,
+    }
+}
+
+fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
+    if !restored {
+        return Some(
+            "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up",
+        );
+    }
+    if sent {
+        Some(STEERING_SENT)
+    } else if note_returned {
+        Some("Steering note withdrawn; draft retained")
+    } else {
+        None
+    }
+}
+
+type HeldDraft = ComposerDraft;
+
+fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
+    (!composer.is_empty()).then(|| composer.take_draft())
+}
+
+fn release_held_draft(composer: &mut Composer, draft: HeldDraft) -> bool {
+    composer.restore_draft(draft)
+}
+
+pub(super) struct PreparedSubmission<'a> {
+    pub(super) engine: &'a arany::Engine,
+    pub(super) profile: String,
+    pub(super) model: String,
+    pub(super) roster: Option<crate::cli::provider::roster::SelectedRoster>,
+    pub(super) manifest: Option<String>,
+    pub(super) request: RunRequest,
+    pub(super) progress: RunProgress<'a>,
+    pub(super) inbox: arany::ApprovalInbox,
+}
+
+pub(super) struct RunUi<'a> {
+    pub(super) terminal: &'a mut AttachedTerminal,
+    pub(super) view: &'a mut SessionView,
+    pub(super) composer: &'a mut Composer,
+}
+
+pub(super) struct RunProgress<'a> {
+    admission: &'a Admission,
+    starting_sequence: u64,
+    autonomous: bool,
+    submitted_goal: Option<arany::GoalId>,
+    cancellation: RunCancellation,
+    hints: RunHints,
+    approvals: arany::ToolApprovals,
+    steering: RunSteering,
+    approval_ui: ApprovalUi,
+    stop: ActiveStop,
+    user_recorded: bool,
+    offered: Option<String>,
+    linear_offers: Vec<ComposerDraft>,
+    held: Option<HeldDraft>,
+    seen_delivered: u64,
+    shown_retries: (Option<arany::RunId>, usize),
+    exit_after_run: bool,
+}
+
+#[derive(Default)]
+struct ApprovalUi {
+    pending: Option<arany::ToolApproval>,
+    page: usize,
+    choice: usize,
+    answer: Composer,
+    unarmed: bool,
+    review_notice: bool,
+}
+
+enum Iteration {
+    Armed(ApprovalPage),
+    Redraw,
+}
+
+#[derive(Clone, Copy)]
+enum ApprovalPage {
+    More,
+    Last,
+}
+
+enum InputFailure {
+    Shutdown(String),
+    Return(String),
+}
+
+enum InputRoute {
+    Handled,
+    Composer,
+}
+
+enum Completion {
+    Finished(Result<RunSubmission, String>),
+    Shutdown(String),
+}
+
+impl<'a> RunProgress<'a> {
+    pub(super) fn new(
+        admission: &'a Admission,
+        ui: &RunUi<'_>,
+        starting_sequence: u64,
+        autonomous: bool,
+        submitted_goal: Option<arany::GoalId>,
+    ) -> (Self, arany::ApprovalInbox) {
+        let cancellation = RunCancellation::new();
+        let hints = if ui.terminal.is_linear() {
+            RunHints::new()
+        } else {
+            RunHints::with_previews()
+        };
+        let (approvals, inbox) =
+            arany::ToolApprovals::new(ui.composer.approval_mode().unwrap_or_default());
+        (
+            Self {
+                admission,
+                starting_sequence,
+                autonomous,
+                submitted_goal,
+                cancellation,
+                hints,
+                approvals,
+                steering: RunSteering::new(),
+                approval_ui: ApprovalUi::default(),
+                stop: ActiveStop::Running,
+                user_recorded: false,
+                offered: None,
+                linear_offers: Vec::new(),
+                held: None,
+                seen_delivered: 0,
+                shown_retries: (None, 0),
+                exit_after_run: false,
+            },
+            inbox,
+        )
+    }
+
+    fn draw(
+        &self,
+        ui: &mut RunUi<'_>,
+        notice: Option<TerminalNotice<'_>>,
+    ) -> Result<(), TerminalError> {
+        ui.draw(self.user_recorded, self.stop, notice)
+    }
+
+    async fn prepare_iteration(&mut self, ui: &mut RunUi<'_>) -> Result<Iteration, String> {
+        if self.approval_ui.pending.is_none()
+            && ui
+                .terminal
+                .restore_selected_draft_input(ui.composer.input_capacity())
+                .is_err()
+        {
+            return Err("terminal input cleanup failed".to_owned());
+        }
+        let approval_more = match &self.approval_ui.pending {
+            Some(approval) => match ui.terminal.draw_tool_approval(
+                approval,
+                ui.view,
+                self.approval_ui.page,
+                (!self.approval_ui.unarmed).then_some(self.approval_ui.choice),
+                self.approval_ui.review_notice,
+            ) {
+                Ok(more) => more,
+                Err(_) => return Err("terminal rendering failed".to_owned()),
+            },
+            None => false,
+        };
+        // Only bytes the reader reads after this barrier reach the armed redraw.
+        if std::mem::take(&mut self.approval_ui.unarmed) {
+            if ui.terminal.discard_approval_typeahead().await.is_err() {
+                return Err("terminal input admission failed".to_owned());
+            }
+            return Ok(Iteration::Redraw);
+        }
+        Ok(Iteration::Armed(if approval_more {
+            ApprovalPage::More
+        } else {
+            ApprovalPage::Last
+        }))
+    }
+
+    fn receive_approval(&mut self, ui: &mut RunUi<'_>) {
+        if self.approval_ui.pending.is_some() {
+            ui.composer.disarm_continuation();
+        }
+        self.approval_ui.page = 0;
+        self.approval_ui.choice = self
+            .approval_ui
+            .pending
+            .as_ref()
+            .filter(|approval| approval.unguarded.is_some())
+            .map_or(0, |approval| {
+                crate::presentation::tool_approval_choices(approval).len() - 1
+            });
+        self.approval_ui.unarmed = self.approval_ui.pending.is_some();
+        self.approval_ui.review_notice = false;
+        self.approval_ui.answer.clear();
+    }
+
+    async fn settle(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        result: Result<Box<RunOutcome>, RunAttemptError>,
+    ) -> Completion {
+        let caught_up = !ui.terminal.child_notes_pending()
+            || catch_up(&self.admission.state_dir, ui.view).await.is_ok();
+        ui.terminal
+            .settle_child_notes(ui.view, &self.steering, true);
+        let child_follow = if !caught_up {
+            false
+        } else {
+            match ui.terminal.follow_agent_chat(ui.view).await {
+                Ok(follow) => follow != AgentChatFollow::Unchanged,
+                Err(_) => return Completion::Shutdown("terminal input cleanup failed".into()),
+            }
+        };
+        ui.terminal.set_waiting_tool(None);
+        ui.terminal.set_preview(None);
+        ui.composer.set_file_candidates(None, Vec::new());
+        if ui.terminal.close_agents_at_run_end().is_err() {
+            return Completion::Finished(Ok(RunSubmission::Shutdown(
+                "terminal input cleanup failed; Run may have committed; check Session history"
+                    .into(),
+            )));
+        }
+        if let Err(reason) = self.restore_drafts(ui, result.is_err(), child_follow) {
+            return Completion::Finished(Ok(RunSubmission::Shutdown(reason)));
+        }
+        Completion::Finished(self.submission_result(ui, result).await)
+    }
+
+    fn restore_drafts(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        failed: bool,
+        child_follow: bool,
+    ) -> Result<(), String> {
+        // An undelivered note ends the Run as an ordinary retained draft.
+        let had_offer = self.offered.is_some();
+        let sent = settle_recorded_note(
+            self.steering.delivered_notes(),
+            &mut self.seen_delivered,
+            &mut self.offered,
+            ui.composer,
+        );
+        let had_held = self.held.is_some();
+        // The undelivered note predates the held draft, so restore it ahead of that draft.
+        let note = self
+            .steering
+            .withdraw_note()
+            .filter(|_| ui.terminal.is_linear());
+        let withdrawn = note.is_some();
+        let mut restored = self
+            .held
+            .take()
+            .is_none_or(|draft| release_held_draft(ui.composer, draft));
+        if let Some(note) = note {
+            restored &= ui
+                .composer
+                .restore_draft(ComposerDraft::from_steering_note(note, &self.linear_offers));
+        }
+        if (failed || had_offer || sent || had_held)
+            && ui
+                .terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .is_err()
+        {
+            return Err("terminal input cleanup failed".into());
+        }
+        let notice = run_end_notice(sent, withdrawn, restored);
+        if (child_follow || notice.is_some())
+            && self.draw(ui, notice.map(TerminalNotice::History)).is_err()
+        {
+            return Err("terminal rendering failed".into());
+        }
+        Ok(())
+    }
+
+    async fn submission_result(
+        &self,
+        ui: &RunUi<'_>,
+        result: Result<Box<RunOutcome>, RunAttemptError>,
+    ) -> Result<RunSubmission, String> {
+        match result {
+            Ok(outcome) => Ok(RunSubmission::Completed(outcome, self.user_recorded, None)),
+            Err(RunAttemptError::Stopped { outcome, reason }) => Ok(RunSubmission::Completed(
+                outcome,
+                self.user_recorded,
+                Some(reason),
+            )),
+            Err(RunAttemptError::InterruptedBeforeRun) => Ok(RunSubmission::InterruptedBeforeRun),
+            Err(RunAttemptError::Failed(RunFailure::Engine(
+                arany::EngineError::GoalBudgetExhausted,
+            ))) => {
+                let reloaded = super::load_view(&self.admission.state_dir, ui.view.id).await?;
+                let feedback = reloaded
+                    .runs
+                    .iter()
+                    .rev()
+                    .find(|run| {
+                        reloaded.budget_stop_goal(run).is_some_and(|goal| {
+                            Some(goal.id) == self.submitted_goal && goal.budget_refusal.is_some()
+                        })
+                    })
+                    .and_then(|run| crate::presentation::session_run_feedback(&reloaded, run));
+                Err(feedback.unwrap_or_else(|| {
+                    "Goal budget admission refused (uncommitted); no Goal receipt is available"
+                        .into()
+                }))
+            }
+            Err(RunAttemptError::Failed(error)) => Err(error.to_string()),
+        }
+    }
+
+    fn retry_notice(&mut self, ui: &RunUi<'_>) -> Option<String> {
+        ui.view
+            .runs
+            .last()
+            .filter(|run| run.accepted_sequence > self.starting_sequence)
+            .and_then(|run| {
+                let shown = if self.shown_retries.0 == Some(run.id) {
+                    self.shown_retries.1
+                } else {
+                    0
+                };
+                self.shown_retries = (Some(run.id), run.provider_retries.len());
+                run.provider_retries.get(shown..)?.last()
+            })
+            .map(|(_, retry)| crate::presentation::escape_terminal(&retry.notice()))
+    }
+
+    async fn on_events(&mut self, ui: &mut RunUi<'_>) -> Result<(), String> {
+        if !self.user_recorded
+            && let Some(run) = ui
+                .view
+                .runs
+                .last()
+                .filter(|run| run.accepted_sequence > self.starting_sequence)
+        {
+            if ui.terminal.record_user_run(run).is_err() {
+                return Err("terminal rendering failed".to_owned());
+            }
+            self.user_recorded = true;
+        }
+        let sent = settle_recorded_note(
+            self.steering.delivered_notes(),
+            &mut self.seen_delivered,
+            &mut self.offered,
+            ui.composer,
+        );
+        if sent
+            && ui
+                .terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .is_err()
+        {
+            return Err("terminal input failed".to_owned());
+        }
+        let retry = self.retry_notice(ui);
+        let notice = if sent {
+            Some(TerminalNotice::History(STEERING_SENT))
+        } else {
+            retry.as_deref().map(TerminalNotice::Transient)
+        };
+        let child_changed = ui.terminal.settle_child_notes(
+            ui.view,
+            &self.steering,
+            self.stop != ActiveStop::Running,
+        );
+        if child_changed
+            && ui
+                .terminal
+                .restore_selected_draft_input(ui.composer.input_capacity())
+                .is_err()
+        {
+            return Err("terminal input failed".to_owned());
+        }
+        let follow = match ui.terminal.follow_agent_chat(ui.view).await {
+            Ok(follow) => follow,
+            Err(_) => return Err("terminal rendering failed".to_owned()),
+        };
+        let notice = match follow {
+            AgentChatFollow::Closed(text) => Some(TerminalNotice::History(text)),
+            AgentChatFollow::Unchanged | AgentChatFollow::Redraw => notice,
+        };
+        if self.approval_ui.pending.is_none()
+            && (child_changed || follow != AgentChatFollow::Unchanged || notice.is_some())
+            && self.draw(ui, notice).is_err()
+        {
+            return Err("terminal rendering failed".to_owned());
+        }
+        Ok(())
+    }
+
+    fn draw_hint(&self, ui: &mut RunUi<'_>) -> Result<(), String> {
+        if self.approval_ui.pending.is_none() && !ui.terminal.agent_chat_open() {
+            self.draw(ui, None)
+                .map_err(|_| "terminal rendering failed".to_owned())?;
+        }
+        Ok(())
+    }
+
+    fn handle_approval(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+        page: ApprovalPage,
+    ) -> Result<(), InputFailure> {
+        let choices = crate::presentation::tool_approval_choices(
+            self.approval_ui.pending.as_ref().expect("pending action"),
+        );
+        self.approval_ui.choice = self.approval_ui.choice.min(choices.len() - 1);
+        match self.approval_control(ui, input, choices.len())? {
+            InputRoute::Handled => return Ok(()),
+            InputRoute::Composer => {}
+        }
+        if ui.terminal.is_linear() {
+            if let TerminalInput::Character(character) = input {
+                self.approval_ui
+                    .answer
+                    .apply(TerminalInput::Character(character));
+                return Ok(());
+            }
+            if input == TerminalInput::Backspace {
+                self.approval_ui.answer.apply(TerminalInput::Backspace);
+                return Ok(());
+            }
+        }
+        if matches!(input, TerminalInput::Character(_) | TerminalInput::Submit) {
+            if let Some(choice) = self.approval_reply(ui, input, page, &choices) {
+                self.decide_approval(ui, choice)?;
+            }
+        } else {
+            self.navigate_approval(input, page, choices.len());
+        }
+        Ok(())
+    }
+
+    fn cycle_approval(&self, composer: &mut Composer) -> String {
+        let notice = super::permissions::cycle(composer);
+        self.approvals
+            .set_mode(composer.approval_mode().unwrap_or_default());
+        notice
+    }
+
+    fn approval_control(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+        choices: usize,
+    ) -> Result<InputRoute, InputFailure> {
+        if input == TerminalInput::CycleApprovalMode {
+            let _ = self.cycle_approval(ui.composer);
+            return Ok(InputRoute::Handled);
+        }
+        if interrupt_approval_input(&input, &self.cancellation, &mut self.stop) {
+            self.approval_ui.pending.take();
+            ui.terminal
+                .settle_child_notes(ui.view, &self.steering, true);
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|error| InputFailure::Return(error.to_string()))?;
+            return Ok(InputRoute::Handled);
+        }
+        if input == TerminalInput::Resize {
+            self.reset_approval_review(choices);
+            return Ok(InputRoute::Handled);
+        }
+        if input == TerminalInput::Suspend {
+            ui.terminal
+                .suspend_and_resume(ui.composer.input_capacity())
+                .map_err(|error| InputFailure::Return(error.to_string()))?;
+            self.reset_approval_focus(choices);
+            return Ok(InputRoute::Handled);
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    fn navigate_approval(&mut self, input: TerminalInput, page: ApprovalPage, choices: usize) {
+        match input {
+            TerminalInput::Tab if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = (self.approval_ui.choice + 1) % choices
+            }
+            TerminalInput::Up
+                if matches!(page, ApprovalPage::Last)
+                    && self.approval_ui.choice == 0
+                    && self.approval_ui.page > 0 =>
+            {
+                self.approval_ui.page -= 1
+            }
+            TerminalInput::Up if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = self.approval_ui.choice.saturating_sub(1)
+            }
+            TerminalInput::Down if matches!(page, ApprovalPage::Last) => {
+                self.approval_ui.choice = (self.approval_ui.choice + 1).min(choices - 1)
+            }
+            TerminalInput::Down | TerminalInput::PageDown if matches!(page, ApprovalPage::More) => {
+                self.approval_ui.page += 1;
+                self.approval_ui.review_notice = false;
+            }
+            TerminalInput::Up | TerminalInput::PageUp => {
+                self.approval_ui.page = self.approval_ui.page.saturating_sub(1);
+            }
+            _ => {}
+        }
+    }
+
+    fn approval_reply(
+        &mut self,
+        ui: &RunUi<'_>,
+        input: TerminalInput,
+        page: ApprovalPage,
+        choices: &[crate::presentation::ToolApprovalChoice],
+    ) -> Option<crate::presentation::ToolApprovalChoice> {
+        if input == TerminalInput::Submit {
+            if matches!(page, ApprovalPage::More) {
+                self.approval_ui.page += 1;
+                return None;
+            }
+            return if ui.terminal.is_linear() {
+                let choice = linear_approval_choice(self.approval_ui.answer.text(), choices);
+                self.approval_ui.answer.clear();
+                choice
+            } else {
+                Some(choices[self.approval_ui.choice])
+            };
+        }
+        let choice = input
+            .choice_index(choices.len())
+            .map(|index| choices[index])?;
+        if matches!(page, ApprovalPage::More)
+            && choice != crate::presentation::ToolApprovalChoice::No
+        {
+            self.approval_ui.review_notice = true;
+            None
+        } else {
+            Some(choice)
+        }
+    }
+
+    fn decide_approval(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        choice: crate::presentation::ToolApprovalChoice,
+    ) -> Result<(), InputFailure> {
+        if choice == crate::presentation::ToolApprovalChoice::AutoEdits {
+            for _ in 0..2 {
+                if ui.composer.approval_mode() == Some(arany::ApprovalMode::AutoEdits) {
+                    break;
+                }
+                let _ = super::permissions::cycle(ui.composer);
+            }
+            self.approvals.set_mode(arany::ApprovalMode::AutoEdits);
+        }
+        self.approval_ui
+            .pending
+            .take()
+            .expect("pending action")
+            .decide(choice.reply());
+        ui.terminal
+            .restore_draft_input(ui.composer.input_capacity())
+            .map_err(|error| InputFailure::Return(error.to_string()))?;
+        Ok(())
+    }
+
+    fn reset_approval_focus(&mut self, choices: usize) {
+        self.approval_ui.page = 0;
+        self.approval_ui.choice = if self
+            .approval_ui
+            .pending
+            .as_ref()
+            .is_some_and(|approval| approval.unguarded.is_some())
+        {
+            choices - 1
+        } else {
+            0
+        };
+    }
+
+    fn reset_approval_review(&mut self, choices: usize) {
+        self.reset_approval_focus(choices);
+        self.approval_ui.review_notice = false;
+    }
+
+    fn route_help(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<InputRoute, InputFailure> {
+        if ui.terminal.help_open() {
+            match input {
+                TerminalInput::Interrupt => ui.terminal.close_help(),
+                TerminalInput::Suspend | TerminalInput::Shutdown(_) => {}
+                _ => {
+                    ui.terminal.help_input(input);
+                    if self.draw(ui, None).is_err() {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                    return Ok(InputRoute::Handled);
+                }
+            }
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    async fn route_agents(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<InputRoute, InputFailure> {
+        if ui.terminal.agents_open()
+            && !matches!(
+                input,
+                TerminalInput::Interrupt | TerminalInput::Suspend | TerminalInput::Shutdown(_)
+            )
+        {
+            let notice = match ui.terminal.agent_input(ui.view, input).await {
+                Ok(notice) => notice.map(TerminalNotice::Transient),
+                Err(_) => {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+            };
+            if !ui.terminal.agents_open() && self.draw(ui, notice).is_err() {
+                return Err(InputFailure::Shutdown(
+                    "terminal rendering failed".to_owned(),
+                ));
+            }
+            return Ok(InputRoute::Handled);
+        }
+        if ui.terminal.agents_open()
+            && matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
+            && ui.terminal.close_agents().is_err()
+        {
+            return Err(InputFailure::Shutdown(
+                "terminal input cleanup failed".to_owned(),
+            ));
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    async fn route_chat(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<InputRoute, InputFailure> {
+        // A child view takes Escape before Run cancellation; Ctrl+C passes through.
+        let agent_notice = match ui
+            .terminal
+            .agent_chat_input(ui.view, input, ui.composer)
+            .await
+        {
+            Ok(AgentChatInput::ChildMessage { target, text }) => {
+                let agent = ui
+                    .view
+                    .runs
+                    .iter()
+                    .find(|run| run.id == target.run_id)
+                    .and_then(|run| {
+                        run.agents
+                            .iter()
+                            .find(|agent| agent.id == target.agent_run_id)
+                    });
+                let ordinal = agent.map_or(0, |agent| agent.ordinal);
+                let count = agent.map_or(0, |agent| agent.steering_notes.len());
+                let (notice, offer) = if self.stop == ActiveStop::Running {
+                    match self.steering.offer_child_note(target, text.clone()) {
+                        Ok(()) => (
+                            format!("Note waiting for child {ordinal}'s next step"),
+                            Some((text, count)),
+                        ),
+                        Err(refused) => (steering_refusal(refused, self.autonomous), None),
+                    }
+                } else {
+                    (
+                        "Child note unavailable while stopping; draft retained".into(),
+                        None,
+                    )
+                };
+                ui.terminal.child_note_feedback(target, notice, offer);
+                Some(None)
+            }
+            Ok(AgentChatInput::ChildEdited(target)) => {
+                ui.terminal.withdraw_child_offer(target, &self.steering);
+                Some(None)
+            }
+            Ok(AgentChatInput::Pass) => None,
+            Ok(AgentChatInput::Handled) => return Ok(InputRoute::Handled),
+            Ok(AgentChatInput::Returned) => Some(None),
+            Ok(AgentChatInput::Notice(text)) => Some(Some(TerminalNotice::Transient(text))),
+            Err(_) => {
+                return Err(InputFailure::Shutdown(
+                    "terminal rendering failed".to_owned(),
+                ));
+            }
+        };
+        if let Some(notice) = agent_notice {
+            if self.draw(ui, notice).is_err() {
+                return Err(InputFailure::Shutdown(
+                    "terminal rendering failed".to_owned(),
+                ));
+            }
+            return Ok(InputRoute::Handled);
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    async fn route_history(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<InputRoute, InputFailure> {
+        if ui.terminal.handle_draft_detail(ui.composer, input) {
+            if self.draw(ui, None).is_err() {
+                return Err(InputFailure::Shutdown("terminal rendering failed".into()));
+            }
+            return Ok(InputRoute::Handled);
+        }
+        if ui.terminal.ignores_page_key(input) {
+            return Ok(InputRoute::Handled);
+        }
+        match ui.terminal.handle_transcript_input(input, ui.view) {
+            Ok(true) => {
+                if self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                return Ok(InputRoute::Handled);
+            }
+            Ok(false) => {}
+            Err(_) => {
+                return Err(InputFailure::Shutdown(
+                    "terminal rendering failed".to_owned(),
+                ));
+            }
+        }
+        if ui
+            .terminal
+            .handle_history_input(input, ui.view, ui.composer, true)
+            .await
+        {
+            if self.draw(ui, None).is_err() {
+                return Err(InputFailure::Shutdown(
+                    "terminal rendering failed".to_owned(),
+                ));
+            }
+            return Ok(InputRoute::Handled);
+        }
+        Ok(InputRoute::Composer)
+    }
+
+    async fn on_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: Result<TerminalInput, TerminalError>,
+        page: ApprovalPage,
+    ) -> Result<(), InputFailure> {
+        let input = match input {
+            Ok(input) => input,
+            Err(_) => return Err(InputFailure::Shutdown("terminal input failed".to_owned())),
+        };
+        ui.composer.observe_input(input);
+        if ui.terminal.agent_chat_open()
+            || self.approval_ui.pending.is_some()
+            || ui.terminal.help_open()
+        {
+            ui.composer.disarm_continuation();
+        }
+        if self.approval_ui.pending.is_some()
+            && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
+        {
+            return self.handle_approval(ui, input, page);
+        }
+        match self.route_help(ui, input)? {
+            InputRoute::Handled => return Ok(()),
+            InputRoute::Composer => {}
+        }
+        match self.route_agents(ui, input).await? {
+            InputRoute::Handled => return Ok(()),
+            InputRoute::Composer => {}
+        }
+        match self.route_chat(ui, input).await? {
+            InputRoute::Handled => return Ok(()),
+            InputRoute::Composer => {}
+        }
+        match self.route_history(ui, input).await? {
+            InputRoute::Handled => return Ok(()),
+            InputRoute::Composer => {}
+        }
+        let input = ui.composer.chat_input(input);
+        let input = active_escape(
+            input,
+            ui.composer.has_open_menu(),
+            ui.terminal.clipboard_loading(),
+            self.stop,
+        );
+        let notice = self.composer_input(ui, input).await?;
+        self.finish_input(ui, input, notice)
+    }
+
+    fn finish_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+        mut notice: Option<Feedback>,
+    ) -> Result<(), InputFailure> {
+        if !ui.terminal.is_linear()
+            && self
+                .offered
+                .as_deref()
+                .is_some_and(|text| ui.composer.text() != text || !ui.composer.images().is_empty())
+        {
+            self.offered = None;
+            notice = Some(if self.steering.withdraw_note().is_some() {
+                Feedback::Transient("Steering note withdrawn; draft retained".into())
+            } else {
+                // The Engine already took the note, so it is sent; the edited draft stays.
+                Feedback::History(STEERING_SENT.into())
+            });
+        }
+        if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
+            && self
+                .draw(ui, notice.as_ref().map(Feedback::notice))
+                .is_err()
+        {
+            return Err(InputFailure::Shutdown(
+                "terminal rendering failed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    async fn submit_input(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        if !ui.terminal.is_linear() && ui.composer.continue_line() {
+            self.draw(ui, None)
+                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".into()))?;
+            return Ok(None);
+        }
+        if ui.terminal.clipboard_loading() && !ui.terminal.is_linear() {
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;
+            return Ok(Some(Feedback::Transient(
+                "Clipboard loading; press Enter after paste to submit".into(),
+            )));
+        }
+        if !ui.terminal.is_linear()
+            && ui.composer.apply(TerminalInput::Submit) == ComposerEdit::Changed
+        {
+            self.draw(ui, None)
+                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".into()))?;
+            return Ok(None);
+        }
+        if exits_after_settled_run(ui.composer, ui.view, self.starting_sequence) {
+            abandon_drafts_for_exit(ui.composer, &mut self.held, &self.steering);
+            self.offered = None;
+            ui.terminal
+                .restore_draft_input(crate::terminal::MAX_DRAFT_BYTES)
+                .map_err(|_| InputFailure::Shutdown("terminal input failed".into()))?;
+            ui.terminal.defer_input(TerminalInput::EndOfInput);
+            self.exit_after_run = true;
+            return Ok(None);
+        }
+        self.active_submission(ui).await
+    }
+
+    fn offer_note(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        text: String,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        let feedback = if ui.terminal.is_linear() && self.held.is_some() {
+            Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
+        } else if !ui.composer.images().is_empty() {
+            Feedback::Transient("Steering notes are text only; draft retained".into())
+        } else if self.offered.is_some() && !ui.terminal.is_linear() {
+            // The composer still holds the waiting note; editing it withdraws the offer.
+            Feedback::Transient(
+                "Steering note waits for the agent's next step; editing withdraws it".into(),
+            )
+        } else {
+            match self.steering.offer_note(text) {
+                Ok(()) => {
+                    self.offered = Some(ui.composer.text().to_owned());
+                    if ui.terminal.is_linear() {
+                        self.linear_offers.push(ui.composer.take_draft());
+                        Feedback::Transient("Steering note waits for the agent's next step".into())
+                    } else {
+                        Feedback::Transient(
+                            "Steering note waits for the agent's next step; editing withdraws it"
+                                .into(),
+                        )
+                    }
+                }
+                Err(refused) => Feedback::Transient(steering_refusal(refused, self.autonomous)),
+            }
+        };
+        // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
+        if ui.terminal.is_linear()
+            && self.held.is_none()
+            && let Some(draft) = hold_draft(ui.composer)
+        {
+            self.held = Some(draft);
+        }
+        if ui
+            .terminal
+            .restore_draft_input(ui.composer.input_capacity())
+            .is_err()
+        {
+            return Err(InputFailure::Shutdown("terminal input failed".to_owned()));
+        }
+        Ok(Some(feedback))
+    }
+
+    fn pause(&mut self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        let notice = match self.stop {
+            ActiveStop::Running => {
+                self.steering.pause();
+                self.stop = ActiveStop::Pausing;
+                ui.terminal
+                    .settle_child_notes(ui.view, &self.steering, true);
+                "Pausing at the next step; Ctrl+C cancels now"
+            }
+            ActiveStop::Pausing => "Already pausing at the next step",
+            ActiveStop::Cancelling => "Run is already cancelling",
+        };
+        // Classic hides the history notice from the status row; linear prints notices as lines.
+        if self
+            .draw(ui, Some(TerminalNotice::History(notice)))
+            .is_err()
+            || (!ui.terminal.is_linear() && self.draw(ui, None).is_err())
+        {
+            return Err(InputFailure::Shutdown(
+                "terminal rendering failed".to_owned(),
+            ));
+        }
+        Ok(None)
+    }
+
+    async fn active_submission(
+        &mut self,
+        ui: &mut RunUi<'_>,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        let submission =
+            super::controls::handle_active_submission(ui.composer, ui.view, self.starting_sequence);
+        Ok(match submission {
+            ActiveSubmission::SteeringNote(text) => return self.offer_note(ui, text),
+            ActiveSubmission::Pause => return self.pause(ui),
+            ActiveSubmission::Rejected(notice) => {
+                if ui.terminal.is_linear() && !ui.composer.has_text_pastes() {
+                    ui.composer.take();
+                }
+                Some(Feedback::History(format!("Error: {notice}")))
+            }
+            ActiveSubmission::Notice(notice) => Some(Feedback::History(notice)),
+            ActiveSubmission::ReadClipboard => Some(match ui.terminal.request_clipboard_paste() {
+                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+            }),
+            ActiveSubmission::OpenAgents => {
+                if ui.terminal.open_agents(ui.view, true).await.is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenUsage { status } => {
+                if ui
+                    .terminal
+                    .open_usage(ui.view, status, Some(self.starting_sequence))
+                    .await
+                    .is_err()
+                {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenHelp => {
+                if ui.terminal.open_help(ui.view).await.is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ActiveSubmission::OpenAgentChats(number) => {
+                match ui.terminal.open_agent_chats(ui.view, number).await {
+                    Ok(AgentChatInput::Notice(text)) => Some(Feedback::Transient(text.into())),
+                    Ok(
+                        AgentChatInput::ChildMessage { .. }
+                        | AgentChatInput::ChildEdited(_)
+                        | AgentChatInput::Pass
+                        | AgentChatInput::Handled
+                        | AgentChatInput::Returned,
+                    ) => None,
+                    Err(_) => {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                }
+            }
+            ActiveSubmission::OpenTranscript => {
+                if ui.terminal.toggle_transcript(ui.view).is_err() || self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+        })
+    }
+
+    async fn composer_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match input {
+            TerminalInput::Escape if ui.terminal.clipboard_loading() => {
+                ui.terminal.cancel_clipboard_paste();
+                Some(Feedback::Transient(
+                    "Clipboard read cancelled; draft retained".into(),
+                ))
+            }
+            TerminalInput::CycleApprovalMode => {
+                Some(Feedback::History(self.cycle_approval(ui.composer)))
+            }
+            TerminalInput::ClipboardPaste => Some(match ui.terminal.request_clipboard_paste() {
+                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
+                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
+            }),
+            TerminalInput::Paste => match ui.terminal.paste_into(ui.composer) {
+                Err(error) => Some(Feedback::History(format!(
+                    "Error: {error}; draft unchanged"
+                ))),
+                Ok(ComposerEdit::Changed) => {
+                    if self.draw(ui, None).is_err() {
+                        return Err(InputFailure::Shutdown(
+                            "terminal rendering failed".to_owned(),
+                        ));
+                    }
+                    None
+                }
+                Ok(ComposerEdit::AtCapacity | ComposerEdit::Unchanged) => None,
+            },
+            input @ (TerminalInput::Character(_)
+            | TerminalInput::Newline
+            | TerminalInput::Backspace
+            | TerminalInput::Delete
+            | TerminalInput::Left
+            | TerminalInput::Right
+            | TerminalInput::WordLeft
+            | TerminalInput::WordRight
+            | TerminalInput::BackspaceWord
+            | TerminalInput::Up
+            | TerminalInput::Down
+            | TerminalInput::Home
+            | TerminalInput::End
+            | TerminalInput::Tab
+            | TerminalInput::Escape) => return self.edit_composer(ui, input),
+            TerminalInput::LineRejected => Some(Feedback::History(
+                "Error: invalid or overlong terminal line; draft unchanged".into(),
+            )),
+            TerminalInput::LineContinued => return self.continued_line(ui),
+            TerminalInput::QuickActions => Some(Feedback::History(
+                "Quick actions are unavailable during a Run; /agents opens details".into(),
+            )),
+            TerminalInput::Submit => return self.submit_input(ui).await,
+            _ => return self.control_input(ui, input),
+        })
+    }
+
+    fn continued_line(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, InputFailure> {
+        if self.held.is_some() {
+            ui.terminal
+                .restore_draft_input(ui.composer.input_capacity())
+                .map_err(|_| InputFailure::Shutdown("terminal input failed".to_owned()))?;
+            Ok(Some(Feedback::Transient(
+                "Both drafts retained; wait for the Run to finish".into(),
+            )))
+        } else {
+            Ok(Some(Feedback::History(format!(
+                "Draft: {} characters; Enter offers it as a steering note",
+                ui.composer.character_count()
+            ))))
+        }
+    }
+
+    fn edit_composer(
+        &self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        Ok(match ui.composer.apply(input) {
+            ComposerEdit::AtCapacity => Some(Feedback::History(
+                "Error: message is too long; shorten it; draft unchanged".into(),
+            )),
+            ComposerEdit::Changed if !ui.terminal.is_linear() => {
+                if self.draw(ui, None).is_err() {
+                    return Err(InputFailure::Shutdown(
+                        "terminal rendering failed".to_owned(),
+                    ));
+                }
+                None
+            }
+            ComposerEdit::Unchanged => None,
+            ComposerEdit::Changed => None,
+        })
+    }
+
+    fn control_input(
+        &mut self,
+        ui: &mut RunUi<'_>,
+        input: TerminalInput,
+    ) -> Result<Option<Feedback>, InputFailure> {
+        if input == TerminalInput::Interrupt {
+            if self.stop == ActiveStop::Cancelling {
+                return Err(InputFailure::Shutdown(
+                    "forced shutdown after second Ctrl+C".to_owned(),
+                ));
+            }
+            self.stop = ActiveStop::Cancelling;
+            ui.terminal
+                .settle_child_notes(ui.view, &self.steering, true);
+            self.cancellation.cancel();
+        }
+        if input == TerminalInput::Suspend {
+            ui.terminal
+                .suspend_and_resume(ui.composer.input_capacity())
+                .map_err(|_| InputFailure::Shutdown("terminal resume failed".to_owned()))?;
+            self.draw(ui, None)
+                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()))?;
+        }
+        if let TerminalInput::Shutdown(signal) = input {
+            return Err(InputFailure::Shutdown(format!(
+                "terminated by {}",
+                signal.name()
+            )));
+        }
+        if input == TerminalInput::Resize {
+            self.draw(ui, None)
+                .map_err(|_| InputFailure::Shutdown("terminal rendering failed".to_owned()))?;
+        }
+        if input == TerminalInput::EndOfInput {
+            if !ui.composer.is_empty() || self.held.is_some() {
+                return Ok(Some(Feedback::Transient(
+                    draft_retained_notice(self.autonomous).into(),
+                )));
+            }
+            // The screen already shows the outcome, so exit once the Run returns.
+            if run_settled(ui.view, self.starting_sequence) {
+                ui.terminal.defer_input(TerminalInput::EndOfInput);
+                self.exit_after_run = true;
+            }
+        }
+        Ok(None)
+    }
+}
+
+enum RunEvent<'a> {
+    ApprovalWithdrawn,
+    Approval,
+    Step(RunStep<'a>),
+    Preview(Option<arany::DisplayUpdate>),
+    Events(Result<(), String>),
+    Waiting(Option<uuid::Uuid>),
+    Input(Result<TerminalInput, TerminalError>),
+}
+
+struct RunDriver<'a, 'f, F> {
+    future: std::pin::Pin<&'f mut F>,
+    handle: Option<arany::RunHandle<'a>>,
+    inbox: arany::ApprovalInbox,
+    previews: arany::RunPreview,
+    waiting_hints: RunHints,
+}
+
+impl<'a, F> RunDriver<'a, '_, F>
+where
+    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
+{
+    async fn poll(&mut self, progress: &mut RunProgress<'_>, ui: &mut RunUi<'_>) -> RunEvent<'a> {
+        let (result, mut events) = self
+            .handle
+            .as_mut()
+            .map(|handle| (&mut handle.result, &mut handle.events))
+            .unzip();
+        let approval_pending = progress.approval_ui.pending.is_some();
+        let stop = progress.stop;
+        tokio::select! {
+            () = withdraw_abandoned_approval(&mut progress.approval_ui.pending, &mut progress.approval_ui.answer) => RunEvent::ApprovalWithdrawn,
+            approval = self.inbox.next(), if !approval_pending => { progress.approval_ui.pending = approval; RunEvent::Approval },
+            step = async {
+                match result {
+                    Some(result) => RunStep::Completed(finish_attempt(result.await, !matches!(stop, ActiveStop::Running)).map(Box::new)),
+                    None => match self.future.as_mut().await {
+                        Ok(handle) => RunStep::Admitted(handle),
+                        Err(error) => RunStep::Completed(Err(error)),
+                    },
+                }
+            } => RunEvent::Step(step),
+            preview = self.previews.changed() => RunEvent::Preview(preview),
+            event = async {
+                match events.as_deref_mut() {
+                    Some(events) => events.next().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let ready = async || match events.as_deref_mut() {
+                    Some(events) => tokio::time::timeout(Duration::ZERO, events.next()).await.ok(),
+                    None => None,
+                };
+                RunEvent::Events(apply_burst(&progress.admission.state_dir, ui.view, event, ready).await)
+            },
+            waiting = self.waiting_hints.waiting_changed() => RunEvent::Waiting(waiting),
+            input = async {
+                if approval_pending { ui.terminal.next_input().await } else { ui.terminal.next_chat_input().await }
+            }, if !progress.exit_after_run => RunEvent::Input(input),
+        }
+    }
+
+    async fn finish(self) -> Result<RunOutcome, RunAttemptError> {
+        let handle = match self.handle {
+            Some(handle) => handle,
+            None => self.future.await?,
+        };
+        finish_attempt(handle.await, true)
+    }
+}
+
+pub(super) async fn drive_run(
+    prepared: PreparedSubmission<'_>,
+    ui: &mut RunUi<'_>,
+) -> Result<RunSubmission, String> {
+    let PreparedSubmission {
+        engine,
+        profile,
+        model,
+        roster,
+        manifest,
+        request,
+        mut progress,
+        inbox,
+    } = prepared;
+    progress.draw(ui, None).map_err(|error| error.to_string())?;
+    if let Some(manifest) = &manifest {
+        ui.terminal
+            .draw_busy_notice(
+                ui.view,
+                ui.composer,
+                Some(TerminalNotice::History(manifest)),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    let approvals = progress.approvals.clone();
+    let admission = progress.admission;
+    let future = submit_selected(SelectedSubmission {
+        engine,
+        state_dir: &admission.state_dir,
+        selection: Selection {
+            workspace: &admission.workspace,
+            profile: &profile,
+            model: &model,
+            effort: ui.view.defaults.effort,
+            account_id: ui.view.defaults.account_id,
+        },
+        request,
+        cancellation: progress.cancellation.clone(),
+        hints: progress.hints.clone(),
+        tools: ToolAccess {
+            configured: admission.tools,
+            permissions: admission.workspace_permissions.as_ref(),
+            approvals: &approvals,
+        },
+        steering: progress.steering.clone(),
+        roster,
+    });
+    tokio::pin!(future);
+    let mut driver = RunDriver {
+        future: future.as_mut(),
+        handle: None,
+        inbox,
+        previews: progress.hints.previews(),
+        waiting_hints: progress.hints.clone(),
+    };
+    match drive_loop(&mut progress, ui, &mut driver).await {
+        Completion::Finished(result) => result,
+        Completion::Shutdown(reason) => finish_shutdown(&progress, ui, driver, reason).await,
+    }
+}
+
+async fn drive_loop<'a, F>(
+    progress: &mut RunProgress<'_>,
+    ui: &mut RunUi<'_>,
+    driver: &mut RunDriver<'a, '_, F>,
+) -> Completion
+where
+    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
+{
+    loop {
+        let page = match progress.prepare_iteration(ui).await {
+            Ok(Iteration::Armed(page)) => page,
+            Ok(Iteration::Redraw) => continue,
+            Err(reason) => return Completion::Shutdown(reason),
+        };
+        let result = match driver.poll(progress, ui).await {
+            RunEvent::ApprovalWithdrawn => {
+                if let Err(error) = ui
+                    .terminal
+                    .restore_draft_input(ui.composer.input_capacity())
+                {
+                    return Completion::Finished(Err(error.to_string()));
+                }
+                progress
+                    .draw(ui, None)
+                    .map_err(|_| "terminal rendering failed".to_owned())
+            }
+            RunEvent::Approval => {
+                progress.receive_approval(ui);
+                Ok(())
+            }
+            RunEvent::Step(RunStep::Admitted(handle)) => {
+                driver.handle = Some(handle);
+                continue;
+            }
+            RunEvent::Step(RunStep::Completed(result)) => {
+                return progress.settle(ui, result).await;
+            }
+            RunEvent::Preview(preview) => {
+                ui.terminal.set_preview(preview);
+                progress.draw_hint(ui)
+            }
+            RunEvent::Events(result) => match result {
+                Ok(()) => progress.on_events(ui).await,
+                Err(reason) => Err(reason),
+            },
+            RunEvent::Waiting(waiting) => {
+                ui.terminal.set_waiting_tool(waiting);
+                progress.draw_hint(ui)
+            }
+            RunEvent::Input(input) => match progress.on_input(ui, input, page).await {
+                Ok(()) => Ok(()),
+                Err(InputFailure::Shutdown(reason)) => Err(reason),
+                Err(InputFailure::Return(error)) => return Completion::Finished(Err(error)),
+            },
+        };
+        if let Err(reason) = result {
+            return Completion::Shutdown(reason);
+        }
+    }
+}
+
+async fn finish_shutdown<'a, F>(
+    progress: &RunProgress<'_>,
+    ui: &mut RunUi<'_>,
+    driver: RunDriver<'a, '_, F>,
+    shutdown_reason: String,
+) -> Result<RunSubmission, String>
+where
+    F: std::future::Future<Output = Result<arany::RunHandle<'a>, RunAttemptError>>,
+{
+    ui.terminal
+        .settle_child_notes(ui.view, &progress.steering, true);
+    progress.cancellation.cancel();
+    let linear = ui.terminal.is_linear();
+    let mode = (!linear).then_some(ui.terminal.mode());
+    let preview_printed = if linear {
+        progress.user_recorded
+    } else {
+        ui.view
+            .runs
+            .last()
+            .is_some_and(|run| ui.terminal.user_run_recorded(run.id))
+    };
+    let restored = ui.terminal.restore();
+    let mut reason = shutdown_reason;
+    match tokio::time::timeout(SHUTDOWN_GRACE, driver.finish()).await {
+        Ok(Ok(outcome)) if restored.is_ok() => {
+            let emitted = match load_confirmed_outcome(&progress.admission.state_dir, &outcome)
+                .await
+            {
+                Ok(confirmed) => emit_outcome(&confirmed, &outcome, preview_printed, !linear, mode),
+                Err(error) => Err(error),
+            };
+            if emitted.is_err() {
+                reason.push_str("; committed receipt unavailable; check Session history");
+            }
+        }
+        Ok(Ok(_)) => reason.push_str("; Run committed; check Session history"),
+        Ok(Err(RunAttemptError::InterruptedBeforeRun)) => {
+            reason
+                .push_str("; no Run started for this submission; account work may still complete");
+        }
+        Ok(Err(RunAttemptError::Stopped { .. } | RunAttemptError::Failed(_))) => {
+            reason.push_str("; Run outcome unavailable; check Session history")
+        }
+        Err(_) => reason.push_str("; Run may be interrupted; check Session history"),
+    }
+    if restored.is_err() {
+        reason.push_str("; terminal restoration failed");
+    }
+    Ok(RunSubmission::Shutdown(reason))
+}
+
+impl RunUi<'_> {
+    fn draw(
+        &mut self,
+        current_run_started: bool,
+        stop: ActiveStop,
+        notice: Option<TerminalNotice<'_>>,
+    ) -> Result<(), TerminalError> {
+        if !current_run_started {
+            let status = match stop {
+                ActiveStop::Running => None,
+                ActiveStop::Pausing => Some("Pausing at the next step... Ctrl+C cancels now"),
+                ActiveStop::Cancelling => Some("Stopping request..."),
+            };
+            self.terminal.draw_preparing_notice(
+                self.view,
+                self.composer,
+                notice.or(status.map(TerminalNotice::Transient)),
+            )
+        } else if stop != ActiveStop::Running || self.terminal.is_linear() {
+            let notice = notice.unwrap_or(TerminalNotice::Transient(match stop {
+                ActiveStop::Cancelling => "Cancelling Run...",
+                ActiveStop::Pausing => "Pausing at the next step... Ctrl+C cancels now",
+                ActiveStop::Running => "Run is active; Ctrl+C cancels",
+            }));
+            if self.terminal.is_linear() {
+                self.terminal
+                    .draw_busy_notice(self.view, self.composer, Some(notice))
+            } else {
+                self.terminal
+                    .draw_notice(self.view, self.composer, Some(notice))
+            }
+        } else {
+            self.terminal.draw_notice(self.view, self.composer, notice)
+        }
+    }
+}
+
+const EVENT_DRAIN_LIMIT: usize = 64;
+
+// Bounded so input is polled again before the next burst.
+async fn apply_burst(
+    state_dir: &std::path::Path,
+    view: &mut SessionView,
+    first: Option<arany::Tapped>,
+    mut ready: impl AsyncFnMut() -> Option<Option<arany::Tapped>>,
+) -> Result<(), String> {
+    let mut event = first;
+    for drained in 1..=EVENT_DRAIN_LIMIT {
+        let Some(tapped) = event else {
+            return Err("Run event stream closed".to_owned());
+        };
+        if apply_tapped(state_dir, view, tapped).await.is_err() {
+            return Err("Run history unavailable; check Session history".to_owned());
+        }
+        if drained == EVENT_DRAIN_LIMIT {
+            break;
+        }
+        match ready().await {
+            Some(next) => event = next,
+            None => break,
+        }
+    }
+    Ok(())
+}
+
+async fn apply_tapped(
+    state_dir: &std::path::Path,
+    view: &mut SessionView,
+    tapped: arany::Tapped,
+) -> Result<(), String> {
+    match tapped {
+        arany::Tapped::Committed(event) => {
+            if event.session_id != view.id || event.sequence <= view.last_sequence {
+                return Ok(());
+            }
+            if event.sequence != view.last_sequence + 1 {
+                return catch_up(state_dir, view).await;
+            }
+            match arany::reduce_into(view, &event) {
+                Ok(()) => Ok(()),
+                Err(_) => catch_up(state_dir, view).await,
+            }
+        }
+        arany::Tapped::Resync { .. } => catch_up(state_dir, view).await,
+    }
+}
+
+async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result<(), String> {
+    let state = arany::StateRoot::open_existing(state_dir).map_err(|error| error.to_string())?;
+    let store = arany::Store::open_read_only(state).map_err(|error| error.to_string())?;
+    let loaded = store
+        .load_open_view(view.id)
+        .await
+        .map_err(|error| error.to_string());
+    store.close().await.map_err(|error| error.to_string())?;
+    *view = loaded?.ok_or_else(|| "Session history unavailable".to_owned())?;
+    Ok(())
+}
+
+fn interrupt_approval_input(
+    input: &TerminalInput,
+    cancellation: &arany::RunCancellation,
+    stop: &mut ActiveStop,
+) -> bool {
+    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
+        *stop = ActiveStop::Cancelling;
+        cancellation.cancel();
+        true
+    } else {
+        false
+    }
+}
+
 #[cfg(test)]
 mod budget_tests {
     use super::*;
@@ -322,7 +2011,7 @@ mod budget_tests {
             )
             .expect("attached admission")
             .await;
-            let outcome = finish_run(result, false).expect("attached completion");
+            let outcome = finish_attempt(result, false).expect("attached completion");
             assert_eq!(
                 outcome.run.assistant_message.as_deref(),
                 if finite {
@@ -1622,7 +3311,7 @@ mod tests {
                 },
                 RunSteering::new(),
             ) {
-                Ok(handle) => finish_run(handle.await, false)
+                Ok(handle) => finish_attempt(handle.await, false)
                     .expect_err("explicit Tool admission must reject before inference"),
                 Err(error) => error,
             };
@@ -1760,5 +3449,588 @@ mod tests {
         );
         assert_eq!(std::fs::read(&trust_record).unwrap(), remembered);
         drop(terminal);
+    }
+}
+
+#[cfg(test)]
+mod burst_tests {
+    use super::*;
+    use arany::test_support::{
+        engine::{open, run_to_end},
+        scenario::{ScriptedProvider, request},
+    };
+    use arany::{
+        Answer, ChildAssignment, CollaborationPolicy, Delegate, EngineConfig, ProviderOutcome,
+        StateRoot, Store, Tapped,
+    };
+    use std::{collections::VecDeque, sync::Arc};
+
+    // A team Run with two children, then single Runs, so the journal outgrows one burst.
+    async fn committed_team() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        Vec<arany::EventEnvelope>,
+    ) {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("workspace");
+        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
+        let state_dir = root.path().join("state");
+        let engine = open(
+            StateRoot::admit(&state_dir).unwrap(),
+            EngineConfig::default(),
+        )
+        .unwrap();
+        let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
+        let child = |objective: &str| ChildAssignment {
+            editor: None,
+            objective: objective.into(),
+            profile: None,
+        };
+        let mut responses = vec![
+            ProviderOutcome::Delegate(Delegate {
+                agent: None,
+                children: vec![child("first task"), child("second task")],
+            }),
+            answer("first result"),
+            answer("second result"),
+            answer("team answer"),
+        ];
+        responses.extend((0..8).map(|_| answer("later answer")));
+        let mut provider = ScriptedProvider::new(responses);
+        // One call at a time, so each child takes its scripted answer in spawn order.
+        provider.identity.limits.concurrency = 1;
+        let provider = Arc::new(provider);
+        let mut team = request(&workspace, "team task");
+        team.policy = CollaborationPolicy::Team {
+            max_active_children: 2,
+        };
+        let session = run_to_end(&engine, &provider, team)
+            .await
+            .unwrap()
+            .session_id;
+        for _ in 0..8 {
+            let mut later = request(&workspace, "later task");
+            later.session_id = Some(session);
+            later.title = None;
+            run_to_end(&engine, &provider, later).await.unwrap();
+        }
+        engine.close().await.unwrap();
+        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).unwrap()).unwrap();
+        let events = store.load_session(session).await.unwrap();
+        store.close().await.unwrap();
+        (root, state_dir, events)
+    }
+
+    fn tapped(envelope: &arany::EventEnvelope) -> Tapped {
+        Tapped::Committed(Arc::new(envelope.clone()))
+    }
+
+    fn replay(events: &[arany::EventEnvelope]) -> SessionView {
+        SessionView::replay(events[0].session_id, events)
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn committed_events_apply_in_bounded_in_order_bursts_and_gaps_reload_the_view() {
+        let (_root, state_dir, events) = committed_team().await;
+        let full = replay(&events);
+
+        // Commit order, one Event at a time, reaches the strictly replayed view.
+        let mut view = replay(&events[..1]);
+        for envelope in &events[1..] {
+            apply_tapped(&state_dir, &mut view, tapped(envelope))
+                .await
+                .unwrap();
+            assert_eq!(view.last_sequence, envelope.sequence);
+        }
+        assert_eq!(view.runs, full.runs);
+
+        // One burst applies at most EVENT_DRAIN_LIMIT ready Events and leaves the rest queued.
+        let mut queue = events[1..].iter().map(tapped).collect::<VecDeque<_>>();
+        assert!(queue.len() > EVENT_DRAIN_LIMIT);
+        let mut view = replay(&events[..1]);
+        let first = queue.pop_front();
+        apply_burst(&state_dir, &mut view, first, async || {
+            queue.pop_front().map(Some)
+        })
+        .await
+        .unwrap();
+        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT].sequence);
+        assert_eq!(queue.len(), events.len() - 1 - EVENT_DRAIN_LIMIT);
+        // Nothing else ready ends the burst after its first Event.
+        let first = queue.pop_front();
+        apply_burst(&state_dir, &mut view, first, async || None)
+            .await
+            .unwrap();
+        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT + 1].sequence);
+
+        // A sequence gap or a resync reloads the whole validated committed view.
+        let gap = tapped(&events[EVENT_DRAIN_LIMIT + 3]);
+        for missed in [Some(gap), Some(Tapped::Resync { missed: 3 })] {
+            let mut view = replay(&events[..=EVENT_DRAIN_LIMIT]);
+            apply_burst(&state_dir, &mut view, missed, async || None)
+                .await
+                .unwrap();
+            assert_eq!(view.last_sequence, full.last_sequence);
+            assert_eq!(view.runs, full.runs);
+        }
+        // A closed stream or unreadable history stops the Run view instead of inventing progress.
+        let mut view = replay(&events[..1]);
+        for (state, event, expected) in [
+            (state_dir.as_path(), None, "Run event stream closed"),
+            (
+                std::path::Path::new("/nonexistent-arany-state"),
+                Some(Tapped::Resync { missed: 1 }),
+                "Run history unavailable; check Session history",
+            ),
+        ] {
+            assert_eq!(
+                apply_burst(state, &mut view, event, async || None).await,
+                Err(expected.to_owned())
+            );
+        }
+        assert_eq!(view.last_sequence, events[0].sequence);
+    }
+}
+
+#[cfg(test)]
+mod escape_tests {
+    use super::*;
+
+    #[test]
+    fn run_end_notice_never_claims_a_dropped_note_was_kept() {
+        assert_eq!(
+            run_end_notice(false, true, false),
+            Some(
+                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
+            )
+        );
+        assert_eq!(
+            run_end_notice(false, false, false),
+            Some(
+                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
+            )
+        );
+        assert_eq!(
+            run_end_notice(false, true, true),
+            Some("Steering note withdrawn; draft retained")
+        );
+        assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
+        assert_eq!(run_end_notice(false, false, true), None);
+    }
+
+    #[test]
+    fn escape_cancels_only_when_nothing_else_claims_it() {
+        let idle = |input, menu, clipboard, stop| active_escape(input, menu, clipboard, stop);
+        assert_eq!(
+            idle(TerminalInput::Escape, false, false, ActiveStop::Running),
+            TerminalInput::Interrupt
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, true, false, ActiveStop::Running),
+            TerminalInput::Escape,
+            "an open menu closes first"
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, false, true, ActiveStop::Running),
+            TerminalInput::Escape,
+            "a pending clipboard read is cancelled, not the Run"
+        );
+        assert_eq!(
+            idle(TerminalInput::Escape, false, false, ActiveStop::Cancelling),
+            TerminalInput::Escape,
+            "a second Escape never forces shutdown"
+        );
+        assert_eq!(
+            idle(TerminalInput::Interrupt, false, false, ActiveStop::Running),
+            TerminalInput::Interrupt
+        );
+    }
+}
+
+#[cfg(test)]
+mod approval_reply_tests {
+    use super::{linear_approval_choice, withdraw_abandoned_approval};
+    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
+    use crate::terminal::{Composer, TerminalInput};
+    use std::time::Duration;
+
+    #[tokio::test(start_paused = true)]
+    async fn child_timeout_withdraws_the_dialog_and_discards_its_partial_answer() {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
+            let intent = arany::EffectIntent {
+                host: None,
+                host_command: None,
+                target: arany::worker::EffectTarget::Workspace,
+                id: uuid::Uuid::now_v7(),
+                run_id: arany::RunId::new(),
+                agent_run_id: arany::AgentRunId::new(),
+                policy_digest: [1; 32],
+                enforcement_digest: [2; 32],
+                workspace_device: 1,
+                workspace_inode: 2,
+                call: arany::ToolCall::Mkdir {
+                    path: "directory".into(),
+                },
+                limits: arany::ToolLimits::default(),
+                use_count: 1,
+            };
+            let child_approvals = approvals.clone();
+            let child_intent = intent.clone();
+            let child = tokio::spawn(async move {
+                tokio::time::timeout(
+                    Duration::from_secs(30),
+                    arany::test_support::approval::ask(&child_approvals, &child_intent),
+                )
+                .await
+            });
+            let mut pending = Some(inbox.next().await.expect("child approval"));
+            let mut answer = Composer::default();
+            answer.apply(TerminalInput::Character('y'));
+            assert!(
+                tokio::time::timeout(
+                    Duration::ZERO,
+                    withdraw_abandoned_approval(&mut pending, &mut answer),
+                )
+                .await
+                .is_err(),
+                "a live approval stays answerable"
+            );
+            assert!(pending.is_some());
+            assert_eq!(answer.text(), "y");
+            tokio::time::advance(Duration::from_secs(31)).await;
+            assert!(child.await.expect("child waiter").is_err());
+            withdraw_abandoned_approval(&mut pending, &mut answer).await;
+            assert!(pending.is_none(), "the dialog releases approval input");
+            assert_eq!(
+                answer.text(),
+                "",
+                "partial answers cannot reach a later approval"
+            );
+            let (approved, ()) = tokio::join!(
+                arany::test_support::approval::ask(&approvals, &intent),
+                async {
+                    inbox.next().await.expect("next approval").decide(true);
+                },
+            );
+            assert!(approved, "the parent can continue with a fresh approval");
+        })
+        .await
+        .expect("approval withdrawal deadline");
+    }
+
+    #[test]
+    fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
+        let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
+        for choices in [
+            vec![Yes, prefix, No],
+            vec![Yes, No],
+            vec![Yes, AutoEdits, No],
+            vec![Yes, ExactCommand, No],
+        ] {
+            for (index, choice) in choices.iter().enumerate() {
+                assert_eq!(
+                    linear_approval_choice(&(index + 1).to_string(), &choices),
+                    Some(*choice)
+                );
+            }
+            for (answer, expected) in [
+                ("", Some(No)),
+                ("YES", Some(Yes)),
+                ("no", Some(No)),
+                ("allow", None),
+                ("always", None),
+                ("0", None),
+                ("4", None),
+            ] {
+                assert_eq!(linear_approval_choice(answer, &choices), expected);
+            }
+        }
+        assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
+        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
+        assert_eq!(No.reply(), arany::ApprovalReply::Deny);
+        assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
+    }
+}
+
+#[cfg(test)]
+mod driver_tests {
+    use super::super::active::session_with_goal;
+    use super::*;
+
+    #[test]
+    fn approval_end_of_input_and_escape_cancel_without_a_decline() {
+        for input in [TerminalInput::EndOfInput, TerminalInput::Escape] {
+            let cancellation = arany::RunCancellation::new();
+            let mut stop = ActiveStop::Running;
+            assert!(interrupt_approval_input(&input, &cancellation, &mut stop));
+            assert!(stop == ActiveStop::Cancelling);
+            assert!(
+                !cancellation.cancel(),
+                "interruption already cancelled the Run"
+            );
+        }
+        let cancellation = arany::RunCancellation::new();
+        let mut stop = ActiveStop::Running;
+        assert!(!interrupt_approval_input(
+            &TerminalInput::Submit,
+            &cancellation,
+            &mut stop
+        ));
+        assert!(stop == ActiveStop::Running);
+        assert!(
+            cancellation.cancel(),
+            "ordinary approval input did not cancel"
+        );
+    }
+
+    #[test]
+    fn end_of_input_waits_for_only_the_current_run_to_settle() {
+        let mut view = session_with_goal(false);
+        let starting_sequence = view.last_sequence;
+        assert!(!run_settled(&view, starting_sequence), "no current Run");
+        let mut run = arany::RunView {
+            skill: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Finished,
+            accepted_sequence: starting_sequence,
+            finished_sequence: Some(starting_sequence),
+            failure: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+        };
+        view.runs.push(run.clone());
+        assert!(
+            !run_settled(&view, starting_sequence),
+            "an earlier Run cannot defer exit"
+        );
+        run.accepted_sequence = starting_sequence + 1;
+        for (status, settled) in [
+            (arany::RunStatus::Pending, false),
+            (arany::RunStatus::Active, false),
+            (arany::RunStatus::Finished, true),
+            (arany::RunStatus::Failed, true),
+            (arany::RunStatus::Cancelled, true),
+        ] {
+            run.status = status;
+            *view.runs.last_mut().unwrap() = run.clone();
+            assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
+        }
+    }
+
+    #[test]
+    fn exit_waits_for_only_the_current_run_to_settle() {
+        let mut view = session_with_goal(false);
+        let starting_sequence = view.last_sequence;
+        let typed = |text: &str| {
+            let mut composer = Composer::default();
+            for character in text.chars() {
+                composer.apply(TerminalInput::Character(character));
+            }
+            composer
+        };
+        let exit = typed("/exit");
+        assert!(
+            !exits_after_settled_run(&exit, &view, starting_sequence),
+            "no current Run"
+        );
+        let mut run = arany::RunView {
+            skill: None,
+            supervisor: Default::default(),
+            workers: Default::default(),
+            id: arany::RunId::new(),
+            objective: "Fix".into(),
+            images: Vec::new(),
+            config: None,
+            provider_fallbacks: Vec::new(),
+            provider_retries: Vec::new(),
+            agents: Vec::new(),
+            assistant_message: None,
+            status: arany::RunStatus::Active,
+            accepted_sequence: starting_sequence + 1,
+            finished_sequence: None,
+            failure: None,
+            tools: Vec::new(),
+            tool_compaction_summary: None,
+            tool_compaction_covered_count: 0,
+            tool_results_cleared_count: 0,
+            definitions: Default::default(),
+            display: Vec::new(),
+            steering_notes: Vec::new(),
+            lifecycle_hooks: Vec::new(),
+            lifecycle_hook_sequence: None,
+            provider_sequences: Default::default(),
+        };
+        view.runs.push(run.clone());
+        assert!(
+            !exits_after_settled_run(&exit, &view, starting_sequence),
+            "an active Run keeps /exit refused"
+        );
+        run.status = arany::RunStatus::Finished;
+        *view.runs.last_mut().unwrap() = run;
+        assert!(exits_after_settled_run(&exit, &view, starting_sequence));
+        for other in ["/exit now", "/status", "exit"] {
+            assert!(
+                !exits_after_settled_run(&typed(other), &view, starting_sequence),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn exit_abandons_a_held_linear_draft_and_waiting_note() {
+        let mut composer = Composer::default();
+        for character in "refused draft".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut held = hold_draft(&mut composer);
+        assert!(held.is_some(), "a refused linear draft is held");
+        let steering = RunSteering::default();
+        steering
+            .offer_note("waiting note".into())
+            .expect("note waits");
+        for character in "/exit".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        abandon_drafts_for_exit(&mut composer, &mut held, &steering);
+        assert!(composer.is_empty());
+        // Run end hands back nothing, so the deferred Ctrl+D exits instead of retaining a draft.
+        assert!(steering.withdraw_note().is_none());
+        assert!(held.is_none());
+    }
+
+    #[test]
+    fn steering_refusals_name_the_retained_draft_without_echoing_text() {
+        assert_eq!(
+            steering_refusal(SteeringRefused::TooLarge, false),
+            "Steering note exceeds 8.0 KB; draft retained"
+        );
+        assert_eq!(
+            steering_refusal(SteeringRefused::Unavailable, true),
+            "Steering note unavailable; draft retained"
+        );
+        assert_eq!(
+            steering_refusal(SteeringRefused::RunFull, true),
+            "No room for more steering notes this Run. Draft retained; press Enter after this Goal to submit"
+        );
+    }
+
+    #[test]
+    fn recorded_note_clears_only_an_unchanged_composer() {
+        let mut seen = 0;
+        let mut composer = Composer::default();
+        for character in "first note".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some(composer.text().to_owned());
+        assert!(!settle_recorded_note(
+            0,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert!(
+            composer.is_empty(),
+            "an unchanged offer clears the composer"
+        );
+        assert!(offered.is_none());
+        assert!(!settle_recorded_note(
+            1,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+
+        // An edit after the Engine took the note keeps the user's text as a retained draft.
+        for character in "second".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let mut offered = Some("second".to_owned());
+        composer.apply(TerminalInput::Character('!'));
+        assert!(settle_recorded_note(
+            2,
+            &mut seen,
+            &mut offered,
+            &mut composer
+        ));
+        assert_eq!(composer.text(), "second!");
+    }
+
+    #[test]
+    fn held_linear_draft_waits_aside_and_returns_before_later_text() {
+        let mut composer = Composer::default();
+        for character in "kept".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        assert!(
+            composer.is_empty(),
+            "the invisible draft leaves the composer"
+        );
+        assert!(hold_draft(&mut composer).is_none());
+
+        for character in "later".chars() {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "kept\nlater");
+    }
+
+    #[test]
+    fn overflowing_release_keeps_the_newer_draft() {
+        let mut composer = Composer::default();
+        composer.insert_paste(&"a".repeat(64 * 1024)).unwrap();
+        let held = hold_draft(&mut composer).expect("refused draft is held");
+        for character in std::iter::repeat_n('b', 4000) {
+            composer.apply(TerminalInput::Character(character));
+        }
+        assert!(!release_held_draft(&mut composer, held));
+        assert_eq!(composer.text(), "b".repeat(4000));
+        assert_eq!(
+            composer.apply(TerminalInput::Character('c')),
+            ComposerEdit::AtCapacity
+        );
+        composer.clear();
+        composer.apply(TerminalInput::Up);
+        assert_eq!(composer.text(), "a".repeat(64 * 1024));
+        assert!(composer.has_text_pastes());
+    }
+
+    #[test]
+    fn retained_draft_names_the_autonomous_goal_boundary() {
+        assert_eq!(
+            draft_retained_notice(true),
+            "Draft retained; press Enter after this Goal to submit"
+        );
+        assert_eq!(
+            draft_retained_notice(false),
+            "Draft retained; press Enter after this Run to submit"
+        );
     }
 }
