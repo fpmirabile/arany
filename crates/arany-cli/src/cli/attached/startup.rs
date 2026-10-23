@@ -1,8 +1,8 @@
 use super::{
     Admission, AttachedArgs, EntryMode, Feedback, PromptEntry,
-    active::{self, GoalStart, RunSubmission, submit_objective},
+    active::{self, GoalStart},
     admit_startup, append_notice, authorize_or_notice, controls, final_startup_notice,
-    finish_interrupted_submission, finish_submission, materialize_session, models, permissions,
+    materialize_session, models, permissions,
     picker::{PickerChoice, pick_session},
     preflight_prompt, refresh_runtime_skills, require_access, restore_failure_notice,
     seed_setup_catalog,
@@ -570,58 +570,20 @@ impl Startup {
         )?;
         active::validate_objective_inputs(&parts.admission, &prompt)?;
         materialize_session(&parts.admission, &mut parts.session_id, &mut parts.view).await?;
-        let starting_sequence = parts.view.last_sequence;
         parts
             .terminal
             .draw_progress(&parts.view, &notice)
             .map_err(|error| error.to_string())?;
-        let submission = submit_objective(
-            &parts.engine,
-            &mut parts.terminal,
-            &parts.admission,
-            startup_goal,
-            &mut parts.view,
-            &mut parts.composer,
-            prompt,
-            startup_skill,
-            None,
-        )
-        .await?;
-        Self::finish_startup(parts, submission, starting_sequence).await
-    }
-
-    async fn finish_startup(
-        parts: &mut SessionParts,
-        submission: RunSubmission,
-        starting_sequence: u64,
-    ) -> Result<(), String> {
-        match submission {
-            RunSubmission::Completed(outcome, user_recorded, stop) => {
-                parts.notice = finish_submission(
-                    &parts.engine,
-                    &mut parts.terminal,
-                    &parts.admission,
-                    &mut parts.composer,
-                    &mut parts.view,
-                    &outcome,
-                    user_recorded,
-                    stop.as_deref(),
-                )
-                .await?;
-            }
-            RunSubmission::InterruptedBeforeRun => {
-                parts.notice = finish_interrupted_submission(
-                    &mut parts.terminal,
-                    &parts.admission,
-                    &parts.composer,
-                    &mut parts.view,
-                    parts.session_id,
-                    starting_sequence,
-                )
-                .await?;
-            }
-            RunSubmission::Shutdown(reason) => return Err(reason),
+        parts.notice = active::PendingSubmission {
+            engine: &parts.engine,
+            admission: &parts.admission,
+            goal: startup_goal,
+            objective: prompt,
+            skill: startup_skill,
+            draft: None,
         }
+        .submit(&mut parts.terminal, &mut parts.view, &mut parts.composer)
+        .await?;
         Ok(())
     }
 }

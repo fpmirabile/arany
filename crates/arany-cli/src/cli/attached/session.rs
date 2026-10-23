@@ -2,10 +2,10 @@ use super::{
     Admission, EMPTY_INTERRUPT_WINDOW, Feedback, Selector,
     active::{self, CompactionOutcome, GoalStart, compact_current},
     append_notice, archive_notice_drawn, close_engine, configure_account, consume_local_command,
-    controls, feedback_or_end, load_view, permissions,
+    controls, feedback_or_end, load_view, materialize_session, permissions,
     picker::{QuickChoice, pick_quick_action},
     readmit_host_permissions, refresh_runtime_skills, reload_view_or_keep, retained_draft_notice,
-    rewind, run_selector, submit_idle_run,
+    rewind, run_selector,
 };
 use crate::terminal::{
     AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerEdit, InteractiveCommand,
@@ -535,6 +535,31 @@ impl AttachedSession {
         }
     }
 
+    async fn submit_idle_run(
+        &mut self,
+        goal: GoalStart,
+        objective: String,
+        skill: Option<String>,
+    ) -> Result<Option<Feedback>, String> {
+        materialize_session(&self.admission, &mut self.session_id, &mut self.view).await?;
+        let submitted = if matches!(goal, GoalStart::Resume | GoalStart::Continue) {
+            self.composer.take();
+            crate::terminal::ComposerDraft::default()
+        } else {
+            self.composer.take_draft()
+        };
+        active::PendingSubmission {
+            engine: &self.engine,
+            admission: &self.admission,
+            goal,
+            objective,
+            skill,
+            draft: Some(submitted),
+        }
+        .submit(&mut self.terminal, &mut self.view, &mut self.composer)
+        .await
+    }
+
     async fn execute_submission(
         &mut self,
         submission: Submission<'_>,
@@ -547,18 +572,9 @@ impl AttachedSession {
                     Submission::Skill { name, .. } => (line.to_owned(), Some(name.to_owned())),
                     Submission::Command { .. } => unreachable!("task submission"),
                 };
-                self.ui.notice = submit_idle_run(
-                    &self.engine,
-                    &mut self.terminal,
-                    &self.admission,
-                    &mut self.composer,
-                    &mut self.session_id,
-                    &mut self.view,
-                    GoalStart::Plain,
-                    objective,
-                    skill,
-                )
-                .await?;
+                self.ui.notice = self
+                    .submit_idle_run(GoalStart::Plain, objective, skill)
+                    .await?;
             }
             Submission::Command {
                 command: InteractiveCommand::Goal,
@@ -571,18 +587,7 @@ impl AttachedSession {
                 } else {
                     (GoalStart::Autonomous, argument.to_owned())
                 };
-                self.ui.notice = submit_idle_run(
-                    &self.engine,
-                    &mut self.terminal,
-                    &self.admission,
-                    &mut self.composer,
-                    &mut self.session_id,
-                    &mut self.view,
-                    start,
-                    objective,
-                    None,
-                )
-                .await?;
+                self.ui.notice = self.submit_idle_run(start, objective, None).await?;
             }
             Submission::Command { command, argument } => {
                 return self.command(command, argument).await;
