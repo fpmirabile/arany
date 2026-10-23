@@ -2931,6 +2931,72 @@ fn team_cancellation_drains_active_and_queued_children() {
     });
 }
 
+fn output_cap_provider(
+    bound: OutputTokenBound,
+    cap: u32,
+    responses: Vec<ProviderOutcome>,
+) -> ScriptedProvider {
+    let provider = ScriptedProvider::new(responses).with_max_output_tokens(cap);
+    match bound {
+        OutputTokenBound::ProviderEnforced => provider.with_profile("openai", "gpt-5.4"),
+        OutputTokenBound::LocalAcceptanceOnly => {
+            provider.with_chatgpt_account(Uuid::now_v7(), [1; 32])
+        }
+    }
+}
+
+async fn assert_team_output_caps(workspace: &Path, state: &Path, provider: ScriptedProvider) {
+    let cap = provider.identity().limits.max_output_tokens;
+    let bound = provider.identity().limits.output_token_bound;
+    let requests = Arc::clone(&provider.requests);
+    let provider = Arc::new(provider);
+    let engine = engine_support::open(
+        StateRoot::admit(state).expect("private state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let mut team = request(workspace, "Question");
+    team.policy = CollaborationPolicy::Team {
+        max_active_children: 1,
+    };
+    let outcome = run_to_end(&engine, &provider, team)
+        .await
+        .expect("team Run");
+    assert_eq!(outcome.run.status, RunStatus::Finished);
+    let config = outcome.run.config.as_ref().expect("Run config");
+    assert_eq!(config.output_token_cap, cap);
+    assert_eq!(config.output_token_bound, bound);
+    let caps: Vec<_> = requests
+        .lock()
+        .expect("requests lock")
+        .iter()
+        .map(|call| (call.phase, call.max_output_tokens))
+        .collect();
+    assert_eq!(
+        caps,
+        [
+            (AgentPhase::RootPlan, cap),
+            (AgentPhase::ChildWork, 4096),
+            (AgentPhase::RootSynthesis, cap)
+        ]
+    );
+    engine.close().await.expect("engine shutdown");
+}
+
+async fn assert_output_cap_refused(workspace: &Path, state: &Path, provider: ScriptedProvider) {
+    let requests = Arc::clone(&provider.requests);
+    let provider = Arc::new(provider);
+    let engine = engine_support::open(
+        StateRoot::admit(state).expect("private state"),
+        EngineConfig::default(),
+    )
+    .expect("engine");
+    let result = run_to_end(&engine, &provider, request(workspace, "Question")).await;
+    engine.close().await.expect("engine shutdown");
+    assert!(matches!(result, Err(EngineError::InvalidRequest)));
+    assert!(requests.lock().expect("requests lock").is_empty());
+}
+
 #[test]
 fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -2942,126 +3008,50 @@ fn provider_declared_output_cap_reaches_the_primary_and_caps_children() {
         let workspace = temp.path().join("workspace");
         std::fs::create_dir_all(workspace.join("notes")).expect("workspace");
         std::fs::write(workspace.join("notes/facts.txt"), "Fact").expect("include");
-        let provider = ScriptedProvider::new(vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![arany::ChildAssignment {
-                    editor: None,
-                    objective: "Inspect".into(),
-                    profile: None,
-                }],
-            }),
-            ProviderOutcome::Answer(Answer {
-                text: "Child answer".into(),
-            }),
-            ProviderOutcome::Answer(Answer {
-                text: "Answer".into(),
-            }),
-        ])
-        .with_max_output_tokens(16_384);
-        let requests = Arc::clone(&provider.requests);
-        let provider = Arc::new(provider);
-        let engine = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("private state"),
-            EngineConfig::default(),
+        let state = temp.path().join("state");
+        let cap = arany::OpenAiProvider::from_api_key_with_effort(
+            "gpt-5.4".into(),
+            None,
+            "synthetic-openai-key".into(),
         )
-        .expect("engine");
-        let mut team = request(&workspace, "Question");
-        team.policy = CollaborationPolicy::Team {
-            max_active_children: 1,
-        };
-        let outcome = run_to_end(&engine, &provider, team)
-            .await
-            .expect("team Run");
-        assert_eq!(outcome.run.status, RunStatus::Finished);
-        assert_eq!(
-            outcome
-                .run
-                .config
-                .as_ref()
-                .expect("Run config")
-                .output_token_cap,
-            16_384
-        );
-        let caps: Vec<_> = requests
-            .lock()
-            .expect("requests lock")
-            .iter()
-            .map(|call| (call.phase, call.max_output_tokens))
-            .collect();
-        assert_eq!(
-            caps,
-            [
-                (AgentPhase::RootPlan, 16_384),
-                (AgentPhase::ChildWork, 4096),
-                (AgentPhase::RootSynthesis, 16_384)
-            ]
-        );
-        engine.close().await.expect("engine shutdown");
-
-        let oversized_provider =
-            Arc::new(ScriptedProvider::new(Vec::new()).with_max_output_tokens(16_385));
-        let oversized = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert!(matches!(
-            run_to_end(
-                &oversized,
-                &oversized_provider,
-                request(&workspace, "Question")
-            )
-            .await,
-            Err(EngineError::InvalidRequest)
-        ));
-        oversized.close().await.expect("engine shutdown");
-
-        // A local-only ChatGPT route admits its cap and refuses anything above the 4,096 bound.
-        let chatgpt = |cap: u32, responses: Vec<ProviderOutcome>| {
-            ScriptedProvider::new(responses)
-                .with_chatgpt_account(Uuid::now_v7(), [1; 32])
-                .with_max_output_tokens(cap)
-        };
-        let local_over_provider = Arc::new(chatgpt(4097, Vec::new()));
-        let local_over = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert!(matches!(
-            run_to_end(
-                &local_over,
-                &local_over_provider,
-                request(&workspace, "Question")
-            )
-            .await,
-            Err(EngineError::InvalidRequest)
-        ));
-        local_over.close().await.expect("engine shutdown");
-
-        let local_cap_provider = Arc::new(chatgpt(
-            4096,
-            vec![ProviderOutcome::Answer(Answer { text: "ok".into() })],
-        ));
-        let local_cap = engine_support::open(
-            StateRoot::admit(&temp.path().join("state")).expect("state readmission"),
-            EngineConfig::default(),
-        )
-        .expect("engine");
-        assert_eq!(
-            run_to_end(
-                &local_cap,
-                &local_cap_provider,
-                request(&workspace, "Question")
-            )
-            .await
-            .expect("a 4,096 local-only Run is admitted")
-            .run
-            .status,
-            RunStatus::Finished
-        );
-        local_cap.close().await.expect("engine shutdown");
+        .expect("synthetic native identity")
+        .identity()
+        .limits
+        .max_output_tokens;
+        for bound in [
+            OutputTokenBound::ProviderEnforced,
+            OutputTokenBound::LocalAcceptanceOnly,
+        ] {
+            let team = output_cap_provider(
+                bound,
+                cap,
+                vec![
+                    ProviderOutcome::Delegate(Delegate {
+                        agent: None,
+                        children: vec![arany::ChildAssignment {
+                            editor: None,
+                            objective: "Inspect".into(),
+                            profile: None,
+                        }],
+                    }),
+                    ProviderOutcome::Answer(Answer {
+                        text: "Child answer".into(),
+                    }),
+                    ProviderOutcome::Answer(Answer {
+                        text: "Answer".into(),
+                    }),
+                ],
+            );
+            assert_team_output_caps(&workspace, &state, team).await;
+            let oversized = output_cap_provider(
+                bound,
+                cap + 1,
+                vec![ProviderOutcome::Answer(Answer {
+                    text: "Unexpected dispatch".into(),
+                })],
+            );
+            assert_output_cap_refused(&workspace, &state, oversized).await;
+        }
     });
 }
 
