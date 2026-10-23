@@ -80,6 +80,20 @@ pub fn format_duration(milliseconds: u64) -> String {
     parts.join(" ")
 }
 
+pub fn format_tokens(tokens: u32) -> String {
+    if tokens < 1_000 {
+        return format!("{tokens} tokens");
+    }
+    let (divisor, unit) = if tokens < 1_000_000 {
+        (1_000, "k")
+    } else {
+        (1_000_000, "M")
+    };
+    let value = f64::from(tokens) / f64::from(divisor);
+    let value = format!("{value:.1}");
+    format!("{}{unit} tokens", value.trim_end_matches(".0"))
+}
+
 pub(crate) fn supervisor_line(verdict: &arany::supervisor::SupervisorVerdict) -> String {
     use arany::supervisor::SignalKind;
     let signals = verdict

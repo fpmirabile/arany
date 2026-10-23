@@ -88,17 +88,13 @@ pub(crate) async fn check_selected_model(
     expected_account_id: Option<Uuid>,
     model: String,
     effort: Effort,
-) -> Result<Uuid, AuthorizationError> {
+) -> Result<(Uuid, Option<u32>), AuthorizationError> {
     validate_native_model_id(&model).map_err(|_| AuthorizationError::InvalidSelection)?;
     let selected = account::selected_for_use(workspace.clone(), expected_account_id).await?;
     account::clear_model_check(workspace.clone(), selected.clone(), model.clone(), effort).await?;
     let models =
         catalog::list_models(&selected.credentials, &selected.consent, selected.storage).await?;
-    let context_window_tokens = models
-        .iter()
-        .find(|row| row.slug == model)
-        .ok_or(AuthorizationError::ModelUnavailable)?
-        .context_window_tokens;
+    let context_window_tokens = catalog::model_window(&models, &model)?;
     arany::probe_chatgpt_model(&selected.credentials.access_token, &model, effort)
         .await
         .map_err(|error| match error {
@@ -124,7 +120,7 @@ pub(crate) async fn check_selected_model(
         })?;
     let id = selected.id;
     account::record_model_check(workspace, selected, model, effort, context_window_tokens).await?;
-    Ok(id)
+    Ok((id, context_window_tokens))
 }
 
 fn stream_failure_advice(code: &str) -> &'static str {

@@ -10,11 +10,31 @@ use std::{collections::HashSet, time::Duration};
 const MODELS_ENDPOINT: &str = "https://api.openai.com/v1/models";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEADLINE: Duration = Duration::from_secs(20);
+const RUN_ADMISSION_DEADLINE: Duration = Duration::from_secs(5);
 
 pub(crate) struct ChatGptModel {
     pub(crate) slug: String,
     pub(crate) display_name: String,
     pub(crate) context_window_tokens: Option<u32>,
+}
+
+pub(super) fn model_window(
+    models: &[ChatGptModel],
+    slug: &str,
+) -> Result<Option<u32>, AuthorizationError> {
+    models
+        .iter()
+        .find(|row| row.slug == slug)
+        .map(|row| row.context_window_tokens)
+        .ok_or(AuthorizationError::ModelUnavailable)
+}
+
+pub(super) async fn read_for_run(
+    read: impl std::future::Future<Output = Result<Vec<ChatGptModel>, AuthorizationError>>,
+) -> Result<Vec<ChatGptModel>, AuthorizationError> {
+    tokio::time::timeout(RUN_ADMISSION_DEADLINE, read)
+        .await
+        .map_err(|_| AuthorizationError::Unavailable)?
 }
 
 #[derive(Deserialize)]
