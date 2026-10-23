@@ -1,8 +1,8 @@
 use super::RunLoop;
-use super::stop::StopCause;
+use super::stop::{SizingRefusal, StopCause};
 use crate::engine::EngineError;
 use crate::engine::compaction::{COMPACTION_CALL_DEADLINE, classify_response};
-use crate::engine::ledger::Action;
+use crate::engine::ledger::{Action, Admission};
 use crate::engine::routing::CompactionOutcome;
 use crate::provider::{
     CompactionItem, CompactionRequest, GoalContextFacts, HistoryTurn, ProviderFailureClass,
@@ -192,12 +192,15 @@ impl RunLoop<'_> {
             .compact_tool_context_if_needed(request, reserve, deadline)
             .await
         {
-            Ok(()) => {}
-            Err(EngineError::GoalBudgetExhausted) => {
+            Ok(Ok(())) => {}
+            Ok(Err(SizingRefusal::ActiveTime)) => {
                 return Ok(PrimaryContext::Stop(StopCause::Budget));
             }
-            Err(EngineError::ContextTooLarge) => {
+            Ok(Err(SizingRefusal::ContextFull)) => {
                 return Ok(PrimaryContext::Stop(StopCause::ContextFull));
+            }
+            Ok(Err(SizingRefusal::DelegationDeadline)) => {
+                return Ok(PrimaryContext::Stop(StopCause::DelegationDeadline));
             }
             Err(error) => return Err(error),
         }
@@ -248,10 +251,11 @@ impl RunLoop<'_> {
         request: &mut ProviderRequest,
         reserve: usize,
         deadline: Option<Instant>,
-    ) -> Result<(), EngineError> {
+    ) -> Result<Result<(), SizingRefusal>, EngineError> {
         let Some(runtime) = self.controls.tools else {
-            return Ok(());
+            return Ok(Ok(()));
         };
+        let ledger = self.ledger();
         let context_limit = runtime.context_limit_bytes();
         let context = request
             .input
@@ -265,14 +269,14 @@ impl RunLoop<'_> {
                 .store(sequence, std::sync::atomic::Ordering::Relaxed);
         }
         match decision {
-            ContextDecision::Ready => return Ok(()),
+            ContextDecision::Ready => return Ok(Ok(())),
             ContextDecision::Summarize => {}
             ContextDecision::Clear {
                 prefix_steps,
                 covered,
                 bytes,
             } => {
-                let boundary = self.ledger().view(|view| {
+                let boundary = ledger.view(|view| {
                     let run = view
                         .runs
                         .iter()
@@ -289,7 +293,7 @@ impl RunLoop<'_> {
                         1 + self
                             .primary_call()
                             .max_events_for_admitted(&self.routing.providers)
-                            + self.ledger().verdicts(self.primary_call()),
+                            + ledger.verdicts(self.primary_call()),
                         0,
                     )
                     .await?;
@@ -314,7 +318,7 @@ impl RunLoop<'_> {
                         ContextCapacity::Fits
                     )
                 {
-                    return Ok(());
+                    return Ok(Ok(()));
                 }
             }
         }
@@ -329,12 +333,12 @@ impl RunLoop<'_> {
                 .await?;
         }
         let Some(window) = window else {
-            return Ok(());
+            return Ok(Ok(()));
         };
-        if !self.ledger().admits(Action::Compaction) {
-            return Ok(());
+        if !ledger.admits(Action::Compaction) {
+            return Ok(Ok(()));
         }
-        if self
+        if match self
             .lifecycle_hooks(
                 self.primary_id,
                 crate::tools::permissions::HookEvent::PreCompact,
@@ -343,46 +347,41 @@ impl RunLoop<'_> {
                 None,
                 true,
             )
-            .await?
-            .is_some()
-            || self.hook_requested_stop()?
-        {
-            return Ok(());
-        }
-        let reservation = match self
-            .ledger()
-            .reserve(Action::Compaction, self.primary_id)
             .await
         {
-            Ok(reservation) => reservation,
-            Err(EngineError::GoalBudgetExhausted) => return Ok(()),
-            Err(error) => return Err(error),
+            Ok(feedback) => feedback.is_some(),
+            Err(error) => return Ok(Err(SizingRefusal::from_error(error)?)),
+        } || self.hook_requested_stop()?
+        {
+            return Ok(Ok(()));
+        }
+        let reservation = ledger.reserve(Action::Compaction, self.primary_id).await?;
+        let Admission::Reserved(reservation) = reservation else {
+            return Ok(Ok(()));
         };
-        if !self.ledger().admits(Action::Compaction) {
-            return Ok(());
+        if !ledger.admits(Action::Compaction) {
+            return Ok(Ok(()));
         }
         let active_segment = match deadline {
             Some(_) => None,
-            None => Some(self.reserve_active_segment(
+            None => match self.reserve_active_segment(
                 COMPACTION_CALL_DEADLINE,
                 crate::session::BudgetAction::Compaction,
                 self.primary_id,
-            )?),
+            )? {
+                Admission::Reserved(segment) => Some(segment),
+                Admission::Exhausted => return Ok(Err(SizingRefusal::ActiveTime)),
+            },
         };
         let deadline = deadline
             .or_else(|| active_segment.as_ref().map(super::ActiveSegment::deadline))
             .ok_or(EngineError::InvalidRequest)?;
-        self.journal
-            .admit(
-                self.session_id,
-                Action::Compaction.max_events_for_admitted(&self.routing.providers),
-                0,
-            )
-            .await?;
+        let slots = Action::Compaction.max_events_for_admitted(&self.routing.providers);
+        self.journal.admit(self.session_id, slots, 0).await?;
         self.append(Event::GoalCompactionCallReserved {
             goal_id: self.goal()?,
             run_id: self.run_id,
-            active_ceiling_ms: self.ledger().active_ceiling(0)?,
+            active_ceiling_ms: ledger.active_ceiling(0)?,
         })
         .await?;
         reservation.commit()?;
@@ -394,10 +393,10 @@ impl RunLoop<'_> {
         if let Some(segment) = active_segment {
             self.settle_active_segment(segment)?;
         }
-        if self.ledger().active_time_exhausted() {
-            return Err(EngineError::GoalBudgetExhausted);
+        if ledger.active_time_exhausted() {
+            return Ok(Err(SizingRefusal::ActiveTime));
         }
-        Ok(())
+        Ok(Ok(()))
     }
 
     // Each pressured primary report maintains context once, however often maintenance runs before the next call.

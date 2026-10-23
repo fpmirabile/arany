@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::step::{BoxedStep, Grant, intent_observation};
+use super::step::{BoxedStep, Grant, IntentResult};
 use super::stop::StopCause;
 use super::{Action, RunLoop};
 use crate::engine::EngineError;
@@ -98,6 +98,26 @@ pub(super) fn decide_worker_terminal(failure: WorkerCause, facts: &WorkerFacts) 
         agent,
         worker,
         cause,
+    }
+}
+
+fn worker_observation(result: IntentResult) -> Result<Option<ToolObservation>, EngineError> {
+    match result {
+        Ok((observation, _)) => Ok(Some(observation)),
+        Err(StopCause::ActiveTime) => Err(EngineError::GoalBudgetExhausted),
+        Err(StopCause::Capacity) => Err(crate::tools::ToolError::Limit.into()),
+        Err(
+            StopCause::Uncertain
+            | StopCause::Cancelled
+            | StopCause::HookStop
+            | StopCause::Paused
+            | StopCause::Budget
+            | StopCause::ContextFull
+            | StopCause::DelegationDeadline
+            | StopCause::Refused(_)
+            | StopCause::ToolStopped
+            | StopCause::InvalidCommandResult,
+        ) => Ok(None),
     }
 }
 
@@ -858,7 +878,7 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        Ok(intent_observation(observation)?.map(|(observation, _)| observation))
+        worker_observation(observation)
     }
 
     pub(super) fn complete_worker<'a>(
@@ -1115,9 +1135,11 @@ impl RunLoop<'_> {
             )
             .await?;
         Ok(
-            intent_observation(observation)?.and_then(|(o, _)| match o.attestation {
-                Some(Attestation::WorkerData { data, .. }) => Some(data),
-                _ => None,
+            worker_observation(observation)?.and_then(|observation| {
+                match observation.attestation {
+                    Some(Attestation::WorkerData { data, .. }) => Some(data),
+                    _ => None,
+                }
             }),
         )
     }
@@ -1171,12 +1193,14 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        match result.and_then(intent_observation) {
-            Ok(_) | Err(EngineError::GoalBudgetExhausted) => {}
-            Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
+        match result {
+            Ok(Err(StopCause::Capacity))
+            | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
                 self.record_capacity_stop().await?
             }
+            Err(EngineError::GoalBudgetExhausted) => {}
             Err(error) => return Err(error),
+            Ok(_) => {}
         }
         let tool = self
             .ledger()

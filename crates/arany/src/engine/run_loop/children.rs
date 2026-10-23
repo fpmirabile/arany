@@ -1,7 +1,7 @@
 use super::stop::{PrimaryEnd, RunFacts, StepEnd, StopCause};
 use super::{
-    Action, ActiveSegment, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite, RunLoop,
-    call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
+    Action, ActiveSegment, Admission, CallFailure, CallResult, Grant, PrimaryDecision, PrimarySite,
+    RunLoop, call_record, decide_primary_call, primary_admitted, valid_answer, wave_deferred,
 };
 use crate::engine::routing::{CallScope, decide_attempt};
 use crate::engine::{CHILD_OUTPUT_TOKEN_CAP, EngineError};
@@ -921,14 +921,13 @@ impl RunLoop<'_> {
                 .expect("child chain"),
             count.div_ceil(parallel.max(1)),
         );
-        let segment = match self.reserve_active_segment(
+        let Admission::Reserved(segment) = self.reserve_active_segment(
             bound,
             crate::session::BudgetAction::Delegation,
             self.primary_id,
-        ) {
-            Ok(s) => s,
-            Err(EngineError::GoalBudgetExhausted) => return Ok(None),
-            Err(e) => return Err(e),
+        )?
+        else {
+            return Ok(None);
         };
         Ok(Some(Spawned {
             children: Vec::with_capacity(count),
@@ -955,17 +954,19 @@ impl RunLoop<'_> {
             if let Some(child) = &mut child {
                 child.tool_calls_remaining = child.tool_calls_remaining.min(queue.tool_allowance);
             }
-            *segments = match self.reserve_active_segment(
-                deadline.saturating_duration_since(Instant::now()),
-                crate::session::BudgetAction::Delegation,
-                self.primary_id,
-            ) {
-                Ok(segment) => Some(segment),
-                Err(EngineError::GoalBudgetExhausted) => {
+            *segments = match self
+                .reserve_active_segment(
+                    deadline.saturating_duration_since(Instant::now()),
+                    crate::session::BudgetAction::Delegation,
+                    self.primary_id,
+                )?
+                .map(Some)
+            {
+                Admission::Reserved(segment) => segment,
+                Admission::Exhausted => {
                     queue.stop.get_or_insert(StopCause::ActiveTime);
                     None
                 }
-                Err(error) => return Err(error),
             };
             return Ok(child);
         }
@@ -1369,17 +1370,19 @@ impl RunLoop<'_> {
         if wave.queue.stop.is_none() {
             self.verify_workers().await?;
         }
-        *wave.segments = match self.reserve_active_segment(
-            wave.deadline.saturating_duration_since(Instant::now()),
-            crate::session::BudgetAction::Delegation,
-            self.primary_id,
-        ) {
-            Ok(segment) => Some(segment),
-            Err(EngineError::GoalBudgetExhausted) => {
+        *wave.segments = match self
+            .reserve_active_segment(
+                wave.deadline.saturating_duration_since(Instant::now()),
+                crate::session::BudgetAction::Delegation,
+                self.primary_id,
+            )?
+            .map(Some)
+        {
+            Admission::Reserved(segment) => segment,
+            Admission::Exhausted => {
                 wave.queue.stop.get_or_insert(StopCause::ActiveTime);
                 None
             }
-            Err(error) => return Err(error),
         };
         wave.queue.primary_pending = false;
         Ok(())
@@ -1617,17 +1620,19 @@ impl RunLoop<'_> {
         }
         self.settle_worker_handover(wave.root_request, &wave.children[index], completed)
             .await?;
-        *wave.segments = match self.reserve_active_segment(
-            wave.deadline.saturating_duration_since(Instant::now()),
-            crate::session::BudgetAction::Delegation,
-            self.primary_id,
-        ) {
-            Ok(segment) => Some(segment),
-            Err(EngineError::GoalBudgetExhausted) => {
+        *wave.segments = match self
+            .reserve_active_segment(
+                wave.deadline.saturating_duration_since(Instant::now()),
+                crate::session::BudgetAction::Delegation,
+                self.primary_id,
+            )?
+            .map(Some)
+        {
+            Admission::Reserved(segment) => segment,
+            Admission::Exhausted => {
                 wave.queue.stop.get_or_insert(StopCause::ActiveTime);
                 None
             }
-            Err(error) => return Err(error),
         };
         Ok(
             if self.actor_hook_requested_stop(wave.children[index].agent_run_id)? {
@@ -2221,15 +2226,19 @@ impl RunLoop<'_> {
                 queue.pending.push_front(index);
                 break;
             }
-            self.reserve_provider_call(
-                child.agent_run_id,
-                Action::Child {
-                    in_flight: self.ledger().in_flight_children(),
-                    research: researcher,
-                },
-                0,
-            )
-            .await?;
+            let Admission::Reserved(()) = self
+                .reserve_provider_call(
+                    child.agent_run_id,
+                    Action::Child {
+                        in_flight: self.ledger().in_flight_children(),
+                        research: researcher,
+                    },
+                    0,
+                )
+                .await?
+            else {
+                return Err(EngineError::GoalBudgetExhausted);
+            };
             if self.controls.cancellation.is_cancelled()
                 || self.pause_requested()
                 || self.worker_stopped()?
@@ -2483,8 +2492,12 @@ impl RunLoop<'_> {
             if !self.admit_worker_call(queue).await? {
                 return Ok(false);
             }
-            self.reserve_provider_call(self.primary_id, self.primary_call(), 0)
-                .await?;
+            let Admission::Reserved(()) = self
+                .reserve_provider_call(self.primary_id, self.primary_call(), 0)
+                .await?
+            else {
+                return Err(EngineError::GoalBudgetExhausted);
+            };
             self.primary_context(root_request).await?;
             request.input = root_request.input.clone();
             let provider = self

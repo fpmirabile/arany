@@ -1,5 +1,5 @@
 use super::hints::HintPublisher;
-use super::ledger::{Action, GoalLedger, duration_ms};
+use super::ledger::{Action, Admission, GoalLedger, duration_ms};
 use super::{EngineError, RunCancellation, RunSteering, STORE_ACTION_OVERHEAD};
 use crate::journal::Journal;
 use crate::provider::{
@@ -25,7 +25,7 @@ mod tool_compaction;
 mod worker;
 
 use step::Grant;
-use stop::{PrimaryEnd, RunFacts, Settlement, StepEnd, StopCause};
+use stop::{PrimaryEnd, RunFacts, Settlement, SizingRefusal, StepEnd, StopCause};
 
 const TOOL_CLEANUP_OVERHEAD: Duration = Duration::from_secs(10);
 const TOOL_REVIEW_DEADLINE: Duration = Duration::from_secs(20);
@@ -268,14 +268,14 @@ impl<'a> RunLoop<'a> {
         action_bound: Duration,
         action: crate::session::BudgetAction,
         actor: AgentRunId,
-    ) -> Result<ActiveSegment, EngineError> {
-        let (started, reserved_ms) =
-            self.ledger()
-                .reserve_active(duration_ms(action_bound), action, Some(actor))?;
-        Ok(ActiveSegment {
-            started,
-            reserved_ms,
-        })
+    ) -> Result<Admission<ActiveSegment>, EngineError> {
+        Ok(self
+            .ledger()
+            .reserve_active(duration_ms(action_bound), action, Some(actor))?
+            .map(|(started, reserved_ms)| ActiveSegment {
+                started,
+                reserved_ms,
+            }))
     }
 
     fn settle_active_segment(&self, segment: ActiveSegment) -> Result<(), EngineError> {
@@ -293,16 +293,17 @@ impl<'a> RunLoop<'a> {
             .settle_active(segment.active_ms(sampled_at), active_origin)
     }
 
-    fn reserve_active_pause(&self) -> Result<ActivePause, EngineError> {
-        let segment = self.reserve_active_segment(
-            Duration::ZERO,
-            crate::session::BudgetAction::Tool,
-            self.primary_id,
-        )?;
-        Ok(ActivePause {
-            segment,
-            paused_at: Instant::now(),
-        })
+    fn reserve_active_pause(&self) -> Result<Admission<ActivePause>, EngineError> {
+        Ok(self
+            .reserve_active_segment(
+                Duration::ZERO,
+                crate::session::BudgetAction::Tool,
+                self.primary_id,
+            )?
+            .map(|segment| ActivePause {
+                segment,
+                paused_at: Instant::now(),
+            }))
     }
 
     fn settle_active_pause(
@@ -323,8 +324,11 @@ impl<'a> RunLoop<'a> {
         agent_run_id: AgentRunId,
         action: Action,
         pending_ms: u64,
-    ) -> Result<(), EngineError> {
-        let reservation = self.ledger().reserve(action, agent_run_id).await?;
+    ) -> Result<Admission<()>, EngineError> {
+        let Admission::Reserved(reservation) = self.ledger().reserve(action, agent_run_id).await?
+        else {
+            return Ok(Admission::Exhausted);
+        };
         // A review runs inside the Tool step's admission, which already counts its slots.
         if !matches!(action, Action::Review) {
             self.journal
@@ -343,7 +347,8 @@ impl<'a> RunLoop<'a> {
             active_ceiling_ms: self.ledger().active_ceiling(pending_ms)?,
         })
         .await?;
-        reservation.commit()
+        reservation.commit()?;
+        Ok(Admission::Reserved(()))
     }
 
     fn primary_call(&self) -> Action {
@@ -404,32 +409,38 @@ impl<'a> RunLoop<'a> {
         mut root_request: ProviderRequest,
     ) -> Result<(), EngineError> {
         let end = match self.initialize_definitions(&mut root_request).await {
-            Ok(step::DefinitionInitialization::Ready) => None,
-            Ok(step::DefinitionInitialization::Stopped) if self.pause_at_boundary() => {
+            Ok(Admission::Reserved(step::DefinitionInitialization::Ready)) => None,
+            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped))
+                if self.pause_at_boundary() =>
+            {
                 Some(PrimaryEnd::Stopped(StopCause::Paused))
             }
-            Ok(step::DefinitionInitialization::Stopped) if self.take_active_time_floor() => {
+            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped))
+                if self.take_active_time_floor() =>
+            {
                 Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
             }
-            Ok(step::DefinitionInitialization::Stopped) => {
+            Ok(Admission::Reserved(step::DefinitionInitialization::Stopped)) => {
                 Some(PrimaryEnd::Failed(RunFailure::DefinitionInvalid))
             }
-            Err(EngineError::GoalBudgetExhausted) => {
-                Some(PrimaryEnd::Stopped(StopCause::ActiveTime))
-            }
+            Ok(Admission::Exhausted) => Some(PrimaryEnd::Stopped(StopCause::ActiveTime)),
             Err(error) => return Err(error),
         };
         if let Some(end) = end {
             return self.settle_primary(end).await;
         }
         let end = match self.initialize_skill(&mut root_request).await {
-            Ok(step::SkillInitialization::Ready) => {
+            Ok(Admission::Reserved(step::SkillInitialization::Ready)) => {
                 return self.drive_primary(&mut root_request).await;
             }
             // A stopped read carries no cause: the observed facts decide, as for a refused reservation.
-            Ok(step::SkillInitialization::Stopped) => PrimaryEnd::Stopped(StopCause::Budget),
-            Ok(step::SkillInitialization::Failed(cause)) => PrimaryEnd::Failed(cause),
-            Err(EngineError::GoalBudgetExhausted) => PrimaryEnd::Stopped(StopCause::ActiveTime),
+            Ok(Admission::Reserved(step::SkillInitialization::Stopped)) => {
+                PrimaryEnd::Stopped(StopCause::Budget)
+            }
+            Ok(Admission::Reserved(step::SkillInitialization::Failed(cause))) => {
+                PrimaryEnd::Failed(cause)
+            }
+            Ok(Admission::Exhausted) => PrimaryEnd::Stopped(StopCause::ActiveTime),
             Err(error) => return Err(error),
         };
         if matches!(end, PrimaryEnd::Failed(RunFailure::ToolContextFull)) {
@@ -467,8 +478,8 @@ impl<'a> RunLoop<'a> {
             let limits = RateLimitSlot::default();
             let (first, active_segment) =
                 match self.invoke_primary(root_request, limits.clone()).await {
-                    Ok(result) => result,
-                    Err(EngineError::GoalBudgetExhausted) => {
+                    Ok(Admission::Reserved(result)) => result,
+                    Ok(Admission::Exhausted) => {
                         break PrimaryEnd::Stopped(StopCause::Budget);
                     }
                     Err(error) => return Err(error),
@@ -514,14 +525,9 @@ impl<'a> RunLoop<'a> {
                 PrimaryDecision::Finish(answer, turn) => {
                     pending_turn_bytes = turn.len();
                     match self.stop_primary(root_request, &answer, turn).await {
-                        Ok(true) => {}
-                        Ok(false) => break PrimaryEnd::Finished(answer),
-                        Err(EngineError::GoalBudgetExhausted) => {
-                            break PrimaryEnd::Stopped(StopCause::ActiveTime);
-                        }
-                        Err(EngineError::ContextTooLarge) => {
-                            break PrimaryEnd::Stopped(StopCause::ContextFull);
-                        }
+                        Ok(Ok(true)) => {}
+                        Ok(Ok(false)) => break PrimaryEnd::Finished(answer),
+                        Ok(Err(refusal)) => break PrimaryEnd::Stopped(refusal.into()),
                         Err(error) => return Err(error),
                     }
                 }
@@ -704,7 +710,7 @@ impl<'a> RunLoop<'a> {
         root: &mut ProviderRequest,
         answer: &Answer,
         turn: crate::provider::ProviderTurn,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<Result<bool, SizingRefusal>, EngineError> {
         let fits = self
             .controls
             .tools
@@ -712,7 +718,7 @@ impl<'a> RunLoop<'a> {
             .is_none_or(|(runtime, tools)| {
                 tools.has_stop_room(&turn, runtime.context_limit_bytes())
             });
-        let Some(feedback) = self
+        let feedback = match self
             .lifecycle_hooks(
                 self.primary_id,
                 crate::tools::permissions::HookEvent::Stop,
@@ -721,9 +727,11 @@ impl<'a> RunLoop<'a> {
                 None,
                 fits,
             )
-            .await?
-        else {
-            return Ok(false);
+            .await
+        {
+            Ok(Some(feedback)) => feedback,
+            Ok(None) => return Ok(Ok(false)),
+            Err(error) => return Ok(Err(SizingRefusal::from_error(error)?)),
         };
         let after_step = root.input.tools.as_mut().map_or(0, |tools| {
             tools.add_stop_feedback(&turn, &feedback);
@@ -738,7 +746,7 @@ impl<'a> RunLoop<'a> {
                 facts: None,
                 steering_notes: Vec::new(),
             });
-        Ok(true)
+        Ok(Ok(true))
     }
 
     fn primary_refusal(&self) -> Result<(Option<ProposalRefusal>, bool), EngineError> {
@@ -785,7 +793,7 @@ impl<'a> RunLoop<'a> {
         &'b self,
         root: &'b mut ProviderRequest,
         limits: RateLimitSlot,
-    ) -> step::BoxedStep<'b, (CallResult, ActiveSegment)> {
+    ) -> step::BoxedStep<'b, Admission<(CallResult, ActiveSegment)>> {
         Box::pin(self.invoke_primary_inner(root, limits))
     }
 
@@ -793,31 +801,32 @@ impl<'a> RunLoop<'a> {
         &self,
         root: &mut ProviderRequest,
         limits: RateLimitSlot,
-    ) -> Result<(CallResult, ActiveSegment), EngineError> {
+    ) -> Result<Admission<(CallResult, ActiveSegment)>, EngineError> {
         let provider = self.routing.bind(
             crate::provider::ProviderRole::Primary,
             self.primary_id,
             &mut root.model,
             &mut root.max_output_tokens,
         )?;
-        let active_segment = self.reserve_active_segment(
+        let Admission::Reserved(active_segment) = self.reserve_active_segment(
             provider.identity().limits.deadline,
             crate::session::BudgetAction::Provider,
             self.primary_id,
-        )?;
+        )?
+        else {
+            return Ok(Admission::Exhausted);
+        };
         let deadline = active_segment
             .deadline()
             .checked_sub(STORE_ACTION_OVERHEAD)
             .unwrap_or(active_segment.started);
-        if let Err(error) = self
+        let Admission::Reserved(()) = self
             .reserve_provider_call(self.primary_id, self.primary_call(), 0)
-            .await
-        {
-            if matches!(error, EngineError::GoalBudgetExhausted) {
-                self.settle_active_segment(active_segment)?;
-            }
-            return Err(error);
-        }
+            .await?
+        else {
+            self.settle_active_segment(active_segment)?;
+            return Ok(Admission::Exhausted);
+        };
         self.primary_context(root).await?;
         let request = root.clone();
         let context = self
@@ -837,7 +846,7 @@ impl<'a> RunLoop<'a> {
                 )
                 .await?;
             self.settle_result(&result)?;
-            return Ok((result, active_segment));
+            return Ok(Admission::Reserved((result, active_segment)));
         };
         let call_index = context.call_index;
         let (preview, mut receiver) = ResponsePreview::new();
@@ -905,7 +914,7 @@ impl<'a> RunLoop<'a> {
         self.hints
             .expect("preview owner")
             .publish_preview(self.primary_id, call_index, None);
-        Ok((result, active_segment))
+        Ok(Admission::Reserved((result, active_segment)))
     }
 
     async fn checkpoint(
@@ -1031,7 +1040,29 @@ impl<'a> RunLoop<'a> {
                 .controls
                 .tools
                 .is_some_and(|tools| !tools.hides_skill_from_model(name)),
-            _ => true,
+            crate::tools::ToolCall::ParseAgentDefinition { .. }
+            | crate::tools::ToolCall::List { .. }
+            | crate::tools::ToolCall::Read { .. }
+            | crate::tools::ToolCall::Search { .. }
+            | crate::tools::ToolCall::Mkdir { .. }
+            | crate::tools::ToolCall::Write { .. }
+            | crate::tools::ToolCall::Edit { .. }
+            | crate::tools::ToolCall::MultiEdit { .. }
+            | crate::tools::ToolCall::Command { .. }
+            | crate::tools::ToolCall::CommandUnguarded { .. }
+            | crate::tools::ToolCall::ApplyChangeset { .. }
+            | crate::tools::ToolCall::PrepareWorker { .. }
+            | crate::tools::ToolCall::McpList { .. }
+            | crate::tools::ToolCall::McpCall { .. }
+            | crate::tools::ToolCall::GitStatus { .. }
+            | crate::tools::ToolCall::GitDiff { .. }
+            | crate::tools::ToolCall::GitLog { .. }
+            | crate::tools::ToolCall::GitCommit { .. }
+            | crate::tools::ToolCall::GitBranch { .. }
+            | crate::tools::ToolCall::GitSwitch { .. }
+            | crate::tools::ToolCall::GitPush { .. }
+            | crate::tools::ToolCall::GhPrCreate { .. }
+            | crate::tools::ToolCall::Glob { .. } => true,
         }
     }
 

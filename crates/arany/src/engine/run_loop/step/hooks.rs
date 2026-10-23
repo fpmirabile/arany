@@ -1,5 +1,5 @@
 use super::{DispatchSite, Grant, HookDenial, NotDispatched, StopCause, undispatched};
-use crate::engine::ledger::{Action, duration_ms};
+use crate::engine::ledger::{Action, Admission, duration_ms};
 use crate::engine::run_loop::{RunLoop, TOOL_CLEANUP_OVERHEAD};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::session::{AgentRunId, Event};
@@ -955,12 +955,11 @@ impl RunLoop<'_> {
         limits.cache_candidate_bytes = 0;
         limits.cache_transfer_ms = 0;
         let clock = match deadline {
-            Some(deadline) => HookClock::Deadline(deadline),
-            None => HookClock::Pause(match self.reserve_active_pause() {
-                Ok(pause) => pause,
-                Err(EngineError::GoalBudgetExhausted) => return Ok(None),
-                Err(error) => return Err(error),
-            }),
+            Some(deadline) => Admission::Reserved(HookClock::Deadline(deadline)),
+            None => self.reserve_active_pause()?.map(HookClock::Pause),
+        };
+        let Admission::Reserved(clock) = clock else {
+            return Ok(None);
         };
         let boundary_ceiling = boundary_goal.map(|_| {
             deadline.map_or(0, |deadline| {

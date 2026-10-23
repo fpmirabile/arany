@@ -1,5 +1,5 @@
 use super::hints::HintPublisher;
-use super::ledger::{Action, GoalLedger};
+use super::ledger::{Action, Admission, GoalLedger};
 use super::run_loop::{CallResult, invoke_bounded_with_preview};
 use super::{EngineError, RunCancellation, RunSteering};
 use crate::journal::Journal;
@@ -649,23 +649,20 @@ impl CallRouter<'_> {
     ) -> Result<bool, EngineError> {
         let running = self.ledger.view(|view| view.active_goal().is_some())?;
         let reservation = if running {
-            Some(
-                match self
-                    .ledger
-                    .reserve(
-                        Action::ProviderCall {
-                            previews: false,
-                            steering: false,
-                        },
-                        scope.agent_run_id,
-                    )
-                    .await
-                {
-                    Ok(reservation) => reservation,
-                    Err(EngineError::GoalBudgetExhausted) => return Ok(false),
-                    Err(error) => return Err(error),
-                },
-            )
+            let Admission::Reserved(reservation) = self
+                .ledger
+                .reserve(
+                    Action::ProviderCall {
+                        previews: false,
+                        steering: false,
+                    },
+                    scope.agent_run_id,
+                )
+                .await?
+            else {
+                return Ok(false);
+            };
+            Some(reservation)
         } else {
             None
         };

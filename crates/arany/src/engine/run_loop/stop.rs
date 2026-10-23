@@ -61,6 +61,16 @@ pub(super) enum SizingRefusal {
     ContextFull,
 }
 
+impl SizingRefusal {
+    pub(super) fn from_error(error: EngineError) -> Result<Self, EngineError> {
+        match error {
+            EngineError::GoalBudgetExhausted => Ok(Self::ActiveTime),
+            EngineError::ContextTooLarge => Ok(Self::ContextFull),
+            error => Err(error),
+        }
+    }
+}
+
 impl From<SizingRefusal> for StopCause {
     fn from(refusal: SizingRefusal) -> Self {
         match refusal {
