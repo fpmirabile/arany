@@ -51,9 +51,9 @@ pub(super) fn apply(current: &mut SessionView, event: &Event) -> Result<(), Repl
             .ok_or(ReplayError::InvalidTransition)?
             .review_call_index = Some(review_index);
     }
-    let primary_call = run.agents[index].role == AgentRole::Primary;
+    let role = run.agents[index].role;
     run.agents[index].provider_calls.push(record.clone());
-    charge_goal_call(current, goal_id, *agent_run_id, record, primary_call)?;
+    charge_goal_call(current, goal_id, *agent_run_id, record, role)?;
     Ok(())
 }
 
@@ -308,7 +308,7 @@ fn charge_goal_call(
     goal_id: GoalId,
     agent_run_id: AgentRunId,
     record: &ProviderCallRecord,
-    primary_call: bool,
+    role: AgentRole,
 ) -> Result<(), ReplayError> {
     let goal = current_goal_mut(current, goal_id)?;
     let reservation_index = goal
@@ -329,7 +329,7 @@ fn charge_goal_call(
         ))
         .ok_or(ReplayError::InvalidTransition)?;
     goal.token_usage_unknown |= record.input_tokens.is_none() || record.output_tokens.is_none();
-    if primary_call
+    if role == AgentRole::Primary
         && record.disposition == ProviderCallDisposition::PlanRecorded
         && goal.plan_contract.is_none()
     {
