@@ -306,6 +306,86 @@ impl Provider for WaitingCompactionProvider {
     }
 }
 
+fn subscription_replay_provider(account_id: Uuid, fingerprint: [u8; 32]) -> Arc<ScriptedProvider> {
+    let cap = arany::ChatGptProvider::from_checked_account(
+        "model-a".into(),
+        Effort::High,
+        "synthetic-subscription-token".into(),
+        ChatGptProvenance {
+            account_id,
+            evidence_fingerprint: fingerprint,
+            admission: ChatGptAdmission::AccountConsent,
+        },
+    )
+    .expect("synthetic account")
+    .identity()
+    .limits
+    .max_output_tokens;
+    let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
+        text: "Synthetic answer".into(),
+    })])
+    .with_chatgpt_account(account_id, fingerprint)
+    .with_max_output_tokens(cap)
+    .with_reported_usage(arany::Usage {
+        input_tokens: Some(20),
+        output_tokens: Some(cap + 9_000),
+        ..Default::default()
+    })
+    .with_compactions(vec![Ok(CompactionResponse {
+        summary: "Compacted synthetic history".into(),
+        response_id: Some("resp_compact".into()),
+        usage: arany::Usage {
+            input_tokens: Some(20),
+            output_tokens: Some(3_000),
+            ..Default::default()
+        },
+        wire_provenance: Some(arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested),
+    })]);
+    Arc::new(provider)
+}
+
+async fn assert_subscription_replay(state_path: &Path, outcome: &arany::RunOutcome) {
+    let config = outcome.run.config.as_ref().expect("Run provenance");
+    let store = Store::open_read_only(StateRoot::open_existing(state_path).unwrap())
+        .expect("read-only reopen");
+    let events = store
+        .load_session(outcome.session_id)
+        .await
+        .expect("canonical Events");
+    let view = SessionView::replay(outcome.session_id, &events)
+        .expect("strict replay")
+        .expect("Session");
+    assert_eq!(view.runs[0].config.as_ref(), Some(config));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ContextCompacted { record, .. }
+            if record.chatgpt_provenance == config.chatgpt_provenance
+                && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
+                && record.output_tokens == Some(3_000)
+    )));
+    assert!(events.iter().any(|event| matches!(
+        &event.event,
+        Event::ProviderCallRecorded { record, .. } if record.output_tokens == Some(config.output_token_cap + 9_000)
+    )));
+    store.close().await.expect("store shutdown");
+}
+
+fn assert_subscription_account(config: &arany::RunConfig, account_id: Uuid, fingerprint: [u8; 32]) {
+    assert_eq!(config.saved_api_account_id, None);
+    assert_eq!(
+        config.output_token_bound,
+        OutputTokenBound::LocalAcceptanceOnly
+    );
+    assert_eq!(
+        config.chatgpt_provenance,
+        Some(ChatGptProvenance {
+            account_id,
+            evidence_fingerprint: fingerprint,
+            admission: ChatGptAdmission::AccountConsent,
+        })
+    );
+}
+
 #[test]
 fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -320,29 +400,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         let state_path = temp.path().join("state");
         let account_id = Uuid::now_v7();
         let fingerprint = [7; 32];
-        // Reported totals include reasoning, above both caps; the adapter checked visible output.
-        let provider = ScriptedProvider::new(vec![ProviderOutcome::Answer(Answer {
-            text: "Synthetic answer".into(),
-        })])
-        .with_chatgpt_account(account_id, fingerprint)
-        .with_reported_usage(arany::Usage {
-            input_tokens: Some(20),
-            output_tokens: Some(9_000),
-            ..Default::default()
-        })
-        .with_compactions(vec![Ok(CompactionResponse {
-            summary: "Compacted synthetic history".into(),
-            response_id: Some("resp_compact".into()),
-            usage: arany::Usage {
-                input_tokens: Some(20),
-                output_tokens: Some(3_000),
-                ..Default::default()
-            },
-            wire_provenance: Some(
-                arany::ProviderWireProvenance::ResponsesCompletedStoreFalseRequested,
-            ),
-        })]);
-        let provider = Arc::new(provider);
+        let provider = subscription_replay_provider(account_id, fingerprint);
         let engine = engine_support::open(
             StateRoot::admit(&state_path).expect("private state"),
             EngineConfig::default(),
@@ -358,19 +416,15 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         assert_eq!(outcome.run.status, RunStatus::Finished);
         let config = outcome.run.config.as_ref().expect("Run provenance");
         assert_eq!(config.provider, "chatgpt");
-        assert_eq!(config.saved_api_account_id, None);
         assert_eq!(
-            config.output_token_bound,
-            OutputTokenBound::LocalAcceptanceOnly
+            config.output_token_cap,
+            provider.identity().limits.max_output_tokens
         );
         assert_eq!(
-            config.chatgpt_provenance,
-            Some(ChatGptProvenance {
-                account_id,
-                evidence_fingerprint: fingerprint,
-                admission: ChatGptAdmission::AccountConsent,
-            })
+            provider.requests.lock().unwrap()[0].max_output_tokens,
+            config.output_token_cap
         );
+        assert_subscription_account(config, account_id, fingerprint);
         let compaction = engine
             .compact_session(
                 &AdmittedProviders::single(provider.clone()),
@@ -390,28 +444,7 @@ fn subscription_account_and_local_bound_survive_run_and_compaction_replay() {
         );
         engine.close().await.expect("engine shutdown");
 
-        let store = Store::open_read_only(StateRoot::open_existing(&state_path).unwrap())
-            .expect("read-only reopen");
-        let events = store
-            .load_session(outcome.session_id)
-            .await
-            .expect("canonical Events");
-        let view = SessionView::replay(outcome.session_id, &events)
-            .expect("strict replay")
-            .expect("Session");
-        assert_eq!(view.runs[0].config.as_ref(), Some(config));
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::ContextCompacted { record, .. }
-                if record.chatgpt_provenance == config.chatgpt_provenance
-                    && record.output_token_bound == OutputTokenBound::LocalAcceptanceOnly
-                    && record.output_tokens == Some(3_000)
-        )));
-        assert!(events.iter().any(|event| matches!(
-            &event.event,
-            Event::ProviderCallRecorded { record, .. } if record.output_tokens == Some(9_000)
-        )));
-        store.close().await.expect("store shutdown");
+        assert_subscription_replay(&state_path, &outcome).await;
     });
 }
 

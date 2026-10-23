@@ -1568,14 +1568,27 @@ fn streamed_writes_at_the_content_ceiling_assemble_and_decode() {
     let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
     // Escape-heavy input needs a turn allowance above the 4096-token fixture's 96 KiB.
     for (path, content, max_output_tokens) in [
-        ("src/new.rs".to_owned(), "x".repeat(ceiling), 4096),
+        (
+            "src/new.rs".to_owned(),
+            "x".repeat(ceiling),
+            crate::provider::MAX_OUTPUT_TOKEN_CAP,
+        ),
         ("\"".repeat(512), "\u{1}".repeat(ceiling), 128_000),
     ] {
+        let mut request = primary_request("model-1");
+        request.max_output_tokens = max_output_tokens;
+        assert_eq!(
+            body(&request, Effort::Medium)["max_tokens"],
+            max_output_tokens
+        );
         let arguments =
             json!({"path": path, "expected_digest": null, "content": content}).to_string();
         let assembled = streamed_tool_use("arany_write", &arguments)
             .unwrap()
             .unwrap();
+        let mut assembled: Value = serde_json::from_slice(&assembled).unwrap();
+        assembled["usage"]["output_tokens"] = json!(max_output_tokens);
+        let assembled = serde_json::to_vec(&assembled).unwrap();
         let ProviderOutcome::Tools(requests) = decode_streamed_tool(&assembled, max_output_tokens)
             .unwrap()
             .outcome

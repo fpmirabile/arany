@@ -59,6 +59,7 @@ impl ChatGptProvider {
         let mut identity = ProviderIdentity::new("chatgpt", model, Provenance::ChatGpt(provenance));
         identity.effort = Some(effort);
         identity.limits = CallLimits {
+            max_output_tokens: crate::provider::MAX_OUTPUT_TOKEN_CAP,
             output_token_bound: OutputTokenBound::LocalAcceptanceOnly,
             deadline: CALL_CEILING,
             ..CallLimits::default()
@@ -116,11 +117,14 @@ impl Provider for ChatGptProvider {
             return Err(ProviderError::Rejected);
         }
         invoke_at_observed(
-            &self.client,
-            Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
-            &self.access_token,
+            RunCall {
+                client: &self.client,
+                endpoint: Url::parse(ENDPOINT).expect("compiled Responses endpoint"),
+                access_token: &self.access_token,
+                effort: self.effort,
+                max_output_tokens: self.identity.limits.max_output_tokens,
+            },
             &request,
-            self.effort,
             crate::provider::request_ceiling(self.context_window_tokens),
             (preview, limits),
         )
@@ -250,6 +254,14 @@ fn client() -> Result<Client, ProviderError> {
         .map_err(|_| ProviderError::Unavailable)
 }
 
+struct RunCall<'a> {
+    client: &'a Client,
+    endpoint: Url,
+    access_token: &'a str,
+    effort: Effort,
+    max_output_tokens: u32,
+}
+
 async fn invoke_at(
     client: &Client,
     endpoint: Url,
@@ -257,52 +269,38 @@ async fn invoke_at(
     request: &ProviderRequest,
     effort: Effort,
 ) -> Result<ProviderResponse, ProviderError> {
-    invoke_at_with_preview(
-        client,
-        endpoint,
-        access_token,
-        request,
-        effort,
-        crate::provider::MAX_PROVIDER_REQUEST_BYTES,
-        None,
-    )
-    .await
-}
-
-async fn invoke_at_with_preview(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
-    request: &ProviderRequest,
-    effort: Effort,
-    max_request_bytes: usize,
-    preview: Option<ResponsePreview>,
-) -> Result<ProviderResponse, ProviderError> {
     invoke_at_observed(
-        client,
-        endpoint,
-        access_token,
+        RunCall {
+            client,
+            endpoint,
+            access_token,
+            effort,
+            max_output_tokens: PROBE_OUTPUT_CAP,
+        },
         request,
-        effort,
-        max_request_bytes,
-        (preview, RateLimitSlot::default()),
+        crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+        (None, RateLimitSlot::default()),
     )
     .await
 }
 
 async fn invoke_at_observed(
-    client: &Client,
-    endpoint: Url,
-    access_token: &str,
+    call: RunCall<'_>,
     request: &ProviderRequest,
-    effort: Effort,
     max_request_bytes: usize,
     observations: (Option<ResponsePreview>, RateLimitSlot),
 ) -> Result<ProviderResponse, ProviderError> {
-    let (preview, limits) = observations;
-    if !(1..=crate::provider::DEFAULT_OUTPUT_TOKEN_CAP).contains(&request.max_output_tokens) {
+    let RunCall {
+        client,
+        endpoint,
+        access_token,
+        effort,
+        max_output_tokens,
+    } = call;
+    if !(1..=max_output_tokens).contains(&request.max_output_tokens) {
         return Err(ProviderError::Rejected);
     }
+    let (preview, limits) = observations;
     let conversation = render::conversation(request)?;
     let body = subscription_body(request, &conversation, effort, max_request_bytes)?;
     let CompletedStream {

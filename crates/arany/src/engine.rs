@@ -2527,11 +2527,7 @@ fn checked_identity(
     provider: &dyn Provider,
 ) -> Result<&crate::provider::ProviderIdentity, EngineError> {
     let identity = provider.identity();
-    let limits = &identity.limits;
-    if identity.valid()
-        && (limits.output_token_bound != crate::provider::OutputTokenBound::LocalAcceptanceOnly
-            || limits.max_output_tokens <= crate::provider::DEFAULT_OUTPUT_TOKEN_CAP)
-    {
+    if identity.valid() {
         Ok(identity)
     } else {
         Err(EngineError::InvalidRequest)

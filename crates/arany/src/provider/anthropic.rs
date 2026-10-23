@@ -346,11 +346,20 @@ mod tests {
         assert_eq!(provider.identity().effort, Some(Effort::Max));
         assert_eq!(provider.key, "synthetic-anthropic-key");
         assert_eq!(provider.identity().saved_api_account_id(), None);
-        assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
+        assert_eq!(
+            provider.identity().limits.max_output_tokens,
+            crate::provider::MAX_OUTPUT_TOKEN_CAP
+        );
         assert_eq!(
             provider.identity().limits.deadline,
             native::NATIVE_CALL_DEADLINE
         );
+        assert_workspace_scope(&provider);
+        assert_saved_and_unreviewed_models();
+        assert_invalid_credentials_rejected();
+    }
+
+    fn assert_workspace_scope(provider: &AnthropicProvider) {
         assert!(
             !provider
                 .request(serde_json::json!({}))
@@ -386,6 +395,9 @@ mod tests {
             Some("wrkspc_Fixture"),
             "the shared Run and compaction request must retain scope"
         );
+    }
+
+    fn assert_saved_and_unreviewed_models() {
         let account_id = Uuid::now_v7();
         let saved = AnthropicProvider::from_saved_api_key_with_effort(
             "claude-sonnet-5".into(),
@@ -413,6 +425,9 @@ mod tests {
             assert_eq!(selected.identity().limits.concurrency, 1);
             assert_eq!(selected.workspace_id.as_deref(), Some("wrkspc_Fixture"));
         }
+    }
+
+    fn assert_invalid_credentials_rejected() {
         assert!(matches!(
             AnthropicProvider::from_saved_api_key_with_effort(
                 "claude-sonnet-5".into(),

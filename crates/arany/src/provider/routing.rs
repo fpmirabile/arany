@@ -185,9 +185,6 @@ impl ProviderRoutes {
                         && !identity.model.chars().any(char::is_control)
                         && !identity.limits.deadline.is_zero()
                         && identity.limits.deadline <= std::time::Duration::from_secs(1200)
-                        && (identity.limits.output_token_bound
-                            != super::OutputTokenBound::LocalAcceptanceOnly
-                            || identity.limits.max_output_tokens <= super::DEFAULT_OUTPUT_TOKEN_CAP)
                 })
                 && chain
                     .iter()

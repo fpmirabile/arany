@@ -36,6 +36,10 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
     assert_eq!(provider.identity().model, "model-a");
     assert_eq!(provider.identity().effort, Some(Effort::High));
     assert_eq!(provider.identity().limits.concurrency, 1);
+    assert_eq!(
+        provider.identity().limits.max_output_tokens,
+        crate::provider::MAX_OUTPUT_TOKEN_CAP
+    );
     assert_eq!(provider.identity().chatgpt_provenance(), Some(&provenance));
     assert_eq!(
         provider.identity().limits.deadline,
@@ -57,6 +61,62 @@ fn checked_provider_declares_local_bound_and_exact_account_provenance() {
         )
         .is_err()
     );
+}
+
+#[tokio::test]
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn requests_above_the_declared_cap_are_rejected_before_dispatch() {
+    let provider = ChatGptProvider::from_checked_account(
+        "model-a".into(),
+        Effort::High,
+        TOKEN.into(),
+        ChatGptProvenance {
+            account_id: uuid::Uuid::now_v7(),
+            evidence_fingerprint: [7; 32],
+            admission: crate::provider::ChatGptAdmission::AccountConsent,
+        },
+    )
+    .expect("synthetic account");
+    for limits in [
+        provider.identity().limits,
+        CallLimits {
+            max_output_tokens: crate::provider::DEFAULT_OUTPUT_TOKEN_CAP,
+            ..provider.identity().limits
+        },
+    ] {
+        for cap in [0, limits.max_output_tokens + 1] {
+            let request = ProviderRequest {
+                max_output_tokens: cap,
+                ..request()
+            };
+            let (endpoint, server) = serve(event_reply(completed(Some(12)))).await;
+            let result = invoke_at_observed(
+                RunCall {
+                    client: &client(),
+                    endpoint,
+                    access_token: TOKEN,
+                    effort: Effort::High,
+                    max_output_tokens: limits.max_output_tokens,
+                },
+                &request,
+                crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+                (None, RateLimitSlot::default()),
+            )
+            .await;
+            server.abort();
+            let _ = server.await;
+            assert!(matches!(result, Err(ProviderError::Rejected)));
+        }
+    }
+    let request = ProviderRequest {
+        max_output_tokens: PROBE_OUTPUT_CAP + 1,
+        ..request()
+    };
+    let (endpoint, server) = serve(event_reply(completed(Some(12)))).await;
+    let result = invoke_at(&client(), endpoint, TOKEN, &request, Effort::High).await;
+    server.abort();
+    let _ = server.await;
+    assert!(matches!(result, Err(ProviderError::Rejected)));
 }
 
 fn request() -> ProviderRequest {
@@ -939,13 +999,15 @@ fn with_output_details(stream: Vec<u8>, details: &Value) -> Vec<u8> {
         .into_bytes()
 }
 
-#[tokio::test]
-// Skipped in the Guard: local test IPC capability is missing.
-#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
-async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
+type LocalCapCase = (
+    &'static str,
+    fn(u32) -> (u32, Value),
+    Option<crate::ProviderFailureReason>,
+);
+
+fn local_cap_cases() -> [LocalCapCase; 6] {
     use crate::ProviderFailureReason::{LocalOutputLimit, ResponseContract};
-    type Usage = fn(u32) -> (u32, Value);
-    let rows: [(&str, Usage, Option<_>); 6] = [
+    [
         (
             "reasoning-heavy, visible output at the cap",
             |cap| (cap + 3_990, json!({"reasoning_tokens": 3_990})),
@@ -981,13 +1043,27 @@ async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_c
             },
             Some(ResponseContract),
         ),
-    ];
-    for (label, usage, expected) in rows {
-        for compaction in [false, true] {
+    ]
+}
+
+#[tokio::test]
+// Skipped in the Guard: local test IPC capability is missing.
+#[cfg_attr(arany_guard, ignore = "requires local test IPC")]
+async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_charging() {
+    for (label, usage, expected) in local_cap_cases() {
+        for (requested_cap, compaction) in [
+            (request().max_output_tokens, false),
+            (crate::provider::MAX_OUTPUT_TOKEN_CAP, false),
+            (MAX_COMPACTION_OUTPUT_TOKENS, true),
+        ] {
+            let request = ProviderRequest {
+                max_output_tokens: requested_cap,
+                ..request()
+            };
             let (text, cap) = if compaction {
                 (r#"Condensed"#, COMPACTION_VISIBLE_CAP)
             } else {
-                ("done", request().max_output_tokens)
+                ("done", request.max_output_tokens)
             };
             let (total, details) = usage(cap);
             let stream = with_output_details(completed_with_text(Some(total), text), &details);
@@ -1003,9 +1079,20 @@ async fn the_local_cap_counts_visible_output_and_keeps_the_reasoning_total_for_c
                 .await
                 .map(|response| response.usage)
             } else {
-                invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
-                    .await
-                    .map(|response| response.usage)
+                invoke_at_observed(
+                    RunCall {
+                        client: &client(),
+                        endpoint,
+                        access_token: TOKEN,
+                        effort: Effort::Medium,
+                        max_output_tokens: crate::provider::MAX_OUTPUT_TOKEN_CAP,
+                    },
+                    &request,
+                    crate::provider::MAX_PROVIDER_REQUEST_BYTES,
+                    (None, RateLimitSlot::default()),
+                )
+                .await
+                .map(|response| response.usage)
             };
             match expected {
                 None => assert_eq!(
@@ -1986,11 +2073,14 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
         let (endpoint, server) = serve(reply).await;
         let slot = RateLimitSlot::default();
         let result = invoke_at_observed(
-            &client(),
-            endpoint,
-            TOKEN,
+            RunCall {
+                client: &client(),
+                endpoint,
+                access_token: TOKEN,
+                effort: Effort::Low,
+                max_output_tokens: CallLimits::default().max_output_tokens,
+            },
             &request(),
-            Effort::Low,
             crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             (None, slot.clone()),
         )
@@ -2008,11 +2098,14 @@ async fn passive_headers_survive_http_and_body_failures_without_accepting_an_out
         let (endpoint, server) = serve(reply).await;
         let slot = RateLimitSlot::default();
         let result = invoke_at_observed(
-            &client(),
-            endpoint,
-            TOKEN,
+            RunCall {
+                client: &client(),
+                endpoint,
+                access_token: TOKEN,
+                effort: Effort::Low,
+                max_output_tokens: CallLimits::default().max_output_tokens,
+            },
             &request(),
-            Effort::Low,
             crate::provider::MAX_PROVIDER_REQUEST_BYTES,
             (None, slot.clone()),
         )
