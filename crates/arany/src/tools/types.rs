@@ -3,11 +3,14 @@ use crate::session::worker::{
     ChangesetSource, EffectTarget, WorkerDataRef, WorkerMutation, WorkerPreparation,
 };
 use crate::session::{AgentRunId, RunId};
+pub(crate) use crate::validate::{
+    FORBIDDEN_NAMES, MAX_RELATIVE_PATH_BYTES, digest, forbidden, valid_digest, valid_name,
+    valid_relative, valid_revision,
+};
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::path::{Component, Path};
+use std::path::Path;
 use uuid::Uuid;
 
 // Write content or combined Edit/MultiEdit strings, in decoded UTF-8 bytes.
@@ -545,57 +548,6 @@ impl ToolCall {
 }
 
 pub(crate) const MAX_GIT_LOG_COMMITS: u32 = 50;
-const MAX_REVISION_BYTES: usize = 128;
-
-pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
-    ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
-];
-
-pub(crate) fn valid_revision(value: &str) -> bool {
-    if value.is_empty() || value.len() > MAX_REVISION_BYTES {
-        return false;
-    }
-    let (name, mut suffix) = value.split_at(value.find(['~', '^']).unwrap_or(value.len()));
-    let name_valid = !name.is_empty()
-        && !name.contains("..")
-        && name.split('/').all(|part| {
-            !part.is_empty()
-                && !part.starts_with(['.', '-'])
-                && !part.ends_with('.')
-                && !part.ends_with(".lock")
-                && part
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
-        });
-    let mut steps = 0;
-    while let Some(rest) = suffix.strip_prefix(['~', '^']) {
-        let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
-        if digits > 4 {
-            return false;
-        }
-        suffix = &rest[digits..];
-        steps += 1;
-    }
-    name_valid && suffix.is_empty() && steps <= 4
-}
-
-pub(crate) const MAX_RELATIVE_PATH_BYTES: usize = 512;
-
-pub(crate) fn valid_relative(value: &str, root: bool) -> bool {
-    if value.is_empty() || value == "." {
-        return root;
-    }
-    value.len() <= MAX_RELATIVE_PATH_BYTES
-        && !value.chars().any(char::is_control)
-        && !value.contains('\\')
-        && value
-            .split('/')
-            .all(|part| !part.is_empty() && part != "." && part != ".." && !forbidden(part))
-        && Path::new(value)
-            .components()
-            .all(|part| matches!(part, Component::Normal(_)))
-}
-
 pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super::ToolError> {
     if Path::new(value).is_absolute() || value.split('/').any(|part| part == "..") {
         return Err(super::ToolError::OutsideWorkspace.at_path(value));
@@ -607,34 +559,6 @@ pub(crate) fn validate_mention_path(value: &str, root: bool) -> Result<(), super
         return Err(super::ToolError::Path.at_path(value));
     }
     Ok(())
-}
-
-pub(crate) fn forbidden(value: &str) -> bool {
-    FORBIDDEN_NAMES
-        .iter()
-        .any(|name| value.eq_ignore_ascii_case(name))
-        || value
-            .get(..5)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case(".env."))
-}
-
-pub fn valid_name(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 64
-        && value.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'_')
-        })
-}
-
-pub(crate) fn valid_digest(value: &str) -> bool {
-    value.len() == 64
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-pub(crate) fn digest(bytes: &[u8]) -> [u8; 32] {
-    Sha256::digest(bytes).into()
 }
 
 pub(crate) fn hex_digest(bytes: &[u8]) -> String {

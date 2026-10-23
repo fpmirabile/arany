@@ -19,6 +19,9 @@ pub mod supervisor;
 mod telemetry;
 mod timestamp;
 mod tools;
+mod validate;
+
+pub use validate::bounded_vec;
 
 pub use timestamp::utc_date;
 pub use tools::permissions;
@@ -106,7 +109,9 @@ pub use tools::{
 };
 
 pub use session::DISPLAY_LIMIT_TEXT;
-pub use tools::types::valid_name as valid_tool_name;
+pub fn valid_tool_name(value: &str) -> bool {
+    validate::valid_name(value)
+}
 
 pub use tools::catalog::Site;
 

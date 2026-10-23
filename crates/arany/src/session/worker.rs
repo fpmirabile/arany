@@ -923,27 +923,12 @@ where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
 {
-    struct Files<T>(std::marker::PhantomData<T>);
-    impl<'de, T: Deserialize<'de>> serde::de::Visitor<'de> for Files<T> {
-        type Value = Vec<T>;
-        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-            f.write_str("at most 2048 worker file records")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut files = Vec::new();
-            while let Some(file) = seq.next_element()? {
-                if files.len() == WORKER_FILES {
-                    return Err(serde::de::Error::custom("worker file bound exceeded"));
-                }
-                files.push(file);
-            }
-            Ok(files)
-        }
-    }
-    deserializer.deserialize_seq(Files(std::marker::PhantomData))
+    crate::validate::bounded_sequence::<D, T, T, WORKER_FILES>(
+        deserializer,
+        format_args!("at most {WORKER_FILES} worker file records"),
+        "worker file bound exceeded",
+        |_| Ok(()),
+    )
 }
 
 impl WorkerOutcome {

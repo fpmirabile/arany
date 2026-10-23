@@ -81,33 +81,18 @@ pub fn test_image() -> ImageAttachment {
 pub(crate) fn deserialize_images<'de, D: Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Vec<ImageAttachment>, D::Error> {
-    struct Images;
-    impl<'de> serde::de::Visitor<'de> for Images {
-        type Value = Vec<ImageAttachment>;
-        fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-            formatter.write_str("at most four PNG images totaling at most 192 KiB")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut sequence: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut images = Vec::new();
-            for _ in 0..MAX_MESSAGE_IMAGES {
-                let Some(image) = sequence.next_element::<ImageAttachment>()? else {
-                    return Ok(images);
-                };
-                images.push(image);
-                if !valid_image_collection(&images) {
-                    return Err(serde::de::Error::custom("image byte limit exceeded"));
-                }
+    crate::validate::bounded_sequence::<D, ImageAttachment, serde::de::IgnoredAny, MAX_MESSAGE_IMAGES>(
+        deserializer,
+        "at most four PNG images totaling at most 192 KiB",
+        "image count limit exceeded",
+        |images| {
+            if valid_image_collection(images) {
+                Ok(())
+            } else {
+                Err("image byte limit exceeded")
             }
-            if sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {
-                return Err(serde::de::Error::custom("image count limit exceeded"));
-            }
-            Ok(images)
-        }
-    }
-    deserializer.deserialize_seq(Images)
+        },
+    )
 }
 
 impl fmt::Debug for ImageAttachment {
