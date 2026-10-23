@@ -850,6 +850,32 @@ fn catalog_failure_uses_the_latest_same_slug_check_across_efforts() {
         .unwrap();
         assert_eq!(window, expected);
     }
+    record_model_check_at(
+        &state,
+        &workspace,
+        &selected,
+        "model-one",
+        Effort::Medium,
+        None,
+        1_799_999_003,
+    )
+    .unwrap();
+    let (_, window) = admitted_model_at(
+        &state,
+        &workspace,
+        &selected,
+        RunModel {
+            slug: "model-one",
+            effort: Effort::High,
+            now: 1_799_999_010,
+        },
+        Err(&AuthorizationError::Unavailable),
+    )
+    .unwrap();
+    assert_eq!(
+        window, None,
+        "the newest check must not revive older metadata"
+    );
 }
 
 #[test]
