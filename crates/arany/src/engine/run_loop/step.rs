@@ -1,5 +1,5 @@
 use super::children::ChildWork;
-use super::stop::{SizingRefusal, StepEnd, StopCause};
+use super::stop::{RunProgress, RunRefusal, SizingRefusal, StepEnd, StopCause};
 use super::{
     ActivePause, ActiveSegment, CallResult, RunLoop, TOOL_CLEANUP_OVERHEAD, TOOL_REVIEW_DEADLINE,
     call_record,
@@ -3050,7 +3050,7 @@ impl RunLoop<'_> {
     pub(super) async fn initialize_skill(
         &self,
         request: &mut ProviderRequest,
-    ) -> Result<Admission<SkillInitialization>, EngineError> {
+    ) -> Result<RunProgress<SkillInitialization>, EngineError> {
         let name = self
             .ledger()
             .view(|view| view.runs.last().and_then(|run| run.skill.clone()))?;
@@ -3058,8 +3058,8 @@ impl RunLoop<'_> {
             name,
             self.pause_at_boundary() || self.controls.cancellation.is_cancelled(),
         ) {
-            SkillReadPlan::Skip => return Ok(Admission::Reserved(SkillInitialization::Ready)),
-            SkillReadPlan::Stop => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
+            SkillReadPlan::Skip => return Ok(RunProgress::Ready(SkillInitialization::Ready)),
+            SkillReadPlan::Stop => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
             SkillReadPlan::Read(name) => name,
         };
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
@@ -3068,12 +3068,12 @@ impl RunLoop<'_> {
             resource: None,
         };
         if !self.ledger().allows_tool(&call) {
-            return Ok(Admission::Reserved(SkillInitialization::Failed(
+            return Ok(RunProgress::Ready(SkillInitialization::Failed(
                 crate::session::RunFailure::ToolStopped,
             )));
         }
         let mut intent = match self.primary_intent(runtime, call.clone()).await? {
-            None => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
+            None => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
             Some(intent) => intent,
         };
         let tools = request
@@ -3084,7 +3084,7 @@ impl RunLoop<'_> {
         let Some(capacity) =
             runtime.result_capacity(tools.rendered_len(), INVOKED_SKILL_ENVELOPE_BYTES)
         else {
-            return Ok(Admission::Reserved(SkillInitialization::Failed(
+            return Ok(RunProgress::Ready(SkillInitialization::Failed(
                 crate::session::RunFailure::ToolContextFull,
             )));
         };
@@ -3098,8 +3098,8 @@ impl RunLoop<'_> {
             .await?
         {
             Ok((observation, _)) => observation,
-            Err(StopCause::ActiveTime) => return Ok(Admission::Exhausted),
-            Err(StopCause::Capacity) => return Err(ToolError::Limit.into()),
+            Err(StopCause::ActiveTime) => return Ok(RunProgress::Stopped(RunRefusal::Budget)),
+            Err(StopCause::Capacity) => return Ok(RunProgress::Stopped(RunRefusal::Capacity)),
             Err(
                 StopCause::Uncertain
                 | StopCause::Cancelled
@@ -3111,8 +3111,18 @@ impl RunLoop<'_> {
                 | StopCause::Refused(_)
                 | StopCause::ToolStopped
                 | StopCause::InvalidCommandResult,
-            ) => return Ok(Admission::Reserved(SkillInitialization::Stopped)),
+            ) => return Ok(RunProgress::Ready(SkillInitialization::Stopped)),
         };
+        self.apply_invoked_skill(request, runtime, observation)
+            .map(RunProgress::Ready)
+    }
+
+    fn apply_invoked_skill(
+        &self,
+        request: &mut ProviderRequest,
+        runtime: &ToolRuntime,
+        observation: ToolObservation,
+    ) -> Result<SkillInitialization, EngineError> {
         let tools = request
             .input
             .tools
@@ -3128,7 +3138,7 @@ impl RunLoop<'_> {
             SkillInitialization::Ready => tools.invoked_skill = Some(observation),
             SkillInitialization::Stopped | SkillInitialization::Failed(_) => {}
         }
-        Ok(Admission::Reserved(decision))
+        Ok(decision)
     }
 }
 
@@ -3138,68 +3148,45 @@ pub(super) enum DefinitionInitialization {
     Stopped,
 }
 
+#[must_use]
+enum DefinitionRead {
+    Output(String),
+    Stopped,
+}
+
 impl RunLoop<'_> {
     pub(super) async fn initialize_definitions(
         &self,
         request: &mut ProviderRequest,
-    ) -> Result<Admission<DefinitionInitialization>, EngineError> {
+    ) -> Result<RunProgress<DefinitionInitialization>, EngineError> {
         let Some(runtime) = self.controls.tools else {
-            return Ok(Admission::Reserved(DefinitionInitialization::Ready));
+            return Ok(RunProgress::Ready(DefinitionInitialization::Ready));
         };
         let Some(pin) = runtime.definitions.pin() else {
-            return Ok(Admission::Reserved(DefinitionInitialization::Ready));
+            return Ok(RunProgress::Ready(DefinitionInitialization::Ready));
         };
         let mut outputs = Vec::with_capacity(pin.files.len());
         let mut normalized_bytes = 0;
         for (index, file) in pin.files.iter().enumerate() {
             if self.pause_at_boundary() || self.controls.cancellation.is_cancelled() {
-                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
+                return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
             }
             let call = ToolCall::ParseAgentDefinition {
                 index: u16::try_from(index).map_err(|_| EngineError::InvalidRequest)?,
                 raw_digest: file.digest,
             };
-            let Some(mut intent) = self.primary_intent(runtime, call).await? else {
-                self.active_time_floor
-                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
+            let output = match self.read_definition(request, runtime, call).await? {
+                RunProgress::Ready(DefinitionRead::Output(output)) => output,
+                RunProgress::Ready(DefinitionRead::Stopped) => {
+                    return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
+                }
+                RunProgress::Stopped(cause) => return Ok(RunProgress::Stopped(cause)),
             };
-            intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
-            let grant = Grant::Primary {
-                request,
-                review_allowed: false,
-            };
-            let post_call = intent.call.clone();
-            let observation = match self
-                .run_intent(&grant, runtime, intent, &post_call, false)
-                .await?
-            {
-                Ok((observation, _)) => observation,
-                Err(StopCause::ActiveTime) => return Ok(Admission::Exhausted),
-                Err(StopCause::Capacity) => return Err(ToolError::Limit.into()),
-                Err(
-                    StopCause::Uncertain
-                    | StopCause::Cancelled
-                    | StopCause::HookStop
-                    | StopCause::Paused
-                    | StopCause::Budget
-                    | StopCause::ContextFull
-                    | StopCause::DelegationDeadline
-                    | StopCause::Refused(_)
-                    | StopCause::ToolStopped
-                    | StopCause::InvalidCommandResult,
-                ) => return Ok(Admission::Reserved(DefinitionInitialization::Stopped)),
-            };
-            if observation.disposition != ToolDisposition::Succeeded
-                || observation.attestation.is_none()
-            {
-                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
-            }
-            normalized_bytes += observation.output.len();
+            normalized_bytes += output.len();
             if normalized_bytes > 1024 * 1024 {
-                return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
+                return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
             }
-            outputs.push(observation.output);
+            outputs.push(output);
         }
         let child_model = &self.routing.providers.child[0].identity().model;
         let Ok(registry) = crate::tools::definitions::registry(
@@ -3207,8 +3194,18 @@ impl RunLoop<'_> {
             outputs.iter().map(String::as_str),
             child_model,
         ) else {
-            return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
+            return Ok(RunProgress::Ready(DefinitionInitialization::Stopped));
         };
+        self.install_definitions(request, runtime, registry)
+            .map(RunProgress::Ready)
+    }
+
+    fn install_definitions(
+        &self,
+        request: &mut ProviderRequest,
+        runtime: &ToolRuntime,
+        registry: crate::tools::definitions::Registry,
+    ) -> Result<DefinitionInitialization, EngineError> {
         let registry = registry.definitions;
         let tools = request
             .input
@@ -3251,12 +3248,59 @@ impl RunLoop<'_> {
             || tools.catalog().len() > crate::tools::types::MAX_TOOL_CATALOG_BYTES
             || tools.rendered_len() > runtime.context_limit_bytes()
         {
-            return Ok(Admission::Reserved(DefinitionInitialization::Stopped));
+            return Ok(DefinitionInitialization::Stopped);
         }
         self.definitions
             .set(registry)
             .map_err(|_| EngineError::CoordinatorFailed)?;
-        Ok(Admission::Reserved(DefinitionInitialization::Ready))
+        Ok(DefinitionInitialization::Ready)
+    }
+
+    async fn read_definition(
+        &self,
+        request: &mut ProviderRequest,
+        runtime: &ToolRuntime,
+        call: ToolCall,
+    ) -> Result<RunProgress<DefinitionRead>, EngineError> {
+        let Some(mut intent) = self.primary_intent(runtime, call).await? else {
+            self.active_time_floor
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return Ok(RunProgress::Ready(DefinitionRead::Stopped));
+        };
+        intent.limits.result_bytes = MAX_TOOL_RESULT_BYTES as u32;
+        let grant = Grant::Primary {
+            request,
+            review_allowed: false,
+        };
+        let post_call = intent.call.clone();
+        let observation = match self
+            .run_intent(&grant, runtime, intent, &post_call, false)
+            .await?
+        {
+            Ok((observation, _)) => observation,
+            Err(StopCause::ActiveTime) => return Ok(RunProgress::Stopped(RunRefusal::Budget)),
+            Err(StopCause::Capacity) => return Ok(RunProgress::Stopped(RunRefusal::Capacity)),
+            Err(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::Budget
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            ) => return Ok(RunProgress::Ready(DefinitionRead::Stopped)),
+        };
+        if observation.disposition != ToolDisposition::Succeeded
+            || observation.attestation.is_none()
+        {
+            return Ok(RunProgress::Ready(DefinitionRead::Stopped));
+        }
+        Ok(RunProgress::Ready(DefinitionRead::Output(
+            observation.output,
+        )))
     }
 }
 

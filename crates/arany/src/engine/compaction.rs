@@ -287,7 +287,7 @@ impl Engine {
                 feedback_fits: true,
             })
             .await?
-            .map_err(|refusal| super::run_loop::SizingRefusal::from(refusal).into_engine_error())?
+            .map_err(super::run_loop::HookRefusal::into_engine_error)?
             .is_some())
     }
 

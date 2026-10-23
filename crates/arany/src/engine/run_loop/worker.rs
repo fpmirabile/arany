@@ -1,7 +1,7 @@
 use super::children::ChildWork;
 use super::step::{BoxedStep, Grant, IntentResult};
 use super::stop::StopCause;
-use super::{Action, RunLoop};
+use super::{Action, Admission, RunLoop};
 use crate::engine::EngineError;
 use crate::provider::{ChildAssignment, ProviderRequest};
 use crate::session::worker::*;
@@ -14,11 +14,73 @@ use crate::tools::{
 use base64::Engine as _;
 use std::time::Duration;
 
-pub(super) struct CompletedWorker {
+#[must_use]
+pub(super) enum WorkerAdmission {
+    Admitted(Box<ChildWork>),
+    Refused,
+    Exhausted,
+    CapacityExhausted,
+}
+
+pub(super) struct WorkerEnd {
+    pub(super) answer: Option<crate::provider::Answer>,
+    pub(super) deadline: tokio::time::Instant,
+    pub(super) torn_down: bool,
+    pub(super) failure: WorkerCause,
+    pub(super) step_stop: Option<StopCause>,
+}
+
+#[must_use]
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum WorkerCompletion {
+    Discard(WorkerSettlementReason),
+    Handover { data: WorkerDataRef, bytes: Vec<u8> },
+}
+
+fn worker_completion(
     stopped: bool,
     disposition: WorkerDisposition,
     data: Option<WorkerDataRef>,
     bytes: Option<Vec<u8>>,
+) -> Result<WorkerCompletion, EngineError> {
+    if stopped {
+        return Ok(WorkerCompletion::Discard(WorkerSettlementReason::Stopped));
+    }
+    if disposition == WorkerDisposition::NoChange {
+        return Ok(WorkerCompletion::Discard(WorkerSettlementReason::NoChange));
+    }
+    match (data, bytes) {
+        (Some(data), Some(bytes)) => Ok(WorkerCompletion::Handover { data, bytes }),
+        (Some(_), None) => Err(EngineError::CoordinatorFailed),
+        (None, _) => Ok(WorkerCompletion::Discard(match disposition {
+            WorkerDisposition::PrivateUncertain => WorkerSettlementReason::PrivateUncertain,
+            WorkerDisposition::Cancelled => WorkerSettlementReason::Cancelled,
+            WorkerDisposition::Ready
+            | WorkerDisposition::NoChange
+            | WorkerDisposition::Failed
+            | WorkerDisposition::Lost => WorkerSettlementReason::Failed,
+        })),
+    }
+}
+
+struct WorkerCleanup {
+    private_uncertain: bool,
+    bytes: Option<Vec<u8>>,
+    receipt: WorkerCleanupReceipt,
+}
+
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkerSettlementProgress {
+    Settled,
+    Exhausted,
+}
+
+struct WorkerSpawn<'a> {
+    id: AgentRunId,
+    runtime: &'a ToolRuntime,
+    allowance: u32,
+    assignment: &'a EditorAssignment,
 }
 
 // Observations read once after an editor's handover capture and disposal.
@@ -108,29 +170,12 @@ enum IntegrationDecision {
     Continue,
 }
 
-fn integration_decision(
-    result: Result<IntentResult, EngineError>,
-) -> Result<IntegrationDecision, EngineError> {
-    match result {
-        Ok(Err(StopCause::Capacity)) | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
-            Ok(IntegrationDecision::RecordCapacityStop)
-        }
-        Err(EngineError::GoalBudgetExhausted)
-        | Ok(Ok(_))
-        | Ok(Err(
-            StopCause::Uncertain
-            | StopCause::Cancelled
-            | StopCause::HookStop
-            | StopCause::Paused
-            | StopCause::ActiveTime
-            | StopCause::Budget
-            | StopCause::ContextFull
-            | StopCause::DelegationDeadline
-            | StopCause::Refused(_)
-            | StopCause::ToolStopped
-            | StopCause::InvalidCommandResult,
-        )) => Ok(IntegrationDecision::Continue),
-        Err(error) => Err(error),
+fn integration_decision(observation: WorkerObservation) -> IntegrationDecision {
+    match observation {
+        WorkerObservation::CapacityExhausted => IntegrationDecision::RecordCapacityStop,
+        WorkerObservation::Observed(_)
+        | WorkerObservation::ActiveTimeExhausted
+        | WorkerObservation::Stopped => IntegrationDecision::Continue,
     }
 }
 
@@ -160,6 +205,18 @@ fn worker_observation(result: IntentResult) -> WorkerObservation {
             | StopCause::ToolStopped
             | StopCause::InvalidCommandResult,
         ) => WorkerObservation::Stopped,
+    }
+}
+
+fn worker_intent_observation(
+    result: Result<IntentResult, EngineError>,
+) -> Result<WorkerObservation, EngineError> {
+    match result {
+        Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
+            Ok(WorkerObservation::CapacityExhausted)
+        }
+        Ok(result) => Ok(worker_observation(result)),
+        Err(error) => Err(error),
     }
 }
 
@@ -711,7 +768,7 @@ impl RunLoop<'_> {
         &'a self,
         root: &'a mut ProviderRequest,
         assignment: Box<EditorAssignment>,
-    ) -> BoxedStep<'a, Option<ChildWork>> {
+    ) -> BoxedStep<'a, WorkerAdmission> {
         Box::pin(self.begin_worker_inner(root, assignment))
     }
 
@@ -730,15 +787,61 @@ impl RunLoop<'_> {
         &self,
         root: &mut ProviderRequest,
         assignment: Box<EditorAssignment>,
-    ) -> Result<Option<ChildWork>, EngineError> {
+    ) -> Result<WorkerAdmission, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         if !self.ledger().admits(Action::Delegation {
             children: 1,
             research: true,
         }) {
             self.record_capacity_stop().await?;
-            return Err(EngineError::GoalBudgetExhausted);
+            return Ok(WorkerAdmission::Exhausted);
         }
+        let Admission::Reserved(allowance) = self.admit_worker_base().await? else {
+            return Ok(WorkerAdmission::Exhausted);
+        };
+        if !self.editor_catalog_fits(runtime, &assignment)? {
+            return Ok(WorkerAdmission::Refused);
+        }
+        let id = AgentRunId::new();
+        self.worker_data_bytes
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(id, allowance);
+        self.worker_requests
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?
+            .insert(id, (*assignment).clone());
+        let observation = match self.prepare_worker_base(root, id, allowance).await? {
+            WorkerObservation::Observed(observation) => observation,
+            WorkerObservation::ActiveTimeExhausted => return Ok(WorkerAdmission::Exhausted),
+            WorkerObservation::CapacityExhausted => return Ok(WorkerAdmission::CapacityExhausted),
+            WorkerObservation::Stopped => return Ok(WorkerAdmission::Refused),
+        };
+        let Some(Attestation::WorkerData { data: base, .. }) = observation.attestation else {
+            return Ok(WorkerAdmission::Refused);
+        };
+        if self.observe_worker_stop().await? {
+            self.worker
+                .lock()
+                .await
+                .remove(&id)
+                .ok_or(EngineError::CoordinatorFailed)?
+                .dispose()?;
+            return Ok(WorkerAdmission::Exhausted);
+        }
+        let spawn = WorkerSpawn {
+            id,
+            runtime,
+            allowance,
+            assignment: &assignment,
+        };
+        let grant = self.spawn_worker(&spawn, &observation.intent, base).await?;
+        Ok(WorkerAdmission::Admitted(Box::new(
+            self.worker_child(&spawn, &grant)?,
+        )))
+    }
+
+    async fn admit_worker_base(&self) -> Result<Admission<u32>, EngineError> {
         let mut allowance = WORKER_DATA_BYTES;
         loop {
             let action = Action::Worker {
@@ -762,41 +865,28 @@ impl RunLoop<'_> {
                 Err(
                     crate::store::StoreError::StorageFull | crate::store::StoreError::ReplayLimit,
                 ) => {
-                    return Err(EngineError::GoalBudgetExhausted);
+                    return Ok(Admission::Exhausted);
                 }
                 Err(error) => return Err(error.into()),
             }
         }
         let allowance = u32::try_from(allowance).map_err(|_| EngineError::CoordinatorFailed)?;
-        if !self.editor_catalog_fits(runtime, &assignment)? {
-            return Ok(None);
-        }
-        let id = AgentRunId::new();
-        self.worker_data_bytes
-            .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)?
-            .insert(id, allowance);
-        self.worker_requests
-            .lock()
-            .map_err(|_| EngineError::CoordinatorFailed)?
-            .insert(id, (*assignment).clone());
-        let observation = self.prepare_worker_base(root, id, allowance).await?;
-        let Some(observation) = observation else {
-            return Ok(None);
-        };
-        let Some(Attestation::WorkerData { data: base, .. }) = observation.attestation else {
-            return Ok(None);
-        };
-        if self.observe_worker_stop().await? {
-            self.worker
-                .lock()
-                .await
-                .remove(&id)
-                .ok_or(EngineError::CoordinatorFailed)?
-                .dispose()?;
-            return Err(EngineError::GoalBudgetExhausted);
-        }
-        let grant = self.editor_grant(&assignment)?;
+        Ok(Admission::Reserved(allowance))
+    }
+
+    async fn spawn_worker(
+        &self,
+        spawn: &WorkerSpawn<'_>,
+        intent: &EffectIntent,
+        base: WorkerDataRef,
+    ) -> Result<WorkerGrant, EngineError> {
+        let WorkerSpawn {
+            id,
+            assignment,
+            runtime,
+            allowance,
+        } = *spawn;
+        let grant = self.editor_grant(assignment)?;
         self.append(Event::AgentSpawned {
             run_id: self.run_id,
             agent_run_id: id,
@@ -819,15 +909,29 @@ impl RunLoop<'_> {
                     } => cache_generation,
                     EffectTarget::Workspace => return Err(EngineError::CoordinatorFailed),
                 },
-                request: *assignment.clone(),
+                request: assignment.clone(),
                 grant: grant.clone(),
-                policy_digest: observation.intent.policy_digest,
+                policy_digest: intent.policy_digest,
                 permissions_digest: runtime.receipt().permissions_digest,
                 base,
                 data_bytes: allowance,
             }),
         })
         .await?;
+        Ok(grant)
+    }
+
+    fn worker_child(
+        &self,
+        spawn: &WorkerSpawn<'_>,
+        grant: &WorkerGrant,
+    ) -> Result<ChildWork, EngineError> {
+        let WorkerSpawn {
+            id,
+            assignment,
+            runtime,
+            ..
+        } = *spawn;
         let remaining = self.ledger().remaining_calls().map_or(16, |n| {
             usize::try_from(n.saturating_sub(3) / 2)
                 .unwrap_or(16)
@@ -859,7 +963,7 @@ impl RunLoop<'_> {
         } else {
             None
         };
-        let child = ChildWork {
+        Ok(ChildWork {
             agent_run_id: id,
             objective: assignment.mission.clone(),
             definition: self
@@ -872,10 +976,9 @@ impl RunLoop<'_> {
             turns_remaining: assignment.max_turns,
             steering_notes: Vec::new(),
             stop_hook_feedback: Vec::new(),
-            tools: Some(runtime.editor_context(&grant, remaining)?),
+            tools: Some(runtime.editor_context(grant, remaining)?),
             tool_calls_remaining: remaining,
-        };
-        Ok(Some(child))
+        })
     }
 
     async fn prepare_worker_base(
@@ -883,7 +986,7 @@ impl RunLoop<'_> {
         root: &mut ProviderRequest,
         id: AgentRunId,
         allowance: u32,
-    ) -> Result<Option<crate::tools::ToolObservation>, EngineError> {
+    ) -> Result<WorkerObservation, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let preparation = ToolCall::PrepareWorker {
             preparation: WorkerPreparation {
@@ -900,10 +1003,9 @@ impl RunLoop<'_> {
                     .min(allowance),
             },
         };
-        let intent = self
-            .primary_intent(runtime, preparation.clone())
-            .await?
-            .ok_or(EngineError::GoalBudgetExhausted)?;
+        let Some(intent) = self.primary_intent(runtime, preparation.clone()).await? else {
+            return Ok(WorkerObservation::ActiveTimeExhausted);
+        };
         let observation = self
             .run_intent(
                 &Grant::Primary {
@@ -916,24 +1018,15 @@ impl RunLoop<'_> {
                 false,
             )
             .await?;
-        match worker_observation(observation) {
-            WorkerObservation::Observed(observation) => Ok(Some(*observation)),
-            WorkerObservation::ActiveTimeExhausted => Err(EngineError::GoalBudgetExhausted),
-            WorkerObservation::CapacityExhausted => Err(crate::tools::ToolError::Limit.into()),
-            WorkerObservation::Stopped => Ok(None),
-        }
+        Ok(worker_observation(observation))
     }
 
     pub(super) fn complete_worker<'a>(
         &'a self,
         child: &'a mut ChildWork,
-        answer: Option<crate::provider::Answer>,
-        deadline: tokio::time::Instant,
-        torn_down: bool,
-        failure: WorkerCause,
-        step_stop: Option<StopCause>,
-    ) -> BoxedStep<'a, CompletedWorker> {
-        Box::pin(self.complete_worker_inner(child, answer, deadline, torn_down, failure, step_stop))
+        end: WorkerEnd,
+    ) -> BoxedStep<'a, WorkerCompletion> {
+        Box::pin(self.complete_worker_inner(child, end))
     }
 
     pub(super) fn criterion_unmet(&self, id: AgentRunId) -> Result<bool, EngineError> {
@@ -955,38 +1048,99 @@ impl RunLoop<'_> {
     async fn complete_worker_inner(
         &self,
         child: &mut ChildWork,
-        answer: Option<crate::provider::Answer>,
-        deadline: tokio::time::Instant,
-        torn_down: bool,
-        failure: WorkerCause,
-        step_stop: Option<StopCause>,
-    ) -> Result<CompletedWorker, EngineError> {
+        end: WorkerEnd,
+    ) -> Result<WorkerCompletion, EngineError> {
         let id = child.agent_run_id;
         let mut stopped = self.observe_worker_stop().await?;
-        let data = if answer.is_some() && !stopped {
-            let allowance = self.worker_allowance(id)?;
-            let call = ToolCall::PrepareWorker {
-                preparation: WorkerPreparation {
-                    assignment_id: id,
-                    purpose: WorkerDataPurpose::Handover,
-                    max_chunks: u16::try_from((allowance as usize).div_ceil(WORKER_CHUNK_BYTES))
-                        .map_err(|_| EngineError::CoordinatorFailed)?,
-                    max_bytes: allowance,
-                },
-            };
-            let captured = self.capture_handover(child, call, deadline).await;
-            match captured {
-                Ok(data) => data,
-                Err(
-                    EngineError::Tool(crate::tools::ToolError::Limit)
-                    | EngineError::GoalBudgetExhausted,
-                ) => None,
-                Err(error) => return Err(error),
-            }
+        let data = if end.answer.is_some() && !stopped {
+            self.capture_worker_data(child, &end).await?
         } else {
             None
         };
         stopped |= self.observe_worker_stop().await?;
+        let WorkerCleanup {
+            private_uncertain,
+            bytes,
+            receipt: cleanup,
+        } = self.clean_up_worker(id, data.is_some()).await?;
+        let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
+        let criterion_unverified = data.is_some() && self.criterion_unmet(id)?;
+        let data = data.filter(|_| !criterion_unverified);
+        let success = data.is_some();
+        let terminal = decide_worker_terminal(
+            end.failure,
+            &WorkerFacts {
+                private_uncertain,
+                handover: success.then_some(no_change),
+                criterion_unverified,
+                worker_stop: stopped,
+                actor_hook_stop: self.actor_hook_requested_stop(id)?,
+                torn_down: end.torn_down,
+                cancel_requested: self.controls.cancellation.is_cancelled(),
+                paused: self.pause_requested(),
+                hook_stop: self.hook_requested_stop()?,
+                step_stop: end.step_stop,
+            },
+        );
+        self.append(Event::AgentFinished {
+            run_id: self.run_id,
+            agent_run_id: id,
+            disposition: terminal.agent,
+            summary: if success {
+                end.answer
+                    .as_ref()
+                    .map(|f| crate::session::answer_summary(&f.text))
+            } else {
+                None
+            },
+            result: if success {
+                end.answer.as_ref().map(|f| f.text.clone())
+            } else {
+                None
+            },
+            worker: Some(WorkerOutcome {
+                disposition: terminal.worker,
+                cause: terminal.cause,
+                data: data.clone(),
+                cleanup: Some(cleanup),
+            }),
+        })
+        .await?;
+        worker_completion(stopped, terminal.worker, data, bytes)
+    }
+
+    async fn capture_worker_data(
+        &self,
+        child: &mut ChildWork,
+        end: &WorkerEnd,
+    ) -> Result<Option<WorkerDataRef>, EngineError> {
+        let id = child.agent_run_id;
+        let allowance = self.worker_allowance(id)?;
+        let call = ToolCall::PrepareWorker {
+            preparation: WorkerPreparation {
+                assignment_id: id,
+                purpose: WorkerDataPurpose::Handover,
+                max_chunks: u16::try_from((allowance as usize).div_ceil(WORKER_CHUNK_BYTES))
+                    .map_err(|_| EngineError::CoordinatorFailed)?,
+                max_bytes: allowance,
+            },
+        };
+        match self.capture_handover(child, call, end.deadline).await? {
+            WorkerObservation::Observed(observation) => Ok(match observation.attestation {
+                Some(Attestation::WorkerData { data, .. }) => Some(data),
+                _ => None,
+            }),
+            WorkerObservation::ActiveTimeExhausted
+            | WorkerObservation::CapacityExhausted
+            | WorkerObservation::Stopped => Ok(None),
+        }
+    }
+
+    async fn clean_up_worker(
+        &self,
+        id: AgentRunId,
+        captured: bool,
+    ) -> Result<WorkerCleanup, EngineError> {
         let latest = self.ledger().view(|v| {
             v.runs
                 .last()
@@ -997,7 +1151,7 @@ impl RunLoop<'_> {
         let private_uncertain = latest
             .as_ref()
             .is_some_and(|o| o.disposition == ToolDisposition::Uncertain);
-        let bytes = if data.is_some() {
+        let bytes = if captured {
             Some(
                 self.worker
                     .lock()
@@ -1024,55 +1178,10 @@ impl RunLoop<'_> {
             .remove(&id)
             .ok_or(EngineError::CoordinatorFailed)?
             .dispose()?;
-        let no_change = bytes.as_ref().is_some_and(|b| matches!(decode_data(b, WorkerDataPurpose::Handover), Ok(WorkerDataFacts::Changes(files)) if files.is_empty()));
-        let criterion_unverified = data.is_some() && self.criterion_unmet(id)?;
-        let data = data.filter(|_| !criterion_unverified);
-        let success = data.is_some();
-        let terminal = decide_worker_terminal(
-            failure,
-            &WorkerFacts {
-                private_uncertain,
-                handover: success.then_some(no_change),
-                criterion_unverified,
-                worker_stop: stopped,
-                actor_hook_stop: self.actor_hook_requested_stop(id)?,
-                torn_down,
-                cancel_requested: self.controls.cancellation.is_cancelled(),
-                paused: self.pause_requested(),
-                hook_stop: self.hook_requested_stop()?,
-                step_stop,
-            },
-        );
-        let disposition = terminal.worker;
-        self.append(Event::AgentFinished {
-            run_id: self.run_id,
-            agent_run_id: id,
-            disposition: terminal.agent,
-            summary: if success {
-                answer
-                    .as_ref()
-                    .map(|f| crate::session::answer_summary(&f.text))
-            } else {
-                None
-            },
-            result: if success {
-                answer.as_ref().map(|f| f.text.clone())
-            } else {
-                None
-            },
-            worker: Some(WorkerOutcome {
-                disposition,
-                cause: terminal.cause,
-                data: data.clone(),
-                cleanup: Some(cleanup),
-            }),
-        })
-        .await?;
-        Ok(CompletedWorker {
-            stopped,
-            disposition,
-            data,
+        Ok(WorkerCleanup {
+            private_uncertain,
             bytes,
+            receipt: cleanup,
         })
     }
 
@@ -1080,69 +1189,50 @@ impl RunLoop<'_> {
         &self,
         root: &mut ProviderRequest,
         child: &ChildWork,
-        completed: CompletedWorker,
-    ) -> Result<(), EngineError> {
-        let CompletedWorker {
-            stopped,
-            disposition,
-            data,
-            bytes,
-        } = completed;
+        completed: WorkerCompletion,
+    ) -> Result<WorkerSettlementProgress, EngineError> {
         let id = child.agent_run_id;
-        let no_change = disposition == WorkerDisposition::NoChange;
-        let private_uncertain = disposition == WorkerDisposition::PrivateUncertain;
-        let success = data.is_some();
         let finished = self.sequence()?;
-        if stopped || !success || no_change {
-            let reason = if stopped {
-                WorkerSettlementReason::Stopped
-            } else if no_change {
-                WorkerSettlementReason::NoChange
-            } else if private_uncertain {
-                WorkerSettlementReason::PrivateUncertain
-            } else if disposition == WorkerDisposition::Cancelled {
-                WorkerSettlementReason::Cancelled
-            } else {
-                WorkerSettlementReason::Failed
-            };
-            let cause_sequence = if stopped {
-                self.stop_sequence()?
-            } else {
-                finished
-            };
-            self.discard_worker(id, None, reason, cause_sequence)
-                .await?;
-        } else {
-            let data = data.ok_or(EngineError::CoordinatorFailed)?;
-            self.handover
-                .lock()
-                .map_err(|_| EngineError::CoordinatorFailed)?
-                .insert(id, bytes.ok_or(EngineError::CoordinatorFailed)?.into());
-            self.append(Event::WorkerHandoverRecorded {
-                run_id: self.run_id,
-                agent_run_id: id,
-                record: WorkerHandover {
-                    criterion_evidence: self.criterion_evidence(id)?,
-                    assignment_id: id,
-                    base_digest: cleanup_base(self, id)?,
-                    data: data.clone(),
-                },
-            })
-            .await?;
-            let sequence = self.ledger().view(|v| v.previous_subject_sequence())?;
-            if !Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
+        match completed {
+            WorkerCompletion::Discard(reason) => {
+                let cause_sequence = if reason == WorkerSettlementReason::Stopped {
+                    self.stop_sequence()?
+                } else {
+                    finished
+                };
+                self.discard_worker(id, None, reason, cause_sequence)
+                    .await?;
+            }
+            WorkerCompletion::Handover { data, bytes } => {
                 self.handover
                     .lock()
                     .map_err(|_| EngineError::CoordinatorFailed)?
-                    .remove(&id);
-                return Ok(());
+                    .insert(id, bytes.into());
+                self.append(Event::WorkerHandoverRecorded {
+                    run_id: self.run_id,
+                    agent_run_id: id,
+                    record: WorkerHandover {
+                        criterion_evidence: self.criterion_evidence(id)?,
+                        assignment_id: id,
+                        base_digest: cleanup_base(self, id)?,
+                        data: data.clone(),
+                    },
+                })
+                .await?;
+                let sequence = self.ledger().view(|v| v.previous_subject_sequence())?;
+                match Box::pin(self.integrate_worker(root, id, sequence, data)).await? {
+                    WorkerSettlementProgress::Exhausted => {
+                        return Ok(WorkerSettlementProgress::Exhausted);
+                    }
+                    WorkerSettlementProgress::Settled => {}
+                }
             }
         }
         self.handover
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?
             .remove(&id);
-        Ok(())
+        Ok(WorkerSettlementProgress::Settled)
     }
 
     async fn capture_handover(
@@ -1150,12 +1240,12 @@ impl RunLoop<'_> {
         child: &mut ChildWork,
         call: ToolCall,
         deadline: tokio::time::Instant,
-    ) -> Result<Option<WorkerDataRef>, EngineError> {
+    ) -> Result<WorkerObservation, EngineError> {
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let Some(mut intent) =
             self.researcher_intent(runtime, child.agent_run_id, call.clone(), deadline)
         else {
-            return Ok(None);
+            return Ok(WorkerObservation::Stopped);
         };
         let available = deadline
             .saturating_duration_since(tokio::time::Instant::now())
@@ -1165,7 +1255,7 @@ impl RunLoop<'_> {
             .runtime_ms
             .min(u32::try_from(available.as_millis() / 4).unwrap_or(u32::MAX));
         if intent.limits.runtime_ms < 1_000 {
-            return Ok(None);
+            return Ok(WorkerObservation::Stopped);
         }
         self.shape_worker_intent(&mut intent, child.agent_run_id)?;
         let observation = self
@@ -1176,16 +1266,8 @@ impl RunLoop<'_> {
                 &call,
                 false,
             )
-            .await?;
-        match worker_observation(observation) {
-            WorkerObservation::Observed(observation) => Ok(match observation.attestation {
-                Some(Attestation::WorkerData { data, .. }) => Some(data),
-                _ => None,
-            }),
-            WorkerObservation::ActiveTimeExhausted => Err(EngineError::GoalBudgetExhausted),
-            WorkerObservation::CapacityExhausted => Err(crate::tools::ToolError::Limit.into()),
-            WorkerObservation::Stopped => Ok(None),
-        }
+            .await;
+        worker_intent_observation(observation)
     }
 
     async fn integrate_worker(
@@ -1194,7 +1276,7 @@ impl RunLoop<'_> {
         id: AgentRunId,
         handover_sequence: u64,
         data: WorkerDataRef,
-    ) -> Result<bool, EngineError> {
+    ) -> Result<WorkerSettlementProgress, EngineError> {
         if self.observe_worker_stop().await? {
             self.discard_worker(
                 id,
@@ -1203,7 +1285,7 @@ impl RunLoop<'_> {
                 self.stop_sequence()?,
             )
             .await?;
-            return Ok(false);
+            return Ok(WorkerSettlementProgress::Settled);
         }
         let runtime = self.controls.tools.ok_or(EngineError::InvalidRequest)?;
         let call = ToolCall::ApplyChangeset {
@@ -1222,7 +1304,7 @@ impl RunLoop<'_> {
                 self.stop_sequence()?,
             )
             .await?;
-            return Ok(false);
+            return Ok(WorkerSettlementProgress::Settled);
         };
         let tool_id = intent.id;
         let result = self
@@ -1237,10 +1319,21 @@ impl RunLoop<'_> {
                 false,
             )
             .await;
-        match integration_decision(result)? {
+        match integration_decision(worker_intent_observation(result)?) {
             IntegrationDecision::RecordCapacityStop => self.record_capacity_stop().await?,
             IntegrationDecision::Continue => {}
         }
+        self.finish_worker_integration(runtime, id, handover_sequence, tool_id)
+            .await
+    }
+
+    async fn finish_worker_integration(
+        &self,
+        runtime: &ToolRuntime,
+        id: AgentRunId,
+        handover_sequence: u64,
+        tool_id: uuid::Uuid,
+    ) -> Result<WorkerSettlementProgress, EngineError> {
         let tool = self
             .ledger()
             .view(|v| v.runs.last().and_then(|r| r.tools.last()).cloned())?
@@ -1254,7 +1347,7 @@ impl RunLoop<'_> {
                 self.stop_sequence()?,
             )
             .await?;
-            return Ok(false);
+            return Ok(WorkerSettlementProgress::Settled);
         }
         let observation = tool
             .observation
@@ -1282,7 +1375,9 @@ impl RunLoop<'_> {
                 WorkerIntegrationOutcome::Denied
             }
             ToolDisposition::Uncertain => WorkerIntegrationOutcome::Uncertain,
-            _ => return Err(crate::tools::ToolError::Uncertain.into()),
+            ToolDisposition::Failed | ToolDisposition::Limit | ToolDisposition::Cancelled => {
+                return Err(crate::tools::ToolError::Uncertain.into());
+            }
         };
         self.append(Event::WorkerIntegrationRecorded {
             run_id: self.run_id,
@@ -1296,6 +1391,26 @@ impl RunLoop<'_> {
             },
         })
         .await?;
+        self.settle_worker_integration(id, handover_sequence, outcome)
+            .await?;
+        if matches!(
+            outcome,
+            WorkerIntegrationOutcome::Conflict | WorkerIntegrationOutcome::Denied
+        ) {
+            return Ok(WorkerSettlementProgress::Settled);
+        }
+        if post_exhausted {
+            return Ok(WorkerSettlementProgress::Exhausted);
+        }
+        Ok(WorkerSettlementProgress::Settled)
+    }
+
+    async fn settle_worker_integration(
+        &self,
+        id: AgentRunId,
+        handover_sequence: u64,
+        outcome: WorkerIntegrationOutcome,
+    ) -> Result<(), EngineError> {
         let cause = self.sequence()?;
         match outcome {
             WorkerIntegrationOutcome::Integrated => {
@@ -1322,13 +1437,9 @@ impl RunLoop<'_> {
                     cause,
                 )
                 .await?;
-                return Ok(false);
             }
         }
-        if post_exhausted {
-            return Err(EngineError::GoalBudgetExhausted);
-        }
-        Ok(true)
+        Ok(())
     }
 
     async fn discard_worker(
@@ -1553,22 +1664,23 @@ mod terminal_tests {
                 IntegrationDecision::RecordCapacityStop,
             ),
             (Ok(Ok((observed, None))), IntegrationDecision::Continue),
-            (
-                Err(EngineError::GoalBudgetExhausted),
-                IntegrationDecision::Continue,
-            ),
         ] {
-            assert_eq!(integration_decision(result).expect("decision"), expected);
+            assert_eq!(
+                integration_decision(worker_intent_observation(result).expect("observation")),
+                expected
+            );
         }
         for (cause, _, expected) in stop_outcomes() {
             assert_eq!(
-                integration_decision(Ok(Err(cause))).expect("stop decision"),
+                integration_decision(
+                    worker_intent_observation(Ok(Err(cause))).expect("stop observation")
+                ),
                 expected,
                 "{cause:?}"
             );
         }
         assert!(matches!(
-            integration_decision(Err(EngineError::CoordinatorFailed)),
+            worker_intent_observation(Err(EngineError::CoordinatorFailed)),
             Err(EngineError::CoordinatorFailed)
         ));
     }
@@ -1583,9 +1695,60 @@ mod terminal_tests {
             ))),
             WorkerObservation::Observed(Box::new(observed))
         );
+        assert_eq!(
+            worker_intent_observation(Err(EngineError::Tool(crate::tools::ToolError::Limit)))
+                .expect("Tool limit"),
+            WorkerObservation::CapacityExhausted
+        );
         for (cause, expected, _) in stop_outcomes() {
             assert_eq!(worker_observation(Err(cause)), expected, "{cause:?}");
         }
+    }
+
+    #[test]
+    fn worker_completion_preserves_discard_precedence_and_handover_bytes() {
+        use WorkerDisposition as W;
+        use WorkerSettlementReason as R;
+        let data = WorkerDataRef {
+            assignment_id: AgentRunId::new(),
+            purpose: WorkerDataPurpose::Handover,
+            first_sequence: 1,
+            seal_sequence: 2,
+            chunks: 1,
+            bytes: 1,
+            sha256: [1; 32],
+        };
+        for (stopped, disposition, captured, expected) in [
+            (true, W::Ready, true, R::Stopped),
+            (true, W::NoChange, true, R::Stopped),
+            (true, W::PrivateUncertain, false, R::Stopped),
+            (false, W::NoChange, true, R::NoChange),
+            (false, W::NoChange, false, R::NoChange),
+            (false, W::PrivateUncertain, false, R::PrivateUncertain),
+            (false, W::Cancelled, false, R::Cancelled),
+            (false, W::Failed, false, R::Failed),
+            (false, W::Lost, false, R::Failed),
+            (false, W::Ready, false, R::Failed),
+        ] {
+            assert_eq!(
+                worker_completion(stopped, disposition, captured.then(|| data.clone()), None)
+                    .expect("discard"),
+                WorkerCompletion::Discard(expected)
+            );
+        }
+        let bytes = vec![1];
+        assert_eq!(
+            worker_completion(false, W::Ready, Some(data.clone()), Some(bytes.clone()))
+                .expect("handover"),
+            WorkerCompletion::Handover {
+                data: data.clone(),
+                bytes
+            },
+        );
+        assert!(matches!(
+            worker_completion(false, W::Ready, Some(data), None),
+            Err(EngineError::CoordinatorFailed)
+        ));
     }
 
     #[test]
