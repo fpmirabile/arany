@@ -1,64 +1,27 @@
+use super::run::{PreparedSubmission, RunProgress, RunSubmission, RunUi, drive_run};
 use super::{
-    Admission, Feedback, controls::ActiveSubmission, emit_outcome, load_confirmed_outcome, run,
+    Admission, Feedback, append_notice, confirm_outcome, hidden_answer_guidance, load_view,
+    paused_goal_notice, print_run_answer, reload_view_or_keep, retained_draft_notice, run,
+    show_command, submission_notice,
 };
 use crate::accounts::chatgpt;
-use crate::cli::exec::SHUTDOWN_GRACE;
 use crate::cli::provider::select::{Selection, validate_local_selection};
 use crate::terminal::{
-    AgentChatFollow, AgentChatInput, AttachedTerminal, Composer, ComposerDraft, ComposerEdit,
-    ShutdownSignal, TerminalError, TerminalInput, TerminalNotice,
+    AttachedTerminal, Composer, ComposerDraft, ComposerEdit, ShutdownSignal, TerminalInput,
+    TerminalNotice,
 };
+#[cfg(test)]
+use arany::WorkspaceIdentity;
 use arany::{
-    CompactionFailure, CompactionRecord, CompactionStatus, RunCancellation, RunHints, RunOutcome,
-    RunRequest, RunSteering, SessionView, SteeringRefused,
+    CompactionFailure, CompactionRecord, CompactionStatus, RunOutcome, RunRequest, RunStatus,
+    SessionView,
 };
-use std::time::Duration;
-
-pub(super) enum RunSubmission {
-    Completed(Box<RunOutcome>, bool, Option<String>),
-    InterruptedBeforeRun,
-    Shutdown(String),
-}
-
-enum RunStep<'a> {
-    Admitted(arany::RunHandle<'a>),
-    Completed(Result<Box<RunOutcome>, run::RunAttemptError>),
-}
 
 pub(super) enum CompactionOutcome {
     Notice(String),
     Unavailable(String),
     Interrupted(String),
     Shutdown(ShutdownSignal),
-}
-
-fn linear_approval_choice(
-    answer: &str,
-    choices: &[crate::presentation::ToolApprovalChoice],
-) -> Option<crate::presentation::ToolApprovalChoice> {
-    use crate::presentation::ToolApprovalChoice::{No, Yes};
-    match answer.trim().to_ascii_lowercase().as_str() {
-        "" | "no" => Some(No),
-        "yes" => Some(Yes),
-        number => number
-            .parse::<usize>()
-            .ok()
-            .and_then(|number| number.checked_sub(1))
-            .and_then(|index| choices.get(index))
-            .copied(),
-    }
-}
-
-async fn withdraw_abandoned_approval(
-    pending: &mut Option<arany::ToolApproval>,
-    answer: &mut Composer,
-) {
-    match pending.as_mut() {
-        Some(approval) => approval.abandoned().await,
-        None => std::future::pending().await,
-    }
-    pending.take();
-    answer.clear();
 }
 
 fn submission_includes(
@@ -182,136 +145,6 @@ pub(super) fn goal_request(
     Ok(request)
 }
 
-fn draft_retained_notice(autonomous: bool) -> &'static str {
-    if autonomous {
-        "Draft retained; press Enter after this Goal to submit"
-    } else {
-        "Draft retained; press Enter after this Run to submit"
-    }
-}
-
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum ActiveStop {
-    Running,
-    Pausing,
-    Cancelling,
-}
-
-const STEERING_SENT: &str = "Steering note sent to the agent";
-
-fn steering_refusal(refused: SteeringRefused, autonomous: bool) -> String {
-    match refused {
-        SteeringRefused::RunFull => format!(
-            "No room for more steering notes this Run. {}",
-            draft_retained_notice(autonomous)
-        ),
-        SteeringRefused::TooLarge => "Steering note exceeds 8.0 KB; draft retained".into(),
-        SteeringRefused::Empty => "Steering note is empty; draft retained".into(),
-        SteeringRefused::Unavailable => "Steering note unavailable; draft retained".into(),
-        SteeringRefused::ChildLimit => {
-            "Only eight children accept steering notes at once; draft retained".into()
-        }
-    }
-}
-
-fn settle_recorded_note(
-    delivered: u64,
-    seen: &mut u64,
-    offered: &mut Option<String>,
-    composer: &mut Composer,
-) -> bool {
-    if delivered == *seen {
-        return false;
-    }
-    *seen = delivered;
-    let Some(text) = offered.take() else {
-        return false;
-    };
-    if composer.text() == text && composer.images().is_empty() {
-        composer.take();
-    }
-    true
-}
-
-fn run_settled(view: &SessionView, starting_sequence: u64) -> bool {
-    view.runs.last().is_some_and(|run| {
-        run.accepted_sequence > starting_sequence
-            && !matches!(
-                run.status,
-                arany::RunStatus::Pending | arany::RunStatus::Active
-            )
-    })
-}
-
-// Once the current Run's outcome is committed, /exit waits for the Run to return, as Ctrl+D does.
-fn exits_after_settled_run(
-    composer: &Composer,
-    view: &SessionView,
-    starting_sequence: u64,
-) -> bool {
-    matches!(
-        composer.submission(),
-        Ok(crate::terminal::Submission::Command {
-            command: crate::terminal::InteractiveCommand::Exit,
-            argument: None,
-        })
-    ) && run_settled(view, starting_sequence)
-}
-
-// An explicit /exit abandons what the settled Run would hand back (a held linear draft or an
-// undelivered note), so the deferred Ctrl+D meets an empty composer and exits.
-fn abandon_drafts_for_exit(
-    composer: &mut Composer,
-    held: &mut Option<HeldDraft>,
-    steering: &RunSteering,
-) {
-    composer.take();
-    composer.take_images();
-    *held = None;
-    let _ = steering.withdraw_note();
-}
-
-fn active_escape(
-    input: TerminalInput,
-    menu_open: bool,
-    clipboard_loading: bool,
-    stop: ActiveStop,
-) -> TerminalInput {
-    match input {
-        TerminalInput::Escape
-            if !clipboard_loading && !menu_open && stop != ActiveStop::Cancelling =>
-        {
-            TerminalInput::Interrupt
-        }
-        input => input,
-    }
-}
-
-fn run_end_notice(sent: bool, note_returned: bool, restored: bool) -> Option<&'static str> {
-    if !restored {
-        return Some(
-            "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up",
-        );
-    }
-    if sent {
-        Some(STEERING_SENT)
-    } else if note_returned {
-        Some("Steering note withdrawn; draft retained")
-    } else {
-        None
-    }
-}
-
-type HeldDraft = ComposerDraft;
-
-fn hold_draft(composer: &mut Composer) -> Option<HeldDraft> {
-    (!composer.is_empty()).then(|| composer.take_draft())
-}
-
-fn release_held_draft(composer: &mut Composer, draft: HeldDraft) -> bool {
-    composer.restore_draft(draft)
-}
-
 pub(super) fn preflight_idle_run(
     admission: &Admission,
     view: &SessionView,
@@ -380,27 +213,141 @@ pub(super) fn preflight_idle_run(
         })
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "submission carries independent Run inputs"
-)]
-pub(super) async fn submit_objective(
-    engine: &arany::Engine,
-    terminal: &mut AttachedTerminal,
-    admission: &Admission,
+pub(super) struct PendingSubmission<'a> {
+    pub(super) engine: &'a arany::Engine,
+    pub(super) admission: &'a Admission,
+    pub(super) goal: GoalStart,
+    pub(super) objective: String,
+    pub(super) skill: Option<String>,
+    pub(super) draft: Option<ComposerDraft>,
+}
+
+struct SubmissionInput {
     goal: GoalStart,
-    view: &mut SessionView,
-    composer: &mut Composer,
     objective: String,
     skill: Option<String>,
-    draft: Option<&ComposerDraft>,
-) -> Result<RunSubmission, String> {
-    let profile = view
+}
+
+struct SubmissionFinish<'a> {
+    engine: &'a arany::Engine,
+    admission: &'a Admission,
+    draft: Option<ComposerDraft>,
+}
+
+impl PendingSubmission<'_> {
+    pub(super) async fn submit(
+        self,
+        terminal: &mut AttachedTerminal,
+        view: &mut SessionView,
+        composer: &mut Composer,
+    ) -> Result<Option<Feedback>, String> {
+        let mut ui = RunUi {
+            terminal,
+            view,
+            composer,
+        };
+        let starting_sequence = ui.view.last_sequence;
+        let PendingSubmission {
+            engine,
+            admission,
+            goal,
+            objective,
+            skill,
+            draft,
+        } = self;
+        let finish = SubmissionFinish {
+            engine,
+            admission,
+            draft,
+        };
+        let input = SubmissionInput {
+            goal,
+            objective,
+            skill,
+        };
+        let result = match admit_submission(input, &finish, &mut ui, starting_sequence).await {
+            Ok(prepared) => drive_run(prepared, &mut ui).await,
+            Err(error) => Err(error),
+        };
+        finish.finish_run(&mut ui, result, starting_sequence).await
+    }
+}
+
+impl SubmissionFinish<'_> {
+    async fn finish_run(
+        self,
+        ui: &mut RunUi<'_>,
+        result: Result<RunSubmission, String>,
+        starting_sequence: u64,
+    ) -> Result<Option<Feedback>, String> {
+        match result {
+            Ok(RunSubmission::Completed(outcome, user_recorded, stop)) => {
+                CompletedRun {
+                    engine: self.engine,
+                    admission: self.admission,
+                    outcome: &outcome,
+                    user_recorded,
+                    stop: stop.as_deref(),
+                }
+                .finish(ui)
+                .await
+            }
+            Ok(RunSubmission::InterruptedBeforeRun) => {
+                if let Some(submitted) = self.draft {
+                    ui.composer.restore_draft(submitted);
+                }
+                finish_interrupted_run(self.admission, ui, starting_sequence).await
+            }
+            Ok(RunSubmission::Shutdown(reason)) => Err(reason),
+            Err(error) => match self.draft {
+                None => Err(error),
+                Some(submitted) => {
+                    super::reconcile_failed_submission(
+                        ui.terminal,
+                        &self.admission.state_dir,
+                        ui.view,
+                        ui.composer,
+                        submitted,
+                        starting_sequence,
+                    )
+                    .await?;
+                    let text = if ui.composer.is_empty() {
+                        format!("Error: {error}")
+                    } else {
+                        format!(
+                            "Error: {error}; draft retained ({} characters)",
+                            ui.composer.character_count()
+                        )
+                    };
+                    Ok(Some(Feedback::History(text)))
+                }
+            },
+        }
+    }
+}
+
+async fn admit_submission<'a>(
+    input: SubmissionInput,
+    finish: &SubmissionFinish<'a>,
+    ui: &mut RunUi<'_>,
+    starting_sequence: u64,
+) -> Result<PreparedSubmission<'a>, String> {
+    let SubmissionInput {
+        goal,
+        objective,
+        skill,
+    } = input;
+    let engine = finish.engine;
+    let admission = finish.admission;
+    let draft = finish.draft.as_ref();
+    let profile = ui
+        .view
         .defaults
         .provider
         .clone()
         .ok_or("select /provider and /model before submitting")?;
-    let model = view
+    let model = ui
+        .view
         .defaults
         .model
         .clone()
@@ -416,761 +363,285 @@ pub(super) async fn submit_objective(
         .as_ref()
         .map(|selected| selected.manifest())
         .transpose()?;
-    let starting_sequence = view.last_sequence;
     let autonomous = match goal {
-        GoalStart::Resume => view
+        GoalStart::Resume => ui
+            .view
             .interrupted_goal_id()
-            .and_then(|id| view.goal(id))
+            .and_then(|id| ui.view.goal(id))
             .is_some_and(|resumed| resumed.autonomous),
-        GoalStart::Continue => view
+        GoalStart::Continue => ui
+            .view
             .continuable_goal()
             .is_some_and(|source| source.autonomous),
         GoalStart::Plain | GoalStart::Autonomous => goal == GoalStart::Autonomous,
     };
-    let cancellation = RunCancellation::new();
-    let hints = if terminal.is_linear() {
-        RunHints::new()
-    } else {
-        RunHints::with_previews()
-    };
-    let mut previews = hints.previews();
-    let mut waiting_hints = hints.clone();
-    let (approvals, mut inbox) =
-        arany::ToolApprovals::new(composer.approval_mode().unwrap_or_default());
-    let mut pending: Option<arany::ToolApproval> = None;
-    let mut approval_page = 0usize;
-    let mut approval_choice = 0usize;
-    let mut approval_answer = Composer::default();
-    let mut approval_unarmed = false;
-    let mut approval_review_notice = false;
     let editable = draft.map_or_else(|| objective.clone(), ComposerDraft::editable_text);
-    let include_paths = submission_includes(admission, view, goal, &editable)?;
+    let include_paths = submission_includes(admission, ui.view, goal, &editable)?;
     let execution_settings = super::controls::settings_or_defaults(admission).await?;
-    let goal = goal_request(view, goal, execution_settings)?;
-    let submitted_goal = goal.id;
+    let goal = goal_request(ui.view, goal, execution_settings)?;
+    let (progress, inbox) = RunProgress::new(admission, ui, starting_sequence, autonomous, goal.id);
     let request = RunRequest {
         skill,
-        session_id: Some(view.id),
+        session_id: Some(ui.view.id),
         title: None,
         objective,
-        images: draft.map_or_else(|| composer.take_images(), |draft| draft.images().to_vec()),
+        images: draft.map_or_else(
+            || ui.composer.take_images(),
+            |draft| draft.images().to_vec(),
+        ),
         workspace: admission.workspace.clone(),
         launch_directory: std::env::current_dir().ok(),
         include_paths,
-        policy: view.defaults.policy,
+        policy: ui.view.defaults.policy,
         goal,
     };
-    let steering = RunSteering::new();
-    draw_active_snapshot(terminal, view, composer, false, ActiveStop::Running, None)
-        .map_err(|error| error.to_string())?;
-    if let Some(manifest) = &manifest {
-        terminal
-            .draw_busy_notice(view, composer, Some(TerminalNotice::History(manifest)))
-            .map_err(|error| error.to_string())?;
-    }
-    let future = run::submit_selected(
+    Ok(PreparedSubmission {
         engine,
-        &admission.state_dir,
-        Selection {
-            workspace: &admission.workspace,
-            profile: &profile,
-            model: &model,
-            effort: view.defaults.effort,
-            account_id: view.defaults.account_id,
-        },
-        request,
-        cancellation.clone(),
-        hints.clone(),
-        run::ToolAccess {
-            configured: admission.tools,
-            permissions: admission.workspace_permissions.as_ref(),
-            approvals: &approvals,
-        },
-        steering.clone(),
+        profile,
+        model,
         roster,
-    );
-    tokio::pin!(future);
-    let mut handle: Option<arany::RunHandle<'_>> = None;
-    let mut stop = ActiveStop::Running;
-    let mut user_recorded = false;
-    let mut offered: Option<String> = None;
-    let mut linear_offers = Vec::new();
-    let mut held: Option<HeldDraft> = None;
-    let mut seen_delivered = 0u64;
-    let mut shown_retries = (None, 0usize);
-    let mut exit_after_run = false;
-    let shutdown_reason = loop {
-        if pending.is_none()
-            && terminal
-                .restore_selected_draft_input(composer.input_capacity())
-                .is_err()
-        {
-            break "terminal input cleanup failed".to_owned();
-        }
-        let approval_more = match &pending {
-            Some(approval) => match terminal.draw_tool_approval(
-                approval,
-                view,
-                approval_page,
-                (!approval_unarmed).then_some(approval_choice),
-                approval_review_notice,
-            ) {
-                Ok(more) => more,
-                Err(_) => break "terminal rendering failed".to_owned(),
-            },
-            None => false,
-        };
-        // Only bytes the reader reads after this barrier reach the armed redraw.
-        if std::mem::take(&mut approval_unarmed) {
-            if terminal.discard_approval_typeahead().await.is_err() {
-                break "terminal input admission failed".to_owned();
-            }
-            continue;
-        }
-        let (result, mut events) = handle
-            .as_mut()
-            .map(|handle| (&mut handle.result, &mut handle.events))
-            .unzip();
-        let approval_pending = pending.is_some();
-        tokio::select! {
-            () = withdraw_abandoned_approval(&mut pending, &mut approval_answer) => {
-                terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
-                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                    break "terminal rendering failed".to_owned();
-                }
-            }
-            approval = inbox.next(), if !approval_pending => {
-                pending = approval;
-                if pending.is_some() { composer.disarm_continuation(); }
-                approval_page = 0;
-                approval_choice = pending.as_ref().filter(|approval| approval.unguarded.is_some()).map_or(0, |approval| crate::presentation::tool_approval_choices(approval).len() - 1);
-                approval_unarmed = pending.is_some();
-                approval_review_notice = false;
-                approval_answer.clear();
-            }
-            step = async {
-                match result {
-                    Some(result) => RunStep::Completed(run::finish_run(result.await, !matches!(stop, ActiveStop::Running)).map(Box::new)),
-                    None => match future.as_mut().await {
-                        Ok(handle) => RunStep::Admitted(handle),
-                        Err(error) => RunStep::Completed(Err(error)),
-                    },
-                }
-            } => {
-                let result = match step {
-                    RunStep::Admitted(admitted) => {
-                        handle = Some(admitted);
-                        continue;
-                    }
-                    RunStep::Completed(result) => result,
-                };
-                let caught_up = !terminal.child_notes_pending()
-                    || catch_up(&admission.state_dir, view).await.is_ok();
-                terminal.settle_child_notes(view, &steering, true);
-                let child_follow = if !caught_up { false } else { match terminal.follow_agent_chat(view).await {
-                    Ok(follow) => follow != AgentChatFollow::Unchanged,
-                    Err(_) => break "terminal input cleanup failed".into(),
-                }};
-                terminal.set_waiting_tool(None);
-                terminal.set_preview(None);
-                composer.set_file_candidates(None, Vec::new());
-                if terminal.close_agents_at_run_end().is_err() {
-                    return Ok(RunSubmission::Shutdown(
-                        "terminal input cleanup failed; Run may have committed; check Session history".into(),
-                    ));
-                }
-                // An undelivered note ends the Run as an ordinary retained draft.
-                let had_offer = offered.is_some();
-                let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
-                let had_held = held.is_some();
-                // The undelivered note predates the held draft, so restore it ahead of that draft.
-                let note = steering.withdraw_note().filter(|_| terminal.is_linear());
-                let withdrawn = note.is_some();
-                let mut restored = held.take().is_none_or(|draft| release_held_draft(composer, draft));
-                if let Some(note) = note {
-                    restored &= composer.restore_draft(ComposerDraft::from_steering_note(note, &linear_offers));
-                }
-                if (result.is_err() || had_offer || sent || had_held)
-                    && terminal.restore_draft_input(composer.input_capacity()).is_err()
-                {
-                    return Ok(RunSubmission::Shutdown("terminal input cleanup failed".into()));
-                }
-                let notice = run_end_notice(sent, withdrawn, restored);
-                if (child_follow || notice.is_some())
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice.map(TerminalNotice::History)).is_err()
-                {
-                    return Ok(RunSubmission::Shutdown("terminal rendering failed".into()));
-                }
-                return match result {
-                    Ok(outcome) => Ok(RunSubmission::Completed(outcome, user_recorded, None)),
-                    Err(run::RunAttemptError::Stopped { outcome, reason }) => {
-                        Ok(RunSubmission::Completed(outcome, user_recorded, Some(reason)))
-                    }
-                    Err(run::RunAttemptError::InterruptedBeforeRun) => Ok(RunSubmission::InterruptedBeforeRun),
-                    Err(run::RunAttemptError::Failed(run::RunFailure::Engine(arany::EngineError::GoalBudgetExhausted))) => {
-                        let reloaded = super::load_view(&admission.state_dir, view.id).await?;
-                        let feedback = reloaded.runs.iter().rev().find(|run| reloaded.budget_stop_goal(run).is_some_and(|goal| Some(goal.id) == submitted_goal && goal.budget_refusal.is_some())).and_then(|run| crate::presentation::session_run_feedback(&reloaded, run));
-                        Err(feedback.unwrap_or_else(|| "Goal budget admission refused (uncommitted); no Goal receipt is available".into()))
-                    },
-                    Err(run::RunAttemptError::Failed(error)) => Err(error.to_string()),
-                };
-            },
-            preview = previews.changed() => {
-                terminal.set_preview(preview);
-                // A child view shows neither the primary's preview nor its waiting hint.
-                if pending.is_none() && !terminal.agent_chat_open() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                    break "terminal rendering failed".to_owned();
-                }
-            }
-            event = async {
-                match events.as_deref_mut() {
-                    Some(events) => events.next().await,
-                    None => std::future::pending().await,
-                }
-            } => {
-                let ready = async || match events.as_deref_mut() {
-                    Some(events) => tokio::time::timeout(Duration::ZERO, events.next()).await.ok(),
-                    None => None,
-                };
-                if let Err(reason) = apply_burst(&admission.state_dir, view, event, ready).await {
-                    break reason;
-                }
-                if !user_recorded && let Some(run) = view.runs.last().filter(|run| run.accepted_sequence > starting_sequence) {
-                    if terminal.record_user_run(run).is_err() {
-                        break "terminal rendering failed".to_owned();
-                    }
-                    user_recorded = true;
-                }
-                let sent = settle_recorded_note(steering.delivered_notes(), &mut seen_delivered, &mut offered, composer);
-                if sent && terminal.restore_draft_input(composer.input_capacity()).is_err() {
-                    break "terminal input failed".to_owned();
-                }
-                let retry = view
-                    .runs
-                    .last()
-                    .filter(|run| run.accepted_sequence > starting_sequence)
-                    .and_then(|run| {
-                        let shown = if shown_retries.0 == Some(run.id) { shown_retries.1 } else { 0 };
-                        shown_retries = (Some(run.id), run.provider_retries.len());
-                        run.provider_retries.get(shown..)?.last()
-                    })
-                    .map(|(_, retry)| crate::presentation::escape_terminal(&retry.notice()));
-                let notice = if sent {
-                    Some(TerminalNotice::History(STEERING_SENT))
-                } else {
-                    retry.as_deref().map(TerminalNotice::Transient)
-                };
-                let child_changed = terminal.settle_child_notes(view, &steering, stop != ActiveStop::Running);
-                if child_changed && terminal.restore_selected_draft_input(composer.input_capacity()).is_err() {
-                    break "terminal input failed".to_owned();
-                }
-                let follow = match terminal.follow_agent_chat(view).await {
-                    Ok(follow) => follow,
-                    Err(_) => break "terminal rendering failed".to_owned(),
-                };
-                let notice = match follow {
-                    AgentChatFollow::Closed(text) => Some(TerminalNotice::History(text)),
-                    AgentChatFollow::Unchanged | AgentChatFollow::Redraw => notice,
-                };
-                if pending.is_none()
-                    && (child_changed || follow != AgentChatFollow::Unchanged || notice.is_some())
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err()
-                {
-                    break "terminal rendering failed".to_owned();
-                }
-            }
-            waiting = waiting_hints.waiting_changed() => {
-                terminal.set_waiting_tool(waiting);
-                if pending.is_none() && !terminal.agent_chat_open() && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                    break "terminal rendering failed".to_owned();
-                }
-            }
-            input = async {
-                if approval_pending { terminal.next_input().await } else { terminal.next_chat_input().await }
-            }, if !exit_after_run => {
-                let input = match input {
-                    Ok(input) => input,
-                    Err(_) => break "terminal input failed".to_owned(),
-                };
-                composer.observe_input(input);
-                if terminal.agent_chat_open() || pending.is_some() || terminal.help_open() { composer.disarm_continuation(); }
-                if pending.is_some() && !matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_)) {
-                    let choices = crate::presentation::tool_approval_choices(pending.as_ref().expect("pending action"));
-                    approval_choice = approval_choice.min(choices.len() - 1);
-                    let mut selected = None;
-                    match input {
-                        TerminalInput::CycleApprovalMode => {
-                            let _ = super::permissions::cycle(composer);
-                            approvals.set_mode(composer.approval_mode().unwrap_or_default());
-                        }
-                        input if interrupt_approval_input(&input, &cancellation, &mut stop) => {
-                            pending.take();
-                            terminal.settle_child_notes(view, &steering, true);
-                            terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
-                        }
-                        TerminalInput::Tab if !approval_more => approval_choice = (approval_choice + 1) % choices.len(),
-                        TerminalInput::Up if !approval_more && approval_choice == 0 && approval_page > 0 => approval_page -= 1,
-                        TerminalInput::Up if !approval_more => approval_choice = approval_choice.saturating_sub(1),
-                        TerminalInput::Down if !approval_more => approval_choice = (approval_choice + 1).min(choices.len() - 1),
-                        TerminalInput::Down | TerminalInput::PageDown if approval_more => { approval_page += 1; approval_review_notice = false; },
-                        TerminalInput::Up | TerminalInput::PageUp => { approval_page = approval_page.saturating_sub(1); }
-                        TerminalInput::Resize => { approval_page = 0; approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 }; approval_review_notice = false; }
-                        TerminalInput::Suspend => {
-                            terminal.suspend_and_resume(composer.input_capacity()).map_err(|error| error.to_string())?;
-                            approval_page = 0;
-                            approval_choice = if pending.as_ref().is_some_and(|approval| approval.unguarded.is_some()) { choices.len() - 1 } else { 0 };
-                        }
-                        TerminalInput::Character(character) if terminal.is_linear() => { approval_answer.apply(TerminalInput::Character(character)); }
-                        TerminalInput::Backspace if terminal.is_linear() => { approval_answer.apply(TerminalInput::Backspace); }
-                        TerminalInput::Character(character) if character.is_ascii_digit() => {
-                            if let Some(choice) = input.choice_index(choices.len()).map(|index| choices[index]) {
-                                if approval_more && choice != crate::presentation::ToolApprovalChoice::No {
-                                    approval_review_notice = true;
-                                } else { selected = Some(choice); }
-                            }
-                        }
-                        TerminalInput::Submit if approval_more => approval_page += 1,
-                        TerminalInput::Submit => {
-                            selected = if terminal.is_linear() {
-                                let choice = linear_approval_choice(approval_answer.text(), &choices);
-                                approval_answer.clear();
-                                choice
-                            } else { Some(choices[approval_choice]) };
-                        }
-                        _ => {}
-                    }
-                    if let Some(choice) = selected {
-                        if choice == crate::presentation::ToolApprovalChoice::AutoEdits {
-                            for _ in 0..2 {
-                                if composer.approval_mode() == Some(arany::ApprovalMode::AutoEdits) { break; }
-                                let _ = super::permissions::cycle(composer);
-                            }
-                            approvals.set_mode(arany::ApprovalMode::AutoEdits);
-                        }
-                        pending.take().expect("pending action").decide(choice.reply());
-                        terminal.restore_draft_input(composer.input_capacity()).map_err(|error| error.to_string())?;
-                    }
-                    continue;
-                }
-                if terminal.help_open() {
-                    match input {
-                        TerminalInput::Interrupt => terminal.close_help(),
-                        TerminalInput::Suspend | TerminalInput::Shutdown(_) => {}
-                        _ => {
-                            terminal.help_input(input);
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                                break "terminal rendering failed".to_owned();
-                            }
-                            continue;
-                        }
-                    }
-                }
-                if terminal.agents_open()
-                    && !matches!(input, TerminalInput::Interrupt | TerminalInput::Suspend | TerminalInput::Shutdown(_))
-                {
-                    let notice = match terminal.agent_input(view, input).await {
-                        Ok(notice) => notice.map(TerminalNotice::Transient),
-                        Err(_) => break "terminal rendering failed".to_owned(),
-                    };
-                    if !terminal.agents_open()
-                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err()
-                    {
-                        break "terminal rendering failed".to_owned();
-                    }
-                    continue;
-                }
-                if terminal.agents_open()
-                    && matches!(input, TerminalInput::Interrupt | TerminalInput::Shutdown(_))
-                    && terminal.close_agents().is_err()
-                {
-                    break "terminal input cleanup failed".to_owned();
-                }
-                // A child view takes Escape before Run cancellation; Ctrl+C passes through.
-                let agent_notice = match terminal.agent_chat_input(view, input, composer).await {
-                    Ok(AgentChatInput::ChildMessage { target, text }) => {
-                        let agent = view.runs.iter().find(|run| run.id == target.run_id)
-                            .and_then(|run| run.agents.iter().find(|agent| agent.id == target.agent_run_id));
-                        let ordinal = agent.map_or(0, |agent| agent.ordinal);
-                        let count = agent.map_or(0, |agent| agent.steering_notes.len());
-                        let (notice, offer) = if stop == ActiveStop::Running {
-                            match steering.offer_child_note(target, text.clone()) {
-                                Ok(()) => (format!("Note waiting for child {ordinal}'s next step"), Some((text, count))),
-                                Err(refused) => (steering_refusal(refused, autonomous), None),
-                            }
-                        } else { ("Child note unavailable while stopping; draft retained".into(), None) };
-                        terminal.child_note_feedback(target, notice, offer);
-                        Some(None)
-                    }
-                    Ok(AgentChatInput::ChildEdited(target)) => {
-                        terminal.withdraw_child_offer(target, &steering);
-                        Some(None)
-                    }
-                    Ok(AgentChatInput::Pass) => None,
-                    Ok(AgentChatInput::Handled) => continue,
-                    Ok(AgentChatInput::Returned) => Some(None),
-                    Ok(AgentChatInput::Notice(text)) => Some(Some(TerminalNotice::Transient(text))),
-                    Err(_) => break "terminal rendering failed".to_owned(),
-                };
-                if let Some(notice) = agent_notice {
-                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice).is_err() {
-                        break "terminal rendering failed".to_owned();
-                    }
-                    continue;
-                }
-                if terminal.handle_draft_detail(composer, input) {
-                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                        break "terminal rendering failed".into();
-                    }
-                    continue;
-                }
-                if terminal.ignores_page_key(input) {
-                    continue;
-                }
-                match terminal.handle_transcript_input(input, view) {
-                    Ok(true) => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                            break "terminal rendering failed".to_owned();
-                        }
-                        continue;
-                    }
-                    Ok(false) => {}
-                    Err(_) => break "terminal rendering failed".to_owned(),
-                }
-                if terminal.handle_history_input(input, view, composer, true).await {
-                    if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                        break "terminal rendering failed".to_owned();
-                    }
-                    continue;
-                }
-                let input = composer.chat_input(input);
-                let input = active_escape(input, composer.has_open_menu(), terminal.clipboard_loading(), stop);
-                let mut notice = match input {
-                    TerminalInput::Escape if terminal.clipboard_loading() => {
-                        terminal.cancel_clipboard_paste();
-                        Some(Feedback::Transient("Clipboard read cancelled; draft retained".into()))
-                    }
-                    TerminalInput::CycleApprovalMode => {
-                        let notice = super::permissions::cycle(composer);
-                        approvals.set_mode(composer.approval_mode().unwrap_or_default());
-                        Some(Feedback::History(notice))
-                    }
-                    TerminalInput::ClipboardPaste => Some(match terminal.request_clipboard_paste() {
-                        Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
-                        Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
-                    }),
-                    TerminalInput::Paste => match terminal.paste_into(composer) {
-                        Err(error) => Some(Feedback::History(format!("Error: {error}; draft unchanged"))),
-                        Ok(ComposerEdit::Changed) => {
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                                break "terminal rendering failed".to_owned();
-                            }
-                            None
-                        }
-                        Ok(_) => None,
-                    },
-                    input @ (TerminalInput::Character(_)
-                    | TerminalInput::Newline
-                    | TerminalInput::Backspace
-                    | TerminalInput::Delete
-                    | TerminalInput::Left
-                    | TerminalInput::Right
-                    | TerminalInput::WordLeft
-                    | TerminalInput::WordRight
-                    | TerminalInput::BackspaceWord
-                    | TerminalInput::Up
-                    | TerminalInput::Down
-                    | TerminalInput::Home
-                    | TerminalInput::End
-                    | TerminalInput::Tab
-                    | TerminalInput::Escape) => match composer.apply(input) {
-                        ComposerEdit::AtCapacity => Some(Feedback::History("Error: message is too long; shorten it; draft unchanged".into())),
-                        ComposerEdit::Changed if !terminal.is_linear() => {
-                            if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                                break "terminal rendering failed".to_owned();
-                            }
-                            None
-                        }
-                        ComposerEdit::Unchanged => None,
-                        ComposerEdit::Changed => None,
-                    },
-                    TerminalInput::LineRejected => {
-                        Some(Feedback::History("Error: invalid or overlong terminal line; draft unchanged".into()))
-                    }
-                    TerminalInput::LineContinued if held.is_some() => {
-                        if terminal.restore_draft_input(composer.input_capacity()).is_err() {
-                            break "terminal input failed".to_owned();
-                        }
-                        Some(Feedback::Transient("Both drafts retained; wait for the Run to finish".into()))
-                    }
-                    TerminalInput::LineContinued => {
-                        Some(Feedback::History(format!("Draft: {} characters; Enter offers it as a steering note", composer.character_count())))
-                    }
-                    TerminalInput::QuickActions => {
-                        Some(Feedback::History("Quick actions are unavailable during a Run; /agents opens details".into()))
-                    }
-                    TerminalInput::Submit if !terminal.is_linear() && composer.continue_line() => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                            break "terminal rendering failed".to_owned();
-                        }
-                        None
-                    }
-                    TerminalInput::Submit if terminal.clipboard_loading() && !terminal.is_linear() => {
-                        if terminal.restore_draft_input(composer.input_capacity()).is_err() {
-                            break "terminal input failed".to_owned();
-                        }
-                        Some(Feedback::Transient("Clipboard loading; press Enter after paste to submit".into()))
-                    }
-                    TerminalInput::Submit if !terminal.is_linear()
-                        && composer.apply(TerminalInput::Submit) == ComposerEdit::Changed => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                            break "terminal rendering failed".to_owned();
-                        }
-                        None
-                    }
-                    TerminalInput::Submit if exits_after_settled_run(composer, view, starting_sequence) => {
-                        abandon_drafts_for_exit(composer, &mut held, &steering);
-                        offered = None;
-                        if terminal.restore_draft_input(crate::terminal::MAX_DRAFT_BYTES).is_err() {
-                            break "terminal input failed".to_owned();
-                        }
-                        terminal.defer_input(TerminalInput::EndOfInput);
-                        exit_after_run = true;
-                        None
-                    }
-                    TerminalInput::Submit => {
-                        match super::controls::handle_active_submission(composer, view, starting_sequence) {
-                            ActiveSubmission::SteeringNote(text) => {
-                                let feedback = if terminal.is_linear() && held.is_some() {
-                                    Feedback::Transient("Both drafts retained; wait for the Run to finish".into())
-                                } else if !composer.images().is_empty() {
-                                    Feedback::Transient("Steering notes are text only; draft retained".into())
-                                } else if offered.is_some() && !terminal.is_linear() {
-                                    // The composer still holds the waiting note; editing it withdraws the offer.
-                                    Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
-                                } else {
-                                    match steering.offer_note(text) {
-                                        Ok(()) => {
-                                            offered = Some(composer.text().to_owned());
-                                            if terminal.is_linear() {
-                                                linear_offers.push(composer.take_draft());
-                                                Feedback::Transient("Steering note waits for the agent's next step".into())
-                                            } else {
-                                                Feedback::Transient("Steering note waits for the agent's next step; editing withdraws it".into())
-                                            }
-                                        }
-                                        Err(refused) => Feedback::Transient(steering_refusal(refused, autonomous)),
-                                    }
-                                };
-                                // A linear draft kept by a refusal is invisible, so it waits aside until the Run ends.
-                                if terminal.is_linear() && held.is_none()
-                                    && let Some(draft) = hold_draft(composer)
-                                {
-                                    held = Some(draft);
-                                }
-                                if terminal.restore_draft_input(composer.input_capacity()).is_err() {
-                                    break "terminal input failed".to_owned();
-                                }
-                                Some(feedback)
-                            }
-                            ActiveSubmission::Pause => {
-                                let notice = match stop {
-                                    ActiveStop::Running => {
-                                        steering.pause();
-                                        stop = ActiveStop::Pausing;
-                                        terminal.settle_child_notes(view, &steering, true);
-                                        "Pausing at the next step; Ctrl+C cancels now"
-                                    }
-                                    ActiveStop::Pausing => "Already pausing at the next step",
-                                    ActiveStop::Cancelling => "Run is already cancelling",
-                                };
-                                // Classic filters the history notice from the status row, so a redraw without it shows the pausing state there; linear prints notices as lines.
-                                if draw_active_snapshot(terminal, view, composer, user_recorded, stop, Some(TerminalNotice::History(notice))).is_err()
-                                    || (!terminal.is_linear()
-                                        && draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err())
-                                {
-                                    break "terminal rendering failed".to_owned();
-                                }
-                                None
-                            }
-                            ActiveSubmission::Rejected(notice) => {
-                                if terminal.is_linear() && !composer.has_text_pastes() {
-                                    composer.take();
-                                }
-                                Some(Feedback::History(format!("Error: {notice}")))
-                            }
-                            ActiveSubmission::Notice(notice) => Some(Feedback::History(notice)),
-                            ActiveSubmission::ReadClipboard => Some(match terminal.request_clipboard_paste() {
-                                Ok(()) => Feedback::Transient("Reading clipboard... draft retained".into()),
-                                Err(error) => Feedback::History(format!("Error: {error}; draft unchanged")),
-                            }),
-                            ActiveSubmission::OpenAgents => {
-                                if terminal.open_agents(view, true).await.is_err() {
-                                    break "terminal rendering failed".to_owned();
-                                }
-                                None
-                            }
-                            ActiveSubmission::OpenUsage { status } => {
-                                if terminal
-                                    .open_usage(view, status, Some(starting_sequence))
-                                    .await
-                                    .is_err()
-                                {
-                                    break "terminal rendering failed".to_owned();
-                                }
-                                None
-                            }
-                            ActiveSubmission::OpenHelp => {
-                                if terminal.open_help(view).await.is_err() {
-                                    break "terminal rendering failed".to_owned();
-                                }
-                                None
-                            }
-                            ActiveSubmission::OpenAgentChats(number) => match terminal.open_agent_chats(view, number).await {
-                                Ok(AgentChatInput::Notice(text)) => Some(Feedback::Transient(text.into())),
-                                Ok(_) => None,
-                                Err(_) => break "terminal rendering failed".to_owned(),
-                            },
-                            ActiveSubmission::OpenTranscript => {
-                                if terminal.toggle_transcript(view).is_err()
-                                    || draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err()
-                                {
-                                    break "terminal rendering failed".to_owned();
-                                }
-                                None
-                            }
-                        }
-                    }
-                    TerminalInput::Interrupt => {
-                        if stop == ActiveStop::Cancelling {
-                            break "forced shutdown after second Ctrl+C".to_owned();
-                        }
-                        stop = ActiveStop::Cancelling;
-                        terminal.settle_child_notes(view, &steering, true);
-                        cancellation.cancel();
-                        None
-                    }
-                    TerminalInput::Suspend => {
-                        if terminal.suspend_and_resume(composer.input_capacity()).is_err() {
-                            break "terminal resume failed".to_owned();
-                        }
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                            break "terminal rendering failed".to_owned();
-                        }
-                        None
-                    }
-                    TerminalInput::Shutdown(signal) => {
-                        break format!("terminated by {}", signal.name());
-                    }
-                    TerminalInput::Resize => {
-                        if draw_active_snapshot(terminal, view, composer, user_recorded, stop, None).is_err() {
-                            break "terminal rendering failed".to_owned();
-                        }
-                        None
-                    }
-                    TerminalInput::EndOfInput if !composer.is_empty() || held.is_some() => {
-                        Some(Feedback::Transient(draft_retained_notice(autonomous).into()))
-                    }
-                    // The screen already shows the outcome, so exit once the Run returns.
-                    TerminalInput::EndOfInput if run_settled(view, starting_sequence) => {
-                        terminal.defer_input(TerminalInput::EndOfInput);
-                        exit_after_run = true;
-                        None
-                    }
-                    _ => None,
-                };
-                if !terminal.is_linear() && offered.as_deref().is_some_and(|text| composer.text() != text || !composer.images().is_empty()) {
-                    offered = None;
-                    notice = Some(if steering.withdraw_note().is_some() {
-                        Feedback::Transient("Steering note withdrawn; draft retained".into())
-                    } else {
-                        // The Engine already took the note, so it is sent; the edited draft stays.
-                        Feedback::History(STEERING_SENT.into())
-                    });
-                }
-                if (notice.is_some() || matches!(input, TerminalInput::Interrupt))
-                    && draw_active_snapshot(terminal, view, composer, user_recorded, stop, notice.as_ref().map(Feedback::notice)).is_err()
-                {
-                    break "terminal rendering failed".to_owned();
-                }
-            }
-        }
-    };
-    terminal.settle_child_notes(view, &steering, true);
-    cancellation.cancel();
-    let linear = terminal.is_linear();
-    let mode = (!linear).then_some(terminal.mode());
-    let preview_printed = if linear {
-        user_recorded
-    } else {
-        view.runs
-            .last()
-            .is_some_and(|run| terminal.user_run_recorded(run.id))
-    };
-    let restored = terminal.restore();
-    let mut reason = shutdown_reason;
-    let finish = async {
-        let handle = match handle {
-            Some(handle) => handle,
-            None => future.await?,
-        };
-        run::finish_run(handle.await, true)
-    };
-    match tokio::time::timeout(SHUTDOWN_GRACE, finish).await {
-        Ok(Ok(outcome)) if restored.is_ok() => {
-            let emitted = match load_confirmed_outcome(&admission.state_dir, &outcome).await {
-                Ok(confirmed) => emit_outcome(&confirmed, &outcome, preview_printed, !linear, mode),
-                Err(error) => Err(error),
-            };
-            if emitted.is_err() {
-                reason.push_str("; committed receipt unavailable; check Session history");
-            }
-        }
-        Ok(Ok(_)) => reason.push_str("; Run committed; check Session history"),
-        Ok(Err(run::RunAttemptError::InterruptedBeforeRun)) => {
-            reason
-                .push_str("; no Run started for this submission; account work may still complete");
-        }
-        Ok(Err(_)) => reason.push_str("; Run outcome unavailable; check Session history"),
-        Err(_) => reason.push_str("; Run may be interrupted; check Session history"),
-    }
-    if restored.is_err() {
-        reason.push_str("; terminal restoration failed");
-    }
-    Ok(RunSubmission::Shutdown(reason))
+        manifest,
+        request,
+        progress,
+        inbox,
+    })
 }
 
-fn draw_active_snapshot(
-    terminal: &mut AttachedTerminal,
-    view: &SessionView,
-    composer: &Composer,
-    current_run_started: bool,
-    stop: ActiveStop,
-    notice: Option<TerminalNotice<'_>>,
-) -> Result<(), TerminalError> {
-    if !current_run_started {
-        let status = match stop {
-            ActiveStop::Running => None,
-            ActiveStop::Pausing => Some("Pausing at the next step... Ctrl+C cancels now"),
-            ActiveStop::Cancelling => Some("Stopping request..."),
-        };
-        terminal.draw_preparing_notice(
-            view,
-            composer,
-            notice.or(status.map(TerminalNotice::Transient)),
-        )
-    } else if stop != ActiveStop::Running || terminal.is_linear() {
-        let notice = notice.unwrap_or(TerminalNotice::Transient(match stop {
-            ActiveStop::Cancelling => "Cancelling Run...",
-            ActiveStop::Pausing => "Pausing at the next step... Ctrl+C cancels now",
-            ActiveStop::Running => "Run is active; Ctrl+C cancels",
-        }));
-        if terminal.is_linear() {
-            terminal.draw_busy_notice(view, composer, Some(notice))
-        } else {
-            terminal.draw_notice(view, composer, Some(notice))
+async fn finish_interrupted_run(
+    admission: &Admission,
+    ui: &mut RunUi<'_>,
+    starting_sequence: u64,
+) -> Result<Option<Feedback>, String> {
+    let reload_error = reload_view_or_keep(
+        ui.view,
+        load_view(&admission.state_dir, ui.view.id).await,
+        None,
+        None,
+    );
+    // Only a Goal this submission started can be paused by it; an older paused Goal is not news.
+    let started_goal_paused = ui
+        .view
+        .interrupted_goal_id()
+        .and_then(|id| ui.view.goal(id))
+        .filter(|goal| goal.started_sequence > starting_sequence)
+        .map(|goal| paused_goal_notice(goal.admits_resume(ui.view)));
+    let interrupted = started_goal_paused.unwrap_or(
+        "Submission interrupted before Run admission; no task was accepted. Account work already started may still complete.",
+    );
+    let drawn = match &reload_error {
+        Some(error) => format!("{interrupted}; {error}"),
+        None => interrupted.to_owned(),
+    };
+    ui.terminal
+        .draw(ui.view, ui.composer, Some(drawn.as_str()))
+        .map_err(|error| error.to_string())?;
+    let draft = retained_draft_notice(ui.composer);
+    Ok(match reload_error {
+        Some(error) => Some(Feedback::History(match draft {
+            Some(draft) => format!("{draft}; {error}"),
+            None => error,
+        })),
+        None => draft,
+    })
+}
+
+struct CompletedRun<'a> {
+    engine: &'a arany::Engine,
+    admission: &'a Admission,
+    outcome: &'a RunOutcome,
+    user_recorded: bool,
+    stop: Option<&'a str>,
+}
+
+struct RunNotice<'a> {
+    automatic: Option<&'a arany::RunConfig>,
+    preview_already_printed: bool,
+    hidden_answer: &'static str,
+    show: String,
+    reload_error: Option<String>,
+    notice: Option<Feedback>,
+}
+
+impl CompletedRun<'_> {
+    async fn finish(&self, ui: &mut RunUi<'_>) -> Result<Option<Feedback>, String> {
+        let automatic = self.outcome.run.config.as_ref().filter(|config| {
+            self.outcome.run.status == RunStatus::Finished && config.auto_compaction_due()
+        });
+        let linear = ui.terminal.is_linear();
+        let preview_already_printed = self.user_recorded && linear;
+        let hidden_answer = hidden_answer_guidance(linear);
+        let show = show_command(
+            self.outcome.run.id,
+            self.admission
+                .explicit_state_dir
+                .then_some(self.admission.state_dir.as_path()),
+        );
+        let reloaded = load_view(&self.admission.state_dir, self.outcome.session_id).await;
+        if let Ok(confirmed) = &reloaded {
+            confirm_outcome(confirmed, self.outcome)?;
         }
-    } else {
-        terminal.draw_notice(view, composer, notice)
+        print_run_answer(
+            ui.terminal,
+            reloaded.as_ref().ok(),
+            self.outcome,
+            preview_already_printed,
+            &show,
+        )?;
+        if !linear {
+            ui.terminal.finish_run_display();
+        }
+        let reload_error = reload_view_or_keep(ui.view, reloaded, None, Some(hidden_answer));
+        if automatic.is_some() {
+            ui.terminal
+                .draw(
+                    ui.view,
+                    ui.composer,
+                    Some("Context threshold reached; attempting automatic compaction"),
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        ui.terminal
+            .restore_draft_input(ui.composer.input_capacity())
+            .map_err(|error| error.to_string())?;
+        let notice = retained_draft_notice(ui.composer);
+        self.finish_notice(
+            ui,
+            RunNotice {
+                automatic,
+                preview_already_printed,
+                hidden_answer,
+                show,
+                reload_error,
+                notice,
+            },
+        )
+        .await
+    }
+
+    fn feedback(&self, view: &SessionView) -> Option<String> {
+        // A cancelled autonomous loop keeps its Goal open; the reloaded view says how to continue it.
+        let run_feedback = crate::presentation::session_run_feedback(view, &self.outcome.run);
+        let run_feedback = match self.stop {
+            Some(reason) => Some(match run_feedback {
+                Some(feedback) => {
+                    format!("Error: Goal stopped after this Run: {reason}. {feedback}")
+                }
+                None => format!("Error: Goal stopped after this Run: {reason}."),
+            }),
+            None => run_feedback,
+        };
+        // Only this Run's Goal can have been paused by it; an older paused Goal is not news here.
+        let paused_goal = view
+            .goal(self.outcome.goal_id)
+            .filter(|goal| goal.status == arany::GoalStatus::Interrupted)
+            .map(|goal| paused_goal_notice(goal.admits_resume(view)));
+        submission_notice(
+            paused_goal,
+            self.outcome.run.status,
+            run_feedback,
+            crate::presentation::render_provider_attempts(&self.outcome.run),
+        )
+    }
+
+    async fn finish_notice(
+        &self,
+        ui: &mut RunUi<'_>,
+        mut display: RunNotice<'_>,
+    ) -> Result<Option<Feedback>, String> {
+        let feedback = self.feedback(ui.view);
+        if let Some(feedback) = feedback.as_deref() {
+            if ui.composer.is_empty() {
+                display.notice = Some(Feedback::History(feedback.to_owned()));
+            } else {
+                ui.terminal
+                    .draw(ui.view, ui.composer, Some(feedback))
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        if let Some(config) = display.automatic {
+            self.compact(ui, &mut display, config, feedback).await?;
+        }
+        if let Some(error) = display.reload_error {
+            display.notice = Some(Feedback::History(match display.notice.as_deref() {
+                Some(previous) => format!("{previous}; {error}"),
+                None => error,
+            }));
+        }
+        Ok(display.notice)
+    }
+
+    async fn compact(
+        &self,
+        ui: &mut RunUi<'_>,
+        display: &mut RunNotice<'_>,
+        config: &arany::RunConfig,
+        feedback: Option<String>,
+    ) -> Result<(), String> {
+        let submission_feedback = if ui.composer.is_empty() {
+            display.notice.take()
+        } else {
+            feedback.map(Feedback::History)
+        };
+        let compaction_notice = match compact_current(
+            self.engine,
+            ui.terminal,
+            self.admission,
+            ui.view,
+            ui.composer,
+            Some((config, self.outcome.run.id)),
+        )
+        .await?
+        {
+            CompactionOutcome::Notice(notice) => notice,
+            CompactionOutcome::Interrupted(error) => {
+                format!("Automatic compaction unavailable: {error}; history retained")
+            }
+            CompactionOutcome::Unavailable(error) => {
+                format!("Error: Automatic compaction unavailable: {error}; history retained")
+            }
+            CompactionOutcome::Shutdown(signal) => {
+                return Err(format!("terminated by {}", signal.name()));
+            }
+        };
+        let text = match retained_draft_notice(ui.composer) {
+            Some(draft) => format!("{compaction_notice}; {draft}"),
+            None => compaction_notice,
+        };
+        self.reload_after_compaction(ui, display, text).await?;
+        if let Some(feedback) = submission_feedback {
+            append_notice(&mut display.notice, &feedback);
+        }
+        Ok(())
+    }
+
+    async fn reload_after_compaction(
+        &self,
+        ui: &mut RunUi<'_>,
+        display: &mut RunNotice<'_>,
+        text: String,
+    ) -> Result<(), String> {
+        // The compaction reload supersedes an earlier failed reload, which is reported at most once here.
+        let answer_hidden = display.reload_error.is_some();
+        display.reload_error = None;
+        let reloaded = load_view(&self.admission.state_dir, self.outcome.session_id).await;
+        if let (true, Ok(confirmed)) = (answer_hidden, &reloaded) {
+            confirm_outcome(confirmed, self.outcome)?;
+            print_run_answer(
+                ui.terminal,
+                Some(confirmed),
+                self.outcome,
+                display.preview_already_printed,
+                &display.show,
+            )?;
+        }
+        display.notice = reload_view_or_keep(
+            ui.view,
+            reloaded,
+            Some(text),
+            answer_hidden.then_some(display.hidden_answer),
+        )
+        .map(Feedback::History);
+        Ok(())
     }
 }
 
@@ -1405,112 +876,50 @@ fn compaction_notice(record: &CompactionRecord) -> String {
     }
 }
 
-const EVENT_DRAIN_LIMIT: usize = 64;
-
-// Applies one burst: `first`, then Events already ready, at most EVENT_DRAIN_LIMIT in commit
-// order, so input is polled again before the next burst.
-async fn apply_burst(
-    state_dir: &std::path::Path,
-    view: &mut SessionView,
-    first: Option<arany::Tapped>,
-    mut ready: impl AsyncFnMut() -> Option<Option<arany::Tapped>>,
-) -> Result<(), String> {
-    let mut event = first;
-    for drained in 1..=EVENT_DRAIN_LIMIT {
-        let Some(tapped) = event else {
-            return Err("Run event stream closed".to_owned());
-        };
-        if apply_tapped(state_dir, view, tapped).await.is_err() {
-            return Err("Run history unavailable; check Session history".to_owned());
-        }
-        if drained == EVENT_DRAIN_LIMIT {
-            break;
-        }
-        match ready().await {
-            Some(next) => event = next,
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-async fn apply_tapped(
-    state_dir: &std::path::Path,
-    view: &mut SessionView,
-    tapped: arany::Tapped,
-) -> Result<(), String> {
-    match tapped {
-        arany::Tapped::Committed(event) => {
-            if event.session_id != view.id || event.sequence <= view.last_sequence {
-                return Ok(());
-            }
-            if event.sequence != view.last_sequence + 1 {
-                return catch_up(state_dir, view).await;
-            }
-            match arany::reduce_into(view, &event) {
-                Ok(()) => Ok(()),
-                Err(_) => catch_up(state_dir, view).await,
-            }
-        }
-        arany::Tapped::Resync { .. } => catch_up(state_dir, view).await,
-    }
-}
-
-async fn catch_up(state_dir: &std::path::Path, view: &mut SessionView) -> Result<(), String> {
-    let state = arany::StateRoot::open_existing(state_dir).map_err(|error| error.to_string())?;
-    let store = arany::Store::open_read_only(state).map_err(|error| error.to_string())?;
-    let loaded = store
-        .load_open_view(view.id)
-        .await
-        .map_err(|error| error.to_string());
-    store.close().await.map_err(|error| error.to_string())?;
-    *view = loaded?.ok_or_else(|| "Session history unavailable".to_owned())?;
-    Ok(())
-}
-
-fn interrupt_approval_input(
-    input: &TerminalInput,
-    cancellation: &arany::RunCancellation,
-    stop: &mut ActiveStop,
-) -> bool {
-    if matches!(input, TerminalInput::Escape | TerminalInput::EndOfInput) {
-        *stop = ActiveStop::Cancelling;
-        cancellation.cancel();
-        true
-    } else {
-        false
-    }
+#[cfg(test)]
+pub(super) fn session_with_goal(autonomous: bool) -> SessionView {
+    let session_id = arany::SessionId::new();
+    let event = arany::Event::GoalStarted {
+        include_paths: Some(Vec::new()),
+        goal_id: arany::GoalId::new(),
+        objective: "Ship the parser".into(),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
+        budget: arany::GoalBudget::default(),
+        phase: arany::GoalPhase::Implementation,
+        autonomous,
+        resource_settings: arany::ToolResourceSettings::default(),
+        continues: None,
+    };
+    let started = arany::Event::SessionStarted {
+        title: "Goals".into(),
+        workspace_identity: WorkspaceIdentity {
+            device: 1,
+            inode: 2,
+        },
+    };
+    let events = [started, event]
+        .into_iter()
+        .zip(1..)
+        .map(|(event, sequence)| arany::EventEnvelope {
+            sequence,
+            session_id,
+            run_id: None,
+            agent_run_id: None,
+            event,
+            created_at_ms: 0,
+        })
+        .collect::<Vec<_>>();
+    SessionView::replay(session_id, &events)
+        .expect("valid Goal history")
+        .expect("Session")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn approval_end_of_input_and_escape_cancel_without_a_decline() {
-        for input in [TerminalInput::EndOfInput, TerminalInput::Escape] {
-            let cancellation = arany::RunCancellation::new();
-            let mut stop = ActiveStop::Running;
-            assert!(interrupt_approval_input(&input, &cancellation, &mut stop));
-            assert!(stop == ActiveStop::Cancelling);
-            assert!(
-                !cancellation.cancel(),
-                "interruption already cancelled the Run"
-            );
-        }
-        let cancellation = arany::RunCancellation::new();
-        let mut stop = ActiveStop::Running;
-        assert!(!interrupt_approval_input(
-            &TerminalInput::Submit,
-            &cancellation,
-            &mut stop
-        ));
-        assert!(stop == ActiveStop::Running);
-        assert!(
-            cancellation.cancel(),
-            "ordinary approval input did not cancel"
-        );
-    }
 
     #[test]
     fn switches_shown_before_a_stale_view_do_not_skip_or_panic() {
@@ -1614,193 +1023,10 @@ mod tests {
 }
 
 #[cfg(test)]
-mod burst_tests {
-    use super::*;
-    use arany::test_support::{
-        engine::{open, run_to_end},
-        scenario::{ScriptedProvider, request},
-    };
-    use arany::{
-        Answer, ChildAssignment, CollaborationPolicy, Delegate, EngineConfig, ProviderOutcome,
-        StateRoot, Store, Tapped,
-    };
-    use std::{collections::VecDeque, sync::Arc};
-
-    // A team Run with two children, then single Runs, so the journal outgrows one burst.
-    async fn committed_team() -> (
-        tempfile::TempDir,
-        std::path::PathBuf,
-        Vec<arany::EventEnvelope>,
-    ) {
-        let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("workspace");
-        std::fs::create_dir_all(workspace.join("notes")).unwrap();
-        std::fs::write(workspace.join("notes/facts.txt"), "Fact").unwrap();
-        let state_dir = root.path().join("state");
-        let engine = open(
-            StateRoot::admit(&state_dir).unwrap(),
-            EngineConfig::default(),
-        )
-        .unwrap();
-        let answer = |text: &str| ProviderOutcome::Answer(Answer { text: text.into() });
-        let child = |objective: &str| ChildAssignment {
-            editor: None,
-            objective: objective.into(),
-            profile: None,
-        };
-        let mut responses = vec![
-            ProviderOutcome::Delegate(Delegate {
-                agent: None,
-                children: vec![child("first task"), child("second task")],
-            }),
-            answer("first result"),
-            answer("second result"),
-            answer("team answer"),
-        ];
-        responses.extend((0..8).map(|_| answer("later answer")));
-        let mut provider = ScriptedProvider::new(responses);
-        // One call at a time, so each child takes its scripted answer in spawn order.
-        provider.identity.limits.concurrency = 1;
-        let provider = Arc::new(provider);
-        let mut team = request(&workspace, "team task");
-        team.policy = CollaborationPolicy::Team {
-            max_active_children: 2,
-        };
-        let session = run_to_end(&engine, &provider, team)
-            .await
-            .unwrap()
-            .session_id;
-        for _ in 0..8 {
-            let mut later = request(&workspace, "later task");
-            later.session_id = Some(session);
-            later.title = None;
-            run_to_end(&engine, &provider, later).await.unwrap();
-        }
-        engine.close().await.unwrap();
-        let store = Store::open_read_only(StateRoot::open_existing(&state_dir).unwrap()).unwrap();
-        let events = store.load_session(session).await.unwrap();
-        store.close().await.unwrap();
-        (root, state_dir, events)
-    }
-
-    fn tapped(envelope: &arany::EventEnvelope) -> Tapped {
-        Tapped::Committed(Arc::new(envelope.clone()))
-    }
-
-    fn replay(events: &[arany::EventEnvelope]) -> SessionView {
-        SessionView::replay(events[0].session_id, events)
-            .unwrap()
-            .unwrap()
-    }
-
-    #[tokio::test]
-    async fn committed_events_apply_in_bounded_in_order_bursts_and_gaps_reload_the_view() {
-        let (_root, state_dir, events) = committed_team().await;
-        let full = replay(&events);
-
-        // Commit order, one Event at a time, reaches the strictly replayed view.
-        let mut view = replay(&events[..1]);
-        for envelope in &events[1..] {
-            apply_tapped(&state_dir, &mut view, tapped(envelope))
-                .await
-                .unwrap();
-            assert_eq!(view.last_sequence, envelope.sequence);
-        }
-        assert_eq!(view.runs, full.runs);
-
-        // One burst applies at most EVENT_DRAIN_LIMIT ready Events and leaves the rest queued.
-        let mut queue = events[1..].iter().map(tapped).collect::<VecDeque<_>>();
-        assert!(queue.len() > EVENT_DRAIN_LIMIT);
-        let mut view = replay(&events[..1]);
-        let first = queue.pop_front();
-        apply_burst(&state_dir, &mut view, first, async || {
-            queue.pop_front().map(Some)
-        })
-        .await
-        .unwrap();
-        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT].sequence);
-        assert_eq!(queue.len(), events.len() - 1 - EVENT_DRAIN_LIMIT);
-        // Nothing else ready ends the burst after its first Event.
-        let first = queue.pop_front();
-        apply_burst(&state_dir, &mut view, first, async || None)
-            .await
-            .unwrap();
-        assert_eq!(view.last_sequence, events[EVENT_DRAIN_LIMIT + 1].sequence);
-
-        // A sequence gap or a resync reloads the whole validated committed view.
-        let gap = tapped(&events[EVENT_DRAIN_LIMIT + 3]);
-        for missed in [Some(gap), Some(Tapped::Resync { missed: 3 })] {
-            let mut view = replay(&events[..=EVENT_DRAIN_LIMIT]);
-            apply_burst(&state_dir, &mut view, missed, async || None)
-                .await
-                .unwrap();
-            assert_eq!(view.last_sequence, full.last_sequence);
-            assert_eq!(view.runs, full.runs);
-        }
-        // A closed stream or unreadable history stops the Run view instead of inventing progress.
-        let mut view = replay(&events[..1]);
-        for (state, event, expected) in [
-            (state_dir.as_path(), None, "Run event stream closed"),
-            (
-                std::path::Path::new("/nonexistent-arany-state"),
-                Some(Tapped::Resync { missed: 1 }),
-                "Run history unavailable; check Session history",
-            ),
-        ] {
-            assert_eq!(
-                apply_burst(state, &mut view, event, async || None).await,
-                Err(expected.to_owned())
-            );
-        }
-        assert_eq!(view.last_sequence, events[0].sequence);
-    }
-}
-
-#[cfg(test)]
 mod goal_request_tests {
     use super::*;
     use crate::cli::attached::{Admission, EntryMode};
-    use arany::{SessionDefaults, WorkspaceIdentity};
-
-    fn session_with_goal(autonomous: bool) -> SessionView {
-        let session_id = arany::SessionId::new();
-        let event = arany::Event::GoalStarted {
-            include_paths: Some(Vec::new()),
-            goal_id: arany::GoalId::new(),
-            objective: "Ship the parser".into(),
-            workspace_identity: WorkspaceIdentity {
-                device: 1,
-                inode: 2,
-            },
-            budget: arany::GoalBudget::default(),
-            phase: arany::GoalPhase::Implementation,
-            autonomous,
-            resource_settings: arany::ToolResourceSettings::default(),
-            continues: None,
-        };
-        let started = arany::Event::SessionStarted {
-            title: "Goals".into(),
-            workspace_identity: WorkspaceIdentity {
-                device: 1,
-                inode: 2,
-            },
-        };
-        let events = [started, event]
-            .into_iter()
-            .zip(1..)
-            .map(|(event, sequence)| arany::EventEnvelope {
-                sequence,
-                session_id,
-                run_id: None,
-                agent_run_id: None,
-                event,
-                created_at_ms: 0,
-            })
-            .collect::<Vec<_>>();
-        SessionView::replay(session_id, &events)
-            .expect("valid Goal history")
-            .expect("Session")
-    }
+    use arany::SessionDefaults;
 
     #[test]
     fn goal_starts_map_to_plain_autonomous_and_resume_requests() {
@@ -1818,138 +1044,6 @@ mod goal_request_tests {
             goal_request(&view, GoalStart::Resume, Default::default()),
             Err("No interrupted Goal is available to resume".into())
         );
-    }
-
-    #[test]
-    fn end_of_input_waits_for_only_the_current_run_to_settle() {
-        let mut view = session_with_goal(false);
-        let starting_sequence = view.last_sequence;
-        assert!(!run_settled(&view, starting_sequence), "no current Run");
-        let mut run = arany::RunView {
-            skill: None,
-            supervisor: Default::default(),
-            workers: Default::default(),
-            id: arany::RunId::new(),
-            objective: "Fix".into(),
-            images: Vec::new(),
-            config: None,
-            provider_fallbacks: Vec::new(),
-            provider_retries: Vec::new(),
-            agents: Vec::new(),
-            assistant_message: None,
-            status: arany::RunStatus::Finished,
-            accepted_sequence: starting_sequence,
-            finished_sequence: Some(starting_sequence),
-            failure: None,
-            tools: Vec::new(),
-            tool_compaction_summary: None,
-            tool_compaction_covered_count: 0,
-            tool_results_cleared_count: 0,
-            definitions: Default::default(),
-            display: Vec::new(),
-            steering_notes: Vec::new(),
-            lifecycle_hooks: Vec::new(),
-            lifecycle_hook_sequence: None,
-            provider_sequences: Default::default(),
-        };
-        view.runs.push(run.clone());
-        assert!(
-            !run_settled(&view, starting_sequence),
-            "an earlier Run cannot defer exit"
-        );
-        run.accepted_sequence = starting_sequence + 1;
-        for (status, settled) in [
-            (arany::RunStatus::Pending, false),
-            (arany::RunStatus::Active, false),
-            (arany::RunStatus::Finished, true),
-            (arany::RunStatus::Failed, true),
-            (arany::RunStatus::Cancelled, true),
-        ] {
-            run.status = status;
-            *view.runs.last_mut().unwrap() = run.clone();
-            assert_eq!(run_settled(&view, starting_sequence), settled, "{status:?}");
-        }
-    }
-
-    #[test]
-    fn exit_waits_for_only_the_current_run_to_settle() {
-        let mut view = session_with_goal(false);
-        let starting_sequence = view.last_sequence;
-        let typed = |text: &str| {
-            let mut composer = Composer::default();
-            for character in text.chars() {
-                composer.apply(TerminalInput::Character(character));
-            }
-            composer
-        };
-        let exit = typed("/exit");
-        assert!(
-            !exits_after_settled_run(&exit, &view, starting_sequence),
-            "no current Run"
-        );
-        let mut run = arany::RunView {
-            skill: None,
-            supervisor: Default::default(),
-            workers: Default::default(),
-            id: arany::RunId::new(),
-            objective: "Fix".into(),
-            images: Vec::new(),
-            config: None,
-            provider_fallbacks: Vec::new(),
-            provider_retries: Vec::new(),
-            agents: Vec::new(),
-            assistant_message: None,
-            status: arany::RunStatus::Active,
-            accepted_sequence: starting_sequence + 1,
-            finished_sequence: None,
-            failure: None,
-            tools: Vec::new(),
-            tool_compaction_summary: None,
-            tool_compaction_covered_count: 0,
-            tool_results_cleared_count: 0,
-            definitions: Default::default(),
-            display: Vec::new(),
-            steering_notes: Vec::new(),
-            lifecycle_hooks: Vec::new(),
-            lifecycle_hook_sequence: None,
-            provider_sequences: Default::default(),
-        };
-        view.runs.push(run.clone());
-        assert!(
-            !exits_after_settled_run(&exit, &view, starting_sequence),
-            "an active Run keeps /exit refused"
-        );
-        run.status = arany::RunStatus::Finished;
-        *view.runs.last_mut().unwrap() = run;
-        assert!(exits_after_settled_run(&exit, &view, starting_sequence));
-        for other in ["/exit now", "/status", "exit"] {
-            assert!(
-                !exits_after_settled_run(&typed(other), &view, starting_sequence),
-                "{other}"
-            );
-        }
-    }
-
-    #[test]
-    fn exit_abandons_a_held_linear_draft_and_waiting_note() {
-        let mut composer = Composer::default();
-        for character in "refused draft".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        let mut held = hold_draft(&mut composer);
-        assert!(held.is_some(), "a refused linear draft is held");
-        let steering = RunSteering::default();
-        steering
-            .offer_note("waiting note".into())
-            .expect("note waits");
-        for character in "/exit".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        abandon_drafts_for_exit(&mut composer, &mut held, &steering);
-        assert!(composer.is_empty());
-        // Run end hands back nothing, so the deferred Ctrl+D exits instead of retaining a draft.
-        assert!(steering.withdraw_note().is_none());
-        assert!(held.is_none());
     }
 
     #[test]
@@ -2069,281 +1163,5 @@ mod goal_request_tests {
             !admission.state_dir.exists(),
             "refused submissions create no State"
         );
-    }
-
-    #[test]
-    fn steering_refusals_name_the_retained_draft_without_echoing_text() {
-        assert_eq!(
-            steering_refusal(SteeringRefused::TooLarge, false),
-            "Steering note exceeds 8.0 KB; draft retained"
-        );
-        assert_eq!(
-            steering_refusal(SteeringRefused::Unavailable, true),
-            "Steering note unavailable; draft retained"
-        );
-        assert_eq!(
-            steering_refusal(SteeringRefused::RunFull, true),
-            "No room for more steering notes this Run. Draft retained; press Enter after this Goal to submit"
-        );
-    }
-
-    #[test]
-    fn recorded_note_clears_only_an_unchanged_composer() {
-        let mut seen = 0;
-        let mut composer = Composer::default();
-        for character in "first note".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        let mut offered = Some(composer.text().to_owned());
-        assert!(!settle_recorded_note(
-            0,
-            &mut seen,
-            &mut offered,
-            &mut composer
-        ));
-        assert!(settle_recorded_note(
-            1,
-            &mut seen,
-            &mut offered,
-            &mut composer
-        ));
-        assert!(
-            composer.is_empty(),
-            "an unchanged offer clears the composer"
-        );
-        assert!(offered.is_none());
-        assert!(!settle_recorded_note(
-            1,
-            &mut seen,
-            &mut offered,
-            &mut composer
-        ));
-
-        // An edit after the Engine took the note keeps the user's text as a retained draft.
-        for character in "second".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        let mut offered = Some("second".to_owned());
-        composer.apply(TerminalInput::Character('!'));
-        assert!(settle_recorded_note(
-            2,
-            &mut seen,
-            &mut offered,
-            &mut composer
-        ));
-        assert_eq!(composer.text(), "second!");
-    }
-
-    #[test]
-    fn held_linear_draft_waits_aside_and_returns_before_later_text() {
-        let mut composer = Composer::default();
-        for character in "kept".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        let held = hold_draft(&mut composer).expect("refused draft is held");
-        assert!(
-            composer.is_empty(),
-            "the invisible draft leaves the composer"
-        );
-        assert!(hold_draft(&mut composer).is_none());
-
-        for character in "later".chars() {
-            composer.apply(TerminalInput::Character(character));
-        }
-        assert!(release_held_draft(&mut composer, held));
-        assert_eq!(composer.text(), "kept\nlater");
-    }
-
-    #[test]
-    fn overflowing_release_keeps_the_newer_draft() {
-        let mut composer = Composer::default();
-        composer.insert_paste(&"a".repeat(64 * 1024)).unwrap();
-        let held = hold_draft(&mut composer).expect("refused draft is held");
-        for character in std::iter::repeat_n('b', 4000) {
-            composer.apply(TerminalInput::Character(character));
-        }
-        assert!(!release_held_draft(&mut composer, held));
-        assert_eq!(composer.text(), "b".repeat(4000));
-        assert_eq!(
-            composer.apply(TerminalInput::Character('c')),
-            ComposerEdit::AtCapacity
-        );
-        composer.clear();
-        composer.apply(TerminalInput::Up);
-        assert_eq!(composer.text(), "a".repeat(64 * 1024));
-        assert!(composer.has_text_pastes());
-    }
-
-    #[test]
-    fn retained_draft_names_the_autonomous_goal_boundary() {
-        assert_eq!(
-            draft_retained_notice(true),
-            "Draft retained; press Enter after this Goal to submit"
-        );
-        assert_eq!(
-            draft_retained_notice(false),
-            "Draft retained; press Enter after this Run to submit"
-        );
-    }
-}
-
-#[cfg(test)]
-mod escape_tests {
-    use super::*;
-
-    #[test]
-    fn run_end_notice_never_claims_a_dropped_note_was_kept() {
-        assert_eq!(
-            run_end_notice(false, true, false),
-            Some(
-                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
-            )
-        );
-        assert_eq!(
-            run_end_notice(false, false, false),
-            Some(
-                "Drafts exceed the combined limit; both kept; submit or clear this draft, then press Up"
-            )
-        );
-        assert_eq!(
-            run_end_notice(false, true, true),
-            Some("Steering note withdrawn; draft retained")
-        );
-        assert_eq!(run_end_notice(true, false, true), Some(STEERING_SENT));
-        assert_eq!(run_end_notice(false, false, true), None);
-    }
-
-    #[test]
-    fn escape_cancels_only_when_nothing_else_claims_it() {
-        let idle = |input, menu, clipboard, stop| active_escape(input, menu, clipboard, stop);
-        assert_eq!(
-            idle(TerminalInput::Escape, false, false, ActiveStop::Running),
-            TerminalInput::Interrupt
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, true, false, ActiveStop::Running),
-            TerminalInput::Escape,
-            "an open menu closes first"
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, false, true, ActiveStop::Running),
-            TerminalInput::Escape,
-            "a pending clipboard read is cancelled, not the Run"
-        );
-        assert_eq!(
-            idle(TerminalInput::Escape, false, false, ActiveStop::Cancelling),
-            TerminalInput::Escape,
-            "a second Escape never forces shutdown"
-        );
-        assert_eq!(
-            idle(TerminalInput::Interrupt, false, false, ActiveStop::Running),
-            TerminalInput::Interrupt
-        );
-    }
-}
-
-#[cfg(test)]
-mod approval_reply_tests {
-    use super::{linear_approval_choice, withdraw_abandoned_approval};
-    use crate::presentation::ToolApprovalChoice::{AutoEdits, ExactCommand, GitPrefix, No, Yes};
-    use crate::terminal::{Composer, TerminalInput};
-    use std::time::Duration;
-
-    #[tokio::test(start_paused = true)]
-    async fn child_timeout_withdraws_the_dialog_and_discards_its_partial_answer() {
-        tokio::time::timeout(Duration::from_secs(60), async {
-            let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
-            let intent = arany::EffectIntent {
-                host: None,
-                host_command: None,
-                target: arany::worker::EffectTarget::Workspace,
-                id: uuid::Uuid::now_v7(),
-                run_id: arany::RunId::new(),
-                agent_run_id: arany::AgentRunId::new(),
-                policy_digest: [1; 32],
-                enforcement_digest: [2; 32],
-                workspace_device: 1,
-                workspace_inode: 2,
-                call: arany::ToolCall::Mkdir {
-                    path: "directory".into(),
-                },
-                limits: arany::ToolLimits::default(),
-                use_count: 1,
-            };
-            let child_approvals = approvals.clone();
-            let child_intent = intent.clone();
-            let child = tokio::spawn(async move {
-                tokio::time::timeout(
-                    Duration::from_secs(30),
-                    arany::test_support::approval::ask(&child_approvals, &child_intent),
-                )
-                .await
-            });
-            let mut pending = Some(inbox.next().await.expect("child approval"));
-            let mut answer = Composer::default();
-            answer.apply(TerminalInput::Character('y'));
-            assert!(
-                tokio::time::timeout(
-                    Duration::ZERO,
-                    withdraw_abandoned_approval(&mut pending, &mut answer),
-                )
-                .await
-                .is_err(),
-                "a live approval stays answerable"
-            );
-            assert!(pending.is_some());
-            assert_eq!(answer.text(), "y");
-            tokio::time::advance(Duration::from_secs(31)).await;
-            assert!(child.await.expect("child waiter").is_err());
-            withdraw_abandoned_approval(&mut pending, &mut answer).await;
-            assert!(pending.is_none(), "the dialog releases approval input");
-            assert_eq!(
-                answer.text(),
-                "",
-                "partial answers cannot reach a later approval"
-            );
-            let (approved, ()) = tokio::join!(
-                arany::test_support::approval::ask(&approvals, &intent),
-                async {
-                    inbox.next().await.expect("next approval").decide(true);
-                },
-            );
-            assert!(approved, "the parent can continue with a fresh approval");
-        })
-        .await
-        .expect("approval withdrawal deadline");
-    }
-
-    #[test]
-    fn numbered_replies_use_choice_identity_and_refuse_unavailable_choices() {
-        let prefix = GitPrefix(arany::permissions::TypedGitPrefix::Branch);
-        for choices in [
-            vec![Yes, prefix, No],
-            vec![Yes, No],
-            vec![Yes, AutoEdits, No],
-            vec![Yes, ExactCommand, No],
-        ] {
-            for (index, choice) in choices.iter().enumerate() {
-                assert_eq!(
-                    linear_approval_choice(&(index + 1).to_string(), &choices),
-                    Some(*choice)
-                );
-            }
-            for (answer, expected) in [
-                ("", Some(No)),
-                ("YES", Some(Yes)),
-                ("no", Some(No)),
-                ("allow", None),
-                ("always", None),
-                ("0", None),
-                ("4", None),
-            ] {
-                assert_eq!(linear_approval_choice(answer, &choices), expected);
-            }
-        }
-        assert_eq!(AutoEdits.reply(), arany::ApprovalReply::AllowOnce);
-        assert_eq!(ExactCommand.reply(), arany::ApprovalReply::AllowForSession);
-        assert_eq!(No.reply(), arany::ApprovalReply::Deny);
-        assert_eq!(prefix.reply(), arany::ApprovalReply::AllowPrefixInFolder);
     }
 }
