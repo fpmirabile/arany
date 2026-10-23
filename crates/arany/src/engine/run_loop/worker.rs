@@ -1198,9 +1198,22 @@ impl RunLoop<'_> {
             | Err(EngineError::Tool(crate::tools::ToolError::Limit)) => {
                 self.record_capacity_stop().await?
             }
-            Err(EngineError::GoalBudgetExhausted) => {}
+            Err(EngineError::GoalBudgetExhausted)
+            | Ok(Ok(_))
+            | Ok(Err(
+                StopCause::Uncertain
+                | StopCause::Cancelled
+                | StopCause::HookStop
+                | StopCause::Paused
+                | StopCause::ActiveTime
+                | StopCause::Budget
+                | StopCause::ContextFull
+                | StopCause::DelegationDeadline
+                | StopCause::Refused(_)
+                | StopCause::ToolStopped
+                | StopCause::InvalidCommandResult,
+            )) => {}
             Err(error) => return Err(error),
-            Ok(_) => {}
         }
         let tool = self
             .ledger()
