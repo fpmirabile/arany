@@ -1,6 +1,6 @@
 use super::{CredentialError, DEFAULT_ACCOUNT, SERVICE, SavedAccount, admit_transport};
 use crate::accounts::chatgpt::{MAX_TOKEN_RECORD_BYTES, valid_keyring_record};
-use arany::RecordKind;
+use arany::{ProviderKind, RecordKind};
 #[cfg(not(target_os = "macos"))]
 use keyring::Entry;
 use keyring::Error;
@@ -602,7 +602,7 @@ fn valid_record(slot: &str, bytes: &[u8]) -> bool {
 fn valid_native_identity(slot: &str, id: Uuid, provider: &str) -> bool {
     slot == DEFAULT_ACCOUNT
         && id.get_version() == Some(uuid::Version::SortRand)
-        && matches!(provider, "openai" | "anthropic")
+        && ProviderKind::parse(provider).is_some_and(ProviderKind::is_native_api)
 }
 
 fn valid_authorized_record(slot: &str, record: &str, expected: Option<(Uuid, String)>) -> bool {

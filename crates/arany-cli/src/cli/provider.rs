@@ -4,11 +4,12 @@ pub(crate) mod select;
 
 use super::{CommandOutput, state_dir};
 use crate::accounts::{chatgpt, credentials};
-use crate::presentation::escape_terminal;
+use crate::presentation::{escape_terminal, format_tokens};
 use arany::{
     CustomProfile, CustomProfileError, Effort, ModelEntry, NativeApiCredentials, NativeCheckError,
-    NativeCheckRequest, RunCancellation, StateRoot, check_custom_profile_with_cancellation,
-    check_native_model, list_native_models_with_credentials, validate_native_model_id,
+    NativeCheckRequest, ProviderKind, RunCancellation, StateRoot,
+    check_custom_profile_with_cancellation, check_native_model,
+    list_native_models_with_credentials, validate_native_model_id,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -57,7 +58,7 @@ enum ProviderAction {
 pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
     match args.action {
         ProviderAction::Logout { profile } => {
-            if profile != "chatgpt" {
+            if ProviderKind::parse(&profile) != Some(ProviderKind::ChatGpt) {
                 return Err("logout is available only for the selected ChatGPT account".into());
             }
             let workspace = std::env::current_dir()
@@ -88,7 +89,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             saved_account,
             profile,
         } => {
-            if profile == "chatgpt" {
+            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
                 if saved_account || selected_state_dir.is_some() {
                     return Err(
                         "ChatGPT models use the selected user account; omit --saved-account and --state-dir"
@@ -107,8 +108,8 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                     success: true,
                 });
             }
-            let (models, exact_custom) = match profile.as_str() {
-                "openai" | "anthropic" => {
+            let (models, exact_custom) = match ProviderKind::parse(&profile) {
+                Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
                     let key = if saved_account {
                         let account = credentials::load()
                             .await
@@ -129,7 +130,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                         .map_err(|error| error.to_string())?;
                     (models, false)
                 }
-                _ => {
+                Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
                     if saved_account {
                         return Err("--saved-account requires a native Provider".into());
                     }
@@ -168,7 +169,7 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
             accept_cost,
             saved_account,
         } => {
-            if profile == "chatgpt" {
+            if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
                 if saved_account || selected_state_dir.is_some() {
                     return Err(
                         "ChatGPT checks use the selected user account; omit --saved-account and --state-dir"
@@ -184,17 +185,17 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                 let workspace = std::env::current_dir()
                     .and_then(std::fs::canonicalize)
                     .map_err(|_| "Workspace unavailable".to_owned())?;
-                let account_id =
+                let (account_id, context_window_tokens) =
                     chatgpt::check_selected_model(workspace, None, model.clone(), effort)
                         .await
                         .map_err(|error| error.to_string())?;
                 return Ok(CommandOutput {
-                    stdout: render_chatgpt_check(account_id, &model, effort),
+                    stdout: render_chatgpt_check(account_id, &model, effort, context_window_tokens),
                     stderr: String::new(),
                     success: true,
                 });
             }
-            let native = matches!(profile.as_str(), "openai" | "anthropic");
+            let native = ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native_api);
             if native && !accept_cost {
                 return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
             }
@@ -385,17 +386,28 @@ fn render_chatgpt_models(account_id: uuid::Uuid, models: &[chatgpt::ChatGptModel
     );
     for model in models {
         output.push_str(&format!(
-            "{} · {} · availability only; compatibility check optional\n",
+            "{} · {} · context window {} · availability only; compatibility check optional\n",
             model.slug,
-            escape_terminal(&model.display_name)
+            escape_terminal(&model.display_name),
+            render_context_window(model.context_window_tokens),
         ));
     }
     output
 }
 
-fn render_chatgpt_check(account_id: uuid::Uuid, model: &str, effort: Effort) -> String {
+fn render_context_window(tokens: Option<u32>) -> String {
+    tokens.map_or_else(|| "unknown".into(), format_tokens)
+}
+
+fn render_chatgpt_check(
+    account_id: uuid::Uuid,
+    model: &str,
+    effort: Effort,
+    context_window_tokens: Option<u32>,
+) -> String {
+    let window = render_context_window(context_window_tokens);
     format!(
-        "Provider: chatgpt\nAccount: {account_id}\nModel: {model}\nEffort: {effort}\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
+        "Provider: chatgpt\nAccount: {account_id}\nModel: {model}\nEffort: {effort}\nContext window: {window}\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
     )
 }
 
@@ -471,11 +483,35 @@ mod tests {
     fn successful_chatgpt_check_receipt_describes_run_admission() {
         let id = Uuid::now_v7();
         assert_eq!(
-            render_chatgpt_check(id, "model-1", Effort::High),
+            render_chatgpt_check(id, "model-1", Effort::High, Some(272_000)),
             format!(
-                "Provider: chatgpt\nAccount: {id}\nModel: model-1\nEffort: high\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
+                "Provider: chatgpt\nAccount: {id}\nModel: model-1\nEffort: high\nContext window: 272k tokens\nStatus: synthetic conformance passed; optional diagnostic, not Run authorization\n"
             )
         );
+    }
+
+    #[test]
+    fn chatgpt_window_output_uses_human_token_units() {
+        let id = Uuid::now_v7();
+        for (window, expected) in [
+            (None, "unknown"),
+            (Some(32_768), "32.8k tokens"),
+            (Some(272_000), "272k tokens"),
+            (Some(1_048_576), "1M tokens"),
+            (Some(2_000_000), "2M tokens"),
+        ] {
+            let output = render_chatgpt_check(id, "model-one", Effort::High, window);
+            assert!(output.contains(&format!("Context window: {expected}\n")));
+            let models = render_chatgpt_models(
+                id,
+                &[chatgpt::ChatGptModel {
+                    slug: "model-one".into(),
+                    display_name: "First model".into(),
+                    context_window_tokens: window,
+                }],
+            );
+            assert!(models.contains(&format!("context window {expected} ·")));
+        }
     }
 
     #[test]
@@ -524,7 +560,7 @@ mod tests {
                 chatgpt::ChatGptModel {
                     slug: "model-one".into(),
                     display_name: "First model".into(),
-                    context_window_tokens: None,
+                    context_window_tokens: Some(272_000),
                 },
                 chatgpt::ChatGptModel {
                     slug: "model-two".into(),
@@ -539,11 +575,11 @@ mod tests {
         )));
         assert!(
             output.contains(
-                "model-one · First model · availability only; compatibility check optional"
+                "model-one · First model · context window 272k tokens · availability only; compatibility check optional"
             )
         );
         assert!(output.contains(
-            "model-two · Second\\u{001b}[2J model · availability only; compatibility check optional"
+            "model-two · Second\\u{001b}[2J model · context window unknown · availability only; compatibility check optional"
         ));
         assert!(!output.contains('\u{1b}'));
     }

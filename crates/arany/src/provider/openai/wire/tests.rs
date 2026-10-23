@@ -1365,9 +1365,18 @@ fn escape_heavy_write_and_edit_decode_at_the_content_ceiling() {
 
 #[test]
 fn native_write_and_edit_decode_at_the_content_ceiling() {
-    let request = primary_request(MODEL);
+    let mut request = primary_request(MODEL);
+    request.max_output_tokens = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+    assert_eq!(
+        body(&request)["max_output_tokens"],
+        request.max_output_tokens
+    );
     let ceiling = crate::tools::types::MAX_EDIT_CONTENT_BYTES;
     for (name, arguments) in [
+        (
+            "arany_write",
+            json!({"path":"README.md","expected_digest":null,"content":"x".repeat(ceiling)}),
+        ),
         (
             "arany_write",
             json!({"path":"README.md","expected_digest":null,"content":"é".repeat(ceiling / 2)}),
@@ -1377,21 +1386,20 @@ fn native_write_and_edit_decode_at_the_content_ceiling() {
             json!({"path":"README.md","expected_digest":"0".repeat(64),"old":"x".repeat(ceiling / 2),"new":"é".repeat(ceiling / 4)}),
         ),
     ] {
-        let fixture = response("completed", json!([function_call(name, &arguments)]));
-        assert!(
-            matches!(
-                decode(&request, &fixture).unwrap().outcome,
-                ProviderOutcome::Tools(_)
-            ),
-            "{name}"
-        );
-        assert!(
-            matches!(
-                decode_streamed(&request, &fixture).unwrap().outcome,
-                ProviderOutcome::Tools(_)
-            ),
-            "{name}"
-        );
+        let mut fixture = response("completed", json!([function_call(name, &arguments)]));
+        fixture["usage"]["output_tokens"] = json!(request.max_output_tokens);
+        for decoded in [
+            decode(&request, &fixture).unwrap(),
+            decode_streamed(&request, &fixture).unwrap(),
+        ] {
+            let ProviderOutcome::Tools(calls) = decoded.outcome else {
+                panic!("one Tool request");
+            };
+            let actual = serde_json::to_value(&calls[0].call).unwrap();
+            for (key, value) in arguments.as_object().unwrap() {
+                assert_eq!(&actual[key], value, "{name} {key}");
+            }
+        }
     }
 }
 

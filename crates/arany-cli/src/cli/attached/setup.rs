@@ -6,8 +6,8 @@ use crate::terminal::{AttachedTerminal, Composer, ShutdownSignal, TerminalError,
 use arany::RecordKind;
 use arany::{
     CollaborationPolicy, Effort, HistoryRecovery, MAX_ANTHROPIC_WORKSPACE_ID_BYTES,
-    MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, SessionDefaults, StateRoot, Store,
-    StoreError, list_native_models_with_credentials, validate_native_api_key,
+    MAX_NATIVE_API_KEY_BYTES, ModelEntry, NativeApiCredentials, ProviderKind, SessionDefaults,
+    StateRoot, Store, StoreError, list_native_models_with_credentials, validate_native_api_key,
 };
 use std::future::Future;
 use std::path::Path;
@@ -228,7 +228,9 @@ pub(super) async fn saved_defaults(
     workspace: &Path,
 ) -> Result<SavedDefaults, SetupError> {
     if let Some(defaults) = super::models::last_saved_defaults(workspace)? {
-        let disconnected = if defaults.provider.as_deref() == Some("chatgpt") {
+        let disconnected = if defaults.provider.as_deref().and_then(ProviderKind::parse)
+            == Some(ProviderKind::ChatGpt)
+        {
             match chatgpt::selected_account_id() {
                 Ok(_) => false,
                 Err(chatgpt::AuthorizationError::NoSelectedAccount) => true,
@@ -275,7 +277,9 @@ pub(super) async fn authorize_saved_access(
     let expected = defaults
         .account_id
         .zip(defaults.provider.clone())
-        .filter(|(_, provider)| matches!(provider.as_str(), "openai" | "anthropic"));
+        .filter(|(_, provider)| {
+            ProviderKind::parse(provider).is_some_and(ProviderKind::is_native_api)
+        });
     let Some(result) = await_operation(
         terminal,
         AUTHORIZE_TITLE,
@@ -301,16 +305,19 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
     let Some(id) = defaults.account_id else {
         return Ok(None);
     };
-    match defaults.provider.as_deref() {
-        Some("chatgpt") => {
+    match defaults.provider.as_deref().and_then(ProviderKind::parse) {
+        Some(ProviderKind::ChatGpt) => {
             chatgpt::selected_keyring_slot(id).map_err(|error| error.to_string().into())
         }
-        Some(provider @ ("openai" | "anthropic")) => {
-            credentials::selected_keyring_slot(id, provider)
-                .await
-                .map_err(|error| error.to_string().into())
+        Some(provider @ (ProviderKind::OpenAi | ProviderKind::Anthropic)) => {
+            credentials::selected_keyring_slot(
+                id,
+                provider.native_name().expect("native Provider name"),
+            )
+            .await
+            .map_err(|error| error.to_string().into())
         }
-        _ => Ok(None),
+        Some(ProviderKind::Custom) | None => Ok(None),
     }
 }
 
@@ -361,7 +368,12 @@ fn selected_chatgpt_defaults() -> Result<SavedDefaults, String> {
 
 fn chatgpt_defaults(account_id: uuid::Uuid) -> SessionDefaults {
     SessionDefaults {
-        provider: Some("chatgpt".into()),
+        provider: Some(
+            ProviderKind::ChatGpt
+                .native_name()
+                .expect("native Provider name")
+                .into(),
+        ),
         model: None,
         effort: None,
         account_id: Some(account_id),
@@ -573,14 +585,14 @@ async fn native_setup(
         return Ok(None);
     };
     let provider = if provider == b'1' {
-        "openai"
+        ProviderKind::OpenAi
     } else {
-        "anthropic"
+        ProviderKind::Anthropic
     };
     let Some(key) = read_api_key(terminal).await? else {
         return Ok(None);
     };
-    let workspace_id = if provider == "anthropic" {
+    let workspace_id = if provider == ProviderKind::Anthropic {
         match choose(
             terminal,
             3,
@@ -606,6 +618,7 @@ async fn native_setup(
     } else {
         None
     };
+    let provider = provider.native_name().expect("native Provider name");
     let credentials = NativeApiCredentials::new(provider, key, workspace_id)
         .map_err(|_| "invalid selected native API credentials")?;
     let Some(items) = load_catalog(terminal, provider, &credentials).await? else {
@@ -1146,10 +1159,10 @@ pub(super) async fn await_operation<T>(
 }
 
 fn native_catalog_default<'a>(provider: &str, items: &'a [ModelEntry]) -> Option<(&'a str, bool)> {
-    let preferred: &[&str] = match provider {
-        "openai" => &["gpt-5.6-luna"],
-        "anthropic" => &["claude-sonnet-5-5", "claude-sonnet-5"],
-        _ => return None,
+    let preferred: &[&str] = match ProviderKind::parse(provider) {
+        Some(ProviderKind::OpenAi) => &["gpt-5.6-luna"],
+        Some(ProviderKind::Anthropic) => &["claude-sonnet-5-5", "claude-sonnet-5"],
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => return None,
     };
     preferred
         .iter()
@@ -1405,7 +1418,9 @@ async fn read_workspace_id(
             TerminalInput::Submit => {
                 if rejected == 0
                     && NativeApiCredentials::new(
-                        "anthropic",
+                        ProviderKind::Anthropic
+                            .native_name()
+                            .expect("native Provider name"),
                         key.to_owned(),
                         Some(draft.text().to_owned()),
                     )

@@ -1,5 +1,5 @@
 use super::escape_terminal;
-use arany::{SessionView, TokenCount, UsageGroup};
+use arany::{ProviderKind, SessionView, TokenCount, UsageGroup};
 use std::collections::BTreeMap;
 use std::fmt::Write;
 
@@ -104,12 +104,17 @@ pub fn usage_pages_at(
     if pending {
         header.push_str("In-flight or interrupted usage pending; totals incomplete\n");
     }
-    if view.defaults.provider.as_deref() == Some("chatgpt")
+    if view
+        .defaults
+        .provider
+        .as_deref()
+        .and_then(ProviderKind::parse)
+        == Some(ProviderKind::ChatGpt)
         && !view
             .usage
             .groups
             .iter()
-            .any(|group| group.provider == "chatgpt")
+            .any(|group| ProviderKind::parse(&group.provider) == Some(ProviderKind::ChatGpt))
     {
         header.push_str("ChatGPT weekly: unknown (not reported)\n");
     }
@@ -166,15 +171,17 @@ pub fn usage_pages_at(
             {
                 let _ = writeln!(text, "{label}: {}", count(value, scope_pending));
             }
-            text.push_str(if provider == "chatgpt" {
-                if view.usage.plan_limits.is_empty() {
-                    "ChatGPT weekly: unknown (not reported)\n"
+            text.push_str(
+                if ProviderKind::parse(provider) == Some(ProviderKind::ChatGpt) {
+                    if view.usage.plan_limits.is_empty() {
+                        "ChatGPT weekly: unknown (not reported)\n"
+                    } else {
+                        "Plan windows: see account-level observations below\n"
+                    }
                 } else {
-                    "Plan windows: see account-level observations below\n"
-                }
-            } else {
-                "API rate limits: unknown (not reported)\n"
-            });
+                    "API rate limits: unknown (not reported)\n"
+                },
+            );
             sections.push(text);
         }
     }

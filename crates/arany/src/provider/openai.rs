@@ -301,7 +301,10 @@ mod tests {
         assert_eq!(provider.identity().effort, Some(Effort::High));
         assert_eq!(provider.key, "synthetic-openai-key");
         assert_eq!(provider.identity().saved_api_account_id(), None);
-        assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
+        assert_eq!(
+            provider.identity().limits.max_output_tokens,
+            crate::provider::MAX_OUTPUT_TOKEN_CAP
+        );
         assert_eq!(
             provider.identity().limits.deadline,
             native::NATIVE_CALL_DEADLINE

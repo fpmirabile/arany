@@ -41,6 +41,7 @@ fn final_message_failure_stream(phases: &[Option<&str>]) -> String {
 
 const OBJECTIVE: &str = "offline chatgpt objective";
 const UNCHECKED_OBJECTIVE: &str = "offline direct Run without a model check";
+const CATALOG_FAILURE_OBJECTIVE: &str = "offline direct Run without a model catalog";
 const ANSWER: &str = "offline chatgpt answer";
 const FOLLOWUP_OBJECTIVE: &str = "offline chatgpt follow-up";
 const FOLLOWUP_ANSWER: &str = "offline follow-up answer";
@@ -198,6 +199,40 @@ pub(super) fn respond_after_catalog(
             b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         )
         .expect("failed cached refresh");
+    respond_unchecked(input, output, catalog);
+    respond_without_catalog(input, output);
+    respond_probes(input, output, catalog);
+    respond_team(input, output, catalog);
+    respond_failure(input, output, catalog);
+    respond_diagnostics(input, output, catalog);
+}
+
+fn serve_catalog(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    assert!(checked_request(output, "GET /v1/models").is_none());
+    send_json(input, catalog);
+}
+
+fn serve_unavailable_catalog(input: &mut impl Write, output: &mut impl Read) {
+    assert!(checked_request(output, "GET /v1/models").is_none());
+    input
+        .write_all(
+            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        )
+        .expect("unavailable Run catalog");
+}
+
+fn respond_without_catalog(input: &mut impl Write, output: &mut impl Read) {
+    serve_unavailable_catalog(input, output);
+    let body = checked_request(output, "POST /v1/responses").expect("unchecked Run body");
+    assert_eq!(
+        crate::semantic::input(&body)["objective"],
+        CATALOG_FAILURE_OBJECTIVE
+    );
+    send_sse(input, "resp_without_catalog", serde_json::json!(ANSWER));
+}
+
+fn respond_unchecked(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    serve_catalog(input, output, catalog);
     let direct = checked_request(output, "POST /v1/responses").expect("first direct Run body");
     assert_eq!(direct["model"], "gpt-6.1-sol");
     assert_eq!(direct["reasoning"]["effort"], "low");
@@ -222,8 +257,10 @@ pub(super) fn respond_after_catalog(
         })
     );
     send_sse(input, "resp_without_check", serde_json::json!(ANSWER));
-    assert!(checked_request(output, "GET /v1/models").is_none());
-    send_json(input, catalog);
+}
+
+fn respond_probes(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    serve_catalog(input, output, catalog);
     let probes = [
         (
             "resp_check_direct",
@@ -248,6 +285,11 @@ pub(super) fn respond_after_catalog(
         ),
     ];
     for (index, (id, expected_input, outcome)) in probes.into_iter().enumerate() {
+        if index == 3 {
+            serve_unavailable_catalog(input, output);
+        } else if index > 3 {
+            serve_catalog(input, output, catalog);
+        }
         let body = checked_request(output, "POST /v1/responses").expect("Responses body");
         assert_eq!(body["model"], "gpt-6.1-sol");
         assert_eq!(body["reasoning"]["effort"], "medium");
@@ -276,6 +318,10 @@ pub(super) fn respond_after_catalog(
         }
         send_sse(input, id, outcome);
     }
+}
+
+fn respond_team(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    serve_catalog(input, output, catalog);
     for (id, phase, objective, outcome) in [
         (
             "resp_team_plan",
@@ -334,6 +380,10 @@ pub(super) fn respond_after_catalog(
         );
         send_sse(input, id, outcome);
     }
+}
+
+fn respond_failure(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
+    serve_catalog(input, output, catalog);
     let body = checked_request(output, "POST /v1/responses").expect("failed Run body");
     assert_eq!(body["model"], "gpt-6.1-sol");
     assert_eq!(body["reasoning"]["effort"], "medium");
@@ -355,27 +405,31 @@ pub(super) fn respond_after_catalog(
     let rejected_body = format!("{FAILURE_BODY_CANARY} {ACCESS} {REFRESH}");
     // A Retry-After beyond the action deadline is never waited out, so the 429 fails the Run at once.
     input.write_all(format!("HTTP/1.1 429 Too Many Requests\r\nx-codex-secondary-used-percent: 71\r\nx-codex-secondary-window-minutes: 10080\r\nRetry-After: 86400\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{rejected_body}", rejected_body.len()).as_bytes()).expect("synthetic Run rejection");
-    let completed = |model: &str, text: serde_json::Value| {
-        format!(
-            "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
-            serde_json::json!({
-                "type": "response.completed",
-                "response": {
-                    "id": "resp_contract_rejection",
+}
+
+fn completed_diagnostic(model: &str, text: serde_json::Value) -> String {
+    format!(
+        "data: {{\"type\":\"response.created\"}}\n\ndata: {}\n\n",
+        serde_json::json!({
+            "type": "response.completed",
+            "response": {
+                "id": "resp_contract_rejection",
+                "status": "completed",
+                "model": model,
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
                     "status": "completed",
-                    "model": model,
-                    "output": [{
-                        "type": "message",
-                        "role": "assistant",
-                        "status": "completed",
-                        "phase": "final_answer",
-                        "content": [{"type": "output_text", "text": text.to_string()}]
-                    }],
-                    "usage": {"input_tokens": 12, "output_tokens": 8}
-                }
-            })
-        )
-    };
+                    "phase": "final_answer",
+                    "content": [{"type": "output_text", "text": text.to_string()}]
+                }],
+                "usage": {"input_tokens": 12, "output_tokens": 8}
+            }
+        })
+    )
+}
+
+fn respond_diagnostics(input: &mut impl Write, output: &mut impl Read, catalog: &[u8]) {
     // A stream that ends before completion is a retryable cut; the wire corpus owns it.
     for (stage, stream) in [
         (
@@ -384,13 +438,14 @@ pub(super) fn respond_after_catalog(
         ),
         (
             "ResponseModel",
-            completed("gpt-6-astra", serde_json::json!("done")),
+            completed_diagnostic("gpt-6-astra", serde_json::json!("done")),
         ),
     ]
     .into_iter()
     .chain(
         FINAL_MESSAGE_FAILURES.map(|(stage, phases)| (stage, final_message_failure_stream(phases))),
     ) {
+        serve_catalog(input, output, catalog);
         let body =
             checked_request(output, "POST /v1/responses").expect("diagnostic failure request");
         assert_eq!(body["model"], "gpt-6.1-sol");
@@ -565,6 +620,7 @@ pub(super) fn accept_check_and_run(
     assert!(result.status.success(), "direct unchecked Run failed");
     assert!(result.stderr.is_empty());
     let direct = session("/root/state-without-check");
+    assert_catalog_window(&direct);
     assert_eq!(direct.runs.len(), 1);
     assert_eq!(direct.runs[0].objective, UNCHECKED_OBJECTIVE);
     assert_eq!(direct.runs[0].status, arany::RunStatus::Finished);
@@ -606,6 +662,7 @@ pub(super) fn accept_check_and_run(
                 .any(|part| part == secret.as_bytes())
         );
     }
+    run_without_catalog();
     let diagnostic = Command::new("/arany")
         .args([
             "provider",
@@ -623,6 +680,7 @@ pub(super) fn accept_check_and_run(
         .expect("explicit optional synthetic diagnostic after the first real Run");
     assert!(diagnostic.status.success());
     assert!(diagnostic.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&diagnostic.stdout).contains("Context window: 272k tokens\n"));
     assert!(
         String::from_utf8_lossy(&diagnostic.stdout)
             .contains("optional diagnostic, not Run authorization")
@@ -928,7 +986,58 @@ pub(super) fn accept_check_and_run(
         .expect("restore test-owned account");
 }
 
+fn run_without_catalog() {
+    let state = "/root/state-without-catalog";
+    let result = Command::new("/arany")
+        .args([
+            "exec",
+            "--provider",
+            "chatgpt",
+            "--model",
+            "gpt-6.1-sol",
+            "--effort",
+            "low",
+            "--collaboration",
+            "single",
+            "--output",
+            "jsonl",
+            "--workspace",
+            "/root/workspace",
+            "--state-dir",
+            state,
+            CATALOG_FAILURE_OBJECTIVE,
+        ])
+        .env_clear()
+        .env("SSL_CERT_FILE", "/fixture/ca.pem")
+        .bounded_output()
+        .expect("direct Run with unavailable catalog and no check");
+    assert!(result.status.success());
+    assert!(result.stderr.is_empty());
+    let view = session(state);
+    assert_eq!(view.runs.len(), 1);
+    assert_eq!(view.runs[0].objective, CATALOG_FAILURE_OBJECTIVE);
+    assert_eq!(view.runs[0].status, arany::RunStatus::Finished);
+    assert_eq!(view.runs[0].assistant_message.as_deref(), Some(ANSWER));
+    assert_eq!(
+        view.runs[0].config.as_ref().unwrap().context_window_tokens,
+        None
+    );
+}
+
+fn assert_catalog_window(view: &SessionView) {
+    for run in &view.runs {
+        assert_eq!(
+            run.config
+                .as_ref()
+                .expect("Run config")
+                .context_window_tokens,
+            Some(CONTEXT_WINDOW)
+        );
+    }
+}
+
 pub(super) fn assert_runs(view: &SessionView, account_id: Uuid, check: &serde_json::Value) {
+    assert_catalog_window(view);
     assert_eq!(check["account_id"], account_id.to_string());
     let checked_fingerprint = check["fingerprint"]
         .as_array()

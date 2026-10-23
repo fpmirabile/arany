@@ -1,8 +1,8 @@
 use super::routing::{Route, RoutingError, admit};
 use super::select::{ProviderArg, Selection};
 use arany::{
-    AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, Providers,
-    RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
+    AdmittedProviders, AdmittedRoster, Effort, NamedProviderRoutes, Provider, ProviderKind,
+    Providers, RecordFormat, RecordKind, RosterSnapshot, StateRoot, valid_profile_name,
 };
 use serde::Deserialize;
 use std::{collections::BTreeSet, path::Path, sync::Arc, time::Duration};
@@ -120,7 +120,7 @@ fn presets(bytes: &[u8]) -> Result<Vec<SelectedRoster>, String> {
         for index in 0..profile.routes.len() {
             let route = &mut profile.routes[index];
             route.validate().map_err(|_| INVALID)?;
-            if matches!(route.provider.as_str(), "openai" | "anthropic") {
+            if ProviderKind::parse(&route.provider).is_some_and(ProviderKind::is_native_api) {
                 route.effort = Some(
                     arany::resolve_native_effort_for_run(
                         &route.provider,
@@ -276,18 +276,19 @@ impl SelectedRoster {
 
     pub(crate) fn matches_selection(&self, selection: Selection<'_>) -> Result<(), String> {
         let primary = self.primary();
-        let effort = if matches!(selection.profile, "openai" | "anthropic") {
-            Some(
-                arany::resolve_native_effort_for_run(
-                    selection.profile,
-                    selection.model,
-                    selection.effort,
+        let effort =
+            if ProviderKind::parse(selection.profile).is_some_and(ProviderKind::is_native_api) {
+                Some(
+                    arany::resolve_native_effort_for_run(
+                        selection.profile,
+                        selection.model,
+                        selection.effort,
+                    )
+                    .map_err(|_| "invalid Provider/model/effort".to_owned())?,
                 )
-                .map_err(|_| "invalid Provider/model/effort".to_owned())?,
-            )
-        } else {
-            selection.effort
-        };
+            } else {
+                selection.effort
+            };
         if selection.profile != primary.provider
             || selection.model != primary.model
             || effort != primary.effort
@@ -310,12 +311,12 @@ impl SelectedRoster {
         );
         for profile in &self.profiles {
             for (index, route) in profile.routes.iter().enumerate() {
-                let billing = match route.provider.as_str() {
-                    "chatgpt" => {
+                let billing = match ProviderKind::parse(&route.provider) {
+                    Some(ProviderKind::ChatGpt) => {
                         "ChatGPT plan; local-only output cap does not cap remote plan consumption"
                     }
-                    "openai" | "anthropic" => "native API",
-                    _ => "exact custom; unknown pricing",
+                    Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => "native API",
+                    Some(ProviderKind::Custom) | None => "exact custom; unknown pricing",
                 };
                 text.push_str(&format!(
                     "  {}[{}]: {}/{} effort={} ({})\n",

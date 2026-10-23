@@ -579,6 +579,27 @@ mod goal_replay_tests {
     }
 
     #[test]
+    fn run_output_caps_replay_inside_the_declared_range_only() {
+        let session = SessionId::new();
+        let (goal, run, agent) = (GoalId::new(), RunId::new(), AgentRunId::new());
+        let ceiling = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+        for (cap, accepted) in [
+            (4096, true),
+            (16_384, true),
+            (ceiling, true),
+            (ceiling + 1, false),
+            (0, false),
+        ] {
+            let mut config = config(CollaborationPolicy::Single, false);
+            config.output_token_cap = cap;
+            let mut events = vec![goal_started(goal, GoalBudget::default())];
+            events.extend(start_run(goal, run, agent, config));
+            let result = SessionView::replay_open(session, &session_with(session, events));
+            assert_eq!(result.is_ok(), accepted, "cap {cap}");
+        }
+    }
+
+    #[test]
     fn role_chains_are_canonical_and_tool_history_stays_in_one_adapter_and_account() {
         use crate::provider::{Provenance, Providers};
         let mut config = config(CollaborationPolicy::Single, true);

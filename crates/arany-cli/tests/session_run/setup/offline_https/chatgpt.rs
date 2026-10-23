@@ -20,6 +20,7 @@ const ACCOUNT_ONLY_TEST: &str = "setup::offline_https::chatgpt::release_private_
 const CHECKED_TURN_TEST: &str =
     "setup::offline_https::chatgpt::release_private_file_chatgpt_checked_direct_and_team_turns";
 const ACCESS: &str = "synthetic-chatgpt-access-token";
+const CONTEXT_WINDOW: u32 = 272_000;
 const REFRESH: &str = "synthetic-chatgpt-refresh-token";
 const CLIENT: &str = "oaiapp_synthetic_offline";
 const UNFINISHED_HOST: &str = "2e664d00-3f9a-40c3-adeb-c6447313a871";
@@ -284,10 +285,14 @@ fn catalog_server(
                 .eq_ignore_ascii_case(&format!("authorization: Bearer {ACCESS}"))),
             "selected ChatGPT access token was not sent to its compiled catalog"
         );
-        let body = br#"{"models":[{"slug":"gpt-6.1-sol","display_name":"GPT-6.1 Sol","visibility":"list"}]}"#;
-        send_json(&mut input, body);
+        let body = serde_json::to_vec(&serde_json::json!({"models":[{
+            "slug":"gpt-6.1-sol", "display_name":"GPT-6.1 Sol", "visibility":"list",
+            "context_window": CONTEXT_WINDOW
+        }]}))
+        .expect("catalog body");
+        send_json(&mut input, &body);
         if checked_turn {
-            checked_turn::respond_after_catalog(&mut input, &mut output, body, refresh_ready);
+            checked_turn::respond_after_catalog(&mut input, &mut output, &body, refresh_ready);
         }
     });
     let server = Server {
