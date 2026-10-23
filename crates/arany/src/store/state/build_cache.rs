@@ -323,8 +323,7 @@ impl BuildCacheLease {
             )?;
             sync_directory(&self.dir)?;
             commit_marker_attempted = true;
-            #[cfg(any(test, feature = "test-support"))]
-            crate::fault::FaultPlan::commit_marker(&self.token)?;
+            crate::fault::commit_marker(&self.token)?;
             write_transaction(
                 &self.dir,
                 &self.token,

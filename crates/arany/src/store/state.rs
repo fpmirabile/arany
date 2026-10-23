@@ -441,10 +441,7 @@ impl StateRoot {
             }
             // The unlink may already be durable, so a failed or faulted sync is unconfirmed, not unchanged.
             let unconfirmed = |_| StoreError::ReplaceUnconfirmed;
-            #[cfg(any(test, feature = "test-support"))]
-            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
-                return Err(StoreError::ReplaceUnconfirmed);
-            }
+            crate::fault::record_sync(&self.path, name)?;
             self.dir
                 .open_with(".", OpenOptions::new().read(true))
                 .map_err(unconfirmed)?
@@ -534,10 +531,7 @@ impl StateRoot {
             file.write_all(record)?;
             file.sync_all()?;
             rename(&self.dir, pending, &self.dir, name)?;
-            #[cfg(any(test, feature = "test-support"))]
-            if crate::fault::FaultPlan::record_sync_fails(&self.path, name) {
-                return Err(StoreError::ReplaceUnconfirmed);
-            }
+            crate::fault::record_sync(&self.path, name)?;
             sync(&self.dir).map_err(|_| StoreError::ReplaceUnconfirmed)
         }
         #[cfg(not(unix))]

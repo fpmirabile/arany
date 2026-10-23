@@ -405,9 +405,8 @@ impl Store {
                             event,
                             reply,
                         } => {
-                            #[cfg(any(test, feature = "test-support"))]
-                            if crate::fault::FaultPlan::append_fails(session_id, event.as_ref()) {
-                                let _ = reply.send(Err(StoreError::Closed));
+                            if let Err(error) = crate::fault::append(session_id, event.as_ref()) {
+                                let _ = reply.send(Err(error));
                                 continue;
                             }
                             let result = if read_only {
@@ -434,26 +433,7 @@ impl Store {
                                     }
                                 }
                             }
-                            #[cfg(any(test, feature = "test-support"))]
-                            let result = match result {
-                                Ok(envelope) => {
-                                    match crate::fault::FaultPlan::acknowledgment_gate(
-                                        session_id,
-                                        &envelope.event,
-                                    ) {
-                                        Some((entered, release)) => {
-                                            let _ = entered.send(());
-                                            // A dropped release means the commit was never acknowledged.
-                                            release
-                                                .recv()
-                                                .map(|()| envelope)
-                                                .map_err(|_| StoreError::Closed)
-                                        }
-                                        None => Ok(envelope),
-                                    }
-                                }
-                                error => error,
-                            };
+                            let result = crate::fault::acknowledge(session_id, result);
                             let _ = reply.send(result);
                         }
                         Request::SupervisorCorpus { session_id, reply } => {

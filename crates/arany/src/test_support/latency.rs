@@ -132,7 +132,27 @@ pub(crate) struct Receipt<'a> {
     pub(crate) call_index: usize,
 }
 
-impl Receipt<'_> {
+impl<'a> Receipt<'a> {
+    #[cfg(feature = "test-support")]
+    pub(crate) fn primary(
+        recorder: &'a crate::fault::LatencyRecorder,
+        request: &crate::provider::ProviderRequest,
+        call_index: impl FnOnce() -> usize,
+    ) -> Option<Self> {
+        if crate::provider::ProviderRole::for_phase(request.phase)
+            != crate::provider::ProviderRole::Primary
+        {
+            return None;
+        }
+        recorder.get().map(|recorder| Self {
+            recorder,
+            session_id: request.session_id,
+            run_id: request.run_id,
+            agent_run_id: request.agent_run_id,
+            call_index: call_index(),
+        })
+    }
+
     pub(crate) fn received(self, response: &ProviderResponse, received: Instant) {
         let ProviderOutcome::Tools(requests) = &response.outcome else {
             return;

@@ -1590,16 +1590,13 @@ pub(crate) fn failure_detail(error: &ToolError) -> Option<&str> {
 
 fn record_failure(site: &'static str, intent: &EffectIntent, error: &ToolError) {
     crate::diagnostics::tool_failure(site, error);
-    #[cfg(any(test, feature = "test-support"))]
-    crate::test_support::record_tool_failure(
+    crate::fault::record_tool_failure(
         intent.id,
         site,
         failure_stage(error),
         failure_check(error),
-        failure_detail(error).map(str::to_owned),
+        failure_detail(error),
     );
-    #[cfg(not(any(test, feature = "test-support")))]
-    let _ = intent;
 }
 
 fn unstarted_observation(intent: EffectIntent, error: ToolError) -> ToolObservation {

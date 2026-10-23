@@ -156,8 +156,7 @@ fn admit_in_transaction(
     {
         return Err(StoreError::StorageFull);
     }
-    #[cfg(any(test, feature = "test-support"))]
-    crate::test_support::admissions::record(session_id, count, event_slots, kind);
+    crate::fault::record_admission(session_id, count, event_slots, kind);
     Ok(())
 }
 

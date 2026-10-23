@@ -92,24 +92,7 @@ impl Default for SupervisorPolicy {
     }
 }
 impl SupervisorPolicy {
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn all_off() -> Self {
-        let mut policy = Self::default();
-        let mut value = serde_json::to_value(&policy.floors).expect("thresholds");
-        for v in value
-            .as_object_mut()
-            .expect("threshold fields")
-            .values_mut()
-        {
-            *v = serde_json::json!(u16::MAX);
-        }
-        policy.floors = serde_json::from_value(value).expect("thresholds");
-        policy.candidates = policy.floors.clone();
-        policy.digest = policy.computed_digest();
-        policy
-    }
-
-    fn computed_digest(&self) -> [u8; 32] {
+    pub(crate) fn computed_digest(&self) -> [u8; 32] {
         hash(
             &serde_json::to_vec(&(
                 "arany.supervisor.policy.v1",

@@ -8,7 +8,6 @@ pub mod test_support;
 
 mod diagnostics;
 mod engine;
-#[cfg(any(test, feature = "test-support"))]
 mod fault;
 mod journal;
 mod private_fs;

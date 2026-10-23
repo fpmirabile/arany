@@ -2539,14 +2539,8 @@ fn checked_identity(
 }
 
 fn supervisor_policy(
-    _session_id: SessionId,
+    session_id: SessionId,
     tools_enabled: bool,
 ) -> Option<crate::supervisor::SupervisorPolicy> {
-    tools_enabled.then(|| {
-        #[cfg(any(test, feature = "test-support"))]
-        if crate::fault::FaultPlan::take_supervisor_off(_session_id) {
-            return crate::supervisor::SupervisorPolicy::all_off();
-        }
-        crate::supervisor::SupervisorPolicy::default()
-    })
+    tools_enabled.then(|| crate::fault::supervisor_policy(session_id))
 }

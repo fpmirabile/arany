@@ -747,12 +747,7 @@ pub(super) async fn execute(
     } else {
         None
     };
-    #[cfg(any(test, feature = "test-support"))]
-    let result = if result.is_ok() && crate::fault::FaultPlan::guard_receipt_lost(intent.id) {
-        Err(ToolError::Uncertain)
-    } else {
-        result
-    };
+    let result = crate::fault::guard_result(intent.id, result);
     let result = dispatch_result(intent, dispatched, result);
     let Some(report) = stale else {
         return result;
@@ -1088,8 +1083,7 @@ pub(super) async fn read_observation_line<R: tokio::io::AsyncBufRead + Unpin>(
     if observation.cache_update != CacheUpdate::NotAttempted || !observation.attested_for(intent) {
         return Err(ToolError::Operation);
     }
-    #[cfg(any(test, feature = "test-support"))]
-    crate::fault::FaultPlan::guard_cache_report_gate(&observation).await;
+    crate::fault::guard_cache_report(&observation).await;
     Ok(observation)
 }
 
@@ -1170,18 +1164,10 @@ pub(super) async fn receive_cache_candidate<R: tokio::io::AsyncBufRead + Unpin>(
             })
         },
         |staged| {
-            #[cfg(any(test, feature = "test-support"))]
-            let completion = crate::fault::FaultPlan::candidate_sync(staged._lease.token());
-            #[cfg(any(test, feature = "test-support"))]
-            let admitted = completion.is_ok();
-            #[cfg(not(any(test, feature = "test-support")))]
-            let admitted = true;
-            let synced = admitted && staged.file.sync_all().is_ok();
+            let completion = crate::fault::candidate_sync(&staged._lease);
+            let synced = completion.is_ok() && staged.file.sync_all().is_ok();
             drop(staged);
-            #[cfg(any(test, feature = "test-support"))]
-            if let Ok(Some(finished)) = completion {
-                let _ = finished.send(());
-            }
+            crate::fault::candidate_sync_finished(completion);
             synced
         },
     )
