@@ -1,13 +1,11 @@
 use super::conversation::Conversation;
 use super::{
-    CallLimits, CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS,
-    MAX_RESPONSE_BYTES, Provenance, Provider, ProviderError, ProviderIdentity, ProviderRequest,
-    ProviderResponse, Usage, raw_reflects_secret, render, resolve_native_effort,
+    CompactionRequest, CompactionResponse, Effort, MAX_REPORTED_INPUT_TOKENS, Provenance, Provider,
+    ProviderError, ProviderIdentity, ProviderRequest, ProviderResponse, Usage, native, render,
     resolve_native_effort_for_run, valid_saved_api_account_id, validate_native_api_key,
 };
 use reqwest::Client;
 use serde_json::Value;
-use std::time::Duration;
 use uuid::Uuid;
 
 mod subscription;
@@ -15,7 +13,6 @@ pub(crate) mod wire;
 pub use subscription::ChatGptProvider;
 
 const ENDPOINT: &str = "https://api.openai.com/v1/responses";
-const DEADLINE: Duration = Duration::from_secs(600);
 
 /// Makes three potentially plan-consuming, data-free strict-outcome probes.
 /// The caller must verify the selected account, catalog visibility, and explicit cost consent.
@@ -108,7 +105,7 @@ impl OpenAiProvider {
         provider.identity.provenance = Provenance::Native {
             saved_api_account_id,
         };
-        provider.identity.limits.concurrency = 1;
+        provider.identity.limits.concurrency = native::UNREVIEWED_MODEL_CONCURRENCY;
         Ok(provider)
     }
 
@@ -130,25 +127,11 @@ impl OpenAiProvider {
         key: String,
     ) -> Result<Self, ProviderError> {
         validate_native_api_key(&key)?;
-        let client = super::http_client(DEADLINE)
+        let client = super::http_client(native::NATIVE_CALL_DEADLINE)
             .https_only(true)
             .build()
             .map_err(|_| ProviderError::Unavailable)?;
-        let max_concurrent_calls = if resolve_native_effort("openai", &model, Some(effort)).is_ok()
-        {
-            3
-        } else {
-            1
-        };
-        let mut identity =
-            ProviderIdentity::new("openai", model, crate::provider::Provenance::native());
-        identity.effort = Some(effort);
-        identity.limits = CallLimits {
-            concurrency: max_concurrent_calls,
-            max_output_tokens: super::MAX_OUTPUT_TOKEN_CAP,
-            deadline: DEADLINE,
-            ..CallLimits::default()
-        };
+        let identity = native::native_identity("openai", model, effort);
         Ok(Self {
             client,
             identity,
@@ -157,26 +140,17 @@ impl OpenAiProvider {
         })
     }
 
+    fn request(&self, request: Value) -> Result<reqwest::RequestBuilder, ProviderError> {
+        Ok(native::json_request(
+            &self.client,
+            ENDPOINT,
+            &self.key,
+            wire::encode_request(&request)?,
+        ))
+    }
+
     async fn send(&self, request: Value) -> Result<Vec<u8>, ProviderError> {
-        let body = wire::encode_request(&request)?;
-        let mut response = self
-            .client
-            .post(ENDPOINT)
-            .bearer_auth(&self.key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| super::send_failure(&error))?;
-        if !response.status().is_success() {
-            return Err(super::http_failure(&mut response).await);
-        }
-        let bytes = super::read_identity_body(&mut response, MAX_RESPONSE_BYTES).await?;
-        if raw_reflects_secret(&bytes, &self.key) {
-            return Err(ProviderError::InvalidOutcome);
-        }
-        Ok(bytes)
+        native::post_json(self.request(request)?, &self.key).await
     }
 
     fn decode_run(
@@ -225,13 +199,7 @@ impl Provider for OpenAiProvider {
     }
 
     async fn invoke(&self, request: ProviderRequest) -> Result<ProviderResponse, ProviderError> {
-        request.validate_scope()?;
-        super::image::validate_images(&request)?;
-        if request.model != self.identity.model
-            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
-        {
-            return Err(ProviderError::Rejected);
-        }
+        native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
         let response = self.send(body).await?;
@@ -243,24 +211,13 @@ impl Provider for OpenAiProvider {
         request: ProviderRequest,
         preview: super::ResponsePreview,
     ) -> Result<ProviderResponse, ProviderError> {
-        request.validate_scope()?;
-        super::image::validate_images(&request)?;
-        if request.model != self.identity.model
-            || !(1..=self.identity.limits.max_output_tokens).contains(&request.max_output_tokens)
-        {
-            return Err(ProviderError::Rejected);
-        }
+        native::admit_request(&self.identity, &request)?;
         let conversation = render::conversation(&request)?;
         let mut body = wire::run_body_with_effort(&request, &conversation, self.effort)?;
         body["stream"] = Value::Bool(true);
         let mut response = self
-            .client
-            .post(ENDPOINT)
-            .bearer_auth(&self.key)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .request(body)?
             .header(reqwest::header::ACCEPT, "text/event-stream")
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .body(wire::encode_request(&body)?)
             .send()
             .await
             .map_err(|error| super::send_failure(&error))?;
@@ -314,6 +271,7 @@ pub(crate) async fn read_streamed_reply(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::raw_reflects_secret;
 
     fn synthetic_reply(text: &str) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
@@ -346,7 +304,7 @@ mod tests {
         assert_eq!(provider.identity().limits.max_output_tokens, 16_384);
         assert_eq!(
             provider.identity().limits.deadline,
-            Duration::from_secs(600)
+            native::NATIVE_CALL_DEADLINE
         );
         let account_id = Uuid::now_v7();
         let saved = OpenAiProvider::from_saved_api_key_with_effort(

@@ -143,7 +143,7 @@ pub(super) async fn admit_history(
     let mut reset_attempted = false;
     let mut uncertain = false;
     loop {
-        let root = match crate::cli::open_optional_state(state_dir) {
+        let root = match crate::files::open_optional_state(state_dir) {
             Ok(None) => return Ok(ready(reset_attempted)),
             Ok(Some(_)) => StateRoot::admit(state_dir),
             Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -315,7 +315,7 @@ async fn selected_keyring_slot(defaults: &SessionDefaults) -> Result<Option<Stri
 }
 
 fn saved_account_presence(path: &Path) -> Result<(bool, bool), String> {
-    let Some(state) = crate::cli::open_optional_state(path).map_err(|error| error.to_string())?
+    let Some(state) = crate::files::open_optional_state(path).map_err(|error| error.to_string())?
     else {
         return Ok((false, false));
     };

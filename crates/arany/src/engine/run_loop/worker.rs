@@ -7,6 +7,7 @@ use crate::provider::{ChildAssignment, ProviderRequest};
 use crate::session::worker::*;
 use crate::session::{AgentDisposition, AgentRole, AgentRunId, ChildGrant, Event, GoalPhase};
 use crate::session::{evidence_admitted, verification_passed};
+use crate::store::AdmissionKind;
 use crate::tools::{
     Attestation, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation, ToolRuntime,
 };
@@ -408,15 +409,10 @@ impl RunLoop<'_> {
         let action = Action::Worker { chunks };
         let slots = action.max_events_for_admitted(&self.routing.providers)
             + self.ledger().verdicts(action);
-        if chunks > 0 {
-            self.journal
-                .admit_sealed_data(self.session_id, slots, action.tool_observations())
-                .await?;
-        } else {
-            self.journal
-                .admit(self.session_id, slots, action.tool_observations())
-                .await?;
-        }
+        let kind = AdmissionKind::for_chunks(chunks);
+        self.journal
+            .admit_as(self.session_id, slots, action.tool_observations(), kind)
+            .await?;
         Ok(())
     }
 
@@ -740,11 +736,12 @@ impl RunLoop<'_> {
             };
             match self
                 .journal
-                .admit_sealed_data(
+                .admit_as(
                     self.session_id,
                     action.max_events_for_admitted(&self.routing.providers)
                         + self.ledger().verdicts(action),
                     2,
+                    AdmissionKind::SealedData,
                 )
                 .await
             {

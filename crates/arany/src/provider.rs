@@ -16,6 +16,7 @@ mod image;
 pub use image::test_image;
 pub(crate) use image::{MAX_IMAGE_METADATA_BYTES, deserialize_images, valid_image_collection};
 mod limits;
+mod native;
 mod native_check;
 pub use limits::{
     LimitFailure, LimitSource, LimitUnavailable, MAX_LIMIT_TIMESTAMP, MAX_RATE_LIMIT_BYTES,
@@ -52,7 +53,10 @@ pub use custom::{
     check_custom_profile_with_cancellation,
 };
 pub use effort::{Effort, resolve_native_effort, resolve_native_effort_for_run};
-pub use image::{ImageAttachment, ImageOrigin, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES, ProviderImage};
+pub use image::{
+    ImageAttachment, ImageOrigin, MAX_ENCODED_IMAGE_BYTES, MAX_IMAGE_BYTES, MAX_MESSAGE_IMAGES,
+    ProviderImage,
+};
 pub use native_check::{
     NativeCheckError, NativeCheckRequest, check_native_model, check_native_model_from_env,
 };

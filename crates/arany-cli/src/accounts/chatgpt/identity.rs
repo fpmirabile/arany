@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, de};
 use std::fmt;
 
-const ISSUER: &str = "https://auth.openai.com";
+pub(super) const ISSUER: &str = "https://auth.openai.com";
 const MAX_ID_TOKEN_BYTES: usize = 16 * 1024;
 const MAX_KEYS: usize = 16;
 const CLOCK_SKEW_SECONDS: u64 = 5;
@@ -274,5 +274,5 @@ where
 }
 
 fn bounded_keys<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<Jwk>, D::Error> {
-    crate::cli::bounded_list::<D, Jwk, MAX_KEYS>(deserializer, "too many keys")
+    crate::files::bounded_list::<D, Jwk, MAX_KEYS>(deserializer, "too many keys")
 }

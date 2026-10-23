@@ -1,10 +1,10 @@
 use super::{AuthorizationError, VerifiedCredentials, client, read_json};
+use crate::accounts::chatgpt::identity::ISSUER;
 use reqwest::{StatusCode, Url, header};
 use serde::Deserialize;
 use std::time::Duration;
 
 const DISCOVERY_ENDPOINT: &str = "https://auth.openai.com/.well-known/openid-configuration";
-const ISSUER: &str = "https://auth.openai.com";
 const MAX_DISCOVERY_BYTES: usize = 16 * 1024;
 const MAX_FORM_BYTES: usize = 25 * 1024;
 const DEADLINE: Duration = Duration::from_secs(30);

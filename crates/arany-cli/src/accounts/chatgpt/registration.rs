@@ -60,7 +60,7 @@ pub(crate) fn validate_saved_setup(workspace: &Path) -> Result<(), Authorization
     let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
     // Without State there is no saved host or registration to validate.
     let Some(state) =
-        crate::cli::open_optional_state(&path).map_err(|_| AuthorizationError::Unavailable)?
+        crate::files::open_optional_state(&path).map_err(|_| AuthorizationError::Unavailable)?
     else {
         return Ok(());
     };

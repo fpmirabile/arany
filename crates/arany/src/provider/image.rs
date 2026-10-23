@@ -6,7 +6,7 @@ use std::{fmt, sync::Arc};
 pub const MAX_IMAGE_BYTES: usize = 192 * 1024;
 pub const MAX_MESSAGE_IMAGES: usize = 4;
 pub(crate) const MAX_IMAGE_METADATA_BYTES: usize = 128;
-const MAX_ENCODED_IMAGE_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
+pub const MAX_ENCODED_IMAGE_BYTES: usize = MAX_IMAGE_BYTES.div_ceil(3) * 4;
 
 #[derive(Clone, Eq, PartialEq)]
 pub struct ImageAttachment {

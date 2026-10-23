@@ -1,6 +1,6 @@
 use super::{Admission, LoopError, controls};
 use crate::accounts::{chatgpt, credentials};
-use crate::cli::bounded_list;
+use crate::files::bounded_list;
 use crate::terminal::{
     AttachedTerminal, Composer, ComposerEdit, ModelCatalogState, ModelPicker, ShutdownSignal,
     TerminalInput,
@@ -100,7 +100,7 @@ fn decode_preferences(record: &[u8]) -> Result<ModelPreferences, String> {
 
 pub(super) fn preferences_need_reset(workspace: &Path) -> Result<bool, String> {
     let path = StateRoot::account_path().map_err(|_| "saved model preferences unavailable")?;
-    let Some(root) = crate::cli::open_optional_state(&path)
+    let Some(root) = crate::files::open_optional_state(&path)
         .map_err(|_| "saved model preferences unavailable or unsafe")?
     else {
         return Ok(false);
@@ -169,7 +169,7 @@ pub(super) fn last_saved_defaults(
     workspace: &Path,
 ) -> Result<Option<arany::SessionDefaults>, String> {
     let path = StateRoot::account_path().map_err(|_| "saved selection unavailable")?;
-    let Some(root) = crate::cli::open_optional_state(&path)
+    let Some(root) = crate::files::open_optional_state(&path)
         .map_err(|_| "saved selection unavailable or unsafe")?
     else {
         return Ok(None);

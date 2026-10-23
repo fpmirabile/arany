@@ -157,7 +157,7 @@ fn unsafe_display_character(character: char) -> bool {
 }
 
 fn bounded_models<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<CatalogRow>, D::Error> {
-    crate::cli::bounded_list::<D, CatalogRow, MAX_MODELS>(deserializer, "too many models")
+    crate::files::bounded_list::<D, CatalogRow, MAX_MODELS>(deserializer, "too many models")
 }
 
 #[cfg(test)]

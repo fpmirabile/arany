@@ -313,9 +313,8 @@ fn tool_admission_near_capacity_reserves_the_largest_intent_and_its_completion()
         .query_row("PRAGMA page_size", [], |row| row.get(0))
         .unwrap();
     let admits = |t: &Transaction<'_>, observations: usize| {
-        let results = [false, true].map(|sealed| {
-            admit_in_transaction(t, session_id, 2, observations, false, sealed).is_ok()
-        });
+        let results = [AdmissionKind::Operation, AdmissionKind::SealedData]
+            .map(|kind| admit_in_transaction(t, session_id, 2, observations, kind).is_ok());
         assert_eq!(
             results[0], results[1],
             "worker sealed-data admission reserves the same bytes"

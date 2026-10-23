@@ -3,9 +3,9 @@ use super::{CommandOutput, OutputArg};
 use crate::presentation::render_exec;
 use arany::{
     AdmittedProviders, CollaborationPolicy, Effort, Engine, EngineConfig, EngineError, GoalBudget,
-    GoalId, GoalLimit, GoalPhase, GoalRequest, GoalStatus, Provider, RunCancellation, RunControls,
-    RunRequest, RunResult, RunStatus, RunStop, SessionId, StateRoot, Store, Telemetry, ToolGrant,
-    native_protection_supported,
+    GoalId, GoalLimit, GoalPhase, GoalRequest, GoalStatus, MAX_USER_MESSAGE_BYTES, Provider,
+    RunCancellation, RunControls, RunRequest, RunResult, RunStatus, RunStop, SessionId, StateRoot,
+    Store, Telemetry, ToolGrant, native_protection_supported,
 };
 use clap::{Args, ValueEnum};
 use std::{path::PathBuf, str::FromStr, sync::Arc, time::Duration};
@@ -166,7 +166,9 @@ impl ExecArgs {
                 );
             }
         };
-        if !resumes_without_text && (objective.trim().is_empty() || objective.len() > 64 * 1024) {
+        if !resumes_without_text
+            && (objective.trim().is_empty() || objective.len() > MAX_USER_MESSAGE_BYTES)
+        {
             return Err("invalid objective");
         }
         let (workspace, state_dir) =
