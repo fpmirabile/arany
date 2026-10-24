@@ -1,5 +1,6 @@
 use super::hooks::HookFold;
-use super::{ActiveTime, Answer, HookDenial, Permission, Resolution};
+use super::permission::Permission;
+use super::{ActiveTime, Answer, HookDenial, Resolution};
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
