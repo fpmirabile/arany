@@ -507,7 +507,7 @@ fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
     drop(hot);
     for kind in ["WorkspaceRewindStarted", "WorkspaceRewindFinished"] {
         let current = payload_version(kind).unwrap();
-        for unsupported in [current - 1, current + 1] {
+        for unsupported in (1..current).chain(std::iter::once(current + 1)) {
             connection
                 .execute(
                     "UPDATE events SET event_version=?1 WHERE kind=?2",
