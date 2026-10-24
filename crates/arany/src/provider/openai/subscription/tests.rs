@@ -607,6 +607,8 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
         ("error", b"event: error\ndata: {\"type\":\"error\"}\n\n".as_slice()),
         ("type drift", b"event: response.completed\ndata: {\"type\":\"response.failed\"}\n\n".as_slice()),
         ("malformed", b"event: response.completed\ndata: {broken}\n\n".as_slice()),
+        ("event without data", b"event: response.created\n\n".as_slice()),
+        ("event with empty data", b"event: response.created\ndata:\n\n".as_slice()),
         ("missing data-only type", b"data: {\"response\":{}}\n\n".as_slice()),
         ("null data-only type", b"data: {\"type\":null}\n\n".as_slice()),
         ("non-string data-only type", b"data: {\"type\":12}\n\n".as_slice()),
@@ -621,7 +623,7 @@ fn only_a_complete_bounded_terminal_event_yields_an_outcome() {
             "failed" | "error" => Stage::RemoteFailure,
             "incomplete" => Stage::IncompleteResponse,
             "malformed" => Stage::EventJson,
-            "duplicate event field" => Stage::EventFraming,
+            "duplicate event field" | "event without data" | "event with empty data" => Stage::EventFraming,
             "reflected token" => Stage::CredentialReflection,
             _ => Stage::EventType,
         };
@@ -1266,6 +1268,11 @@ async fn compaction_stream_requires_complete_bounded_summary() {
 // Skipped in the Guard: local test IPC capability is missing.
 #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
 async fn transport_rejects_non_event_and_encoded_replies() {
+    let request = request();
+    let overflow_headers = format!(
+        "Content-Type: text/event-stream\r\nContent-Length: {}\r\n",
+        crate::provider::max_stream_bytes(request.max_output_tokens) + 1
+    );
     let response = json!({
         "id": "resp_synthetic",
         "status": "completed",
@@ -1302,7 +1309,7 @@ async fn transport_rejects_non_event_and_encoded_replies() {
         ),
         (
             "declared overflow",
-            "Content-Type: text/event-stream\r\nContent-Length: 1048577\r\n",
+            overflow_headers.as_str(),
             completed(Some(12)),
         ),
     ] {
@@ -1312,7 +1319,7 @@ async fn transport_rejects_non_event_and_encoded_replies() {
             .chain(body)
             .collect();
         let (endpoint, server) = serve(reply).await;
-        let error = invoke_at(&client(), endpoint, TOKEN, &request(), Effort::Medium)
+        let error = invoke_at(&client(), endpoint, TOKEN, &request, Effort::Medium)
             .await
             .expect_err(label);
         assert_eq!(
@@ -2159,7 +2166,7 @@ fn token_sized_write_deltas_cover_the_content_ceiling_at_the_real_cap() {
     request.max_output_tokens = crate::provider::MAX_OUTPUT_TOKEN_CAP;
     let content = "x".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES);
     let arguments =
-        json!({"file_path":"src/new.rs","expected_digest":null,"content":content}).to_string();
+        json!({"path":"src/new.rs","expected_digest":null,"content":content}).to_string();
     let item = json!({"type":"function_call","id":"fc_write","call_id":"call_write",
         "name":"arany_write","arguments":arguments,"status":"completed"});
     let mut events = vec![

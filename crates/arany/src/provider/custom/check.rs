@@ -458,7 +458,7 @@ mod tests {
         net::TcpListener,
     };
 
-    const CONTRACT_RESPONSE_BYTES: usize = 1024 * 1024;
+    const CONTRACT_RESPONSE_BYTES: usize = crate::provider::MAX_RESPONSE_BYTES;
 
     #[derive(Clone, Copy)]
     struct MessagesCase {
@@ -500,7 +500,7 @@ mod tests {
         auth: super::super::MessagesAuth::ApiKey,
     };
 
-    #[derive(Clone, Copy)]
+    #[derive(Clone, Copy, Debug)]
     enum ProbeReply {
         Valid,
         ValidEfforts,
@@ -523,6 +523,32 @@ mod tests {
         MissingUsage,
         InputAtLimit,
         InputAboveLimit,
+    }
+
+    fn response_byte_limit(request: &serde_json::Value) -> usize {
+        if request["stream"] != true {
+            return CONTRACT_RESPONSE_BYTES;
+        }
+        let cap = request
+            .get("max_tokens")
+            .or_else(|| request.get("max_output_tokens"))
+            .and_then(|value| value.as_u64())
+            .and_then(|value| u32::try_from(value).ok())
+            .expect("stream request output cap");
+        crate::provider::max_stream_bytes(cap)
+    }
+
+    fn padded_event_stream(events: &str, target: usize) -> String {
+        let padding = target
+            .checked_sub(events.len() + 1)
+            .expect("stream padding");
+        let comment = format!(":{}\n", "x".repeat(CONTRACT_RESPONSE_BYTES - 2));
+        let mut body = comment.repeat(padding / comment.len());
+        body.push_str(&comment[..padding % comment.len()]);
+        body.push('\n');
+        body.push_str(events);
+        assert_eq!(body.len(), target);
+        body
     }
 
     async fn serve_probe(
@@ -768,7 +794,7 @@ mod tests {
                         )
                     {
                         response["padding"] = json!("");
-                        let target = CONTRACT_RESPONSE_BYTES
+                        let target = response_byte_limit(&body)
                             + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
                         let padding = target - response.to_string().len();
                         response["padding"] = json!("x".repeat(padding));
@@ -785,12 +811,9 @@ mod tests {
                     assert!(messages.is_some());
                     let response: serde_json::Value = serde_json::from_str(&response_body).unwrap();
                     let events = crate::provider::render::semantic::messages_stream(&response);
-                    let target = CONTRACT_RESPONSE_BYTES
+                    let target = response_byte_limit(&body)
                         + usize::from(matches!(reply, ProbeReply::ChunkedOversize));
-                    let padding = target - events.len() - 3;
-                    let body = format!(":{}\n\n{events}", "x".repeat(padding));
-                    assert_eq!(body.len(), target);
-                    body
+                    padded_event_stream(&events, target)
                 } else {
                     response_body
                 };
@@ -871,7 +894,7 @@ mod tests {
                 continue;
             }
             let declared_len = if matches!(reply, ProbeReply::Oversize) {
-                CONTRACT_RESPONSE_BYTES + 1
+                response_byte_limit(&body) + 1
             } else {
                 response_body.len()
             };
@@ -1073,10 +1096,13 @@ mod tests {
                 ProbeReply::EncodedBodyAfterIdentity,
                 ProbeReply::InputAboveLimit,
             ] {
-                assert!(matches!(
-                    run_transport_case(reply, false, true, streaming).await,
-                    Err(super::super::transport::TransportError::InvalidOutcome)
-                ));
+                assert!(
+                    matches!(
+                        run_transport_case(reply, false, true, streaming).await,
+                        Err(super::super::transport::TransportError::InvalidOutcome)
+                    ),
+                    "Messages reply={reply:?}, streaming={streaming}"
+                );
             }
         }
         assert!(

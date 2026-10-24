@@ -234,11 +234,13 @@ pub(crate) const MAX_REPORTED_OUTPUT_TOKENS: u32 = 1_000_000;
 pub(crate) const MAX_OUTPUT_TOKEN_CAP: u32 = 32_768;
 const MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN: usize = 2;
 const MAX_STREAM_FIXED_EVENTS: usize = 2048;
+const MIN_STREAM_EVENTS: usize = 8192;
 const MAX_STREAM_ENVELOPE_BYTES_PER_EVENT: usize = 512;
 
 fn max_stream_events(max_output_tokens: u32) -> usize {
-    MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * max_output_tokens.min(MAX_OUTPUT_TOKEN_CAP) as usize
-        + MAX_STREAM_FIXED_EVENTS
+    (MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * max_output_tokens.min(MAX_OUTPUT_TOKEN_CAP) as usize
+        + MAX_STREAM_FIXED_EVENTS)
+        .max(MIN_STREAM_EVENTS)
 }
 
 fn max_stream_bytes(max_output_tokens: u32) -> usize {
@@ -1356,14 +1358,17 @@ mod tests {
             DEFAULT_OUTPUT_TOKEN_CAP,
             MAX_OUTPUT_TOKEN_CAP,
         ] {
-            let events =
-                MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * cap as usize + MAX_STREAM_FIXED_EVENTS;
+            let events = (MAX_STREAM_EVENTS_PER_OUTPUT_TOKEN * cap as usize
+                + MAX_STREAM_FIXED_EVENTS)
+                .max(MIN_STREAM_EVENTS);
             assert_eq!(max_stream_events(cap), events);
             assert_eq!(
                 max_stream_bytes(cap),
                 MAX_STREAM_ENVELOPE_BYTES_PER_EVENT * events
             );
         }
+        assert_eq!(max_stream_events(1), MIN_STREAM_EVENTS);
+        assert_eq!(max_stream_events(PROBE_OUTPUT_CAP), MIN_STREAM_EVENTS);
         assert!(max_stream_bytes(PROBE_OUTPUT_CAP) < max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP));
         assert!(
             max_stream_bytes(DEFAULT_OUTPUT_TOKEN_CAP) < max_stream_bytes(MAX_OUTPUT_TOKEN_CAP)

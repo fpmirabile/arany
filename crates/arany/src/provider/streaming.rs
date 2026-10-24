@@ -200,10 +200,11 @@ impl SseFramer {
             return Ok(None);
         }
         self.events += 1;
-        self.stage = FramingStage::Limit;
         if self.events > self.max_events {
+            self.stage = FramingStage::Limit;
             return Err(self.limit_error());
         }
+        self.stage = FramingStage::Framing;
         if self.data.is_empty() {
             return Err(ProviderError::InvalidStream);
         }
