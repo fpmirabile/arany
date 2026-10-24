@@ -4,7 +4,7 @@ use super::{
 use crate::tools::{EffectIntent, ToolCall, ToolObservation};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 
 pub const MAX_HOOK_GROUPS: usize = 64;
@@ -476,6 +476,22 @@ pub(crate) fn feedback_lines<'a>(results: impl IntoIterator<Item = &'a HookResul
     lines
 }
 
+#[allow(clippy::result_large_err)]
+fn parse_success_header(stdout: &str) -> Result<Map<String, Value>, HookResult> {
+    let Ok(Value::Object(output)) =
+        super::super::parse_json(stdout.trim().as_bytes(), HOOK_RESULT_BYTES as usize)
+    else {
+        return Err(HookResult::Passed);
+    };
+    let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
+    if output.get("continue") == Some(&Value::Bool(false)) {
+        return Err(HookResult::Stopped {
+            reason: text(output.get("stopReason")),
+        });
+    }
+    Ok(output)
+}
+
 pub(crate) fn parse_post_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HookResult {
     let feedback = |lines: Vec<String>| {
         if lines.is_empty() {
@@ -498,17 +514,11 @@ pub(crate) fn parse_post_output(exit_code: Option<i32>, stdout: &str, stderr: &s
             };
         }
     }
-    let Ok(Value::Object(output)) =
-        super::super::parse_json(stdout.trim().as_bytes(), HOOK_RESULT_BYTES as usize)
-    else {
-        return HookResult::Passed;
+    let output = match parse_success_header(stdout) {
+        Ok(output) => output,
+        Err(result) => return result,
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
-    if output.get("continue") == Some(&Value::Bool(false)) {
-        return HookResult::Stopped {
-            reason: text(output.get("stopReason")),
-        };
-    }
     let mut lines = Vec::new();
     if output.get("decision").and_then(Value::as_str) == Some("block") {
         lines.push(text(output.get("reason")).unwrap_or_else(|| BLOCKED.into()));
@@ -546,17 +556,11 @@ pub(crate) fn parse_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -
             };
         }
     }
-    let Ok(Value::Object(output)) =
-        super::super::parse_json(stdout.trim().as_bytes(), HOOK_RESULT_BYTES as usize)
-    else {
-        return HookResult::Passed;
+    let output = match parse_success_header(stdout) {
+        Ok(output) => output,
+        Err(result) => return result,
     };
     let text = |value: Option<&Value>| value.and_then(Value::as_str).and_then(bounded_reason);
-    if output.get("continue") == Some(&Value::Bool(false)) {
-        return HookResult::Stopped {
-            reason: text(output.get("stopReason")),
-        };
-    }
     if output.get("decision").and_then(Value::as_str) == Some("block") {
         return deny(text(output.get("reason")));
     }
