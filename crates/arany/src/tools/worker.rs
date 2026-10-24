@@ -2639,7 +2639,7 @@ mod tests {
         let command: super::super::CommandChangeset = serde_json::from_slice(&bytes).unwrap();
         assert!(
             !command.valid(),
-            "command still owns its 64-file/8-KiB ceiling"
+            "command still owns its separate changeset limits"
         );
         let mut too_many = after.clone();
         too_many.entries.insert("overflow".into(), Entry::Directory);
@@ -2817,8 +2817,8 @@ mod tests {
     fn worker_handover_transport_preserves_sources_and_rejects_whole_conflicting_or_aliased_batches()
      {
         let (dir, runtime, view) = fixture();
-        let old = vec![b'a'; 16 * 1024];
-        let new = vec![b'b'; 16 * 1024];
+        let old = vec![b'a'; MAX_CHANGESET_BYTES / 2];
+        let new = vec![b'b'; MAX_CHANGESET_BYTES - old.len() + 1];
         std::fs::write(dir.path().join("owned/a"), &old).unwrap();
         std::fs::write(dir.path().join("owned/b"), b"current").unwrap();
         let change = FileChange {
