@@ -17,6 +17,11 @@ const MAX_REQUEST_BYTES: usize = crate::provider::MAX_PROVIDER_REQUEST_BYTES;
 const MAX_CONTENT_BLOCKS: usize = 16;
 const DELEGATED_OUTPUT: &str = "Arany recorded this call; its result follows in a later message.";
 
+pub(in crate::provider) struct MessageReply {
+    pub(in crate::provider) bytes: Vec<u8>,
+    pub(in crate::provider) counts: crate::diagnostics::StreamCounts,
+}
+
 pub(super) struct MessageStream<'a> {
     framer: crate::provider::streaming::SseFramer,
     secret: &'a str,
@@ -29,6 +34,8 @@ pub(super) struct MessageStream<'a> {
     stopped: bool,
     tool_input: String,
     preview_failed: bool,
+    stage: crate::diagnostics::SubscriptionFailureStage,
+    http_status: Option<u16>,
 }
 
 impl<'a> MessageStream<'a> {
@@ -54,19 +61,57 @@ impl<'a> MessageStream<'a> {
             stopped: false,
             tool_input: String::new(),
             preview_failed: false,
+            stage: crate::diagnostics::SubscriptionFailureStage::EventFraming,
+            http_status: None,
+        }
+    }
+
+    pub(super) fn set_http_status(&mut self, status: u16) {
+        self.http_status = Some(status);
+    }
+
+    #[cfg(test)]
+    pub(super) fn stage(&self) -> crate::diagnostics::SubscriptionFailureStage {
+        self.stage
+    }
+
+    pub(super) fn counts(&self) -> crate::diagnostics::StreamCounts {
+        crate::diagnostics::StreamCounts {
+            bytes: self.framer.bytes,
+            events: self.framer.events,
+            http_status: self.http_status,
+            ..Default::default()
         }
     }
 
     pub(super) fn feed(&mut self, chunk: &[u8]) -> Result<Option<Vec<u8>>, ProviderError> {
-        self.framer.admit(chunk.len())?;
-        for &byte in chunk {
-            if let Some(event) = self.framer.byte(byte, self.secret)?
-                && let Some(response) = self.event(event.value)?
-            {
-                return Ok(Some(response));
+        let result = (|| {
+            self.stage = framing_stage(self.framer.stage);
+            if let Err(error) = self.framer.admit(chunk.len()) {
+                self.stage = framing_stage(self.framer.stage);
+                return Err(error);
             }
+            for &byte in chunk {
+                self.stage = framing_stage(self.framer.stage);
+                match self.framer.byte(byte, self.secret) {
+                    Ok(Some(event)) => {
+                        if let Some(response) = self.event(event.value)? {
+                            return Ok(Some(response));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.stage = framing_stage(self.framer.stage);
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(None)
+        })();
+        if result.is_err() {
+            crate::diagnostics::messages_failure(self.stage, self.counts());
         }
-        Ok(None)
+        result
     }
 
     fn publish_preview(&mut self, fragment: &str) {
@@ -87,6 +132,7 @@ impl<'a> MessageStream<'a> {
     }
 
     fn event(&mut self, event: Value) -> Result<Option<Vec<u8>>, ProviderError> {
+        self.stage = crate::diagnostics::SubscriptionFailureStage::EventType;
         if self.stopped {
             return Err(ProviderError::InvalidStream);
         }
@@ -97,8 +143,12 @@ impl<'a> MessageStream<'a> {
             .ok_or_else(invalid)?
         {
             "ping" => {}
-            "error" => return Err(ProviderError::Unavailable),
+            "error" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::RemoteFailure;
+                return Err(ProviderError::Unavailable);
+            }
             "message_start" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseMessage;
                 let message = event.get("message").ok_or_else(invalid)?;
                 if self.response.is_some()
                     || message.get("type").and_then(Value::as_str) != Some("message")
@@ -117,6 +167,7 @@ impl<'a> MessageStream<'a> {
                 self.response = Some(message.clone());
             }
             "content_block_start" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -155,6 +206,7 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "content_block_delta" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -219,6 +271,7 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "content_block_stop" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
                 let index = event
                     .get("index")
                     .and_then(Value::as_u64)
@@ -255,6 +308,7 @@ impl<'a> MessageStream<'a> {
                 }
             }
             "message_delta" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
                 if self.closed.is_empty() || self.closed.iter().any(|closed| !closed) {
                     return Err(ProviderError::InvalidStream);
                 }
@@ -311,11 +365,13 @@ impl<'a> MessageStream<'a> {
                 self.delta_seen = true;
             }
             "message_stop" => {
+                self.stage = crate::diagnostics::SubscriptionFailureStage::CompletedResponse;
                 if !self.delta_seen || self.closed.iter().any(|closed| !closed) {
                     return Err(ProviderError::InvalidStream);
                 }
                 let response = self.response.take().ok_or_else(invalid)?;
                 if crate::provider::streaming::reflects_secret(&response, self.secret) {
+                    self.stage = crate::diagnostics::SubscriptionFailureStage::CredentialReflection;
                     return Err(ProviderError::InvalidOutcome);
                 }
                 let response =
@@ -329,6 +385,19 @@ impl<'a> MessageStream<'a> {
             _ => {}
         }
         Ok(None)
+    }
+}
+
+fn framing_stage(
+    stage: crate::provider::streaming::FramingStage,
+) -> crate::diagnostics::SubscriptionFailureStage {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
+    match stage {
+        crate::provider::streaming::FramingStage::Limit => Stage::StreamLimit,
+        crate::provider::streaming::FramingStage::Framing => Stage::EventFraming,
+        crate::provider::streaming::FramingStage::Json => Stage::EventJson,
+        crate::provider::streaming::FramingStage::Credential => Stage::CredentialReflection,
+        crate::provider::streaming::FramingStage::Type => Stage::EventType,
     }
 }
 
@@ -357,66 +426,172 @@ fn tool_argument_limit(block: &Value) -> usize {
     )
 }
 
+#[cfg(test)]
 pub(in crate::provider) fn decode_run(
     bytes: &[u8],
     scope: &RunScope,
 ) -> Result<ProviderResponse, ProviderError> {
-    let response: WireResponse =
-        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let admitted = response.admit(scope.model, scope.output_cap)?;
-    let (outcome, provenance) = match admitted.stop {
-        Stop::EndTurn => (
-            if scope.review {
-                review_outcome(&admitted.single_text()?)?
-            } else {
-                ProviderOutcome::Answer(crate::provider::Answer {
-                    text: admitted.answer_text()?,
-                })
-            },
-            ProviderWireProvenance::MessagesEndTurnStorageUnspecified,
-        ),
-        Stop::ToolUse => (
-            admitted.tool_requests(scope.offered)?,
-            ProviderWireProvenance::MessagesToolUseStorageUnspecified,
-        ),
-    };
-    let raw: Value = serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let turn = ProviderTurn::new(
-        ADAPTER,
-        &raw["content"].to_string(),
-        scope.secret,
-        scope.output_cap,
-    )?;
-    Ok(ProviderResponse {
-        outcome,
-        turn,
-        response_id: Some(admitted.id),
-        usage: admitted.usage,
-        wire_provenance: Some(provenance),
-    })
+    decode_run_with_counts(
+        bytes,
+        scope,
+        crate::diagnostics::StreamCounts {
+            bytes: bytes.len(),
+            ..Default::default()
+        },
+    )
 }
 
+pub(in crate::provider) fn decode_run_with_counts(
+    bytes: &[u8],
+    scope: &RunScope,
+    counts: crate::diagnostics::StreamCounts,
+) -> Result<ProviderResponse, ProviderError> {
+    let (result, stage, tool_arguments) = decode_run_staged(bytes, scope);
+    if result.is_err() {
+        crate::diagnostics::messages_failure(
+            stage,
+            crate::diagnostics::StreamCounts {
+                tool_arguments,
+                ..counts
+            },
+        );
+    }
+    result
+}
+
+fn decode_run_staged(
+    bytes: &[u8],
+    scope: &RunScope,
+) -> (
+    Result<ProviderResponse, ProviderError>,
+    crate::diagnostics::SubscriptionFailureStage,
+    Option<crate::diagnostics::ToolArgumentShape>,
+) {
+    let mut stage = crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
+    let mut tool_arguments = None;
+    let result = (|| {
+        let response: WireResponse =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let admitted = response.admit(scope.model, scope.output_cap, &mut stage)?;
+        let (outcome, provenance) = match admitted.stop {
+            Stop::EndTurn => (
+                if scope.review {
+                    review_outcome(&admitted.single_text()?)?
+                } else {
+                    ProviderOutcome::Answer(crate::provider::Answer {
+                        text: admitted.answer_text()?,
+                    })
+                },
+                ProviderWireProvenance::MessagesEndTurnStorageUnspecified,
+            ),
+            Stop::ToolUse => {
+                stage = crate::diagnostics::SubscriptionFailureStage::OutcomeToolArguments;
+                match admitted.tool_requests(scope.offered) {
+                    Ok(outcome) => (
+                        outcome,
+                        ProviderWireProvenance::MessagesToolUseStorageUnspecified,
+                    ),
+                    Err(failure) => {
+                        tool_arguments = failure.tool_arguments.map(|shape| *shape);
+                        return Err(failure.error);
+                    }
+                }
+            }
+        };
+        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let raw: Value =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+        let turn = ProviderTurn::new(
+            ADAPTER,
+            &raw["content"].to_string(),
+            scope.secret,
+            scope.output_cap,
+        )?;
+        Ok(ProviderResponse {
+            outcome,
+            turn,
+            response_id: Some(admitted.id),
+            usage: admitted.usage,
+            wire_provenance: Some(provenance),
+        })
+    })();
+    (result, stage, tool_arguments)
+}
+
+#[cfg(test)]
+pub(super) fn decode_run_failure_stage(
+    bytes: &[u8],
+    scope: &RunScope,
+) -> crate::diagnostics::SubscriptionFailureStage {
+    decode_run_staged(bytes, scope).1
+}
+
+#[cfg(test)]
+pub(super) fn decode_run_failure_tool_shape(
+    bytes: &[u8],
+    scope: &RunScope,
+) -> Option<crate::diagnostics::ToolArgumentShape> {
+    decode_run_staged(bytes, scope).2
+}
+
+pub(in crate::provider) fn decode_compaction_with_counts(
+    bytes: &[u8],
+    model: &str,
+    output_cap: u32,
+    counts: crate::diagnostics::StreamCounts,
+) -> Result<CompactionResponse, ProviderError> {
+    decode_compaction_observed(bytes, model, output_cap, counts)
+}
+
+#[cfg(test)]
 pub(in crate::provider) fn decode_compaction(
     bytes: &[u8],
     model: &str,
     output_cap: u32,
 ) -> Result<CompactionResponse, ProviderError> {
-    let response: WireResponse =
-        serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
-    let admitted = response.admit(model, output_cap)?;
-    if admitted.stop != Stop::EndTurn {
-        return Err(ProviderError::InvalidOutcome);
+    decode_compaction_observed(
+        bytes,
+        model,
+        output_cap,
+        crate::diagnostics::StreamCounts {
+            bytes: bytes.len(),
+            ..Default::default()
+        },
+    )
+}
+
+fn decode_compaction_observed(
+    bytes: &[u8],
+    model: &str,
+    output_cap: u32,
+    counts: crate::diagnostics::StreamCounts,
+) -> Result<CompactionResponse, ProviderError> {
+    let mut stage = crate::diagnostics::SubscriptionFailureStage::ResponseEnvelope;
+    let result = (|| {
+        let response: WireResponse =
+            serde_json::from_slice(bytes).map_err(|_| ProviderError::InvalidOutcome)?;
+        stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        let admitted = response.admit(model, output_cap, &mut stage)?;
+        if admitted.stop != Stop::EndTurn {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        let summary = admitted.single_text()?;
+        if summary.trim().is_empty() || summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES
+        {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        Ok(CompactionResponse {
+            summary,
+            response_id: Some(admitted.id),
+            usage: admitted.usage,
+            wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
+        })
+    })();
+    if result.is_err() {
+        crate::diagnostics::messages_failure(stage, crate::diagnostics::StreamCounts { ..counts });
     }
-    let summary = admitted.single_text()?;
-    if summary.trim().is_empty() || summary.len() > crate::session::MAX_COMPACTION_SUMMARY_BYTES {
-        return Err(ProviderError::InvalidOutcome);
-    }
-    Ok(CompactionResponse {
-        summary,
-        response_id: Some(admitted.id),
-        usage: admitted.usage,
-        wire_provenance: Some(ProviderWireProvenance::MessagesEndTurnStorageUnspecified),
-    })
+    result
 }
 
 // Put stable Tools and system blocks first so later requests preserve the earlier prefix.
@@ -475,7 +650,17 @@ pub(in crate::provider) fn run_body_with_optional_effort(
     if request.input.role != crate::provider::PromptRole::ToolReview {
         let tools = conversation.tools.as_deref().unwrap_or_default();
         let specs: Vec<Value> = tools.iter().cloned().chain(outcome_specs(&conversation.outcome))
-            .map(|tool| json!({"name": tool.name, "description": tool.description, "input_schema": tool.parameters}))
+            .map(|tool| {
+                let mut parameters = tool.parameters;
+                if tool.name == "arany_read"
+                    && let Some(required) = parameters["required"].as_array_mut()
+                {
+                    required.retain(|field| field != "offset" && field != "limit");
+                    parameters["properties"]["offset"]["description"] = json!(format!("Optional 1-based start line, 1 through {}; omitted or null starts at line 1. Continue using next_line.", u32::MAX));
+                    parameters["properties"]["limit"]["description"] = json!(format!("Optional number of lines, 1 through {}; omitted or null reads up to {} lines. Lines are numbered and cut after {} characters; the rendered result budget may end the page earlier.", crate::tools::types::MAX_READ_PAGE_LINES, crate::tools::types::MAX_READ_PAGE_LINES, crate::tools::types::MAX_READ_LINE_CHARS));
+                }
+                json!({"name": tool.name, "description": tool.description, "input_schema": parameters})
+            })
             .collect();
         if !specs.is_empty() {
             body["tools"] = Value::Array(specs);
@@ -655,6 +840,11 @@ struct Admitted<'a> {
     content: Vec<WireContent<'a>>,
 }
 
+struct ToolRequestFailure {
+    error: ProviderError,
+    tool_arguments: Option<Box<crate::diagnostics::ToolArgumentShape>>,
+}
+
 impl WireContent<'_> {
     fn is_thinking(&self) -> bool {
         match self.kind.as_str() {
@@ -705,7 +895,13 @@ impl WireContent<'_> {
 }
 
 impl<'a> WireResponse<'a> {
-    fn admit(self, model: &str, output_cap: u32) -> Result<Admitted<'a>, ProviderError> {
+    fn admit(
+        self,
+        model: &str,
+        output_cap: u32,
+        stage: &mut crate::diagnostics::SubscriptionFailureStage,
+    ) -> Result<Admitted<'a>, ProviderError> {
+        *stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
         let nested_creation = self
             .usage
             .cache_creation
@@ -733,24 +929,32 @@ impl<'a> WireResponse<'a> {
             .checked_add(cache_creation_input_tokens.unwrap_or(0))
             .and_then(|total| total.checked_add(self.usage.cache_read_input_tokens.unwrap_or(0)))
             .ok_or(ProviderError::InvalidOutcome)?;
+        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseStatus;
+        if self.stop_details.is_some() || self.stop_sequence.is_some() {
+            return Err(ProviderError::InvalidOutcome);
+        }
         let stop = match self.stop_reason.as_str() {
             "end_turn" => Stop::EndTurn,
             "tool_use" => Stop::ToolUse,
             _ => return Err(ProviderError::InvalidOutcome),
         };
-        if self.kind != "message"
-            || self.role != "assistant"
-            || self.stop_details.is_some()
-            || self.stop_sequence.is_some()
-            || self.model != model
-            || self.id.is_empty()
+        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseModel;
+        if self.kind != "message" || self.role != "assistant" || self.model != model {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        *stage = crate::diagnostics::SubscriptionFailureStage::UsageContract;
+        if total_input_tokens > MAX_REPORTED_INPUT_TOKENS || self.usage.output_tokens > output_cap {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseIdentifier;
+        if self.id.is_empty()
             || self.id.len() > 128
             || !self.id.bytes().all(|byte| byte.is_ascii_graphic())
-            || total_input_tokens > MAX_REPORTED_INPUT_TOKENS
-            || self.usage.output_tokens > output_cap
-            || self.content.is_empty()
-            || self.content.len() > MAX_CONTENT_BLOCKS
         {
+            return Err(ProviderError::InvalidOutcome);
+        }
+        *stage = crate::diagnostics::SubscriptionFailureStage::ResponseContent;
+        if self.content.is_empty() || self.content.len() > MAX_CONTENT_BLOCKS {
             return Err(ProviderError::InvalidOutcome);
         }
         Ok(Admitted {
@@ -795,7 +999,7 @@ impl Admitted<'_> {
         Ok(text)
     }
 
-    fn tool_requests(&self, offered: &[ToolSpec]) -> Result<ProviderOutcome, ProviderError> {
+    fn tool_requests(&self, offered: &[ToolSpec]) -> Result<ProviderOutcome, ToolRequestFailure> {
         let mut requests = Vec::new();
         for block in &self.content {
             if block.is_tool_use() {
@@ -803,24 +1007,73 @@ impl Admitted<'_> {
                 let operation = name
                     .strip_prefix(NAME_PREFIX)
                     .filter(|_| offered.iter().any(|spec| spec.name == name))
-                    .ok_or(ProviderError::InvalidOutcome)?;
-                let input = block.input.ok_or(ProviderError::InvalidOutcome)?.get();
-                let input = crate::tools::parse_json(input.as_bytes(), argument_limit(operation))
-                    .map_err(|_| ProviderError::InvalidOutcome)?;
-                requests.push(tool_function(
-                    ToolUseId::new(block.id.clone().unwrap_or_default())?,
-                    operation,
-                    input,
-                )?);
+                    .ok_or(ToolRequestFailure {
+                        error: ProviderError::InvalidOutcome,
+                        tool_arguments: None,
+                    })?;
+                let raw_input = block.input.ok_or(ToolRequestFailure {
+                    error: ProviderError::InvalidOutcome,
+                    tool_arguments: None,
+                })?;
+                let input =
+                    crate::tools::parse_json(raw_input.get().as_bytes(), argument_limit(operation))
+                        .map_err(|_| ToolRequestFailure {
+                            error: ProviderError::InvalidOutcome,
+                            tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                                .map(Box::new),
+                        })?;
+                let id = ToolUseId::new(block.id.clone().unwrap_or_default()).map_err(|error| {
+                    ToolRequestFailure {
+                        error,
+                        tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                            .map(Box::new),
+                    }
+                })?;
+                requests.push(tool_function(id, operation, input).map_err(|error| {
+                    ToolRequestFailure {
+                        error,
+                        tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                            .map(Box::new),
+                    }
+                })?);
             } else if (!block.is_thinking() && !block.is_text()) || !requests.is_empty() {
-                return Err(ProviderError::InvalidOutcome);
+                return Err(ToolRequestFailure {
+                    error: ProviderError::InvalidOutcome,
+                    tool_arguments: None,
+                });
             }
         }
         match <[_; 1]>::try_from(requests) {
             Ok([outcome]) => Ok(outcome),
-            Err(_) => Err(ProviderError::InvalidOutcome),
+            Err(_) => Err(ToolRequestFailure {
+                error: ProviderError::InvalidOutcome,
+                tool_arguments: None,
+            }),
         }
     }
+}
+
+fn diagnostic_tool_arguments(
+    operation: &str,
+    raw_input: &serde_json::value::RawValue,
+) -> Option<crate::diagnostics::ToolArgumentShape> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
+    let operation = crate::tools::catalog::by_name(operation)?.name;
+    let call = crate::tools::parse_json(raw_input.get().as_bytes(), argument_limit(operation))
+        .ok()
+        .and_then(|input| {
+            let Value::Object(mut fields) = input else {
+                return None;
+            };
+            fields.insert("operation".into(), Value::String(operation.to_owned()));
+            serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)).ok()
+        });
+    Some(call.map_or_else(
+        || crate::diagnostics::ToolArgumentShape::from_serialized(operation, raw_input.get().len()),
+        |call| crate::diagnostics::ToolArgumentShape::from_call(&call),
+    ))
 }
 
 #[cfg(test)]
