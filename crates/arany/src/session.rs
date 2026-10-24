@@ -85,8 +85,9 @@ pub use reducer::{
     TokenCount, ToolView, UsageGroup, UsageView,
 };
 pub(crate) use reducer::{
-    ForkInheritance, coordination_ready, criterion_unmet_in_view, evidence_admitted,
-    private_criterion_evidence, private_failure, verification_passed, wave_settled,
+    ForkInheritance, MAX_HOST_SESSION_GRANTS, coordination_ready, criterion_unmet_in_view,
+    evidence_admitted, private_criterion_evidence, private_failure, verification_passed,
+    wave_settled,
 };
 pub use stop::{GoalLimit, RunFailureFeedback, RunStop, escape_status_text};
 
