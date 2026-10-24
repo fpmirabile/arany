@@ -903,7 +903,53 @@ fn history_tool_block_projects_calls_without_intent_internals() {
     ] {
         assert!(!block.contains(internal), "{internal} leaked into history");
     }
-    assert_historical_permission_feedback(run);
+    assert_historical_permission_feedback(run.clone());
+    assert_approval_summary_retained(run);
+}
+
+fn assert_approval_summary_retained(mut run: crate::session::RunView) {
+    use crate::tools::ApprovalCause;
+    for (cause, expected) in [
+        (
+            ApprovalCause::Cancelled,
+            "Run cancelled before this operation; no operation was dispatched",
+        ),
+        (
+            ApprovalCause::Paused,
+            "Goal paused before this operation; no operation was dispatched",
+        ),
+        (
+            ApprovalCause::ChildTimeout,
+            "Child approval wait timed out; no operation was dispatched",
+        ),
+        (
+            ApprovalCause::Declined,
+            "user_declined: no operation was dispatched",
+        ),
+        (
+            ApprovalCause::ChannelUnavailable,
+            "channel_unavailable: no operation was dispatched",
+        ),
+    ] {
+        let denied = run.tools[0].observation.as_mut().unwrap();
+        denied.disposition = ToolDisposition::Denied;
+        denied.attestation = None;
+        denied.approval_cause = Some(cause);
+        denied.output = expected.into();
+        run.tool_compaction_summary = None;
+        run.tool_compaction_covered_count = 0;
+        let projected: Value = serde_json::from_str(&history_tool_block(&run)).unwrap();
+        assert_eq!(projected["tool_records"][0]["output"], expected);
+
+        run.tool_compaction_covered_count = 1;
+        run.tool_compaction_summary = Some("Useful working context remains".into());
+        let projected: Value = serde_json::from_str(&history_tool_block(&run)).unwrap();
+        assert_eq!(
+            projected["summary_untrusted"],
+            "Useful working context remains"
+        );
+        assert_eq!(projected["tool_records"].as_array().unwrap().len(), 1);
+    }
 }
 
 fn assert_historical_permission_feedback(mut run: crate::session::RunView) {

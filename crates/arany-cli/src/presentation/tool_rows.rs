@@ -919,8 +919,8 @@ pub(crate) fn tool_detail_text(tool: &arany::ToolView) -> String {
 // The bounded summary and arguments, then the projected result, for selection and copy.
 pub(crate) fn tool_detail_parts(tool: &arany::ToolView) -> (String, Cow<'_, str>) {
     let arguments = serde_json::to_string(&tool.intent.call).expect("typed Tool call");
-    let output = match tool.model_denial_label() {
-        Some(label) => Cow::Owned(format!("{label}: no operation was dispatched")),
+    let output = match tool.model_denial_output() {
+        Some(output) => Cow::Borrowed(output),
         None => tool
             .observation
             .as_ref()

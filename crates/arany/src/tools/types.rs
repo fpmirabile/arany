@@ -1118,6 +1118,57 @@ pub enum ApprovalCause {
     ChildTimeout,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum DenialFeedback {
+    UserDeclined,
+    ChannelUnavailable,
+    Cancelled,
+    Paused,
+    ChildTimeout,
+    RuleDenied,
+    ModeDenied,
+    HookDenied,
+}
+
+impl DenialFeedback {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::UserDeclined => "user_declined",
+            Self::ChannelUnavailable => "channel_unavailable",
+            Self::Cancelled | Self::Paused => "cancelled",
+            Self::ChildTimeout => "delegation_limit",
+            Self::RuleDenied => "permission_rule_denied",
+            Self::ModeDenied => "permission_mode_denied",
+            Self::HookDenied => "hook_denied",
+        }
+    }
+
+    pub(crate) fn output(self) -> &'static str {
+        match self {
+            Self::UserDeclined => "user_declined: no operation was dispatched",
+            Self::ChannelUnavailable => "channel_unavailable: no operation was dispatched",
+            Self::Cancelled => "Run cancelled before this operation; no operation was dispatched",
+            Self::Paused => "Goal paused before this operation; no operation was dispatched",
+            Self::ChildTimeout => "Child approval wait timed out; no operation was dispatched",
+            Self::RuleDenied => "permission_rule_denied: no operation was dispatched",
+            Self::ModeDenied => "permission_mode_denied: no operation was dispatched",
+            Self::HookDenied => "hook_denied: no operation was dispatched",
+        }
+    }
+}
+
+impl ApprovalCause {
+    pub(crate) fn denial_feedback(self) -> DenialFeedback {
+        match self {
+            Self::Cancelled => DenialFeedback::Cancelled,
+            Self::Paused => DenialFeedback::Paused,
+            Self::ChannelUnavailable => DenialFeedback::ChannelUnavailable,
+            Self::Declined => DenialFeedback::UserDeclined,
+            Self::ChildTimeout => DenialFeedback::ChildTimeout,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolObservation {

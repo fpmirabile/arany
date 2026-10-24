@@ -470,9 +470,20 @@ pub struct HookView {
 
 impl ToolView {
     pub fn model_denial_label(&self) -> Option<&'static str> {
+        self.denial_feedback()
+            .map(crate::tools::types::DenialFeedback::label)
+    }
+
+    pub fn model_denial_output(&self) -> Option<&'static str> {
+        self.denial_feedback()
+            .map(crate::tools::types::DenialFeedback::output)
+    }
+
+    fn denial_feedback(&self) -> Option<crate::tools::types::DenialFeedback> {
         use crate::tools::{
-            ApprovalCause, ToolDisposition,
+            ToolDisposition,
             permissions::{Decision, PermissionSource},
+            types::DenialFeedback,
         };
         let observation = self.observation.as_ref()?;
         if observation.disposition != ToolDisposition::Denied {
@@ -487,10 +498,7 @@ impl ToolView {
             return None;
         }
         match observation.approval_cause {
-            Some(ApprovalCause::Declined) => Some("user_declined"),
-            Some(ApprovalCause::ChannelUnavailable) => Some("channel_unavailable"),
-            Some(ApprovalCause::Cancelled | ApprovalCause::Paused) => Some("cancelled"),
-            Some(ApprovalCause::ChildTimeout) => Some("delegation_limit"),
+            Some(cause) => Some(cause.denial_feedback()),
             None => {
                 let verdict = self.permission_verdict.as_ref()?;
                 if verdict.decision != Decision::Deny
@@ -509,11 +517,11 @@ impl ToolView {
                     return None;
                 }
                 match verdict.source {
-                    PermissionSource::Hook => Some("hook_denied"),
+                    PermissionSource::Hook => Some(DenialFeedback::HookDenied),
                     PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
-                        Some("permission_rule_denied")
+                        Some(DenialFeedback::RuleDenied)
                     }
-                    PermissionSource::Mode => Some("permission_mode_denied"),
+                    PermissionSource::Mode => Some(DenialFeedback::ModeDenied),
                     PermissionSource::Human
                     | PermissionSource::UnavailableApproval
                     | PermissionSource::AiReview
@@ -538,10 +546,10 @@ impl ToolView {
     }
 
     pub(crate) fn denial_needs_redaction(&self) -> bool {
-        self.model_denial_label().is_some_and(|label| {
-            self.observation.as_ref().is_some_and(|observation| {
-                observation.output != format!("{label}: no operation was dispatched")
-            })
+        self.model_denial_output().is_some_and(|output| {
+            self.observation
+                .as_ref()
+                .is_some_and(|observation| observation.output != output)
         })
     }
 

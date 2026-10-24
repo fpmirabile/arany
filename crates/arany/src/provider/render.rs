@@ -451,7 +451,7 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
             Some(observation) => crate::tools::types::model_result_with_output(
                 observation,
                 &tool.hook_feedback(),
-                &historical_denial_output(tool, observation),
+                tool.model_denial_output().unwrap_or(&observation.output),
             ),
             None => json!({"call": model_call(&tool.intent.call), "execution": "uncertain; never replay"}),
         })
@@ -471,16 +471,6 @@ pub(crate) fn history_tool_block(run: &RunView) -> String {
         block["workers_untrusted"] = json!(workers);
     }
     block.to_string()
-}
-
-fn historical_denial_output(
-    tool: &crate::session::ToolView,
-    observation: &crate::tools::ToolObservation,
-) -> String {
-    tool.model_denial_label().map_or_else(
-        || observation.output.clone(),
-        |label| format!("{label}: no operation was dispatched"),
-    )
 }
 
 pub(crate) fn history_unanswered_block(run: &RunView) -> String {

@@ -661,7 +661,14 @@ async fn declined_tool_summaries_preserve_other_facts_across_compactions() {
         &state.join("permissions.json"),
         br#"{"permissions":{"ask":["Read"]}}"#,
     );
-    let engine = engine_support::open(root, EngineConfig::default()).unwrap();
+    let engine = engine_support::open(
+        root,
+        EngineConfig {
+            guard_executable: Some(std::env::current_exe().unwrap()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
     let summary = "The project uses Rust and UTC. Reading the facts was declined.";
     let provider = decline_summary_provider(summary);
     let (approvals, mut inbox) = arany::ToolApprovals::new(arany::ApprovalMode::Request);
@@ -672,10 +679,23 @@ async fn declined_tool_summaries_preserve_other_facts_across_compactions() {
         approvals: Some(approvals),
         ..Default::default()
     };
-    let decline = async { inbox.next().await.unwrap().decide(false) };
-    let (outcome, ()) = tokio::join!(run_with(&engine, &provider, input, controls), decline);
-    let outcome = outcome.unwrap();
+    let decline = async { inbox.next().await.map(|approval| approval.decide(false)) };
+    let (outcome, declined) = tokio::join!(run_with(&engine, &provider, input, controls), decline);
+    let outcome = outcome.expect("Tool-enabled submission reaches approval and continuation");
+    assert!(declined.is_some(), "the Read must reach human approval");
     assert_eq!(outcome.run.status, RunStatus::Finished);
+    assert_eq!(outcome.run.tools.len(), 1);
+    assert_eq!(provider.requests.lock().unwrap().len(), 2);
+    let tool = &outcome.run.tools[0];
+    let observation = tool.observation.as_ref().unwrap();
+    assert_eq!(
+        observation.approval_cause,
+        Some(arany::ApprovalCause::Declined)
+    );
+    assert!(observation.attestation.is_none());
+    let expected = "user_declined: no operation was dispatched";
+    assert_eq!(observation.output, expected);
+    assert_eq!(tool.model_denial_output(), Some(expected));
     assert_decline_summaries_retained(&engine, &provider, outcome.session_id, &workspace, summary)
         .await;
     engine.close().await.unwrap();

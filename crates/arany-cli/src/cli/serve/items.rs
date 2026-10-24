@@ -219,11 +219,11 @@ pub(super) fn history_items(run: &RunView) -> Vec<Item> {
             .iter()
             .chain(run.agents.iter().flat_map(|agent| &agent.tools))
             .map(|tool| {
-                tool_item_with_denial_label(
+                tool_item_with_denial_output(
                     &tool.intent,
                     tool.observation.as_ref(),
                     true,
-                    tool.model_denial_label(),
+                    tool.model_denial_output(),
                 )
             }),
     );
@@ -262,23 +262,18 @@ pub(in crate::cli) fn tool_item(
     observation: Option<&ToolObservation>,
     history: bool,
 ) -> Item {
-    tool_item_with_denial_label(intent, observation, history, None)
+    tool_item_with_denial_output(intent, observation, history, None)
 }
 
-fn tool_item_with_denial_label(
+fn tool_item_with_denial_output(
     intent: &EffectIntent,
     observation: Option<&ToolObservation>,
     history: bool,
-    denial_label: Option<&str>,
+    denial_output: Option<&str>,
 ) -> Item {
     let id = intent.id.to_string();
     let disposition = observation.map(|o| o.disposition);
-    let output = observation.map(|o| {
-        denial_label.map_or_else(
-            || o.output.clone(),
-            |label| format!("{label}: no operation was dispatched"),
-        )
-    });
+    let output = observation.map(|o| denial_output.unwrap_or(&o.output).to_owned());
     let status = match observation {
         Some(o) if o.cache_update == CacheUpdate::Uncertain => ItemStatus::Uncertain,
         Some(o) => match o.disposition {

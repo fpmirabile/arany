@@ -3,6 +3,7 @@ use super::{ActiveTime, Answer, HookDenial, Permission, Resolution};
 use crate::engine::run_loop::stop::StopCause;
 use crate::engine::run_loop::{ActivePause, RunLoop};
 use crate::tools::permissions::{Decision, PermissionSource};
+use crate::tools::types::DenialFeedback;
 use crate::tools::{
     ApprovalMode, CacheUpdate, EffectIntent, ToolCall, ToolDisposition, ToolObservation,
     UnguardedPrompt,
@@ -366,15 +367,14 @@ pub(super) fn decide_dispatch<'a>(
         source = PermissionSource::UnavailableApproval;
     }
     let refused = |reason| {
-        let stop = match (facts.site, &reason) {
-            (DispatchSite::Primary, NotDispatched::ApprovalRefused)
-            | (DispatchSite::Primary, NotDispatched::ApprovalUnavailable)
-            | (DispatchSite::Primary, NotDispatched::UnguardedNeedsHuman) => None,
-            _ => Some(refusal_cause(
+        let stop = if facts.site == DispatchSite::Primary && recoverable_primary_refusal(&reason) {
+            None
+        } else {
+            Some(refusal_cause(
                 after.paused,
                 after.cancelled,
                 after.deadline_reached,
-            )),
+            ))
         };
         Err(refuse(reason, stop))
     };
@@ -450,6 +450,31 @@ pub(super) fn decide_queue_pause(reserved: bool, paused: bool) -> Result<(), Ref
     }
 }
 
+fn recoverable_primary_refusal(reason: &NotDispatched) -> bool {
+    match reason {
+        NotDispatched::ApprovalRefused
+        | NotDispatched::ApprovalUnavailable
+        | NotDispatched::UnguardedNeedsHuman => true,
+        NotDispatched::TimeoutLimit { .. }
+        | NotDispatched::HookDenied(_)
+        | NotDispatched::DelegationDeadline
+        | NotDispatched::DenyRule
+        | NotDispatched::OutsideGrant
+        | NotDispatched::HostSourceUnavailable
+        | NotDispatched::ModeDenied
+        | NotDispatched::HumanOnlyUnavailable
+        | NotDispatched::UnguardedNotOffered(_)
+        | NotDispatched::OutsidePlan
+        | NotDispatched::ActiveTime
+        | NotDispatched::Paused
+        | NotDispatched::Cancelled
+        | NotDispatched::TokenBudget
+        | NotDispatched::UnsavedRule
+        | NotDispatched::SaveUnconfirmed
+        | NotDispatched::ApprovalTimedOut => false,
+    }
+}
+
 fn refusal_cause(paused: bool, cancelled: bool, deadline_reached: bool) -> StopCause {
     if paused {
         StopCause::Paused
@@ -504,7 +529,7 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::DenyRule => (
             ToolDisposition::Denied,
-            "permission_rule_denied: no operation was dispatched".into(),
+            DenialFeedback::RuleDenied.output().into(),
         ),
         NotDispatched::OutsideGrant => (
             ToolDisposition::Denied,
@@ -516,11 +541,11 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::ModeDenied => (
             ToolDisposition::Denied,
-            "permission_mode_denied: no operation was dispatched".into(),
+            DenialFeedback::ModeDenied.output().into(),
         ),
         NotDispatched::HumanOnlyUnavailable => (
             ToolDisposition::Denied,
-            "channel_unavailable: no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::UnguardedNotOffered(UnguardedRefusal::SettingsChanged) => (
             ToolDisposition::Denied,
@@ -547,11 +572,11 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::Cancelled => (
             ToolDisposition::Denied,
-            "Run cancelled before this operation; no operation was dispatched".into(),
+            DenialFeedback::Cancelled.output().into(),
         ),
         NotDispatched::Paused => (
             ToolDisposition::Denied,
-            "Goal paused before this operation; no operation was dispatched".into(),
+            DenialFeedback::Paused.output().into(),
         ),
         NotDispatched::UnsavedRule => (
             ToolDisposition::Denied,
@@ -559,19 +584,19 @@ pub(super) fn not_dispatched(intent: EffectIntent, reason: &NotDispatched) -> To
         ),
         NotDispatched::UnguardedNeedsHuman => (
             ToolDisposition::Denied,
-            "channel_unavailable: no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::ApprovalUnavailable => (
             ToolDisposition::Denied,
-            "channel_unavailable: no operation was dispatched".into(),
+            DenialFeedback::ChannelUnavailable.output().into(),
         ),
         NotDispatched::ApprovalTimedOut => (
             ToolDisposition::Denied,
-            "Child approval wait timed out; no operation was dispatched".into(),
+            DenialFeedback::ChildTimeout.output().into(),
         ),
         NotDispatched::ApprovalRefused => (
             ToolDisposition::Denied,
-            "user_declined: no operation was dispatched".into(),
+            DenialFeedback::UserDeclined.output().into(),
         ),
     };
     let mut observation = undispatched(intent, disposition, output);
@@ -618,7 +643,7 @@ fn hook_denial(denial: &HookDenial) -> (ToolDisposition, String) {
         HookDenial::Uncertain => "Hook outcome uncertain; no operation was dispatched".into(),
         HookDenial::Requested => "Hook stopped this Run; no operation was dispatched".into(),
         HookDenial::Narrowed(name) => format!("Hook narrowed this Tool to: {name}"),
-        HookDenial::Denied(_) => "hook_denied: no operation was dispatched".to_owned(),
+        HookDenial::Denied(_) => DenialFeedback::HookDenied.output().to_owned(),
     };
     (ToolDisposition::Denied, output)
 }
@@ -958,9 +983,8 @@ mod tests {
         assert_eq!(decide_queue_pause(true, false), Ok(()));
     }
 
-    #[test]
-    fn hook_denial_feedback_omits_untrusted_reason() {
-        let intent = EffectIntent {
+    fn read_intent() -> EffectIntent {
+        EffectIntent {
             host: None,
             host_command: None,
             target: crate::session::worker::EffectTarget::Workspace,
@@ -978,10 +1002,14 @@ mod tests {
             },
             limits: crate::tools::ToolLimits::default(),
             use_count: 1,
-        };
+        }
+    }
+
+    #[test]
+    fn hook_denial_feedback_omits_untrusted_reason() {
         let canary = "untrusted hook reason";
         let observation = not_dispatched(
-            intent,
+            read_intent(),
             &NotDispatched::HookDenied(HookDenial::Denied(canary.into())),
         );
         assert_eq!(
@@ -990,5 +1018,46 @@ mod tests {
         );
         assert!(observation.valid());
         assert!(!observation.output.contains(canary));
+    }
+
+    #[test]
+    fn approval_denial_history_preserves_dispatch_output_without_redaction() {
+        for (reason, expected) in [
+            (
+                NotDispatched::Cancelled,
+                "Run cancelled before this operation; no operation was dispatched",
+            ),
+            (
+                NotDispatched::Paused,
+                "Goal paused before this operation; no operation was dispatched",
+            ),
+            (
+                NotDispatched::ApprovalTimedOut,
+                "Child approval wait timed out; no operation was dispatched",
+            ),
+            (
+                NotDispatched::ApprovalRefused,
+                "user_declined: no operation was dispatched",
+            ),
+            (
+                NotDispatched::ApprovalUnavailable,
+                "channel_unavailable: no operation was dispatched",
+            ),
+        ] {
+            let observation = not_dispatched(read_intent(), &reason);
+            assert_eq!(observation.output, expected);
+            let tool = crate::session::ToolView {
+                checkpoint: None,
+                intent: observation.intent.clone(),
+                observation: Some(observation),
+                review_call_index: None,
+                permission_verdict: None,
+                hooks: Vec::new(),
+                hook_sequence: None,
+                finished_sequence: None,
+            };
+            assert_eq!(tool.model_denial_output(), Some(expected));
+            assert!(!tool.denial_needs_redaction());
+        }
     }
 }
