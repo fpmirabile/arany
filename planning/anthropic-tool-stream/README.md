@@ -2,7 +2,7 @@
 
 ## Metadata
 
-- Status: `Ready` for S1 and S2; S3 is blocked on the owner's live re-run after S1 (the cause below is ranked, not confirmed)
+- Status: `S1 implemented`; the ranked Read omission cause is fixed offline; owner live re-run remains pending
 - Owner: `TBD`
 - Last updated: `2026-10-23`
 
