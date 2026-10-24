@@ -12,8 +12,9 @@ use tokio::sync::{Notify, Semaphore, mpsc};
 
 const APPROVAL_WITHDRAWAL_WAIT: Duration = Duration::from_secs(5);
 const RETRY_WAIT_MS: u32 = 10_000;
-const RETRY_GOAL_ACTIVE_MS: u64 = 60_000;
-const RETRY_EXHAUSTION_ADVANCE_SECS: u64 = 61;
+// Native setup must reach the held Ask before the synthetic budget exhaustion.
+const RETRY_GOAL_ACTIVE_MS: u64 = 10 * 60 * 1000;
+const RETRY_EXHAUSTION_ADVANCE: Duration = Duration::from_millis(RETRY_GOAL_ACTIVE_MS + 1);
 const REVIEW_EXHAUSTION_GOAL_ACTIVE_MS: u64 = 120_000;
 const DELEGATION_DEADLINE_MARGIN: Duration = Duration::from_secs(1);
 
@@ -212,10 +213,15 @@ impl ApprovalJourney {
         {
             return;
         }
+        let mut approval = self.held_approval.take().expect("held approval");
+        tokio::select! {
+            biased;
+            () = approval.abandoned() => panic!("approval withdrawn before the active-time advance"),
+            () = std::future::ready(()) => {}
+        }
         tokio::time::pause();
         tokio::time::advance(approval_exhaustion_duration(self.case)).await;
         tokio::time::resume();
-        let mut approval = self.held_approval.take().expect("held approval");
         tokio::time::timeout(APPROVAL_WITHDRAWAL_WAIT, approval.abandoned())
             .await
             .expect("active Goal exhaustion withdraws the pending approval");
@@ -258,7 +264,7 @@ fn approval_exhaustion_case(case: &str) -> bool {
 fn approval_exhaustion_duration(case: &str) -> Duration {
     match case {
         "sibling_approval_exhaustion" => Duration::from_secs(11 * 60),
-        "retry_approval_exhaustion" => Duration::from_secs(RETRY_EXHAUSTION_ADVANCE_SECS),
+        "retry_approval_exhaustion" => RETRY_EXHAUSTION_ADVANCE,
         "delegation_deadline" => {
             crate::MAX_DELEGATION_DEADLINE.saturating_add(DELEGATION_DEADLINE_MARGIN)
         }
