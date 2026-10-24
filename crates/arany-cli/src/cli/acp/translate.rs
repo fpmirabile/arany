@@ -166,7 +166,6 @@ pub(super) async fn input(
             ),
         );
     }
-    let invalid = || invalid_params(&id);
     let refusal = {
         let state = state.lock().expect("translator state");
         if request.method == "initialize" && state.initialized {
@@ -203,10 +202,10 @@ pub(super) async fn input(
         "authenticate" => authenticate_input(id, request.params, config, state, output).await,
         "session/new" => {
             let Ok(params) = parse::<wire::NewSession>(request.params) else {
-                return immediate(output, invalid());
+                return immediate(output, invalid_params(&id));
             };
             if !params.additional_directories.is_empty() {
-                return immediate(output, invalid());
+                return immediate(output, invalid_params(&id));
             }
             new_session_input(id, params, config, state, serve).await
         }
@@ -414,14 +413,6 @@ async fn load_input(
     value: Option<Value>,
     context: &InputContext<'_>,
 ) -> Result<(), String> {
-    let invalid = || {
-        wire::error(
-            Some(id.clone()),
-            -32602,
-            "Invalid parameters",
-            "invalidParams",
-        )
-    };
     let params = if replay {
         parse::<wire::LoadSession>(value).map(|p| wire::ResumeSession {
             session_id: p.session_id,
@@ -433,10 +424,10 @@ async fn load_input(
         parse::<wire::ResumeSession>(value)
     };
     let Ok(params) = params else {
-        return immediate(context.output, invalid());
+        return immediate(context.output, invalid_params(&id));
     };
     if !params.additional_directories.is_empty() {
-        return immediate(context.output, invalid());
+        return immediate(context.output, invalid_params(&id));
     }
     let busy = {
         let state = context.state.lock().expect("translator state");
@@ -498,14 +489,6 @@ async fn mode_input(
     value: Option<Value>,
     context: &InputContext<'_>,
 ) -> Result<(), String> {
-    let invalid = || {
-        wire::error(
-            Some(id.clone()),
-            -32602,
-            "Invalid parameters",
-            "invalidParams",
-        )
-    };
     let params = if config_option {
         parse::<wire::SetConfigOption>(value).and_then(|p| {
             if p.config_id != "mode" || p.value_type.as_deref() == Some("boolean") {
@@ -520,7 +503,7 @@ async fn mode_input(
         parse::<wire::SetMode>(value)
     };
     let Ok(params) = params else {
-        return immediate(context.output, invalid());
+        return immediate(context.output, invalid_params(&id));
     };
     if !context
         .state
@@ -616,16 +599,8 @@ async fn initialize_input(
     output: &mpsc::Sender<Value>,
     serve: &mpsc::Sender<ClientMessage>,
 ) -> Result<(), String> {
-    let invalid = || {
-        wire::error(
-            Some(id.clone()),
-            -32602,
-            "Invalid parameters",
-            "invalidParams",
-        )
-    };
     let Ok(client) = parse::<wire::Initialize>(params).and_then(wire::Initialize::client) else {
-        return immediate(output, invalid());
+        return immediate(output, invalid_params(&id));
     };
     state.lock().expect("translator state").initialized = true;
     send_request(
@@ -651,19 +626,11 @@ async fn authenticate_input(
     if state.lock().expect("translator state").active.is_some() {
         return immediate(output, wire::error(Some(id), -32600, "Server busy", "busy"));
     }
-    let invalid = || {
-        wire::error(
-            Some(id.clone()),
-            -32602,
-            "Invalid parameters",
-            "invalidParams",
-        )
-    };
     let Ok(params) = parse::<wire::Authenticate>(params) else {
-        return immediate(output, invalid());
+        return immediate(output, invalid_params(&id));
     };
     if params.method_id != "arany-setup" {
-        return immediate(output, invalid());
+        return immediate(output, invalid_params(&id));
     }
     let authenticated = config.authenticate().await;
     state.lock().expect("translator state").authenticated = authenticated;
