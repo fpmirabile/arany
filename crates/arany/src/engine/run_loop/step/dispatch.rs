@@ -270,9 +270,9 @@ impl<'a> DispatchFacts<'a> {
                 self.hooks.refusal(self.site)
             } else {
                 let reason = match basis {
-                    PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
-                        NotDispatched::DenyRule
-                    }
+                    PermissionSource::Rule
+                    | PermissionSource::TypedPrefixRule
+                    | PermissionSource::HostPrefixRule => NotDispatched::DenyRule,
                     PermissionSource::PinnedGrant if self.host_unpinned => {
                         NotDispatched::HostSourceUnavailable
                     }
@@ -811,6 +811,7 @@ mod tests {
             executable: "/bin/make".into(),
             attribution: None,
             remember: true,
+            prefix: false,
         })
     }
 

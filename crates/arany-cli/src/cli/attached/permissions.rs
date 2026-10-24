@@ -79,6 +79,7 @@ const HOST_NOTE: &str = "host; human approval required";
 pub(super) enum PermissionArea {
     FolderTrust,
     TypedGitRules,
+    HostRules,
 }
 
 pub(super) async fn choose_area(
@@ -93,6 +94,7 @@ pub(super) async fn choose_area(
             &[
                 (b'1', "Folder trust"),
                 (b'2', "Typed Git rules"),
+                (b'3', "Host command rules"),
                 (b'0', "Cancel"),
             ],
             None,
@@ -101,6 +103,7 @@ pub(super) async fn choose_area(
         {
             Some(b'1') => Some(PermissionArea::FolderTrust),
             Some(b'2') => Some(PermissionArea::TypedGitRules),
+            Some(b'3') => Some(PermissionArea::HostRules),
             _ => None,
         },
     )
@@ -244,6 +247,183 @@ pub(super) async fn manage_rules(
             }
         }
     }
+}
+
+pub(super) enum HostRuleEditOutcome {
+    Confirmed(String),
+    Uncertain,
+}
+
+pub(super) async fn manage_host_rules(
+    terminal: &mut AttachedTerminal,
+    state_dir: &Path,
+    workspace: &Path,
+    view: &arany::SessionView,
+) -> Result<HostRuleEditOutcome, SetupError> {
+    let mut notice = "Host rules authorize every eligible suffix in this folder and exact cwd. They apply next Run. This is not confinement.".to_owned();
+    loop {
+        let Ok(state) = StateRoot::open_existing(state_dir) else {
+            return Ok(HostRuleEditOutcome::Confirmed(
+                "Error: state unavailable; host rules unchanged".into(),
+            ));
+        };
+        let settings = match PermissionSettings::load(&state, workspace) {
+            Ok(settings) => settings,
+            Err(error) => {
+                return Ok(HostRuleEditOutcome::Confirmed(format!(
+                    "Error: {error}; host rules unchanged"
+                )));
+            }
+        };
+        let mut rows = vec![(ADD, "Add from a recent eligible host command".to_owned())];
+        rows.extend(
+            settings
+                .host_prefixes()
+                .iter()
+                .enumerate()
+                .map(|(index, rule)| {
+                    (
+                        ENTRY_BASE + u8::try_from(index).expect("rules bounded"),
+                        format!(
+                            "{} {} · {} · cwd {}",
+                            decision_label(rule.decision),
+                            crate::presentation::escape_terminal(
+                                &serde_json::to_string(&rule.prefix).expect("prefix")
+                            ),
+                            scope_label(Some(rule.workspace()), workspace),
+                            crate::presentation::escape_terminal(&rule.cwd)
+                        ),
+                    )
+                }),
+        );
+        rows.push((BACK, "Back".into()));
+        let labels = rows
+            .iter()
+            .map(|(key, label)| (*key, label.as_str()))
+            .collect::<Vec<_>>();
+        let instruction = [
+            if settings.exists() { "" } else { SETTINGS_NOTE },
+            notice.as_str(),
+        ]
+        .join(" ");
+        let choice = super::setup::choose_focused(
+            terminal,
+            2,
+            "Host command rules",
+            &instruction,
+            &labels,
+            None,
+        )
+        .await?;
+        let edit = match choice {
+            Some(ADD) => add_host_edit(terminal, view, workspace).await?,
+            Some(value) if value >= ENTRY_BASE => {
+                entry_edit(terminal, usize::from(value - ENTRY_BASE))
+                    .await?
+                    .map(|edit| match edit {
+                        TypedPrefixEdit::Replace { index, decision } => {
+                            arany::permissions::HostPrefixEdit::Replace { index, decision }
+                        }
+                        TypedPrefixEdit::Remove { index } => {
+                            arany::permissions::HostPrefixEdit::Remove { index }
+                        }
+                        TypedPrefixEdit::Insert { .. } => {
+                            unreachable!("entry editing cannot insert")
+                        }
+                    })
+            }
+            _ => {
+                return Ok(HostRuleEditOutcome::Confirmed(
+                    "Host command rules apply from the next Run".into(),
+                ));
+            }
+        };
+        let Some(edit) = edit else { continue };
+        match settings.save_host_edit(&state, workspace, edit) {
+            Ok(_) => notice = "Host rules saved; they apply next Run.".into(),
+            Err(SettingsError::NotConfirmed) => return Ok(HostRuleEditOutcome::Uncertain),
+            Err(error) => notice = format!("Error: {error}; nothing dispatched."),
+        }
+    }
+}
+
+async fn add_host_edit(
+    terminal: &mut AttachedTerminal,
+    view: &arany::SessionView,
+    workspace: &Path,
+) -> Result<Option<arany::permissions::HostPrefixEdit>, SetupError> {
+    let candidates = view
+        .runs
+        .iter()
+        .rev()
+        .flat_map(|run| run.tools.iter().rev())
+        .filter(|tool| {
+            tool.intent
+                .host_command
+                .as_ref()
+                .is_some_and(|pin| Path::new(&pin.workspace) == workspace)
+        })
+        .filter(|tool| arany::permissions::HostPrefixRule::from_intent(&tool.intent, 1).is_ok())
+        .take(arany::permissions::MAX_RULES)
+        .collect::<Vec<_>>();
+    let options = candidates
+        .iter()
+        .enumerate()
+        .map(|(index, tool)| {
+            (
+                index,
+                crate::presentation::escape_terminal(
+                    &serde_json::to_string(&tool.intent.call).expect("call"),
+                ),
+            )
+        })
+        .collect::<Vec<_>>();
+    let Some(index) = pick(
+        terminal,
+        "Host command",
+        "Choose a recent command to pin. No command runs here.",
+        &options,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let intent = &candidates[index].intent;
+    let arany::ToolCall::CommandUnguarded { args, .. } = &intent.call else {
+        unreachable!("host candidate")
+    };
+    let prefixes = (1..=args.len() + 1)
+        .filter_map(|count| {
+            arany::permissions::HostPrefixRule::from_intent(intent, count)
+                .ok()
+                .map(|rule| {
+                    (
+                        count,
+                        crate::presentation::escape_terminal(
+                            &serde_json::to_string(&rule.prefix).expect("prefix"),
+                        ),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    let Some(count) = pick(terminal, "Host prefix", "Choose literal tokens. ONE TOKEN authorizes every eligible argument to this executable. Host effects cannot be rewound; private data may reach the Provider.", &prefixes).await? else { return Ok(None) };
+    let Some(decision) = pick(
+        terminal,
+        "Host decision",
+        "Choose a decision; every eligible suffix is covered.",
+        &decisions(),
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let Ok(mut rule) = arany::permissions::HostPrefixRule::from_intent(intent, count) else {
+        return Ok(None);
+    };
+    rule.decision = decision;
+    Ok(Some(arany::permissions::HostPrefixEdit::Insert(Box::new(
+        rule,
+    ))))
 }
 
 async fn add_edit(terminal: &mut AttachedTerminal) -> Result<Option<TypedPrefixEdit>, SetupError> {

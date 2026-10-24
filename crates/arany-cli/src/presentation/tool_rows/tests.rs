@@ -521,6 +521,7 @@ mod peer_row_tests {
                     args: vec![],
                     cwd: String::new(),
                     justification: "Run the timed-out command".into(),
+                    prefix_rule: None,
                 },
                 "Unguarded command(sh )",
                 60_000,
@@ -835,6 +836,7 @@ mod peer_row_tests {
         tool.observation.as_mut().unwrap().disposition = ToolDisposition::Denied;
         for (source, marker) in [
             (PermissionSource::Rule, "permission deny rule"),
+            (PermissionSource::HostPrefixRule, "host command deny rule"),
             (PermissionSource::PinnedGrant, "pinned grant denial"),
             (PermissionSource::Hook, "hook denial"),
             (PermissionSource::Mode, "permission mode denial"),
@@ -998,6 +1000,7 @@ mod unguarded_tests {
                 args: args.iter().map(|arg| (*arg).into()).collect(),
                 cwd: cwd.into(),
                 justification: "It needs the network\u{1b}[31m".into(),
+                prefix_rule: None,
             },
             limits: ToolLimits::default(),
             use_count: 1,
@@ -1012,6 +1015,7 @@ mod unguarded_tests {
             executable: "/usr/bin/bash".into(),
             attribution: None,
             remember: true,
+            prefix: false,
         };
         let lines = unguarded_approval_lines(&intent(&["-c", "cargo test"], ""), &prompt);
         assert_eq!(

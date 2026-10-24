@@ -302,6 +302,65 @@ pub(in crate::store) fn archive_name(now: SystemTime) -> String {
     )
 }
 
+impl StateRoot {
+    pub(crate) fn archive_inactive_host_rules(&self) -> Result<bool, StoreError> {
+        use super::RecordKind;
+        const DIRECTORY: &str = "inactive-host-commands";
+        const SOURCE: &str = "unguarded-commands.json";
+        const PENDING: &str = "pending.json";
+        const MANIFEST: &str = "manifest.json";
+        self.with_record_upgrade_lock(|| {
+            let bytes = self.record(RecordKind::UnguardedCommands).read()?;
+            if bytes.is_none() && identity_of(&self.dir, ARCHIVE_DIR)?.is_none() {
+                return Ok(false);
+            }
+            let archive = private_subdirectory(&self.dir, ARCHIVE_DIR)?;
+            if bytes.is_none() && identity_of(&archive, DIRECTORY)?.is_none() {
+                return Ok(false);
+            }
+            sync(&self.dir)?;
+            let target = private_subdirectory(&archive, DIRECTORY)?;
+            sync(&archive)?;
+            if identity_of(&target, PENDING)?.is_some()
+                || identity_of(&target, "pending.tmp")?.is_some()
+            {
+                return Err(StoreError::ReplaceUnconfirmed);
+            }
+            let archived = identity_of(&target, SOURCE)?;
+            if let Some(bytes) = bytes {
+                if archived.is_some() || identity_of(&target, MANIFEST)?.is_some() {
+                    return Err(StoreError::ArchiveConflict);
+                }
+                let source = self
+                    .open_private_record(SOURCE, RecordKind::UnguardedCommands.limit())?
+                    .ok_or(StoreError::ArchiveConflict)?;
+                let metadata = source.metadata()?;
+                let identity = (metadata.dev(), metadata.ino(), metadata.len());
+                let mut admitted = Vec::new();
+                source
+                    .take(RecordKind::UnguardedCommands.limit() as u64 + 1)
+                    .read_to_end(&mut admitted)?;
+                if admitted != bytes || identity_of(&self.dir, SOURCE)? != Some(identity) {
+                    return Err(StoreError::ArchiveConflict);
+                }
+                let receipt = serde_json::to_vec(&(identity, crate::validate::digest(&bytes)))
+                    .map_err(|_| StoreError::ArchiveConflict)?;
+                publish(&target, "pending.tmp", PENDING, &receipt)?;
+                // Once the durable marker exists, ambiguous completion refuses instead of retrying.
+                rename(&self.dir, SOURCE, &target, SOURCE)?;
+                sync(&target)?;
+                sync(&self.dir)?;
+                publish(&target, "pending.tmp", MANIFEST, &receipt)?;
+                step()?;
+                // Unsynced cleanup can only restore the blocking marker after a crash.
+                target.remove_file(PENDING)?;
+                return Ok(true);
+            }
+            Ok(archived.is_some())
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::{DATABASE_FILE, RecordKind, StateRoot};

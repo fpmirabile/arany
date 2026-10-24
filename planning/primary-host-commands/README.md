@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `In progress` — S1 implemented; S2/S3 remain; both owner decisions recorded on 2026-10-22.
+- Status: `In progress` — S1/S2 implemented; S3 remains; both owner decisions recorded on 2026-10-22.
 - Owner: `fpmirabile`; implementation lead owns delivery and evidence.
 - Last updated: `2026-10-22`
-- Next action: review S1 and its CI evidence, then implement S2 and S3.
+- Next action: review S2 and its CI evidence, then implement S3.
 
 ## Outcome and scope
 

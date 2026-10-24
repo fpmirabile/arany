@@ -1088,6 +1088,7 @@ fn host_admission_tool(
             args: vec!["echo".into(), "canary".into()],
             cwd: String::new(),
             justification: "Inspect the command".into(),
+            prefix_rule: None,
         },
         limits: crate::ToolLimits::default(),
         use_count: 1,

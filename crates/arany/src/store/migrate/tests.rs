@@ -10,7 +10,7 @@ const CHECKPOINT_V1: &str = include_str!("checkpoints-v1.sql");
 
 type EventFixture<'a> = (&'a str, i64, &'a str, &'a str);
 // One canonical (kind, from, input, expected) fixture per production step, plus a command-result fixture.
-const EVENT_FIXTURES: [EventFixture<'static>; 50] = [
+const EVENT_FIXTURES: [EventFixture<'static>; 51] = [
     ("ToolStarted", 15, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 21, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("HookStarted", 5, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
@@ -131,6 +131,7 @@ const EVENT_FIXTURES: [EventFixture<'static>; 50] = [
     ("ToolStarted", 17, GLOB_TOOLSTARTED, GLOB_TOOLSTARTED),
     ("ToolFinished", 23, GLOB_TOOLFINISHED, GLOB_TOOLFINISHED),
     ("ToolPermissionDecided", 5, VERDICT_V4, VERDICT_V4),
+    ("ToolPermissionDecided", 6, VERDICT_V4, VERDICT_V4),
     ("AgentSpawned", 13, GLOB_AGENTSPAWNED, GLOB_AGENTSPAWNED),
     ("HookStarted", 7, GLOB_HOOKSTARTED, GLOB_HOOKSTARTED),
     ("HookFinished", 12, GLOB_HOOKFINISHED, GLOB_HOOKFINISHED),
@@ -2359,6 +2360,7 @@ fn pre_host_migrations_never_create_live_authority() {
         args: vec![".".into()],
         cwd: String::new(),
         justification: "Inspect the Workspace".into(),
+        prefix_rule: None,
     })
     .unwrap();
     assert!(crate::session::pre_host_payload("ToolStarted", &tool.to_string()).is_none());
@@ -2523,4 +2525,16 @@ fn host_git_migrations_reject_new_authority_in_old_rows() {
         migrated, host,
         "host approval loses only the shared clock expiry"
     );
+}
+
+#[test]
+fn host_prefix_migration_preserves_source_bytes_but_never_fabricates_authority() {
+    let step = REGISTRY.event_step("ToolPermissionDecided", 6).unwrap();
+    assert_eq!((step.canonical)(VERDICT_V4).as_deref(), Some(VERDICT_V4));
+    for field in ["basis", "source"] {
+        let mut forged: Value = serde_json::from_str(VERDICT_V4).unwrap();
+        forged[field] = serde_json::json!("host_prefix_rule");
+        assert!((step.transform)(forged.clone()).is_none());
+        assert!((step.canonical)(&forged.to_string()).is_none());
+    }
 }

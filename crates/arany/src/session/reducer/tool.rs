@@ -10,8 +10,10 @@ use super::{
 use crate::provider::AgentPhase;
 use crate::session::events::{Event, GoalPhase, ProviderCallDisposition, ReplayError};
 use crate::tools::permissions::{
-    Decision, HookEvent, HookResult, MAX_HOOKS_PER_OCCURRENCE, PermissionMode, PermissionSource,
+    Decision, HookEvent, HookResult, HostApproval, MAX_HOOKS_PER_OCCURRENCE, PermissionMode,
+    PermissionSource, PermissionVerdict,
 };
+use crate::tools::{EffectIntent, ToolPolicyReceipt};
 
 pub(super) fn apply(
     current: &mut SessionView,
@@ -58,7 +60,10 @@ pub(super) fn apply(
                 if verdict.approved
                     && !(unguarded
                         && mode == PermissionMode::DontAsk
-                        && verdict.source == PermissionSource::SessionApproval)
+                        && matches!(
+                            verdict.source,
+                            PermissionSource::SessionApproval | PermissionSource::HostPrefixRule
+                        ))
                     && (restriction == crate::tools::permissions::Decision::Deny
                         || restriction == crate::tools::permissions::Decision::Ask
                             && !matches!(
@@ -719,7 +724,7 @@ fn valid_host_approval(
     view: &SessionView,
     run_id: crate::session::RunId,
     actor: crate::session::AgentRunId,
-    verdict: &crate::tools::permissions::PermissionVerdict,
+    verdict: &PermissionVerdict,
 ) -> bool {
     let Some(run) = view.runs.last().filter(|run| run.id == run_id) else {
         return false;
@@ -757,26 +762,12 @@ fn valid_host_approval(
         return false;
     }
     match verdict.source {
-        PermissionSource::Human => {
-            host.source_intent.is_none()
-                && verdict.basis != PermissionSource::SessionApproval
-                && verdict.decision == Decision::Ask
-                && (!host.session
-                    || matches!(verdict.mode, None | Some(PermissionMode::Default))
-                        && view.host_grants(host.epoch).count() < MAX_HOST_SESSION_GRANTS)
-        }
+        PermissionSource::Human => valid_human_host_approval(view, &tool.intent, verdict, host),
         PermissionSource::SessionApproval => {
-            !host.session
-                && verdict.decision == Decision::Allow
-                && !crate::tools::unguarded::state_target(&tool.intent.call, pin)
-                && matches!(
-                    verdict.mode,
-                    None | Some(PermissionMode::Default | PermissionMode::DontAsk)
-                )
-                && verdict.basis == PermissionSource::SessionApproval
-                && verdict.hook_restriction.is_none()
-                && host.source_intent.is_some()
-                && view.host_approval(&tool.intent, host.epoch) == host.source_intent
+            valid_session_host_approval(view, &tool.intent, verdict, host)
+        }
+        PermissionSource::HostPrefixRule => {
+            valid_host_prefix_approval(policy, &tool.intent, verdict, host)
         }
         PermissionSource::Rule
         | PermissionSource::Mode
@@ -786,4 +777,89 @@ fn valid_host_approval(
         | PermissionSource::Hook
         | PermissionSource::TypedPrefixRule => false,
     }
+}
+
+fn valid_human_host_approval(
+    view: &SessionView,
+    intent: &EffectIntent,
+    verdict: &PermissionVerdict,
+    host: &HostApproval,
+) -> bool {
+    host.rule.as_ref().is_none_or(|rule| {
+        let crate::tools::ToolCall::CommandUnguarded {
+            prefix_rule: Some(prefix),
+            ..
+        } = &intent.call
+        else {
+            return false;
+        };
+        !host.session
+            && rule.decision == Decision::Allow
+            && matches!(verdict.mode, None | Some(PermissionMode::Default))
+            && verdict.basis == PermissionSource::Mode
+            && verdict.hook_restriction.is_none()
+            && rule.matches(intent)
+            && prefix.len() >= crate::tools::permissions::MIN_HOST_PREFIX_TOKENS
+            && *prefix == rule.prefix
+    }) && host.source_intent.is_none()
+        && verdict.basis != PermissionSource::SessionApproval
+        && verdict.decision == Decision::Ask
+        && (!host.session
+            || matches!(verdict.mode, None | Some(PermissionMode::Default))
+                && view.host_grants(host.epoch).count() < MAX_HOST_SESSION_GRANTS)
+}
+
+fn valid_session_host_approval(
+    view: &SessionView,
+    intent: &EffectIntent,
+    verdict: &PermissionVerdict,
+    host: &HostApproval,
+) -> bool {
+    host.rule.is_none()
+        && !host.session
+        && verdict.decision == Decision::Allow
+        && intent
+            .host_command
+            .as_ref()
+            .is_some_and(|pin| !crate::tools::unguarded::state_target(&intent.call, pin))
+        && matches!(
+            verdict.mode,
+            None | Some(PermissionMode::Default | PermissionMode::DontAsk)
+        )
+        && verdict.basis == PermissionSource::SessionApproval
+        && verdict.hook_restriction.is_none()
+        && host.source_intent.is_some()
+        && view.host_approval(intent, host.epoch) == host.source_intent
+}
+
+fn valid_host_prefix_approval(
+    policy: &ToolPolicyReceipt,
+    intent: &EffectIntent,
+    verdict: &PermissionVerdict,
+    host: &HostApproval,
+) -> bool {
+    let Some(rule) = &host.rule else {
+        return false;
+    };
+    !host.session
+        && host.source_intent.is_none()
+        && verdict.decision == Decision::Allow
+        && verdict.basis == PermissionSource::HostPrefixRule
+        && verdict.hook_restriction.is_none()
+        && policy.permissions_digest.is_some()
+        && intent
+            .host_command
+            .as_ref()
+            .is_some_and(|pin| policy.permissions_digest == pin.permissions_digest)
+        && matches!(
+            verdict.mode,
+            Some(PermissionMode::Default | PermissionMode::DontAsk)
+        )
+        && rule.decision == Decision::Allow
+        && rule.matches(intent)
+        && policy.host_prefixes.contains(rule)
+        && !policy
+            .host_prefixes
+            .iter()
+            .any(|other| other.decision != Decision::Allow && other.scope_matches(intent))
 }

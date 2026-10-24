@@ -155,7 +155,7 @@ pub(super) fn parse_rules(raw: Vec<RawTypedRule>) -> Result<Vec<TypedRule>, Conf
     Ok(rules)
 }
 
-fn valid_path(path: &str) -> bool {
+pub(super) fn valid_path(path: &str) -> bool {
     path.len() <= MAX_PATH_BYTES
         && path.starts_with('/')
         && !path.chars().any(char::is_control)
@@ -206,6 +206,7 @@ pub struct TypedPrefixEntry {
 #[derive(Clone, Debug)]
 pub struct PermissionSettings {
     entries: Vec<TypedRule>,
+    host: Vec<super::HostPrefixRule>,
     digest: Option<[u8; 32]>,
     folder: crate::session::WorkspaceIdentity,
 }
@@ -221,16 +222,17 @@ impl PermissionSettings {
         bytes: Option<&[u8]>,
         folder: crate::session::WorkspaceIdentity,
     ) -> Result<Self, SettingsError> {
-        let entries = match bytes {
-            None => Vec::new(),
+        let (entries, host) = match bytes {
+            None => (Vec::new(), Vec::new()),
             Some(bytes) => {
-                super::PermissionConfig::parse(bytes)
-                    .map_err(|_| SettingsError::Invalid)?
-                    .typed
+                let config =
+                    super::PermissionConfig::parse(bytes).map_err(|_| SettingsError::Invalid)?;
+                (config.typed, config.host)
             }
         };
         Ok(Self {
             entries,
+            host,
             digest: bytes.map(digest),
             folder,
         })
@@ -255,6 +257,63 @@ impl PermissionSettings {
             .collect()
     }
 
+    pub fn host_prefixes(&self) -> &[super::HostPrefixRule] {
+        &self.host
+    }
+
+    pub fn save_host_edit(
+        &self,
+        state: &StateRoot,
+        workspace: &Path,
+        edit: HostPrefixEdit,
+    ) -> Result<Self, SettingsError> {
+        if let HostPrefixEdit::Insert(rule) = &edit {
+            rule.verify_creation(state, workspace)
+                .map_err(|_| SettingsError::Invalid)?;
+        }
+        save(
+            state,
+            workspace,
+            self.folder,
+            Some(self.digest),
+            false,
+            Edit::Host(edit),
+        )
+    }
+
+    pub(crate) fn remember_host(
+        state: &StateRoot,
+        intent: &crate::tools::EffectIntent,
+        expected: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], SettingsError> {
+        let crate::tools::ToolCall::CommandUnguarded {
+            prefix_rule: Some(prefix),
+            ..
+        } = &intent.call
+        else {
+            return Err(SettingsError::Invalid);
+        };
+        let rule = super::HostPrefixRule::from_intent(intent, prefix.len())
+            .map_err(|_| SettingsError::Invalid)?;
+        if rule.prefix != *prefix || prefix.len() < super::MIN_HOST_PREFIX_TOKENS {
+            return Err(SettingsError::Invalid);
+        }
+        let identity = crate::session::WorkspaceIdentity {
+            device: intent.workspace_device,
+            inode: intent.workspace_inode,
+        };
+        save(
+            state,
+            Path::new(rule.workspace()),
+            identity,
+            Some(expected),
+            false,
+            Edit::Host(HostPrefixEdit::Insert(Box::new(rule.clone()))),
+        )?
+        .digest
+        .ok_or(SettingsError::Invalid)
+    }
+
     // The folder identity captured by `load` binds the edit; a replaced directory refuses.
     pub fn save_edit(
         &self,
@@ -268,7 +327,7 @@ impl PermissionSettings {
             self.folder,
             Some(self.digest),
             false,
-            edit,
+            Edit::Typed(edit),
         )
     }
 
@@ -286,14 +345,56 @@ impl PermissionSettings {
             admitted,
             Some(expected),
             true,
-            TypedPrefixEdit::Insert {
+            Edit::Typed(TypedPrefixEdit::Insert {
                 prefix,
                 decision: Decision::Allow,
                 folder: true,
-            },
+            }),
         )
         .and_then(|settings| settings.digest.ok_or(SettingsError::Invalid))
     }
+}
+
+#[derive(Clone, Debug)]
+pub enum HostPrefixEdit {
+    Insert(Box<super::HostPrefixRule>),
+    Replace { index: usize, decision: Decision },
+    Remove { index: usize },
+}
+
+enum Edit {
+    Typed(TypedPrefixEdit),
+    Host(HostPrefixEdit),
+}
+
+fn edit_host(
+    entries: &mut Vec<super::HostPrefixRule>,
+    edit: HostPrefixEdit,
+    workspace: &Path,
+) -> Result<(), SettingsError> {
+    match edit {
+        HostPrefixEdit::Insert(rule) => {
+            if !rule.valid() || Path::new(rule.workspace()) != workspace {
+                return Err(SettingsError::Invalid);
+            }
+            if !entries.contains(&rule) {
+                entries.push(*rule);
+            }
+        }
+        HostPrefixEdit::Replace { index, decision } => {
+            entries
+                .get_mut(index)
+                .ok_or(SettingsError::Missing)?
+                .decision = decision
+        }
+        HostPrefixEdit::Remove { index } => {
+            if index >= entries.len() {
+                return Err(SettingsError::Missing);
+            }
+            entries.remove(index);
+        }
+    }
+    Ok(())
 }
 
 fn read(state: &StateRoot) -> Result<Option<Vec<u8>>, SettingsError> {
@@ -303,13 +404,71 @@ fn read(state: &StateRoot) -> Result<Option<Vec<u8>>, SettingsError> {
         .map_err(|_| SettingsError::Invalid)
 }
 
+fn edit_typed(
+    entries: &mut Vec<TypedRule>,
+    edit: TypedPrefixEdit,
+    workspace: &Path,
+    identity: crate::session::WorkspaceIdentity,
+) -> Result<(), SettingsError> {
+    match edit {
+        TypedPrefixEdit::Insert {
+            prefix,
+            decision,
+            folder,
+        } => {
+            let folder = if folder {
+                Some(Folder {
+                    path: workspace
+                        .to_str()
+                        .filter(|path| valid_path(path))
+                        .ok_or(SettingsError::Folder)?
+                        .to_owned(),
+                    device: identity.device,
+                    inode: identity.inode,
+                })
+            } else {
+                None
+            };
+            let rule = TypedRule {
+                prefix,
+                decision,
+                folder,
+            };
+            if !entries.contains(&rule) {
+                entries.push(rule);
+            }
+        }
+        TypedPrefixEdit::Replace {
+            index,
+            decision: new,
+        } => {
+            let rule = entries.get_mut(index).ok_or(SettingsError::Missing)?;
+            rule.decision = new;
+            if entries
+                .iter()
+                .enumerate()
+                .any(|(other, rule)| other != index && *rule == entries[index])
+            {
+                return Err(SettingsError::Invalid);
+            }
+        }
+        TypedPrefixEdit::Remove { index } => {
+            if index >= entries.len() {
+                return Err(SettingsError::Missing);
+            }
+            entries.remove(index);
+        }
+    }
+    Ok(())
+}
+
 fn save(
     state: &StateRoot,
     workspace: &Path,
     identity: crate::session::WorkspaceIdentity,
     expected: Option<Option<[u8; 32]>>,
     existing_only: bool,
-    edit: TypedPrefixEdit,
+    edit: Edit,
 ) -> Result<PermissionSettings, SettingsError> {
     state
         .with_account_replacement_lock(workspace, || {
@@ -327,54 +486,10 @@ fn save(
             }
             let current = PermissionSettings::from_bytes(bytes.as_deref(), identity)?;
             let mut entries = current.entries;
+            let mut host = current.host;
             match edit {
-                TypedPrefixEdit::Insert {
-                    prefix,
-                    decision,
-                    folder,
-                } => {
-                    let folder = if folder {
-                        Some(Folder {
-                            path: workspace
-                                .to_str()
-                                .filter(|path| valid_path(path))
-                                .ok_or(SettingsError::Folder)?
-                                .to_owned(),
-                            device: identity.device,
-                            inode: identity.inode,
-                        })
-                    } else {
-                        None
-                    };
-                    let rule = TypedRule {
-                        prefix,
-                        decision,
-                        folder,
-                    };
-                    if !entries.contains(&rule) {
-                        entries.push(rule);
-                    }
-                }
-                TypedPrefixEdit::Replace {
-                    index,
-                    decision: new,
-                } => {
-                    let rule = entries.get_mut(index).ok_or(SettingsError::Missing)?;
-                    rule.decision = new;
-                    if entries
-                        .iter()
-                        .enumerate()
-                        .any(|(other, rule)| other != index && *rule == entries[index])
-                    {
-                        return Err(SettingsError::Invalid);
-                    }
-                }
-                TypedPrefixEdit::Remove { index } => {
-                    if index >= entries.len() {
-                        return Err(SettingsError::Missing);
-                    }
-                    entries.remove(index);
-                }
+                Edit::Host(edit) => edit_host(&mut host, edit, workspace)?,
+                Edit::Typed(edit) => edit_typed(&mut entries, edit, workspace, identity)?,
             }
             let mut document = match &bytes {
                 Some(bytes) => crate::tools::parse_json(bytes, MAX_CONFIG_BYTES)
@@ -392,12 +507,20 @@ fn save(
             } else {
                 permissions.insert("typedPrefixes".into(), rows(&entries));
             }
+            if host.is_empty() {
+                permissions.remove("hostPrefixes");
+            } else {
+                permissions.insert(
+                    "hostPrefixes".into(),
+                    serde_json::to_value(&host).map_err(|_| SettingsError::Invalid)?,
+                );
+            }
             let updated = serde_json::to_vec(&document).map_err(|_| SettingsError::Invalid)?;
             if updated.len() > MAX_CONFIG_BYTES {
                 return Err(SettingsError::Invalid);
             }
             let parsed = PermissionSettings::from_bytes(Some(&updated), identity)?;
-            if parsed.entries != entries {
+            if parsed.entries != entries || parsed.host != host {
                 return Err(SettingsError::Invalid);
             }
             state
@@ -454,6 +577,7 @@ mod tests {
     ) -> Result<PermissionSettings, SettingsError> {
         PermissionSettings {
             entries: Vec::new(),
+            host: Vec::new(),
             digest,
             folder: crate::tools::workspace_identity(workspace).unwrap(),
         }

@@ -257,6 +257,7 @@ mod goal_replay_tests {
             compaction_content_digest: None,
             tool_policy: tools.then_some(Box::new(ToolPolicyReceipt {
                 host_epoch: None,
+                host_prefixes: Vec::new(),
                 permissions_digest: None,
                 contract_version: 1,
                 config_digest: [1; 32],
@@ -6169,6 +6170,7 @@ mod goal_replay_tests {
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
+                prefix_rule: None,
             },
         );
         let start = tool_started(run, agent, &host);
@@ -6305,6 +6307,7 @@ mod goal_replay_tests {
                     args: vec!["-c".into(), "exit 0".into()],
                     cwd: String::new(),
                     justification: "Run a primary host command".into(),
+                    prefix_rule: None,
                 },
             );
             apply(&mut view, tool_started(run, agent, &host)).unwrap();
@@ -6437,6 +6440,7 @@ mod goal_replay_tests {
             verdict: crate::tools::permissions::PermissionVerdict {
                 host: (approved && intent.call.is_unguarded()).then_some(
                     crate::tools::permissions::HostApproval {
+                        rule: None,
                         epoch: uuid::Uuid::from_u128(0x01a15ecfa92b736a91a6560b8bc09501),
                         session: false,
                         source_intent: None,
@@ -6826,6 +6830,7 @@ mod goal_replay_tests {
                 args: vec!["-c".into(), "exit 7".into()],
                 cwd: String::new(),
                 justification: "Run the failed command once".into(),
+                prefix_rule: None,
             },
         );
         assert!(rejected(&child, tool_started(run, researcher, &forged)));

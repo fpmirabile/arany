@@ -188,6 +188,7 @@ pub(crate) struct PermissionSnapshot {
 #[derive(Clone)]
 pub(crate) struct ToolRuntime {
     pub(crate) host_settings_admitted: bool,
+    host_settings_saved: std::sync::Arc<std::sync::Mutex<Option<[u8; 32]>>>,
     guard_available: bool,
     config: Config,
     git_writes_available: bool,
@@ -853,6 +854,15 @@ impl ToolRuntime {
             snapshot.config = std::sync::Arc::new(config);
             snapshot
         });
+        if permissions.as_ref().is_some_and(|snapshot| {
+            snapshot
+                .config
+                .host
+                .iter()
+                .any(|rule| !rule.admitted_by(&config))
+        }) {
+            return Err(ToolError::Configuration);
+        }
         let host_authentication = std::sync::Arc::new(git::host::Authentication::admit(&config));
         config.discover_skills(workspace)?;
         let definitions = definitions::snapshot(&root, state, &config)?;
@@ -916,6 +926,7 @@ impl ToolRuntime {
         let skills = skill_roots(&config);
         Ok(Self {
             host_settings_admitted: true,
+            host_settings_saved: Default::default(),
             guard_available,
             definitions: std::sync::Arc::new(definitions),
             config,
@@ -970,6 +981,9 @@ impl ToolRuntime {
         receipt.max_context_bytes = self.context_limit_bytes as u32;
         receipt.permissions_digest = self.permissions.as_ref().map(|snapshot| snapshot.digest);
         receipt.unguarded_rules_digest = None;
+        receipt.host_prefixes = self
+            .permissions()
+            .map_or_else(Vec::new, |permissions| permissions.host.clone());
         receipt
     }
 
@@ -1038,6 +1052,44 @@ impl ToolRuntime {
             permissions::SettingsError::NotConfirmed => ToolError::Uncertain,
             _ => ToolError::Configuration,
         })
+    }
+
+    pub(crate) fn host_prefix_candidate(&self, intent: &EffectIntent) -> bool {
+        let ToolCall::CommandUnguarded {
+            prefix_rule: Some(prefix),
+            ..
+        } = &intent.call
+        else {
+            return false;
+        };
+        prefix.len() >= permissions::MIN_HOST_PREFIX_TOKENS
+            && permissions::HostPrefixRule::from_intent(intent, prefix.len())
+                .is_ok_and(|rule| rule.prefix == *prefix && rule.admitted_by(&self.config))
+    }
+
+    pub(crate) fn record_host_prefix_rule(
+        &self,
+        intent: &EffectIntent,
+        expected: Option<[u8; 32]>,
+    ) -> Result<[u8; 32], ToolError> {
+        if !self.host_prefix_candidate(intent) {
+            return Err(ToolError::Configuration);
+        }
+        fs::validate_workspace(self)?;
+        let state = self
+            .cache_state
+            .as_deref()
+            .ok_or(ToolError::Configuration)?;
+        let digest = permissions::PermissionSettings::remember_host(state, intent, expected)
+            .map_err(|error| match error {
+                permissions::SettingsError::NotConfirmed => ToolError::Uncertain,
+                _ => ToolError::Configuration,
+            })?;
+        *self
+            .host_settings_saved
+            .lock()
+            .expect("saved host settings") = Some(digest);
+        Ok(digest)
     }
 
     pub(crate) fn allows_skill(&self, name: &str) -> bool {
@@ -1279,8 +1331,14 @@ impl ToolRuntime {
 
     pub(crate) fn host_settings_current(&self, pin: &types::HostCommandPin) -> bool {
         self.cache_state.as_ref().is_some_and(|state| {
-            load_permissions(state)
-                .is_ok_and(|snapshot| snapshot.map(|value| value.digest) == pin.permissions_digest)
+            load_permissions(state).is_ok_and(|snapshot| {
+                snapshot.map(|value| value.digest)
+                    == (*self
+                        .host_settings_saved
+                        .lock()
+                        .expect("saved host settings"))
+                    .or(pin.permissions_digest)
+            })
         })
     }
 

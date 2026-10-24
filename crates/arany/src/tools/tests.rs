@@ -63,6 +63,7 @@ fn tool_call_site_and_family_predicates_match_facts_for_every_variant() {
             args: Vec::new(),
             cwd: ".".into(),
             justification: "Run the failed command once on the host".into(),
+            prefix_rule: None,
         },
         ToolCall::ApplyChangeset {
             source: ChangesetSource::CommandReceipt {
@@ -375,6 +376,7 @@ fn goal_skill_scope_is_intersected_with_admitted_name_and_resource() {
     };
     let runtime = ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),
@@ -2606,6 +2608,7 @@ fn host_command_catalog_is_primary_only_and_needs_no_guarded_program() {
             args: Vec::new(),
             cwd: String::new(),
             justification: "run".into(),
+            prefix_rule: None,
         }
         .is_child_research()
     );
@@ -2656,6 +2659,7 @@ fn git_catalog_is_unavailable_without_a_pin_and_names_operations_with_one() {
 
     let runtime = |config: Config, git_writes_available: bool| ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available,
         host_authentication: Default::default(),
@@ -2826,6 +2830,7 @@ fn model_catalog_prose_matches_the_checked_in_snapshot() {
     });
     let runtime = ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: true,
         host_authentication: Default::default(),
@@ -2893,6 +2898,7 @@ pub(super) fn in_process_runtime(workspace: &std::path::Path, config: Value) -> 
     let root = super::fs::open_directory(workspace).unwrap();
     super::ToolRuntime {
         host_settings_admitted: true,
+        host_settings_saved: Default::default(),
         guard_available: true,
         git_writes_available: false,
         host_authentication: Default::default(),

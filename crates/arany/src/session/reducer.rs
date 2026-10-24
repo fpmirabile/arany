@@ -518,9 +518,9 @@ impl ToolView {
                 }
                 match verdict.source {
                     PermissionSource::Hook => Some(DenialFeedback::HookDenied),
-                    PermissionSource::Rule | PermissionSource::TypedPrefixRule => {
-                        Some(DenialFeedback::RuleDenied)
-                    }
+                    PermissionSource::Rule
+                    | PermissionSource::TypedPrefixRule
+                    | PermissionSource::HostPrefixRule => Some(DenialFeedback::RuleDenied),
                     PermissionSource::Mode => Some(DenialFeedback::ModeDenied),
                     PermissionSource::Human
                     | PermissionSource::UnavailableApproval

@@ -861,6 +861,26 @@ impl AttachedSession {
                 readmit_host_permissions(&self.engine, &mut self.ui.notice);
                 return Ok(IdleAction::Handled);
             }
+            Some(permissions::PermissionArea::HostRules) => {
+                let summary = permissions::manage_host_rules(
+                    &mut self.terminal,
+                    &self.admission.state_dir,
+                    &self.admission.workspace,
+                    &self.view,
+                )
+                .await?;
+                self.terminal
+                    .restore_draft_input(self.composer.input_capacity())
+                    .map_err(|error| error.to_string())?;
+                match summary {
+                    permissions::HostRuleEditOutcome::Confirmed(summary) => {
+                        self.ui.notice = Some(Feedback::History(summary));
+                        readmit_host_permissions(&self.engine, &mut self.ui.notice);
+                    }
+                    permissions::HostRuleEditOutcome::Uncertain => self.ui.notice = Some(Feedback::History("Host rule save is uncertain; reopen /permissions to verify. Nothing dispatched.".into())),
+                }
+                return Ok(IdleAction::Handled);
+            }
             Some(permissions::PermissionArea::FolderTrust) => {}
         }
 

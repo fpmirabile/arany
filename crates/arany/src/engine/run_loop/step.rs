@@ -1030,6 +1030,8 @@ impl RunLoop<'_> {
                 Grant::Primary { .. } if intent.call.is_unguarded() => Some(Unguarded {
                     gate: unguarded_gate(runtime, &intent).await.map(|mut prompt| {
                         prompt.remember = host_permission.remember;
+                        prompt.prefix =
+                            host_permission.prefix && runtime.host_prefix_candidate(&intent);
                         prompt
                     }),
                 }),
@@ -1254,7 +1256,10 @@ impl RunLoop<'_> {
         let remember = prompt.as_ref().is_some_and(|prompt| prompt.remember);
         match reply {
             ApprovalReply::AllowForSession if !remember => ApprovalReply::Unavailable,
-            ApprovalReply::AllowPrefixInFolder if remember_prefix.is_none() => {
+            ApprovalReply::AllowPrefixInFolder
+                if remember_prefix.is_none()
+                    && !prompt.as_ref().is_some_and(|prompt| prompt.prefix) =>
+            {
                 if intent.call.is_unguarded() || intent.call.is_host() {
                     ApprovalReply::Unavailable
                 } else {
@@ -1594,12 +1599,27 @@ impl RunLoop<'_> {
                     resolution.save = match reply {
                         ApprovalReply::AllowForSession => Some(RuleSave::Session),
                         ApprovalReply::AllowPrefixInFolder => {
-                            options.remember_prefix.map(RuleSave::Prefix)
+                            options.remember_prefix.map(RuleSave::Prefix).or_else(|| {
+                                options
+                                    .unguarded_prompt
+                                    .as_ref()
+                                    .filter(|prompt| prompt.prefix)
+                                    .map(|_| RuleSave::HostPrefix)
+                            })
                         }
                         ApprovalReply::Deny
                         | ApprovalReply::Unavailable
                         | ApprovalReply::AllowOnce => None,
                     };
+                    if reply == ApprovalReply::AllowPrefixInFolder && resolution.save.is_none()
+                        || reply == ApprovalReply::AllowForSession
+                            && !options
+                                .unguarded_prompt
+                                .as_ref()
+                                .is_some_and(|prompt| prompt.remember)
+                    {
+                        resolution.approved = false;
+                    }
                     let resume_at = resolution.approved.then(Instant::now);
                     self.settle_active_pause(pause, resume_at)?;
                 }
@@ -1848,6 +1868,7 @@ async fn unguarded_gate(
         executable: pin.executable.clone(),
         attribution: None,
         remember: true,
+        prefix: false,
         sensitive: crate::tools::unguarded::sensitive(&intent.call, pin),
         inactive_rules: runtime.has_inactive_host_rules(),
     })

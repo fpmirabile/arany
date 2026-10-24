@@ -63,8 +63,7 @@ pub(crate) const UNGUARDED_COMMANDS: RecordFormat = RecordFormat {
 impl ExactCommandRules {
     pub(crate) fn load(state: &StateRoot) -> Result<Option<Self>, ToolError> {
         state
-            .record(RecordKind::UnguardedCommands)
-            .present()
+            .archive_inactive_host_rules()
             .map(|present| present.then_some(Self))
             .map_err(|_| ToolError::Configuration)
     }
