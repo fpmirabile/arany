@@ -18,6 +18,9 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 const INVOKED_SKILL_ENVELOPE_BYTES: usize = 1024;
+const EDITOR_RUNTIME_DIVISOR: u64 = 4;
+// Cache restoration and publication need additional time within the delegation allowance.
+const EDITOR_RUNTIME_WITH_CACHE_DIVISOR: u64 = 6;
 
 mod checkpoint;
 mod dispatch;
@@ -413,6 +416,20 @@ struct ActiveTime {
     exhausted: bool,
 }
 
+fn sizing_deadline_refusal(cause: Option<ActiveDeadlineCause>) -> SizingRefusal {
+    match cause {
+        Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
+        Some(ActiveDeadlineCause::Delegation) | None => SizingRefusal::DelegationDeadline,
+    }
+}
+
+fn timeout_limit_cause(cause: Option<ActiveDeadlineCause>) -> Option<crate::tools::LimitCause> {
+    match cause {
+        Some(ActiveDeadlineCause::Goal) => None,
+        Some(ActiveDeadlineCause::Delegation) | None => Some(crate::tools::LimitCause::Timeout),
+    }
+}
+
 // Boxing a large future in a non-async wrapper keeps debug-build callers from holding it in their own frames.
 pub(in crate::engine) type BoxedStep<'a, T> =
     std::pin::Pin<Box<dyn Future<Output = Result<T, EngineError>> + Send + 'a>>;
@@ -610,16 +627,12 @@ impl RunLoop<'_> {
                 deadline,
                 active_deadline,
             } => {
-                let deadline_refusal = match active_deadline
-                    .as_ref()
-                    .filter(|deadline| deadline.reached())
-                    .map(|deadline| deadline.cause)
-                {
-                    Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
-                    Some(ActiveDeadlineCause::Delegation) | None => {
-                        SizingRefusal::DelegationDeadline
-                    }
-                };
+                let deadline_refusal = sizing_deadline_refusal(
+                    active_deadline
+                        .as_ref()
+                        .filter(|deadline| deadline.reached())
+                        .map(|deadline| deadline.cause),
+                );
                 let deadline = grant.deadline().unwrap_or(*deadline);
                 let Some(mut intent) = self.researcher_intent(runtime, child, call, deadline)
                 else {
@@ -689,12 +702,15 @@ impl RunLoop<'_> {
                     + STORE_ACTION_OVERHEAD,
             );
         let remaining = remaining.saturating_sub(self.hook_time(runtime, &intent.call, remaining));
-        intent.limits.runtime_ms = intent.limits.runtime_ms.min(
-            u32::try_from(
-                duration_ms(remaining) / if intent.limits.cache_bytes > 0 { 6 } else { 4 },
-            )
-            .unwrap_or(u32::MAX),
-        );
+        let runtime_divisor = if intent.limits.cache_bytes > 0 {
+            EDITOR_RUNTIME_WITH_CACHE_DIVISOR
+        } else {
+            EDITOR_RUNTIME_DIVISOR
+        };
+        intent.limits.runtime_ms = intent
+            .limits
+            .runtime_ms
+            .min(u32::try_from(duration_ms(remaining) / runtime_divisor).unwrap_or(u32::MAX));
         intent.limits.cache_transfer_ms = if intent.limits.cache_bytes > 0 {
             intent.limits.runtime_ms
         } else {
@@ -1000,9 +1016,8 @@ impl RunLoop<'_> {
                     };
                     if timed_out && observation.disposition == ToolDisposition::Cancelled {
                         observation.disposition = ToolDisposition::Limit;
-                        observation.limit_cause = (active_deadline.map(|d| d.cause)
-                            != Some(crate::engine::ledger::ActiveDeadlineCause::Goal))
-                        .then_some(crate::tools::LimitCause::Timeout);
+                        observation.limit_cause =
+                            timeout_limit_cause(active_deadline.map(|d| d.cause));
                     }
                     Answer {
                         checkpoint: None,
@@ -2677,6 +2692,32 @@ fn effective_permission_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sizing_and_timeout_limits_preserve_distinct_deadline_causes() {
+        use crate::tools::LimitCause;
+
+        for (cause, sizing, limit) in [
+            (
+                Some(ActiveDeadlineCause::Goal),
+                SizingRefusal::ActiveTime,
+                None,
+            ),
+            (
+                Some(ActiveDeadlineCause::Delegation),
+                SizingRefusal::DelegationDeadline,
+                Some(LimitCause::Timeout),
+            ),
+            (
+                None,
+                SizingRefusal::DelegationDeadline,
+                Some(LimitCause::Timeout),
+            ),
+        ] {
+            assert_eq!(sizing_deadline_refusal(cause), sizing, "sizing: {cause:?}");
+            assert_eq!(timeout_limit_cause(cause), limit, "timeout: {cause:?}");
+        }
+    }
 
     #[test]
     fn review_resolution_preserves_site_exhaustion_and_interruption_decisions() {
