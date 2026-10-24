@@ -146,7 +146,7 @@ mkdir -p .lavish && head -c 65536 crates/arany/src/provider.rs > .lavish/src.txt
 
 Prompt: "Read `.lavish/src.txt` in full, paging with offset and limit until you reach the end, then Write an exact byte-for-byte copy to `.lavish/big.txt` in a single Write call. Do not abbreviate, summarize or reformat anything; the two files must be identical."
 
-Verify: `cmp .lavish/src.txt .lavish/big.txt && echo identical`; `arany show` lists one `ToolFinished` for the Write with 65,536 bytes and a `ProviderCallRecorded` whose visible output is below 32,768 and whose status is not `local_output_limit`. Failure path: repeat with `head -c 65537`; the Write must be refused with the 65,536-byte limit and the model must report the refusal rather than truncate. Then close [NEXT_STEPS item 10](../../NEXT_STEPS.md) and record the route evidence there.
+Verify: `cmp .lavish/src.txt .lavish/big.txt && echo identical`; `arany show` lists one `ToolFinished` for the Write with 65,536 bytes and a `ProviderCallRecorded` whose visible output is below 32,768 and whose status is not `local_output_limit`. Failure path: repeat with `head -c 65537`; the Write must be refused with the 65,536-byte limit and the model must report the refusal rather than truncate. Then close [NEXT_STEPS item 9](../../NEXT_STEPS.md) and record the route evidence there.
 
 ## Exit criteria
 

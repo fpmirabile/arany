@@ -5,7 +5,7 @@
 - Status: `In progress`
 - Owner: Arany lead (`fpmirabile`); implementation and native measurement assignees to be named by the lead.
 - Last updated: `2026-10-22`
-- Priority: [NEXT_STEPS.md:23](../../NEXT_STEPS.md), Daily use first, item 6.
+- Priority: [NEXT_STEPS.md](../../NEXT_STEPS.md#daily-use-first), Daily use first, item 5.
 - Next action: validate slice 1 in CI and on a qualified native host, then implement slice 2; native evidence gaps are tracked in NEXT_STEPS.
 
 ## Outcome and scope
