@@ -256,7 +256,7 @@ fn supervisor_call_equality_excludes_intent_identity_and_hashes_content() {
         observation.disposition = ToolDisposition::Failed;
         observation.attestation = None;
         observation.output = "payload".into();
-        let (site, step, footprint) = subject(&view.runs[0], fixture.child, &envelope).unwrap();
+        let (site, step, footprint) = subject(&view.runs[0], fixture.child, &envelope, 1).unwrap();
         assert_eq!(site, Site::ToolOutcome);
         assert!(footprint.is_none());
         assert_eq!(step.call, call_key(&a));
@@ -318,7 +318,7 @@ fn supervisor_worker_command_outcomes_ignore_seal_sequences_and_keep_the_exit_cl
             },
         })
         .unwrap();
-        subject(&view.runs[0], fixture.child, &envelope)
+        subject(&view.runs[0], fixture.child, &envelope, 1)
             .unwrap()
             .1
             .outcome
@@ -378,7 +378,7 @@ fn supervisor_footprint_uses_only_leased_base_and_evicts_whole_actor_steps() {
             executable: false,
         },
     }];
-    let f = capture_features(&view.runs[0], actor, &facts);
+    let f = capture_features(&view.runs[0], actor, &facts, 1);
     assert_eq!(
         (f.base_kib, f.changed_kib, f.growth_permille),
         (Some(16), 64, Some(4000))
@@ -507,7 +507,7 @@ fn primary_proposal_refusals_are_stalls_without_marking_account_rejections() {
         record.cache_creation_input_tokens = None;
         record.wire_provenance = None;
         envelope.event.payload().expect("current call record");
-        let boundary = subject(run, actor, &envelope);
+        let boundary = subject(run, actor, &envelope, 1);
         assert_eq!(
             boundary.is_some(),
             stalled,

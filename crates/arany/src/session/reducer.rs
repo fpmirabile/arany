@@ -278,7 +278,7 @@ impl AgentView {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunView {
     pub skill: Option<String>,
-    pub supervisor: crate::supervisor::SupervisorState,
+    pub supervisor: crate::supervisor::SupervisorVerdicts,
     pub workers: WorkerState,
     pub id: RunId,
     pub objective: String,
@@ -1132,7 +1132,8 @@ impl SessionView {
         {
             return Err(ReplayError::InvalidTransition);
         }
-        if crate::supervisor::SupervisorState::before(self, envelope)? {
+        if matches!(envelope.event, Event::SupervisorVerdictRecorded { .. }) {
+            crate::supervisor::SupervisorVerdicts::record(self, envelope)?;
             self.rewinds.prefix.update(envelope)?;
             self.last_sequence = envelope.sequence;
             return Ok(());
@@ -1254,7 +1255,7 @@ impl SessionView {
                 .insert(*agent_run_id, prior);
         }
         worker::after_event(current, &envelope.event, prior)?;
-        crate::supervisor::SupervisorState::after(current, envelope);
+        crate::supervisor::SupervisorVerdicts::place(current, envelope);
         if let Event::RunStarted { run_id, .. } = envelope.event {
             current
                 .rewinds

@@ -2121,17 +2121,28 @@ fn final_answer_message_followed_by_a_call_is_a_contract_failure() {
 }
 
 #[test]
-fn read_arguments_require_nullable_line_ranges() {
+fn read_arguments_default_nullable_line_ranges_and_preserve_bounds() {
     let request = primary_request(MODEL);
     for (offset, limit, accepted) in [
-        (json!(null), json!(null), true),
-        (json!(1), json!(2000), true),
-        (json!(u32::MAX), json!(1), true),
-        (json!(0), json!(1), false),
-        (json!(1), json!(0), false),
-        (json!(1), json!(2001), false),
+        (None, None, true),
+        (Some(json!(null)), None, true),
+        (None, Some(json!(null)), true),
+        (Some(json!(3)), None, true),
+        (None, Some(json!(7)), true),
+        (Some(json!(null)), Some(json!(null)), true),
+        (Some(json!(1)), Some(json!(2000)), true),
+        (Some(json!(u32::MAX)), Some(json!(1)), true),
+        (Some(json!(0)), Some(json!(1)), false),
+        (Some(json!(1)), Some(json!(0)), false),
+        (Some(json!(1)), Some(json!(2001)), false),
     ] {
-        let args = json!({"path":"README.md","offset":offset,"limit":limit});
+        let mut args = json!({"path":"README.md"});
+        if let Some(value) = &offset {
+            args["offset"] = value.clone();
+        }
+        if let Some(value) = &limit {
+            args["limit"] = value.clone();
+        }
         let fixture = response("completed", json!([function_call("arany_read", &args)]));
         let decoded = decode(&request, &fixture).expect("typed range reaches Engine validation");
         let ProviderOutcome::Tools(calls) = decoded.outcome else {
@@ -2141,15 +2152,13 @@ fn read_arguments_require_nullable_line_ranges() {
         assert_eq!(calls[0].call.valid(), accepted, "{args}");
         assert_eq!(
             serde_json::to_value(&calls[0].call).unwrap(),
-            json!({"operation":"read", "path":"README.md", "offset":offset, "limit":limit})
+            json!({"operation":"read", "path":"README.md", "offset":offset.unwrap_or(Value::Null), "limit":limit.unwrap_or(Value::Null)})
         );
     }
     for args in [
         json!({"path":"README.md","offset":-1,"limit":1}),
         json!({"path":"README.md","offset":1.5,"limit":1}),
         json!({"path":"README.md","offset":u64::from(u32::MAX) + 1,"limit":1}),
-        json!({"path":"README.md","offset":null}),
-        json!({"path":"README.md","limit":null}),
     ] {
         assert!(
             decode(

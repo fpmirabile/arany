@@ -537,6 +537,10 @@ impl ProviderIdentity {
         }
     }
 
+    pub(crate) fn ceiling_retry_cause(&self) -> Option<RetryCause> {
+        self.chatgpt_provenance().map(|_| RetryCause::StreamCut)
+    }
+
     pub(crate) fn valid(&self) -> bool {
         let provider = ProviderKind::parse(&self.profile);
         let chatgpt = provider == Some(ProviderKind::ChatGpt);
@@ -1366,6 +1370,35 @@ mod tests {
         assert_eq!(ProviderKind::custom_name("custom:"), Some(""));
         assert_eq!(ProviderKind::custom_name("custom:local"), Some("local"));
         assert_eq!(ProviderKind::custom_name("local"), None);
+    }
+
+    #[test]
+    fn only_chatgpt_ceiling_timeouts_are_retryable_stream_cuts() {
+        for (profile, provenance, expected) in [
+            ("openai", Provenance::native(), None),
+            ("anthropic", Provenance::native(), None),
+            (
+                "custom:local",
+                Provenance::Custom(CustomProfileProvenance {
+                    endpoint: "https://example.com/v1/responses".into(),
+                    evidence_digest: [7; 32],
+                    capability_evidence_version: 2,
+                }),
+                None,
+            ),
+            (
+                "chatgpt",
+                Provenance::ChatGpt(ChatGptProvenance {
+                    account_id: Uuid::now_v7(),
+                    evidence_fingerprint: [7; 32],
+                    admission: ChatGptAdmission::AccountConsent,
+                }),
+                Some(RetryCause::StreamCut),
+            ),
+        ] {
+            let identity = ProviderIdentity::new(profile, "model-a", provenance);
+            assert_eq!(identity.ceiling_retry_cause(), expected, "{profile}");
+        }
     }
 
     #[test]

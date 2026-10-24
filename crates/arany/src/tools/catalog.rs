@@ -105,7 +105,7 @@ pub(crate) static ALL: [OperationFacts; 24] = [
         "read",
         Family::File,
         1,
-        "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+        "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
     ),
     read_row(
         "search",
@@ -330,8 +330,8 @@ pub(crate) fn git_operations(write: bool, host: bool) -> Vec<&'static str> {
         .collect()
 }
 
-pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication)";
-pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset, nullable limit 1..2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
+pub(crate) const FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset; use Read or a file include for edit sha256), mkdir (new directory; parent must exist), write (null digest only creates), edit (unique literal match, expected sha256), multiedit (1..64 ordered literal replacements to one existing file, expected sha256, atomic publication)";
+pub(crate) const RESEARCH_FILE_TOOLS: &str = "list (directory entries), read (UTF-8, nullable 1-based line offset defaulting to 1, nullable limit 1..2000 defaulting to 2000, numbered lines, whole-file sha256), search (literal or regex lines in a file or directory, include glob, case control, up to 100 rows per page with next_offset)";
 pub(crate) const WORKER_COMMAND_CONTRACT: &str = "Explicit argv only. Use ARANY_TOOL_WORKSPACE and ARANY_TOOL_INPUTS for private paths. Commands reconstruct the current private assignment image offline without .git; accepted captures update that view. Only the primary publishes a handover and re-verifies it in the Workspace. Cache changes are discarded.";
 
 pub(crate) const COMMAND_PROJECT_COPY: &str = "The command's project copy has no .git";
