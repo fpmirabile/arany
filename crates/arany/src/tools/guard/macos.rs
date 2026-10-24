@@ -255,6 +255,8 @@ pub(super) fn enforcement_digest() -> Result<[u8; 32], ToolError> {
     bytes.extend_from_slice(b";worker-command-image-v1-shared-cache-discard-only");
     bytes.extend_from_slice(MACOS_SELECTION_CONTRACT);
     bytes.extend_from_slice(&super::super::discovery::enforcement_contract());
+    bytes.extend_from_slice(super::DISCOVERY_DONE);
+    bytes.extend_from_slice(super::super::git::DISCLOSURE_CONTRACT);
     bytes.extend_from_slice(b";runtime-compat-v1:public-vm-page-size-sysconf-getpagesize;non-page-sysconf-forward;fixed-cleared-dyld-env;known-pinned-sh-c-fixed-quoted-export-reject-option-script-position;no-sysctl-policy-exception;read-only-nofollow-exact-bytes;128KiB-runtime-budget");
     bytes.extend_from_slice(RUNTIME_COMPAT_BYTES);
     bytes.extend_from_slice(include_bytes!("macos/runtime_compat.c"));
@@ -1093,6 +1095,44 @@ async fn read_command_windows(
     }
 }
 
+async fn worker_receipt(
+    mut stdin: tokio::process::ChildStdin,
+    stdout: &mut BufReader<tokio::process::ChildStdout>,
+    runtime: &ToolRuntime,
+    intent: &EffectIntent,
+    control: &mut tokio::net::unix::OwnedWriteHalf,
+) -> Result<WorkerOutput, ToolError> {
+    let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
+    stdin
+        .write_all(b"GO\n")
+        .await
+        .map_err(|_| ToolError::Operation)?;
+    drop(stdin);
+    let windows = read_command_windows(stdout, runtime, intent).await?;
+    let observation = if runtime.worker.is_some() {
+        super::read_worker_observation(
+            stdout,
+            runtime,
+            intent,
+            Duration::from_millis(u64::from(intent.limits.runtime_ms)),
+        )
+        .await?
+    } else {
+        read_observation(stdout, intent).await?
+    };
+    if super::super::discovery::possible(&intent.call) {
+        control
+            .write_all(super::DISCOVERY_DONE)
+            .await
+            .map_err(|_| ToolError::Operation)?;
+    }
+    capture.complete();
+    Ok(WorkerOutput {
+        observation,
+        windows,
+    })
+}
+
 async fn execute_worker(
     runtime: &ToolRuntime,
     intent: &EffectIntent,
@@ -1158,31 +1198,10 @@ async fn execute_worker(
             } else {
                 Duration::ZERO
             };
-            tokio::time::timeout_at(payload_deadline, async {
-                let capture = fixture::Span::begin(fixture::Stage::WorkerReceipt);
-                stdin
-                    .write_all(b"GO\n")
-                    .await
-                    .map_err(|_| ToolError::Operation)?;
-                drop(stdin);
-                let windows = read_command_windows(&mut stdout, runtime, intent).await?;
-                let observation = if runtime.worker.is_some() {
-                    super::read_worker_observation(
-                        &mut stdout,
-                        runtime,
-                        intent,
-                        Duration::from_millis(u64::from(intent.limits.runtime_ms)),
-                    )
-                    .await?
-                } else {
-                    read_observation(&mut stdout, intent).await?
-                };
-                capture.complete();
-                Ok(WorkerOutput {
-                    observation,
-                    windows,
-                })
-            })
+            tokio::time::timeout_at(
+                payload_deadline,
+                worker_receipt(stdin, &mut stdout, runtime, intent, control),
+            )
             .await
             .map_err(|_| ToolError::Limit)?
         };
