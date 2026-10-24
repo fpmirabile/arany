@@ -577,12 +577,19 @@ mod tests {
             exhausted_limit(&goal)
         };
         type Change = fn(&mut GoalView);
-        let rows: [(Change, GoalLimit); 7] = [
+        let rows: [(Change, GoalLimit); 8] = [
             (|_| {}, GoalLimit::Runs),
             (|goal| goal.active_ms = 55_000, GoalLimit::ActiveTime),
             (|goal| goal.provider_calls = 4, GoalLimit::Calls),
             (|goal| goal.known_tokens = 100, GoalLimit::Tokens),
             (|goal| goal.token_usage_unknown = true, GoalLimit::Tokens),
+            (
+                |goal| {
+                    goal.known_tokens = 100;
+                    goal.provider_calls = 4;
+                },
+                GoalLimit::Tokens,
+            ),
             (
                 |goal| {
                     goal.provider_calls = 4;
