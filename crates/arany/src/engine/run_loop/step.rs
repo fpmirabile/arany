@@ -538,7 +538,10 @@ impl RunLoop<'_> {
                 deadline,
                 active_deadline,
             } => {
-                let deadline_refusal = match active_deadline.as_ref().map(|deadline| deadline.cause)
+                let deadline_refusal = match active_deadline
+                    .as_ref()
+                    .filter(|deadline| deadline.reached())
+                    .map(|deadline| deadline.cause)
                 {
                     Some(ActiveDeadlineCause::Goal) => SizingRefusal::ActiveTime,
                     Some(ActiveDeadlineCause::Delegation) | None => {

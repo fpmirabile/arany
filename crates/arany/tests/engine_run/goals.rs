@@ -5793,7 +5793,7 @@ fn child_tool_starts(events: &[arany::EventEnvelope], child: arany::AgentRunId) 
 }
 
 #[tokio::test]
-async fn child_tool_sizing_keeps_the_goal_active_time_cause() {
+async fn child_tool_sizing_does_not_exhaust_unspent_goal_time() {
     const GOAL_ACTIVE_MS: u64 = 120_000;
     const ACTIVE_MS_PER_CALL: u64 = 50_000;
     let temp = tempfile::tempdir().expect("temporary root");
@@ -5835,22 +5835,24 @@ async fn child_tool_sizing_keeps_the_goal_active_time_cause() {
     )
     .await
     .expect("bounded child Run");
-    assert_eq!(
-        outcome.run.failure,
-        Some(arany::RunFailure::BudgetExhausted)
-    );
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
     engine.close().await.expect("engine shutdown");
     let (events, view) = replayed(&state_path, outcome.session_id).await;
     assert_eq!(requests.lock().expect("requests").len(), 2);
-    assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event.event, Event::ToolStarted { .. }))
-    );
+    let child = view.runs[0].agents[1].id;
+    assert_eq!(child_tool_starts(&events, child), 1);
+    let tool = &view.runs[0].agents[1].tools[0];
+    let observation = tool.observation.as_ref().expect("sizing observation");
+    assert_eq!(observation.disposition, arany::ToolDisposition::Limit);
+    assert_eq!(observation.limit_cause, Some(arany::LimitCause::Timeout));
     assert_eq!(
-        view.runs[0].failure,
-        Some(arany::RunFailure::BudgetExhausted)
+        observation.output,
+        "Delegation deadline reached; no operation was dispatched"
     );
+    assert!(observation.attestation.is_none());
+    assert!(tool.hooks.is_empty());
+    assert!(!view.goal(outcome.goal_id).expect("Goal").budget_closed);
+    assert_eq!(view.runs[0].failure, Some(arany::RunFailure::ToolStopped));
 }
 
 #[tokio::test]
@@ -6413,10 +6415,12 @@ async fn near_deadline_child_tool_journals_limit_without_dispatch() {
     .await
     .expect("Run");
     assert_eq!(outcome.run.status, RunStatus::Failed);
+    assert_eq!(outcome.run.failure, Some(arany::RunFailure::ToolStopped));
     engine.close().await.expect("engine shutdown");
     assert_eq!(requests.lock().expect("requests").len(), 2);
 
     let (events, view) = replayed(&state_path, outcome.session_id).await;
+    assert!(!view.goal(outcome.goal_id).expect("Goal").budget_closed);
     let child = view.runs[0].agents[1].id;
     assert_eq!(child_tool_starts(&events, child), 1);
     let tool = &view.runs[0].agents[1].tools[0];
