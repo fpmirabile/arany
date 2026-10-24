@@ -86,6 +86,7 @@ pub(super) enum StepEnd {
 }
 
 #[must_use]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum SizingRefusal {
     DelegationDeadline,
     ActiveTime,

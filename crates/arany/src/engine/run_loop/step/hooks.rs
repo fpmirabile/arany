@@ -1058,6 +1058,7 @@ impl RunLoop<'_> {
             HookClock::Deadline(deadline) => {
                 let cancellation = crate::engine::RunCancellation::new();
                 let mut parent = self.controls.cancellation.clone();
+                let _active_work = self.ledger().active_work();
                 let mut execution = Box::pin(runtime.execute(hook_intent, cancellation.clone()));
                 let observation = tokio::select! {
                     observation = &mut execution => observation,
