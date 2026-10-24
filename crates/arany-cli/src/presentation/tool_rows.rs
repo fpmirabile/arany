@@ -5,6 +5,7 @@ use std::borrow::Cow;
 
 pub(crate) fn tool_summary(tool: &arany::ToolView) -> String {
     use arany::{ToolCall, ToolDisposition};
+    // Keep compact row labels as one exhaustive variant table.
     let operation = match &tool.intent.call {
         ToolCall::ApplyChangeset {
             source: arany::worker::ChangesetSource::Rewind { .. },
@@ -431,6 +432,13 @@ pub fn unguarded_approval_lines(
 }
 
 pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
+    let mut lines = approval_header(intent);
+    lines.extend(approval_call_lines(&intent.call));
+    lines.extend(approval_footer(intent));
+    lines
+}
+
+fn approval_header(intent: &arany::EffectIntent) -> Vec<String> {
     use arany::ToolCall;
     let mut lines = vec!["Proposed action".to_owned()];
     if intent.call.is_host() {
@@ -444,7 +452,16 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
             ));
             lines.push(format!("Refspec: {}", escape_terminal(&host.refspec)));
         }
-        match &intent.call {
+    }
+    lines
+}
+
+// Keep approval details as one exhaustive per-variant table.
+fn approval_call_lines(call: &arany::ToolCall) -> Vec<String> {
+    use arany::ToolCall;
+    let mut lines = Vec::new();
+    if call.is_host() {
+        match call {
             ToolCall::GitPush { remote, branch } => {
                 lines.push(format!("Destination: {}", escape_terminal(remote)));
                 lines.push(format!("Branch: {}", escape_terminal(branch)));
@@ -479,7 +496,7 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
         }
         return lines;
     }
-    match &intent.call {
+    match call {
         ToolCall::Write {
             path,
             expected_digest,
@@ -643,12 +660,18 @@ pub fn tool_approval_lines(intent: &arany::EffectIntent) -> Vec<String> {
             );
         }
         _ => lines.push(escape_terminal(
-            &serde_json::to_string(&intent.call).expect("typed action"),
+            &serde_json::to_string(call).expect("typed action"),
         )),
     }
-    lines.push(String::new());
-    lines.push("Allow once for this exact action".into());
     lines
+}
+
+fn approval_footer(intent: &arany::EffectIntent) -> Vec<String> {
+    if intent.call.is_host() {
+        Vec::new()
+    } else {
+        vec![String::new(), "Allow once for this exact action".into()]
+    }
 }
 
 fn changeset_version_lines(
