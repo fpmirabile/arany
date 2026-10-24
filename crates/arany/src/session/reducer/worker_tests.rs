@@ -537,6 +537,41 @@ pub(crate) fn fixture() -> Fixture {
     )
 }
 
+#[test]
+fn worker_editor_output_is_bounded_by_its_selected_route() {
+    for cap in [
+        crate::provider::DEFAULT_OUTPUT_TOKEN_CAP * 2,
+        crate::provider::MAX_OUTPUT_TOKEN_CAP,
+    ] {
+        for (output, accepted) in [
+            (crate::provider::DEFAULT_OUTPUT_TOKEN_CAP + 1, true),
+            (cap, true),
+            (cap + 1, false),
+        ] {
+            let mut f = fixture();
+            for event in &mut f.events {
+                if let Event::RunStarted { config, .. } = event {
+                    config.output_token_cap = cap;
+                }
+            }
+            f.call(
+                f.child,
+                AgentPhase::ChildWork,
+                ProviderCallDisposition::Finished,
+                None,
+            );
+            if let Some(Event::ProviderCallRecorded { record, .. }) = f.events.last_mut() {
+                record.output_tokens = Some(output);
+            }
+            assert_eq!(
+                SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
+                accepted,
+                "editor output {output} with route cap {cap}"
+            );
+        }
+    }
+}
+
 fn fixture_with_manifest(
     manifest: WorkerManifest,
     definition_tools: Vec<String>,

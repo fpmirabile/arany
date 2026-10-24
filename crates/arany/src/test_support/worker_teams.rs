@@ -333,10 +333,30 @@ impl TeamProvider {
             skills: Vec::new(),
             mcp_tools: Vec::new(),
             budget: self.budget,
-            success_criterion: GoalSuccessCriterion::WorkspaceFileContent {
-                path: "notes/0".into(),
-                content: "edited 0".into(),
-            },
+            success_criterion: self.file_criterion(0),
+        }
+    }
+
+    fn edited_content(&self, index: usize) -> String {
+        if self.case == "large_write" && index == 0 {
+            "x".repeat(crate::tools::types::MAX_EDIT_CONTENT_BYTES)
+        } else {
+            format!("edited {index}")
+        }
+    }
+
+    fn file_criterion(&self, index: usize) -> GoalSuccessCriterion {
+        let content = self.edited_content(index);
+        if self.case == "large_write" && index == 0 {
+            GoalSuccessCriterion::WorkspaceFileDigest {
+                path: format!("notes/{index}"),
+                sha256: crate::validate::hex_digest(content.as_bytes()),
+            }
+        } else {
+            GoalSuccessCriterion::WorkspaceFileContent {
+                path: format!("notes/{index}"),
+                content,
+            }
         }
     }
 
@@ -386,10 +406,7 @@ impl TeamProvider {
                         } else {
                             format!("notes/{number}")
                         }],
-                        criterion: GoalSuccessCriterion::WorkspaceFileContent {
-                            path: format!("notes/{number}"),
-                            content: format!("edited {number}"),
-                        },
+                        criterion: self.file_criterion(number),
                         mode: if matches!(
                             self.case,
                             "background"
@@ -529,7 +546,7 @@ impl TeamProvider {
             return Ok(tool_outcome(ToolCall::Write {
                 path: format!("notes/{index}"),
                 expected_digest: Some(crate::validate::hex_digest(original.as_bytes())),
-                content: format!("edited {index}"),
+                content: self.edited_content(index),
             }));
         }
         self.check(step == write_step + 1, "unexpected child continuation");
@@ -590,6 +607,9 @@ impl TeamProvider {
         if pending && prior != 1 {
             *stale = observations.len() + 1;
             return tool_outcome(Self::read("notes/0"));
+        }
+        if self.case == "large_write" && !pending {
+            return finish_with("Primary verified team");
         }
         observations.drain(..(*stale).min(observations.len()));
         drop(stale);
@@ -744,7 +764,16 @@ impl Provider for TeamProvider {
             response_id: None,
             usage: Usage {
                 input_tokens: Some(1),
-                output_tokens: Some(1),
+                output_tokens: Some(
+                    if self.case == "large_write"
+                        && request.phase == AgentPhase::ChildWork
+                        && step == 0
+                    {
+                        crate::provider::DEFAULT_OUTPUT_TOKEN_CAP + 1
+                    } else {
+                        1
+                    },
+                ),
                 ..Default::default()
             },
             wire_provenance: None,
@@ -849,6 +878,9 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (ready, mut arrivals) = mpsc::channel(16);
     let (completed, mut completions) = mpsc::unbounded_channel();
     let mut identity = ProviderIdentity::new("scripted", "test-model", Provenance::native());
+    if case == "large_write" {
+        identity.limits.max_output_tokens = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+    }
     identity.limits.concurrency = 8;
     if matches!(case, "delegation_deadline" | "primary_delegation_deadline") {
         identity.limits.deadline = crate::MAX_DELEGATION_DEADLINE;
@@ -986,7 +1018,7 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                     else if approval_journey_case(case) {
                         approval_journey.arrival(index, &provider).await;
                     }
-                    else if matches!(case, "tokens" | "waves" | "reassign") { provider.gates[index].add_permits(1); }
+                    else if matches!(case, "tokens" | "waves" | "reassign" | "large_write") { provider.gates[index].add_permits(1); }
                     else if matches!(case, "cap" | "hard_cap") {
                         let cap = if case == "hard_cap" { 8 } else { 4 };
                         if ready.len() == cap {
@@ -1072,6 +1104,50 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
     let (events, view) = replayed(&state, session).await;
     assert_action_bounds(&events, false, false);
     let run = &view.runs[0];
+    if case == "large_write" {
+        let requests = provider.requests.lock().unwrap();
+        assert!(requests.iter().any(|request| {
+            request.phase == AgentPhase::RootPlan
+                && request.max_output_tokens == crate::provider::MAX_OUTPUT_TOKEN_CAP
+        }));
+        assert!(requests.iter().any(|request| {
+            request.phase == AgentPhase::ChildWork
+                && request.max_output_tokens == crate::provider::MAX_OUTPUT_TOKEN_CAP
+        }));
+        assert_eq!(
+            run.agents[1].provider_calls[0].output_tokens,
+            Some(crate::provider::DEFAULT_OUTPUT_TOKEN_CAP + 1)
+        );
+        let writes = events
+            .iter()
+            .filter_map(|event| match &event.event {
+                Event::ToolFinished { observation, .. }
+                    if observation.intent.agent_run_id != run.agents[0].id
+                        && matches!(&observation.intent.call, ToolCall::Write { path, content, .. }
+                            if path == "notes/0"
+                                && content.len() == crate::tools::types::MAX_EDIT_CONTENT_BYTES) =>
+                {
+                    Some(observation)
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].disposition, ToolDisposition::Succeeded);
+        assert_eq!(
+            std::fs::read(workspace.join("notes/0")).unwrap(),
+            vec![b'x'; crate::tools::types::MAX_EDIT_CONTENT_BYTES]
+        );
+        assert!(
+            run.agents[1]
+                .assignment
+                .as_ref()
+                .unwrap()
+                .integration
+                .as_ref()
+                .is_some_and(|(_, record)| record.outcome == WorkerIntegrationOutcome::Integrated)
+        );
+    }
     if case == "primary_delegation_deadline" {
         assert!(primary_tool_gated, "primary Tool commit gate did not run");
         assert!(events.iter().any(|event| matches!(
