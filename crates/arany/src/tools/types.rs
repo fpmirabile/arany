@@ -239,9 +239,9 @@ pub enum ToolCall {
     },
     Read {
         path: String,
-        #[serde(deserialize_with = "Option::deserialize")]
+        #[serde(default, deserialize_with = "Option::deserialize")]
         offset: Option<u32>,
-        #[serde(deserialize_with = "Option::deserialize")]
+        #[serde(default, deserialize_with = "Option::deserialize")]
         limit: Option<u32>,
     },
     // Omitted options take their defaults and serialize omitted, so default calls keep one canonical form.
