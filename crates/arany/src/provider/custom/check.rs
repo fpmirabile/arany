@@ -519,7 +519,9 @@ mod tests {
         ChunkedOversize,
         EncodedBody,
         EncodedBodyAfterIdentity,
+        #[cfg(debug_assertions)]
         Disconnect,
+        #[cfg(debug_assertions)]
         MalformedJson,
         EscapedCredential,
         MissingUsage,
@@ -707,9 +709,6 @@ mod tests {
                 continue;
             }
 
-            if matches!(reply, ProbeReply::Disconnect) {
-                continue;
-            }
             let (status, response_body) = match reply {
                 ProbeReply::Redirect => ("302 Found", String::new()),
                 ProbeReply::Unauthorized => ("401 Unauthorized", String::new()),
@@ -719,8 +718,10 @@ mod tests {
                     json!({"error":{"type":"insufficient_quota"}}).to_string(),
                 ),
                 ProbeReply::Oversize => ("200 OK", String::new()),
+                #[cfg(debug_assertions)]
                 ProbeReply::MalformedJson => ("200 OK", "{".to_owned()),
-                ProbeReply::Disconnect => unreachable!(),
+                #[cfg(debug_assertions)]
+                ProbeReply::Disconnect => continue,
                 ProbeReply::EncodedBody | ProbeReply::EncodedBodyAfterIdentity => unreachable!(),
                 ProbeReply::Valid
                 | ProbeReply::CompactionRejected
