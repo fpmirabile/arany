@@ -272,6 +272,7 @@ impl Provider for AnthropicProvider {
             &self.key,
             &self.identity.model,
             Some(preview),
+            request.max_output_tokens,
         )
         .await?;
         self.decode_run(&bytes, &request, &conversation)
@@ -298,10 +299,16 @@ pub(super) async fn read_streamed_reply(
     key: &str,
     model: &str,
     preview: Option<super::ResponsePreview>,
+    max_output_tokens: u32,
 ) -> Result<Vec<u8>, ProviderError> {
-    super::streaming::validate_stream_response(response)?;
+    super::streaming::validate_stream_response(response, max_output_tokens)?;
     let (private_preview, _observed) = super::ResponsePreview::new();
-    let mut decoder = wire::MessageStream::new(key, model, preview.unwrap_or(private_preview));
+    let mut decoder = wire::MessageStream::new(
+        key,
+        model,
+        preview.unwrap_or(private_preview),
+        max_output_tokens,
+    );
     while let Some(chunk) = response
         .chunk()
         .await

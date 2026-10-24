@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `In progress` (S2 remains).
+- Status: `In progress` (S2 implementation and guarded journey evidence added; full test/CI gate remains).
 - Owner: `fpmirabile`; the implementation lead owns slice delivery and evidence.
-- Last updated: `2026-10-22`.
-- Next action: implement S2 on S1; this plan does not depend on host Git publication.
+- Last updated: `2026-10-24`.
+- Next action: run the full test suite and CI on this implementation, then close/remove the plan and its index row if all exit criteria pass; native/manual checks remain in NEXT_STEPS.
 
 ## Outcome and remaining scope
 
@@ -37,7 +37,8 @@ Owner decisions, Decided 2026-10-22:
 - Allow exactly one explicit `base..head` in `git_log.revision`, with two
   independently validated existing revisions. No open endpoints, three-dot,
   revision sets, options, `:`, `@{` or raw argv. Each endpoint is at most 128
-  bytes, the combined expression at most 258 bytes.
+  bytes, the combined expression at most 258 bytes (two endpoint limits plus
+  the delimiter). Ambiguous branch/tag resolution fails before dependent reads.
 - Keep `git_diff {base,head,staged:false}` as the typed spelling of endpoint
   `git diff base..head`; no new diff operation.
 - Resolve comparison endpoints once to commit OIDs before dependent reads and

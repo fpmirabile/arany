@@ -200,20 +200,20 @@
       "type": "function"
     },
     {
-      "description": "Show changed-file line counts and a bounded unified patch: working tree vs index, staged index vs base or HEAD, working tree vs base, or base vs head. Read-only.",
+      "description": "Show changed-file line counts and a bounded unified patch: working tree vs index, staged index vs base or HEAD, working tree vs base, or the two endpoint trees. Endpoint comparison uses Git's two-dot semantics, not a merge-base comparison. Read-only.",
       "name": "arany_git_diff",
       "parameters": {
         "additionalProperties": false,
         "properties": {
           "base": {
-            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes.",
+            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':', '@{' or options. At most 128 bytes.",
             "type": [
               "string",
               "null"
             ]
           },
           "head": {
-            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes.",
+            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':', '@{' or options. At most 128 bytes.",
             "type": [
               "string",
               "null"
@@ -224,7 +224,7 @@
             "type": "string"
           },
           "staged": {
-            "description": "true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares base with head.",
+            "description": "true compares the index with base, or HEAD when base is null; head must then be null. false compares the working tree with the index (no revisions), with base, or compares the two endpoint trees using Git's two-dot semantics, not a merge-base comparison.",
             "type": "boolean"
           }
         },
@@ -240,7 +240,7 @@
       "type": "function"
     },
     {
-      "description": "List up to max_count commits (hash, parents, author, Unix time, subject) from revision or HEAD that touch a path, newest first. Read-only.",
+      "description": "List up to max_count commits (hash, parents, author, Unix time, subject) from one revision or base..head that touch a path, newest first. A range includes commits reachable from head but not base; comparisons resolve both endpoints once. Read-only.",
       "name": "arany_git_log",
       "parameters": {
         "additionalProperties": false,
@@ -254,7 +254,7 @@
             "type": "string"
           },
           "revision": {
-            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes.",
+            "description": "null, one revision, or one base..head range. A range lists commits reachable from head but not base; its result includes the captured endpoint revisions and commit OIDs. Each endpoint is HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999), at most 128 bytes each; the range is at most 258 bytes. Ranges have no open endpoints, three-dot form, revision sets, ':', '@{' or options.",
             "type": [
               "string",
               "null"
@@ -607,7 +607,7 @@
             ]
           },
           "start_point": {
-            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':' or '@{'. At most 128 bytes.",
+            "description": "null, or HEAD, a branch or tag name, or a 7-64 character hex commit name, with at most four ~N or ^N ancestry steps (N at most 9999). No ranges, ':', '@{' or options. At most 128 bytes.",
             "type": [
               "string",
               "null"
