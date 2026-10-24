@@ -2,9 +2,9 @@
 
 ## Metadata
 
-- **Status:** Ready; the owner approved the parser dependency on 2026-10-22.
+- **Status:** In progress; PR1 and PR2 are implemented; PR3 changeset capacity remains. The owner approved the parser dependency on 2026-10-22.
 - **Owner:** Arany maintainer; implementation owner to be assigned.
-- **Last updated:** 2026-10-22.
+- **Last updated:** 2026-10-24.
 - **Baseline:** `9f8dc3564f6927c52dd7e2b4292d60dfaee3a964`.
 - **Feature:** [NEXT_STEPS.md, Daily use first](../../NEXT_STEPS.md#daily-use-first).
 - **Delivery:** Research → Plan → Implement; three ordered vertical slices, one PR each. Typed read discovery is a separate [feature plan](../gitignore-read-discovery/README.md); it reuses the selector introduced here.
