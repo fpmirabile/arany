@@ -1,5 +1,5 @@
 use super::tool_action_ms;
-use crate::engine::ledger::{Action, Admission};
+use crate::engine::ledger::{Action, ActiveDeadline, Admission};
 use crate::engine::run_loop::{CallResult, RunLoop, TOOL_REVIEW_DEADLINE, call_record};
 use crate::engine::{EngineError, STORE_ACTION_OVERHEAD};
 use crate::provider::{
@@ -21,7 +21,7 @@ impl RunLoop<'_> {
         &self,
         objective: &str,
         intent: &EffectIntent,
-        delegation_deadline: Option<Instant>,
+        active_deadline: Option<&ActiveDeadline>,
     ) -> Result<Admission<ToolReviewDecision>, EngineError> {
         let mut model = String::new();
         let mut max_output_tokens = 256;
@@ -49,7 +49,7 @@ impl RunLoop<'_> {
                 )
             },
         };
-        let active_segment = if delegation_deadline.is_none() {
+        let active_segment = if active_deadline.is_none() {
             self.reserve_active_segment(
                 TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD,
                 crate::session::BudgetAction::Tool,
@@ -62,19 +62,8 @@ impl RunLoop<'_> {
         let Admission::Reserved(active_segment) = active_segment else {
             return Ok(Admission::Exhausted);
         };
-        let review_deadline = active_segment
-            .as_ref()
-            .map(|segment| {
-                segment
-                    .deadline()
-                    .checked_sub(STORE_ACTION_OVERHEAD)
-                    .unwrap_or(segment.started)
-            })
-            .or(delegation_deadline)
-            .ok_or(EngineError::CoordinatorFailed)?
-            .min(Instant::now() + TOOL_REVIEW_DEADLINE);
         // A researcher's Tool runs inside the delegation's reservation, so its review adds no time.
-        let pending_ms = match (delegation_deadline, self.controls.tools) {
+        let pending_ms = match (active_deadline, self.controls.tools) {
             (None, Some(runtime)) => tool_action_ms(runtime, intent),
             _ => 0,
         };
@@ -88,17 +77,31 @@ impl RunLoop<'_> {
             return Ok(Admission::Exhausted);
         };
         review.input.goal_context_facts = Some(self.ledger().context_facts()?);
+        let review_deadline = active_segment
+            .as_ref()
+            .map(|segment| {
+                segment
+                    .deadline()
+                    .checked_sub(STORE_ACTION_OVERHEAD)
+                    .unwrap_or(segment.started)
+            })
+            .or_else(|| active_deadline.map(ActiveDeadline::wall_deadline))
+            .ok_or(EngineError::CoordinatorFailed)?
+            .min(Instant::now() + TOOL_REVIEW_DEADLINE);
         let limits = crate::provider::RateLimitSlot::default();
-        let result = self
-            .routing
-            .invoke(
-                review,
-                review_deadline,
-                self.controls.cancellation.clone(),
-                None,
-                limits.clone(),
-            )
-            .await?;
+        let provider_activity = self.ledger().provider_activity();
+        let result = {
+            let _provider_work = provider_activity.start();
+            self.routing
+                .invoke(
+                    review,
+                    review_deadline,
+                    self.controls.cancellation.clone(),
+                    None,
+                    limits.clone(),
+                )
+                .await?
+        };
         self.settle_result(&result)?;
         let valid = matches!(
             &result,
@@ -124,7 +127,7 @@ impl RunLoop<'_> {
         if let Some(active_segment) = active_segment {
             self.settle_active_segment(active_segment)?;
         }
-        let exhausted = if delegation_deadline.is_some() {
+        let exhausted = if active_deadline.is_some() {
             self.ledger().spent_active_time_exhausted()
         } else {
             self.ledger().active_time_exhausted()

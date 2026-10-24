@@ -66,8 +66,8 @@ pub(super) async fn closed_bundle(
 
 pub(super) async fn worker_case(case: &'static str) {
     let _deadline = engine_support::deadline(case, Duration::from_secs(180));
-    let approval_timeout = case == "approval_timeout";
-    let case = if approval_timeout { "denial" } else { case };
+    let approval_wait = case == "approval_wait";
+    let case = if approval_wait { "success" } else { case };
     // A worker admission reserves three retry facts for each of its ten calls and one steering note for each
     // child call; each case pads to the largest prefix that still reaches its capacity stop.
     let padding = match case {
@@ -269,22 +269,21 @@ pub(super) async fn worker_case(case: &'static str) {
         .unwrap()
         .result;
     let mut injected = false;
+    let mut idle_approval_id = None;
     let result = loop {
         tokio::select! {
             result = &mut running => break result,
-            Some(mut approval) = inbox.next(), if case != "no_channel" => {
+            Some(approval) = inbox.next(), if case != "no_channel" => {
                 let private = matches!(approval.intent.target, EffectTarget::WorkerView { .. });
                 if !injected && (case == "private_loss" && private || case == "publication_loss" && !private) {
                     arany::FaultPlan::lose_guard_receipt(approval.intent.id); injected = true;
                 }
-                if approval_timeout && private {
+                if approval_wait && private {
+                    idle_approval_id = Some(approval.intent.id);
                     tokio::time::pause();
-                    tokio::time::advance(Duration::from_millis(u64::from(approval.intent.limits.runtime_ms) + 1)).await;
+                    tokio::time::advance(Duration::from_secs(3_600)).await;
                     tokio::time::resume();
-                    tokio::select! {
-                        result = &mut running => { approval.decide(true); break result; }
-                        () = approval.abandoned() => approval.decide(true),
-                    }
+                    approval.decide(true);
                     continue;
                 }
                 approval.decide(!(case == "denial" && private || case == "integration_denial" && !private));
@@ -337,27 +336,20 @@ pub(super) async fn worker_case(case: &'static str) {
         );
         store.close().await.unwrap();
     }
-    if approval_timeout {
+    if approval_wait {
+        let idle_approval_id = idle_approval_id.expect("child approval was presented");
         let tool = run
             .agents
             .iter()
             .flat_map(|agent| &agent.tools)
-            .find(|tool| {
-                tool.observation.as_ref().is_some_and(|observation| {
-                    observation.output
-                        == "Child approval wait timed out; no operation was dispatched"
-                })
-            })
-            .expect("child timeout observation");
-        assert!(tool.observation.as_ref().unwrap().attestation.is_none());
+            .find(|tool| tool.intent.id == idle_approval_id)
+            .expect("child approval remains answerable after an idle wait");
         assert_eq!(
-            tool.observation.as_ref().unwrap().approval_cause,
-            Some(arany::ApprovalCause::ChildTimeout)
+            tool.observation.as_ref().unwrap().disposition,
+            arany::ToolDisposition::Succeeded
         );
-        assert_eq!(
-            tool.permission_verdict.as_ref().unwrap().source,
-            arany::permissions::PermissionSource::UnavailableApproval
-        );
+        assert!(tool.observation.as_ref().unwrap().attestation.is_some());
+        assert_eq!(tool.observation.as_ref().unwrap().approval_cause, None);
     }
     let worker = run
         .agents
@@ -851,7 +843,7 @@ pub(super) async fn worker_case(case: &'static str) {
 fn foreground_worker_deadline_and_stop_refusals_keep_their_causes() {
     for case in [
         "tool_deadline",
-        "approval_timeout",
+        "approval_wait",
         "hook_stop_last_turn",
         "hook_requested_stop_last_turn",
         "hook_stop_tokens",
@@ -1117,6 +1109,60 @@ async fn worker_primary_background_tool_active_time_exhaustion_settles_the_team(
     arany::test_support::worker_teams::run_case(
         Path::new(env!("CARGO_BIN_EXE_arany")),
         "primary_time",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn completed_sibling_does_not_charge_a_late_child_approval() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "sibling_approval_wait",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn active_sibling_exhaustion_withdraws_the_child_approval() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "sibling_approval_exhaustion",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn retry_wait_exhaustion_withdraws_the_child_approval() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "retry_approval_exhaustion",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn delegation_deadline_keeps_the_goal_receipt_unexhausted() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "delegation_deadline",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn primary_refill_keeps_the_delegation_deadline_cause() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "primary_delegation_deadline",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auto_review_exhaustion_does_not_fall_back_to_human_approval() {
+    arany::test_support::worker_teams::run_case(
+        Path::new(env!("CARGO_BIN_EXE_arany")),
+        "review_exhaustion",
     )
     .await;
 }
