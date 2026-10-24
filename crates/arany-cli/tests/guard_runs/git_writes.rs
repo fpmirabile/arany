@@ -957,13 +957,14 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
         for (scenario, reply, authorized) in [
             ("success", arany::ApprovalReply::AllowOnce, true),
+            ("late_allow", arany::ApprovalReply::AllowOnce, true),
             ("missing_human", arany::ApprovalReply::AllowOnce, false),
             ("unsupported_session", arany::ApprovalReply::AllowForSession, false),
             ("unsupported_prefix", arany::ApprovalReply::AllowPrefixInFolder, false),
             ("uncertain", arany::ApprovalReply::AllowOnce, true),
         ] {
             let human = scenario != "missing_human";
-            let success = scenario == "success";
+            let success = matches!(scenario, "success" | "late_allow");
             let repo = Repo::new();
             let tools_path = repo.state.join("tools.json");
             let mut tools: Value = serde_json::from_slice(&std::fs::read(&tools_path).unwrap()).unwrap();
@@ -1000,6 +1001,11 @@ fn host_git_pr_journey_commits_human_verdict_replays_unknown_and_refuses_missing
                             assert!(matches!(refused, Err(arany::EngineError::WorkspaceBusy)));
                             assert!(peer.requests.lock().unwrap().is_empty());
                             contender.close().await.unwrap();
+                            if scenario == "late_allow" {
+                                tokio::time::pause();
+                                tokio::time::advance(Duration::from_secs(3_600)).await;
+                                tokio::time::resume();
+                            }
                             approval.decide(reply);
                         }
                     }
