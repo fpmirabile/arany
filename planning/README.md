@@ -50,7 +50,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 | Plan | Remaining scope |
 |---|---|
 | [Architecture homogenization](./architecture-homogenization/README.md) | `Ready`: 62 implementation slices in 20 tracks plus one terminal lifecycle research slice (63 slices / 21 tracks); bounded refactors and eight follow-ups for four decided owners: cached admission, intent records, Engine Supervisor and migrated Provider identity |
-| [Approvals wait for the human](./approvals-wait/README.md) | `In progress`: A1 non-host primary approvals; A2 transition-driven child wait accounting; A3 host expiry after #279 |
 | [Tool failure continuation](./failure-feedback/README.md) | `In progress`: C1 primary failure/decline results and sanitized continuation delivered; C2 delegated feedback remains; prior-Run cause reinjection is owned by the Session contract |
 | [Provider setup UI](./provider-setup-ui/README.md) | `Ready`: shared durable checker available; three PRs for account/custom-route management, per-role routing and named roster editing in Fullscreen, Classic and linear modes |
 | [Anthropic Tool turns](./anthropic-tool-stream/README.md) | `Ready`: S1 names Anthropic failure stages in `development.log`; S2 journals the closed reason; S3 fixes the cause after the owner's live re-run |
