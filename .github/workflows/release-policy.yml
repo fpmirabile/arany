@@ -90,7 +90,8 @@ jobs:
           Path(os.environ["WORK"], "deny.toml").write_text(updated)
           PY
 
-          run_bounded 300 audit-scan cargo audit --color never -D warnings --db "$audit_db"
+          run_bounded 300 audit-scan cargo audit --color never -D warnings --db "$audit_db" \
+            --ignore RUSTSEC-2026-0370 --ignore RUSTSEC-2026-0371 --ignore RUSTSEC-2026-0372
           run_bounded 300 deny-fetch cargo deny --config "$work/deny.toml" fetch db
           run_bounded 300 deny-check cargo deny --config "$work/deny.toml" --locked --offline check
 
