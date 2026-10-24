@@ -44,7 +44,6 @@ pub(crate) fn started(view: &SessionView, target: CheckpointTarget) -> Event {
             workspace_inode: w.inode,
             policy_digest: [1; 32],
             enforcement_digest: [2; 32],
-            expires_at_ms: 10_000,
         }),
     }
 }

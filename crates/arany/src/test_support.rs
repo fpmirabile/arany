@@ -22,6 +22,34 @@ pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }
 
+pub struct TestClock {
+    previous: Option<u64>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+
+impl TestClock {
+    pub fn set(&self, now_ms: u64) {
+        crate::tools::set_test_clock_ms(Some(now_ms));
+    }
+
+    pub fn advance(&self, milliseconds: u64) {
+        self.set(crate::tools::now_ms().saturating_add(milliseconds));
+    }
+}
+
+impl Drop for TestClock {
+    fn drop(&mut self) {
+        crate::tools::set_test_clock_ms(self.previous);
+    }
+}
+
+pub fn test_clock(now_ms: u64) -> TestClock {
+    TestClock {
+        previous: crate::tools::set_test_clock_ms(Some(now_ms)),
+        _thread_bound: std::marker::PhantomData,
+    }
+}
+
 static ACCOUNT_ROOT: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
 #[cfg(unix)]
 static ACCOUNT_LEASE: std::sync::OnceLock<cap_std::fs::File> = std::sync::OnceLock::new();

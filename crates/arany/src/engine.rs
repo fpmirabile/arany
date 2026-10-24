@@ -80,7 +80,7 @@ pub enum EngineError {
     },
     #[error("rewind is blocked; inspect the preview paths and uncertain publications")]
     RewindBlocked,
-    #[error("rewind preview changed or expired; preview again")]
+    #[error("rewind preview changed; preview again")]
     RewindPreviewExpired,
     #[error("rewind exceeds file, byte or explicit-path limits; restore with your VCS")]
     RewindTooLarge,

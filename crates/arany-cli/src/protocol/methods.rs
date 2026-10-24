@@ -128,7 +128,6 @@ pub struct ThreadRewindPreviewResult {
     pub blockers: Vec<RewindBlocker>,
     pub non_rewindable: Vec<RewindNonRewindable>,
     pub preview_token: String,
-    pub expires_at_ms: i64,
 }
 
 #[derive(Serialize, Deserialize, JsonSchema, Debug, Clone, PartialEq)]

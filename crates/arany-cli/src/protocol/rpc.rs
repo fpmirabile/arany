@@ -132,7 +132,7 @@ pub enum Reason {
     ProviderUnavailable,
     ProviderRejected,
     InvalidSelection,
-    PreviewExpired,
+    PreviewChanged,
     RewindBlocked,
     RewindTooLarge,
     ConversationRewindLimit,
@@ -147,7 +147,7 @@ impl From<&arany::EngineError> for Reason {
             arany::EngineError::IncompatibleProviderChain => Reason::IncompatibleProviderChain,
             arany::EngineError::ConversationRewindLimit => Reason::ConversationRewindLimit,
             arany::EngineError::RewindBlocked => Reason::RewindBlocked,
-            arany::EngineError::RewindPreviewExpired => Reason::PreviewExpired,
+            arany::EngineError::RewindPreviewExpired => Reason::PreviewChanged,
             arany::EngineError::RewindTooLarge => Reason::RewindTooLarge,
             arany::EngineError::RosterSelectionMismatch | arany::EngineError::InvalidRequest => {
                 Reason::InvalidRequest

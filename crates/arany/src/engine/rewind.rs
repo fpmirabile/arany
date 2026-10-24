@@ -99,9 +99,6 @@ impl RewindPreview {
     pub fn comparisons(&self) -> &[FileChange] {
         &self.comparisons
     }
-    pub fn expires_at_ms(&self) -> i64 {
-        self.started.expires_at_ms
-    }
     pub fn checkpoint_storage_unavailable(&self) -> bool {
         self.checkpoint_storage_unavailable
     }
@@ -113,8 +110,6 @@ impl RewindPreview {
             && self.started.policy_digest == previous.started.policy_digest
             && self.started.enforcement_digest == previous.started.enforcement_digest
             && self.permissions_digest == previous.permissions_digest
-            && i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX)
-                < previous.started.expires_at_ms
             && self.files.len() == previous.files.len()
             && self
                 .files
@@ -152,15 +147,9 @@ impl Engine {
         workspace: PathBuf,
         before_run: RunId,
         head: (u64, [u8; 32]),
-        expires_at_ms: i64,
     ) -> Result<ConversationRewind, EngineError> {
-        self.rewind_conversation_checked(
-            session,
-            workspace,
-            before_run,
-            Some((head.0, head.1, expires_at_ms)),
-        )
-        .await
+        self.rewind_conversation_checked(session, workspace, before_run, Some((head.0, head.1)))
+            .await
     }
 
     async fn rewind_conversation_checked(
@@ -168,7 +157,7 @@ impl Engine {
         session: SessionId,
         workspace: PathBuf,
         before_run: RunId,
-        head: Option<(u64, [u8; 32], i64)>,
+        head: Option<(u64, [u8; 32])>,
     ) -> Result<ConversationRewind, EngineError> {
         let _slot = self.claim()?;
         let mut lock = self.lock_session(session)?;
@@ -180,21 +169,14 @@ impl Engine {
             .ok_or(EngineError::MissingSession)?;
         lock.keep();
         let _ancestors = self.lock_lineage(&view).await?;
-        if head.is_some_and(|(sequence, digest, expiry)| {
-            sequence != view.last_sequence
-                || digest != view.rewinds.prefix_digest()
-                || i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX) >= expiry
+        if head.is_some_and(|(sequence, digest)| {
+            sequence != view.last_sequence || digest != view.rewinds.prefix_digest()
         }) {
             return Err(EngineError::RewindPreviewExpired);
         }
         let identity = WorkspaceInputs::admit_identity(&workspace, &self.state)?;
         ensure_session_workspace(&view, identity)?;
         let prepared = self.prepare_conversation(&view, before_run).await?;
-        if head.is_some_and(|(_, _, expiry)| {
-            i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX) >= expiry
-        }) {
-            return Err(EngineError::RewindPreviewExpired);
-        }
         self.finish_conversation(prepared).await
     }
 
@@ -317,11 +299,6 @@ impl Engine {
         if !preview.can_restore() {
             return Err(EngineError::RewindBlocked);
         }
-        if i64::try_from(crate::tools::now_ms()).unwrap_or(i64::MAX)
-            >= preview.started.expires_at_ms
-        {
-            return Err(EngineError::RewindPreviewExpired);
-        }
         if cancellation.is_cancelled() {
             return Err(EngineError::CancelledBeforeStart);
         }
@@ -372,7 +349,6 @@ impl Engine {
             return Err(EngineError::RewindPreviewExpired);
         }
         started.rewind_id = expected.rewind_id;
-        started.expires_at_ms = expected.expires_at_ms;
         let code = self
             .publish_rewind(
                 session,
@@ -432,11 +408,6 @@ impl Engine {
         intent.id = started.rewind_id;
         if !started.valid() {
             return Err(EngineError::RewindTooLarge);
-        }
-        if crate::tools::now_ms()
-            >= u64::try_from(started.expires_at_ms).map_err(|_| EngineError::InvalidRequest)?
-        {
-            return Err(EngineError::RewindPreviewExpired);
         }
         self.journal.admit(session, 2, 0).await?;
         if cancellation.is_cancelled() {
@@ -699,8 +670,6 @@ impl Engine {
             workspace_inode: pin.workspace_inode,
             policy_digest: pin.policy_digest,
             enforcement_digest: pin.enforcement_digest,
-            expires_at_ms: i64::try_from(pin.expires_at_ms)
-                .map_err(|_| EngineError::InvalidRequest)?,
         };
         let permissions_digest = runtime.receipt().permissions_digest;
         Ok(Prepared {
@@ -840,7 +809,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
-    fn rewind_selection_confirmation_pins_observations_authority_head_and_expiry() {
+    fn rewind_selection_confirmation_pins_observations_authority_and_head() {
         let session = SessionId::new();
         let target = CheckpointTarget::Run {
             run_id: RunId::new(),
@@ -880,7 +849,6 @@ mod tests {
                 workspace_inode: 2,
                 policy_digest: [3; 32],
                 enforcement_digest: [4; 32],
-                expires_at_ms: i64::MAX,
             },
             permissions_digest: None,
             comparisons: Vec::new(),
@@ -927,9 +895,7 @@ mod tests {
             change(&mut selected);
             assert_eq!(selected.observations_match(&original), expected);
         }
-        let mut expired = preview();
-        expired.started.expires_at_ms = 0;
-        assert!(!preview().observations_match(&expired));
+        assert!(preview().observations_match(&preview()));
     }
 
     fn write_grant(state: &std::path::Path, write: bool) {
@@ -1050,9 +1016,7 @@ mod tests {
             .unwrap()
             .preview;
         assert!(!changed.observations_match(&refused));
-        let mut expired = refused;
-        expired.started.expires_at_ms = 0;
-        assert!(!changed.observations_match(&expired));
+        assert!(!changed.observations_match(&refused));
         std::fs::write(workspace.join("src/a"), "external").unwrap();
         assert_eq!(
             overwrite.plan.files[0]
@@ -1261,7 +1225,6 @@ mod tests {
             workspace_inode: pin.workspace_inode,
             policy_digest: pin.policy_digest,
             enforcement_digest: pin.enforcement_digest,
-            expires_at_ms: i64::try_from(pin.expires_at_ms).unwrap(),
         };
         let changeset = WorkerChangeset {
             files: vec![FileChange {
