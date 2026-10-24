@@ -1146,31 +1146,34 @@ fn inspect_file_suggestions(
 ) {
     let start = transcript.len();
     input.write_all(b"@").unwrap();
-    wait_for_after(
+    wait_for_screen(
         output,
         input,
         transcript,
         answered,
-        start,
-        b"visible-note.txt",
+        (start, 40, 24),
+        "visible-note.txt",
     );
     for hidden in ["ignored.cache", "private-note.txt", ".ENV"] {
+        assert!(!screen_contains(transcript, 40, 24, hidden));
         assert!(!String::from_utf8_lossy(&transcript[start..]).contains(hidden));
     }
     std::fs::write(workspace.join(".gitignore"), b"*").unwrap();
     let refining = transcript.len();
     input.write_all(b"visible-no").unwrap();
-    wait_for_after(
+    let refined_column = 14;
+    wait_for_caret(
         output,
         input,
         transcript,
         answered,
         refining,
-        b"visible-note.txt",
+        refined_column,
     );
+    assert!(screen_contains(transcript, 40, 24, "visible-note.txt"));
     let closed = transcript.len();
     input.write_all(b"\x1b").unwrap();
-    wait_for_caret(output, input, transcript, answered, closed, 14);
+    wait_for_caret(output, input, transcript, answered, closed, refined_column);
     let cleared = transcript.len();
     input.write_all(b"\x03").unwrap();
     wait_for_caret(output, input, transcript, answered, cleared, 3);

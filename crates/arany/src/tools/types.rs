@@ -1007,6 +1007,7 @@ impl Attestation {
             } => {
                 intent.target == EffectTarget::Workspace
                     && intent.call.facts().site == Site::InProcess
+                    && !matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. })
                     && *policy_digest == intent.policy_digest
                     && *workspace_device == intent.workspace_device
                     && *workspace_inode == intent.workspace_inode
@@ -1038,7 +1039,12 @@ impl Attestation {
 
     #[cfg(test)]
     pub(crate) fn for_site(intent: &EffectIntent) -> Self {
-        match intent.call.facts().site {
+        let site = if matches!(intent.call, ToolCall::List { .. } | ToolCall::Glob { .. }) {
+            Site::Guard
+        } else {
+            intent.call.facts().site
+        };
+        match site {
             Site::InProcess => Self::InProcess {
                 policy_digest: intent.policy_digest,
                 workspace_device: intent.workspace_device,
