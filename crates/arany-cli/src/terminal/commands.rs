@@ -159,7 +159,7 @@ const COMMANDS: [CommandSpec; 23] = [
         "provider",
         InteractiveCommand::Provider,
         Some("<provider>"),
-        &["openai", "anthropic", "chatgpt", "custom:"],
+        &ProviderKind::NAMES,
     ),
     spec(
         "model",

@@ -557,8 +557,7 @@ async fn load_catalog_inner(
             ))
         }
         Some(ProviderKind::Custom) | None => {
-            let name = profile
-                .strip_prefix("custom:")
+            let name = ProviderKind::custom_name(profile)
                 .ok_or_else(|| "invalid Provider profile".to_owned())?;
             let root = StateRoot::open_existing(&admission.state_dir)
                 .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
