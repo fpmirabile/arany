@@ -497,7 +497,7 @@ pub(crate) fn engine_failure(error: &crate::engine::EngineError) {
         EngineError::GoalInputTooLarge => "GoalInputTooLarge",
         EngineError::Busy => "Busy",
         EngineError::RewindBlocked => "RewindBlocked",
-        EngineError::RewindPreviewExpired => "RewindPreviewExpired",
+        EngineError::RewindPreviewChanged => "RewindPreviewChanged",
         EngineError::RewindTooLarge => "RewindTooLarge",
         EngineError::GuardUnavailable => "GuardUnavailable",
         EngineError::SessionNotIdle => "SessionNotIdle",

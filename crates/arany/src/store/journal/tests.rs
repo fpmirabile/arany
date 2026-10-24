@@ -506,9 +506,13 @@ fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
     append(&mut connection, &mut hot, f.session, event).unwrap();
     drop(hot);
     for kind in ["WorkspaceRewindStarted", "WorkspaceRewindFinished"] {
-        {
+        let current = payload_version(kind).unwrap();
+        for unsupported in (1..current).chain(std::iter::once(current + 1)) {
             connection
-                .execute("UPDATE events SET event_version=2 WHERE kind=?1", [kind])
+                .execute(
+                    "UPDATE events SET event_version=?1 WHERE kind=?2",
+                    params![unsupported, kind],
+                )
                 .unwrap();
             let before = std::fs::read(root.path().join(DATABASE_FILE)).unwrap();
             let cold = open_connection(&root, true).unwrap();
@@ -519,7 +523,10 @@ fn rewind_store_cold_prefixes_and_unsupported_versions_preserve_data() {
                 before
             );
             connection
-                .execute("UPDATE events SET event_version=1 WHERE kind=?1", [kind])
+                .execute(
+                    "UPDATE events SET event_version=?1 WHERE kind=?2",
+                    params![current, kind],
+                )
                 .unwrap();
         }
     }

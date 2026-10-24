@@ -231,7 +231,6 @@ pub(crate) struct RewindPin {
     pub(crate) workspace_inode: u64,
     pub(crate) policy_digest: [u8; 32],
     pub(crate) enforcement_digest: [u8; 32],
-    pub(crate) expires_at_ms: u64,
 }
 
 pub(crate) struct CheckpointRequest {
@@ -321,7 +320,6 @@ impl ToolRuntime {
             workspace_inode: self.workspace_identity.inode,
             policy_digest: self.config.digest(),
             enforcement_digest: self.enforcement_digest,
-            expires_at_ms: now_ms().saturating_add(60_000),
         }
     }
 
@@ -1679,7 +1677,21 @@ pub(super) fn uncertain_observation(
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+std::thread_local! {
+    static TEST_CLOCK_MS: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) fn set_test_clock_ms(value: Option<u64>) -> Option<u64> {
+    TEST_CLOCK_MS.with(|clock| clock.replace(value))
+}
+
 pub fn now_ms() -> u64 {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(now) = TEST_CLOCK_MS.with(std::cell::Cell::get) {
+        return now;
+    }
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()

@@ -51,7 +51,6 @@ When implementation completes, accepted behavior moves into the owning spec and 
 |---|---|
 | [Architecture homogenization](./architecture-homogenization/README.md) | `Ready`: 54 behavior-preserving implementation slices in 16 tracks plus one terminal lifecycle research slice (55 slices / 17 tracks); bounded flows, complete runtime/decoder ownership and live-worktree gates, four independent owner decisions |
 | [Approvals wait for the human](./approvals-wait/README.md) | `In progress`: A1 non-host primary approvals; A2 transition-driven child wait accounting; A3 host expiry after #279 |
-| [Rewind confirmation](./rewind-confirmation/README.md) | `Ready`: R1 live preview confirmation without wall-clock expiry, after approvals A1 |
 | [Tool failure continuation](./failure-feedback/README.md) | `In progress`: C1 primary failure/decline results and sanitized continuation delivered; C2 delegated feedback remains; prior-Run cause reinjection is owned by the Session contract |
 | [Arany-owned storage report](./arany-storage/README.md) | `In progress`: S2 recorded native Guard storage remains; S1 local StateRoot/cache report uses the metadata-only lead default, with no automatic model disclosure |
 | [Provider check journal](./provider-check-journal/README.md) | `In progress`: C1 implemented; C2 selected ChatGPT checks and account-index migration remain; prerequisite for setup UI |

@@ -4822,10 +4822,9 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                         workspace.clone(),
                         source.runs[1].id,
                         head,
-                        i64::MAX,
                     )
                     .await,
-                Err(EngineError::RewindPreviewExpired)
+                Err(EngineError::RewindPreviewChanged)
             ));
             assert_eq!(
                 source_before,
@@ -4838,7 +4837,6 @@ fn fork_pins_committed_parent_prefix_and_rejects_drift() {
                 workspace.clone(),
                 source.runs[1].id,
                 (source.last_sequence, source.rewinds.prefix_digest()),
-                i64::MAX,
             )
             .await
             .unwrap();

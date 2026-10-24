@@ -1,5 +1,5 @@
 {"client":{"id":1,"jsonrpc":"2.0","method":"initialize","params":{"clientInfo":{"name":"test","version":"1"}}}}
-{"server":{"id":1,"jsonrpc":"2.0","result":{"capabilities":["threads_v1","turns_v1","items_v1","interrupt_receipt_v1","approvals_v2","events_subscribe_v1","receipt_get_v1","thread_fork_v1","turn_steer_v1","goal_pause_v1","thread_settings_update_v1","thread_unsubscribe_v1","thread_list_v1","thread_rewind_v1"],"platformOs":"$os","userAgent":"arany/$version"}}}
+{"server":{"id":1,"jsonrpc":"2.0","result":{"capabilities":["threads_v1","turns_v1","items_v1","interrupt_receipt_v1","approvals_v2","events_subscribe_v1","receipt_get_v1","thread_fork_v1","turn_steer_v1","goal_pause_v1","thread_settings_update_v1","thread_unsubscribe_v1","thread_list_v1","thread_rewind_v2"],"platformOs":"$os","userAgent":"arany/$version"}}}
 {"client":{"jsonrpc":"2.0","method":"initialized","params":{}}}
 {"client":{"id":2,"jsonrpc":"2.0","method":"thread/start","params":{"collaboration":"single","cwd":"$workspace","model":"gpt-5.4","provider":"openai","title":"Conformance"}}}
 {"server":{"id":2,"jsonrpc":"2.0","result":{"thread":{"createdAtMs":0,"id":"$thread","title":"Conformance","workspace":"$workspace"}}}}
