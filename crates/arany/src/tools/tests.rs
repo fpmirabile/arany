@@ -2811,7 +2811,7 @@ async fn inspect_read(runtime: &super::ToolRuntime, intent: EffectIntent) -> Too
         Ok(root) => root,
         Err(error) => return super::unstarted_observation(intent, error),
     };
-    if super::discovery::exact_search(&root, &intent.call).unwrap_or(false) {
+    if super::discovery::exact_search(&root, &intent.call).unwrap_or(true) {
         return runtime.execute(intent, super::Cancellation::new()).await;
     }
     let hidden = runtime.hidden_paths(&intent.call);
@@ -3025,7 +3025,9 @@ async fn exact_search_path_refusals_are_attested_without_stopping_the_run() {
             crate::session::AgentRunId::new(),
             search(path, "payload"),
         );
+        let inspected = inspect_read(&runtime, intent.clone()).await;
         let observation = runtime.execute(intent, super::Cancellation::new()).await;
+        assert_eq!(inspected, observation);
         assert_eq!(observation.disposition, disposition);
         assert!(observation.valid() && !observation.stops_run());
         assert!(matches!(
