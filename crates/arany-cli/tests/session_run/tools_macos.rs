@@ -2250,6 +2250,12 @@ int main(void) {
             &state_path.join("tools.json"),
             &serde_json::to_vec(&config).unwrap(),
         );
+        if case == "headless" {
+            private_file(
+                &state_path.join("permissions.json"),
+                br#"{"permissions":{"ask":["Bash"]}}"#,
+            );
+        }
         let requests = Arc::new(Mutex::new(Vec::new()));
         let call = if case == "mcp-version" {
             ToolCall::McpList {
@@ -2537,9 +2543,13 @@ int main(void) {
 }
 
 fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &[ProviderRequest]) {
-    let label = match case {
-        "denied" => "user_declined",
-        "headless" => "channel_unavailable",
+    use arany::permissions::{Decision, PermissionSource};
+    let (label, cause) = match case {
+        "denied" => ("user_declined", arany::ApprovalCause::Declined),
+        "headless" => (
+            "channel_unavailable",
+            arany::ApprovalCause::ChannelUnavailable,
+        ),
         _ => return,
     };
     assert_eq!(
@@ -2548,6 +2558,18 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
         "{case}"
     );
     assert_eq!(run.tools.len(), 1, "{case}: no automatic retry");
+    let tool = &run.tools[0];
+    if case == "headless" {
+        let verdict = tool.permission_verdict.as_ref().unwrap();
+        assert_eq!(verdict.decision, Decision::Ask, "approval is required");
+        assert_eq!(verdict.source, PermissionSource::UnavailableApproval);
+        assert_eq!(verdict.basis, PermissionSource::Rule);
+        assert!(!verdict.approved);
+    }
+    assert_eq!(
+        tool.observation.as_ref().unwrap().approval_cause,
+        Some(cause)
+    );
     assert_eq!(
         run.agents[0].provider_calls.last().unwrap().disposition,
         arany::ProviderCallDisposition::Finished,
@@ -2562,11 +2584,10 @@ fn assert_native_refusal_continues(case: &str, run: &arany::RunView, requests: &
         .unwrap()
         .observations();
     assert_eq!(observations.len(), 1, "{case}: correlated refusal");
-    assert_eq!(observations[0].intent, run.tools[0].intent);
-    assert_eq!(
-        observations[0].output,
-        format!("{label}: no operation was dispatched")
-    );
+    assert_eq!(observations[0].intent, tool.intent);
+    let expected = format!("{label}: no operation was dispatched");
+    assert_eq!(observations[0].output, expected);
+    assert_eq!(tool.model_denial_output(), Some(expected.as_str()));
     assert_eq!(observations[0].disposition, ToolDisposition::Denied);
     assert!(observations[0].attestation.is_none());
 }
