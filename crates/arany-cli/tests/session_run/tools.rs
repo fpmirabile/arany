@@ -3185,7 +3185,28 @@ impl Provider for GitJourney {
                 base: Some("HEAD~1".into()),
                 max_count: Some(16),
             }),
-            5 => ProviderOutcome::Answer(Answer {
+            5 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("HEAD~1..protected".into()),
+                max_count: 5,
+            }),
+            6 => crate::tool_outcome(ToolCall::GitDiff {
+                path: ".".into(),
+                base: Some("HEAD~1".into()),
+                head: Some("HEAD".into()),
+                staged: false,
+            }),
+            7 => crate::tool_outcome(ToolCall::GitLog {
+                path: "denied/history.txt".into(),
+                revision: Some("HEAD~1..protected".into()),
+                max_count: 5,
+            }),
+            8 => crate::tool_outcome(ToolCall::GitLog {
+                path: ".".into(),
+                revision: Some("missing-endpoint..HEAD".into()),
+                max_count: 5,
+            }),
+            9 => ProviderOutcome::Answer(Answer {
                 text: "Git state observed".into(),
             }),
             _ => return Err(ProviderError::InvalidOutcome),
@@ -3332,6 +3353,10 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
 
     let state_path = temp.path().join("state");
     let state = StateRoot::admit(&state_path).unwrap();
+    private_file(
+        &state_path.join("permissions.json"),
+        br#"{"permissions":{"deny":["Read(./denied/**)"]}}"#,
+    );
     let git = std::fs::canonicalize("/usr/bin/git").unwrap();
     let config = json!({
         "version": 1,
@@ -3397,7 +3422,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         "{:?}",
         outcome.run.tools
     );
-    assert_eq!(outcome.run.tools.len(), 5);
+    assert_eq!(outcome.run.tools.len(), 9);
 
     let output = |index: usize| -> Value {
         let observation = outcome.run.tools[index].observation.as_ref().unwrap();
@@ -3440,10 +3465,17 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
     assert!(failed.attestation.is_some());
 
     let branches = output(4);
-    crate::assert_git_branch_journey(&branches, &workspace);
+    crate::assert_restricted_git_branch_journey(&branches, &workspace);
     let observation = outcome.run.tools[4].observation.as_ref().unwrap();
     assert_eq!(observation.disposition, ToolDisposition::Succeeded);
     assert!(observation.attestation.is_some());
+
+    crate::assert_git_range_outputs(&outcome.run, &workspace, &home, GIT);
+    let denied = outcome.run.tools[7].observation.as_ref().unwrap();
+    assert_eq!(denied.disposition, ToolDisposition::Denied);
+    assert!(!denied.output.contains("BRANCH_DISCLOSURE_CANARY"));
+    let missing_endpoint = outcome.run.tools[8].observation.as_ref().unwrap();
+    assert_eq!(missing_endpoint.disposition, ToolDisposition::Failed);
 
     let requests = requests.lock().unwrap().clone();
     assert!(!format!("{requests:?}").contains("BRANCH_DISCLOSURE_CANARY"));
@@ -3459,6 +3491,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
             .output,
         observation.output
     );
+    crate::assert_git_range_continuation(&outcome.run, &requests);
     let catalog: Value =
         serde_json::from_str(requests[0].input.tools.as_ref().unwrap().catalog()).unwrap();
     assert_eq!(
@@ -3484,6 +3517,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         .unwrap()
         .unwrap();
     assert_eq!(replay.runs.last().unwrap(), &outcome.run);
+    crate::assert_git_range_replay(&outcome.run, replay.runs.last().unwrap());
     store.close().await.unwrap();
     crate::assert_closed_git_views(&state_path, &home, &workspace, &events, &replay);
     let is_git = |call: &ToolCall| {
@@ -3503,7 +3537,7 @@ async fn typed_git_reads_run_in_the_guard_without_repository_code() {
         .iter()
         .filter(|event| matches!(&event.event, arany::Event::ToolFinished { observation, .. } if is_git(&observation.intent.call)))
         .count();
-    assert_eq!((started, finished), (5, 5));
+    assert_eq!((started, finished), (9, 9));
 }
 
 #[path = "tools/inline_approval.rs"]

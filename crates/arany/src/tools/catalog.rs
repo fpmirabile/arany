@@ -182,13 +182,13 @@ pub(crate) static ALL: [OperationFacts; 24] = [
         "git_diff",
         Family::Git,
         4,
-        "Show changed-file line counts and a bounded unified patch: working tree vs index, staged index vs base or HEAD, working tree vs base, or base vs head. Read-only.",
+        "Show changed-file line counts and a bounded unified patch: working tree vs index, staged index vs base or HEAD, working tree vs base, or the two endpoint trees. Endpoint comparison uses Git's two-dot semantics, not a merge-base comparison. Read-only.",
     ),
     read_row(
         "git_log",
         Family::Git,
         5,
-        "List up to max_count commits (hash, parents, author, Unix time, subject) from revision or HEAD that touch a path, newest first. Read-only.",
+        "List up to max_count commits (hash, parents, author, Unix time, subject) from one revision or base..head that touch a path, newest first. A range includes commits reachable from head but not base; comparisons resolve both endpoints once. Read-only.",
     ),
     OperationFacts {
         site: Site::Unguarded,

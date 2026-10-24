@@ -5,7 +5,10 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::path::{Component, Path};
 
-const MAX_REVISION_BYTES: usize = 128;
+pub(crate) const MAX_REVISION_BYTES: usize = 128;
+const REVISION_RANGE_SEPARATOR_BYTES: usize = 2;
+pub(crate) const MAX_REVISION_RANGE_BYTES: usize =
+    2 * MAX_REVISION_BYTES + REVISION_RANGE_SEPARATOR_BYTES;
 
 pub(crate) const FORBIDDEN_NAMES: [&str; 7] = [
     ".git", ".aws", ".ssh", ".gnupg", ".env", ".npmrc", ".pypirc",
