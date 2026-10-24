@@ -608,9 +608,6 @@ impl TeamProvider {
             *stale = observations.len() + 1;
             return tool_outcome(Self::read("notes/0"));
         }
-        if self.case == "large_write" && !pending {
-            return finish_with("Primary verified team");
-        }
         observations.drain(..(*stale).min(observations.len()));
         drop(stale);
         if self.case == "defer_finish" && prior == 1 {
@@ -675,9 +672,14 @@ impl TeamProvider {
                 continue;
             }
             let path = format!("notes/{index}");
+            let expected = if self.case == "large_write" && index == 0 {
+                crate::validate::hex_digest(self.edited_content(index).as_bytes())
+            } else {
+                format!("edited {index}")
+            };
             if !observations.iter().any(|o| {
                 matches!(&o.intent.call, ToolCall::Read { path: p, .. } if p == &path)
-                    && o.output.contains(&format!("edited {index}"))
+                    && o.output.contains(&expected)
             }) {
                 return tool_outcome(Self::read(&path));
             }
@@ -1146,6 +1148,15 @@ pub async fn run_case(guard: &Path, case: &'static str) -> TeamObservation {
                 .integration
                 .as_ref()
                 .is_some_and(|(_, record)| record.outcome == WorkerIntegrationOutcome::Integrated)
+        );
+        assert!(
+            run.agents
+                .iter()
+                .filter_map(|agent| agent.assignment.as_ref())
+                .all(|worker| worker
+                    .verification
+                    .as_ref()
+                    .is_some_and(|(_, record)| record.passed))
         );
     }
     if case == "primary_delegation_deadline" {

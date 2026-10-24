@@ -139,7 +139,18 @@ fn validate_provider_cap(
         let identity = run.current_identity(agent_run_id, role, initial);
         let cap = match role {
             ProviderRole::Primary => identity.limits.max_output_tokens,
-            ProviderRole::Child if agent.assignment.is_some() => identity.limits.max_output_tokens,
+            ProviderRole::Child if agent.assignment.is_some() => run
+                .provider_fallbacks
+                .iter()
+                .filter(|(actor, fallback)| {
+                    *actor == agent_run_id
+                        && fallback.role == role
+                        && usize::try_from(fallback.call_index).ok()
+                            == Some(agent.provider_calls.len())
+                })
+                .fold(identity.limits.max_output_tokens, |cap, (_, fallback)| {
+                    cap.min(fallback.from.limits.max_output_tokens)
+                }),
             ProviderRole::Child => identity
                 .limits
                 .max_output_tokens

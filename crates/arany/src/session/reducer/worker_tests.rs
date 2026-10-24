@@ -538,36 +538,71 @@ pub(crate) fn fixture() -> Fixture {
 }
 
 #[test]
-fn worker_editor_output_is_bounded_by_its_selected_route() {
+fn worker_editor_output_respects_route_binding_and_fallback_caps() {
+    use crate::provider::{ProviderFallback, ProviderRole, Providers};
+
     for cap in [
         crate::provider::DEFAULT_OUTPUT_TOKEN_CAP * 2,
         crate::provider::MAX_OUTPUT_TOKEN_CAP,
     ] {
-        for (output, accepted) in [
-            (crate::provider::DEFAULT_OUTPUT_TOKEN_CAP + 1, true),
-            (cap, true),
-            (cap + 1, false),
-        ] {
-            let mut f = fixture();
-            for event in &mut f.events {
-                if let Event::RunStarted { config, .. } = event {
-                    config.output_token_cap = cap;
+        for switched in [false, true] {
+            for (output, accepted) in [
+                (crate::provider::DEFAULT_OUTPUT_TOKEN_CAP + 1, true),
+                (cap, true),
+                (cap + 1, false),
+            ] {
+                let mut f = fixture();
+                let config = f
+                    .events
+                    .iter_mut()
+                    .find_map(|event| match event {
+                        Event::RunStarted { config, .. } => Some(config),
+                        _ => None,
+                    })
+                    .unwrap();
+                config.output_token_cap = cap;
+                let initial = config.identity().unwrap();
+                let mut next = initial.clone();
+                next.model = "editor-fallback".into();
+                next.limits.max_output_tokens = crate::provider::MAX_OUTPUT_TOKEN_CAP;
+                if switched {
+                    config.providers = Some(Providers::all(vec![initial.clone(), next.clone()]));
                 }
-            }
-            f.call(
-                f.child,
-                AgentPhase::ChildWork,
-                ProviderCallDisposition::Finished,
-                None,
-            );
-            if let Some(Event::ProviderCallRecorded { record, .. }) = f.events.last_mut() {
+                f.call(
+                    f.child,
+                    AgentPhase::ChildWork,
+                    ProviderCallDisposition::Finished,
+                    None,
+                );
+                let Event::ProviderCallRecorded { mut record, .. } = f.events.pop().unwrap() else {
+                    panic!("child Provider call");
+                };
+                if switched {
+                    f.push(Event::ProviderFallbackUsed {
+                        run_id: f.run,
+                        agent_run_id: f.child,
+                        fallback: ProviderFallback {
+                            rate_limits: None,
+                            role: ProviderRole::Child,
+                            call_index: 0,
+                            failure: ProviderCallDisposition::Unavailable,
+                            from: initial,
+                            to: next,
+                        },
+                    });
+                }
                 record.output_tokens = Some(output);
+                f.push(Event::ProviderCallRecorded {
+                    run_id: f.run,
+                    agent_run_id: f.child,
+                    record,
+                });
+                assert_eq!(
+                    SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
+                    accepted,
+                    "editor output {output} with initial cap {cap}, switched {switched}"
+                );
             }
-            assert_eq!(
-                SessionView::replay_open(f.session, &f.envelopes()).is_ok(),
-                accepted,
-                "editor output {output} with route cap {cap}"
-            );
         }
     }
 }
