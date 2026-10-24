@@ -1280,6 +1280,14 @@ fn decoded_messages_report_closed_failure_stages() {
         ]),
     );
     let malformed_second_tool = encode(malformed_second_tool);
+    let invalid_typed_tool = encode(response(
+        "tool_use",
+        json!([tool_use(
+            "",
+            "arany_read",
+            json!({"path":"src/main.rs","offset":7,"limit":3})
+        )]),
+    ));
     let cases = [
         (b"{".to_vec(), Stage::ResponseEnvelope),
         (encode(wrong_model), Stage::ResponseModel),
@@ -1297,13 +1305,7 @@ fn decoded_messages_report_closed_failure_stages() {
             )),
             Stage::ResponseEnvelope,
         ),
-        (
-            encode(response(
-                "tool_use",
-                json!([tool_use("", "arany_read", json!({"path":"src/main.rs"}))]),
-            )),
-            Stage::OutcomeToolArguments,
-        ),
+        (invalid_typed_tool.clone(), Stage::OutcomeToolArguments),
         (
             encode(response(
                 "tool_use",
@@ -1319,13 +1321,19 @@ fn decoded_messages_report_closed_failure_stages() {
     for (bytes, expected) in cases {
         assert_eq!(decode_run_failure_stage(&bytes, &scope), expected);
     }
-    assert!(
-        format!(
-            "{:?}",
-            decode_run_failure_tool_shape(&malformed_second_tool, &scope).unwrap()
-        )
-        .contains("operation: \"write\"")
-    );
+    for (bytes, expected) in [
+        (&malformed_second_tool, "operation: \"write\""),
+        (&invalid_typed_tool, "read_offset: Some(7)"),
+        (&invalid_typed_tool, "read_limit: Some(3)"),
+        (&invalid_typed_tool, "path_bytes: Some(11)"),
+    ] {
+        let shape = decode_run_failure_tool_shape(bytes, &scope);
+        if cfg!(debug_assertions) {
+            assert!(format!("{:?}", shape.unwrap()).contains(expected));
+        } else {
+            assert!(shape.is_none());
+        }
+    }
 }
 
 #[test]

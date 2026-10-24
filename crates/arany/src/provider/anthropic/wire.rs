@@ -656,7 +656,7 @@ pub(in crate::provider) fn run_body_with_optional_effort(
                     && let Some(required) = parameters["required"].as_array_mut()
                 {
                     required.retain(|field| field != "offset" && field != "limit");
-                    parameters["properties"]["offset"]["description"] = json!("Optional 1-based start line, 1 through 4294967295; omitted or null starts at line 1. Continue using next_line.");
+                    parameters["properties"]["offset"]["description"] = json!(format!("Optional 1-based start line, 1 through {}; omitted or null starts at line 1. Continue using next_line.", u32::MAX));
                     parameters["properties"]["limit"]["description"] = json!(format!("Optional number of lines, 1 through {}; omitted or null reads up to {} lines. Lines are numbered and cut after {} characters; the rendered result budget may end the page earlier.", crate::tools::types::MAX_READ_PAGE_LINES, crate::tools::types::MAX_READ_PAGE_LINES, crate::tools::types::MAX_READ_LINE_CHARS));
                 }
                 json!({"name": tool.name, "description": tool.description, "input_schema": parameters})
@@ -1019,26 +1019,21 @@ impl Admitted<'_> {
                     crate::tools::parse_json(raw_input.get().as_bytes(), argument_limit(operation))
                         .map_err(|_| ToolRequestFailure {
                             error: ProviderError::InvalidOutcome,
-                            tool_arguments: diagnostic_tool_arguments(
-                                operation,
-                                None,
-                                raw_input.get().len(),
-                            )
-                            .map(Box::new),
+                            tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                                .map(Box::new),
                         })?;
-                let tool_arguments =
-                    diagnostic_tool_arguments(operation, Some(&input), raw_input.get().len())
-                        .map(Box::new);
                 let id = ToolUseId::new(block.id.clone().unwrap_or_default()).map_err(|error| {
                     ToolRequestFailure {
                         error,
-                        tool_arguments: tool_arguments.clone(),
+                        tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                            .map(Box::new),
                     }
                 })?;
                 requests.push(tool_function(id, operation, input).map_err(|error| {
                     ToolRequestFailure {
                         error,
-                        tool_arguments,
+                        tool_arguments: diagnostic_tool_arguments(operation, raw_input)
+                            .map(Box::new),
                     }
                 })?);
             } else if (!block.is_thinking() && !block.is_text()) || !requests.is_empty() {
@@ -1060,25 +1055,25 @@ impl Admitted<'_> {
 
 fn diagnostic_tool_arguments(
     operation: &str,
-    input: Option<&Value>,
-    serialized_bytes: usize,
+    raw_input: &serde_json::value::RawValue,
 ) -> Option<crate::diagnostics::ToolArgumentShape> {
+    if !cfg!(debug_assertions) {
+        return None;
+    }
     let operation = crate::tools::catalog::by_name(operation)?.name;
-    let Some(input) = input else {
-        return Some(crate::diagnostics::ToolArgumentShape::from_serialized(
-            operation,
-            serialized_bytes,
-        ));
-    };
-    let mut fields = input.as_object().cloned().unwrap_or_default();
-    fields.insert("operation".into(), Value::String(operation.to_owned()));
-    Some(
-        serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields))
-            .map(|call| crate::diagnostics::ToolArgumentShape::from_call(&call))
-            .unwrap_or_else(|_| {
-                crate::diagnostics::ToolArgumentShape::from_serialized(operation, serialized_bytes)
-            }),
-    )
+    let call = crate::tools::parse_json(raw_input.get().as_bytes(), argument_limit(operation))
+        .ok()
+        .and_then(|input| {
+            let Value::Object(mut fields) = input else {
+                return None;
+            };
+            fields.insert("operation".into(), Value::String(operation.to_owned()));
+            serde_json::from_value::<crate::tools::ToolCall>(Value::Object(fields)).ok()
+        });
+    Some(call.map_or_else(
+        || crate::diagnostics::ToolArgumentShape::from_serialized(operation, raw_input.get().len()),
+        |call| crate::diagnostics::ToolArgumentShape::from_call(&call),
+    ))
 }
 
 #[cfg(test)]

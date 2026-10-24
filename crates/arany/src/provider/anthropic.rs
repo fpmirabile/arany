@@ -442,7 +442,7 @@ pub(super) async fn read_streamed_reply(
         {
             crate::diagnostics::SubscriptionFailureStage::ContentEncoding
         } else {
-            crate::diagnostics::SubscriptionFailureStage::EventFraming
+            crate::diagnostics::SubscriptionFailureStage::ResponseContent
         };
         crate::diagnostics::messages_failure(
             stage,

@@ -1102,6 +1102,7 @@ mod tests {
 
     #[tokio::test]
     #[cfg(debug_assertions)]
+    #[cfg_attr(arany_guard, ignore = "requires local test IPC")]
     async fn custom_messages_transport_rejections_are_logged_with_observed_shape() {
         if crate::test_process::isolate_test() {
             return;
