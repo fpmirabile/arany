@@ -32,13 +32,6 @@ use picker::{PickerChoice, pick_session};
 const EMPTY_INTERRUPT_WINDOW: std::time::Duration = std::time::Duration::from_secs(2);
 const STATE_UNAVAILABLE: &str = "state directory unavailable or unsafe";
 
-pub(super) async fn execution_limits(
-    state_dir: &Path,
-) -> Result<(arany::GoalBudget, arany::ToolResourceSettings), String> {
-    let settings = controls::restore_settings_at(state_dir).await?;
-    Ok((settings.goal_budget, settings.resources))
-}
-
 #[derive(Args, Default)]
 pub(crate) struct AttachedArgs {
     #[arg(long)]
@@ -752,8 +745,8 @@ async fn admit_startup(
     }
     if let Some(selected) = selected {
         admission.defaults.account_id = selected.primary().account_id;
-        let mut signals =
-            super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        let mut signals = crate::cli::run_outcome::StopSignals::install()
+            .map_err(|_| "signal handling unavailable")?;
         tokio::select! {
             biased;
             _ = signals.next() => return Err("interrupted before a Run started; no Run was recorded".into()),

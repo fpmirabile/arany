@@ -84,7 +84,7 @@ pub(crate) async fn run(args: StorageArgs) -> Result<CommandOutput, String> {
     )?;
     let selected = super::state_dir(args.state_dir)?;
     let mut signals =
-        super::exec::StopSignals::install().map_err(|_| "signal handling unavailable")?;
+        super::run_outcome::StopSignals::install().map_err(|_| "signal handling unavailable")?;
     let mut inventory = Inventory::start(workspace, selected);
     tokio::select! {
         biased;

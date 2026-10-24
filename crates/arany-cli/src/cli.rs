@@ -10,6 +10,7 @@ pub(crate) mod generate_schema;
 pub(crate) mod provider;
 #[cfg(test)]
 mod record_formats;
+pub(crate) mod run_outcome;
 pub(crate) mod serve;
 pub(crate) mod storage;
 
