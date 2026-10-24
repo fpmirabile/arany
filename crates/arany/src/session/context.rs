@@ -79,11 +79,12 @@ impl CompiledContext {
             .into_iter()
             .flat_map(|view| view.compactions.iter().rev())
             .find_map(|compaction| {
-                if let CompactionStatus::Succeeded {
-                    summary,
-                    content_digest,
-                    ..
-                } = &compaction.record.status
+                if compaction.record.compiler_version == super::COMPACTION_COMPILER_VERSION
+                    && let CompactionStatus::Succeeded {
+                        summary,
+                        content_digest,
+                        ..
+                    } = &compaction.record.status
                     && used + summary.len() + 64 <= history_budget
                 {
                     return Some((

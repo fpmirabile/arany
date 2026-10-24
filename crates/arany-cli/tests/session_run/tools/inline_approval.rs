@@ -421,29 +421,27 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
             .unwrap()
             .unwrap();
         let run = &view.runs[0];
+        assert_inline_approval_completion(run, case);
         let denied = matches!(
             case,
-            "escape"
-                | "mouse-digits"
-                | "typeahead"
-                | "linear-no"
-                | "unguarded-page-up"
-                | "unguarded-pages"
+            "escape" | "mouse-digits" | "typeahead" | "unguarded-page-up" | "unguarded-pages"
         );
         assert_eq!(
             run.status,
             if matches!(case, "cancel" | "escape" | "mouse-digits" | "typeahead") {
                 RunStatus::Cancelled
-            } else if denied {
-                RunStatus::Failed
             } else {
                 RunStatus::Finished
             },
             "{case}"
         );
         let observation = run.tools.last().unwrap().observation.as_ref().unwrap();
-        if denied || case == "cancel" {
+        if denied || matches!(case, "cancel" | "linear-no") {
             assert!(observation.attestation.is_none(), "{case}: no dispatch");
+            if matches!(case, "linear-no" | "unguarded-page-up" | "unguarded-pages") {
+                assert_eq!(observation.disposition, ToolDisposition::Denied);
+                assert!(observation.output.contains("user_declined"));
+            }
             if case.starts_with("unguarded") {
                 assert!(!state.join("unguarded-commands.json").exists());
             }
@@ -472,6 +470,26 @@ fn assert_replay(state: &std::path::Path, workspace: &std::path::Path, case: &st
         }
         store.close().await.unwrap();
     });
+}
+
+fn assert_inline_approval_completion(run: &arany::RunView, case: &str) {
+    let cancelled = matches!(case, "cancel" | "escape" | "mouse-digits" | "typeahead");
+    assert_eq!(
+        run.agents[0].provider_calls.len(),
+        if cancelled {
+            1
+        } else if case.starts_with("unguarded") {
+            3
+        } else {
+            2
+        },
+        "{case}: continuation without retry"
+    );
+    assert_eq!(
+        run.assistant_message.as_deref(),
+        (!cancelled).then_some("APPROVAL_FINAL"),
+        "{case}: committed answer"
+    );
 }
 
 fn assert_pending(state: &std::path::Path, workspace: &std::path::Path) {

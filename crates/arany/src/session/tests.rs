@@ -1,5 +1,63 @@
 use super::*;
 
+#[test]
+fn old_source_compilers_rebuild_history_instead_of_reusing_the_summary() {
+    let fixture = worker_compacted_fixture(true);
+    let events = fixture.envelopes();
+    let mut view = SessionView::replay(fixture.session, &events)
+        .unwrap()
+        .unwrap();
+    let mut record = events
+        .iter()
+        .find_map(|event| match &event.event {
+            Event::GoalContextCompacted { record, .. } => Some(record.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let summary = "unsafe legacy summary canary";
+    record.compiler_version = MIN_RECORDED_COMPACTION_COMPILER_VERSION;
+    record.covered_sequence = view.runs[0].finished_sequence.unwrap();
+    record.source_digest = prefix_digest(&events, record.covered_sequence).unwrap();
+    record.status = CompactionStatus::Succeeded {
+        summary: summary.into(),
+        content_digest: crate::validate::digest(summary.as_bytes()),
+        summary_bytes: summary.len() as u32,
+        summary_tokens_estimate: summary.len().div_ceil(4) as u32,
+    };
+    view.compactions.push(CompactionView {
+        event_sequence: view.last_sequence + 1,
+        record,
+    });
+    let prepared =
+        PreparedCompaction::prepare(&view).unwrap_or_else(|_| panic!("canonical history"));
+    assert!(prepared.previous_summary.is_none());
+    assert!(!prepared.items.is_empty());
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    std::fs::create_dir(&workspace).unwrap();
+    let state = crate::StateRoot::admit(&temp.path().join("state")).unwrap();
+    let inputs = input::WorkspaceInputs::load(&workspace, &state, None, &[]).unwrap();
+    let context = CompiledContext::compile(
+        Some(&view),
+        "next",
+        &[],
+        &inputs,
+        CollaborationPolicy::Single,
+        0,
+        0,
+        None,
+    )
+    .unwrap_or_else(|_| panic!("canonical history fits"));
+    assert!(context.summary.is_none());
+    assert!(!context.history.is_empty());
+    assert!(
+        context
+            .history
+            .iter()
+            .all(|turn| !turn.user.contains(summary) && !turn.assistant.contains(summary))
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn directory_includes_snapshot_only_bounded_untrusted_entry_names() {

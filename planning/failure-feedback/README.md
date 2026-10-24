@@ -2,10 +2,10 @@
 
 ## Metadata
 
-- Status: `Ready` (remaining C1–C2; prior-Run cause reinjection is delivered by the [Session contract](../../docs/specs/session.md#context-and-compaction))
+- Status: `In progress` (C1 delivered; C2 remains; prior-Run cause reinjection is delivered by the [Session contract](../../docs/specs/session.md#context-and-compaction))
 - Owner: Fernando Mirabile
-- Last updated: `2026-10-22`
-- Next action: implement C1 after [approvals wait A1](../approvals-wait/README.md#vertical-slices), then C2. [Budget feedback](../../docs/specs/goals.md#budget-refusal-feedback) is independent.
+- Last updated: `2026-10-24`
+- Next action: implement C2 delegated failure feedback. [Budget feedback](../../docs/specs/goals.md#budget-refusal-feedback) is independent.
 
 ## Outcome and scope
 

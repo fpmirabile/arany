@@ -158,6 +158,61 @@ mod goal_recovery_tests {
         let cancelled = pending_plan_view(Some(ToolDisposition::Cancelled));
         assert!(!cancelled.goals[0].can_resume(&cancelled));
     }
+
+    #[test]
+    fn only_unsanitized_denial_results_require_redaction() {
+        let mut view = pending_plan_view(Some(ToolDisposition::Denied));
+        let tool = &mut view.runs[0].tools[0];
+        tool.observation.as_mut().unwrap().output = "old hook denial canary".into();
+        tool.permission_verdict = Some(crate::tools::permissions::PermissionVerdict {
+            host: None,
+            intent_digest: [1; 32],
+            decision: crate::tools::permissions::Decision::Deny,
+            mode: None,
+            basis: crate::tools::permissions::PermissionSource::Hook,
+            source: crate::tools::permissions::PermissionSource::Hook,
+            approved: false,
+            hook_restriction: Some(crate::tools::permissions::Decision::Deny),
+            hooks: 1,
+            narrowed: false,
+        });
+
+        assert!(tool.denial_needs_redaction());
+        tool.observation.as_mut().unwrap().output =
+            "hook_denied: no operation was dispatched".into();
+        assert!(!tool.denial_needs_redaction());
+    }
+
+    #[test]
+    fn approved_execution_denial_keeps_its_filesystem_cause() {
+        let mut view = pending_plan_view(Some(ToolDisposition::Denied));
+        let tool = &mut view.runs[0].tools[0];
+        let observation = tool.observation.as_mut().unwrap();
+        observation.output = "Guard enforcement: protected filesystem path refused".into();
+        observation.enforcement_cause = Some(crate::tools::EnforcementCause::FilesystemDenied);
+        observation.attestation = Some(crate::tools::Attestation::Guard(
+            crate::tools::GuardReceipt {
+                contract_version: 1,
+                intent_digest: tool.intent.digest(),
+                enforcement_digest: tool.intent.enforcement_digest,
+                limits: tool.intent.limits.clone(),
+            },
+        ));
+        tool.permission_verdict = Some(crate::tools::permissions::PermissionVerdict {
+            host: None,
+            intent_digest: tool.intent.digest(),
+            decision: crate::tools::permissions::Decision::Allow,
+            mode: None,
+            basis: crate::tools::permissions::PermissionSource::Human,
+            source: crate::tools::permissions::PermissionSource::Human,
+            approved: true,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        });
+
+        assert_eq!(tool.model_denial_label(), None);
+    }
 }
 
 mod goal_replay_tests {
@@ -725,7 +780,7 @@ mod goal_replay_tests {
                     model: if drifted { "different" } else { "gpt-5.4" }.into(),
                     prompt_version: 1,
                     schema_version: 1,
-                    compiler_version: 3,
+                    compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                     source_bytes: 1,
                     source_tokens_estimate: 1,
                     input_tokens: None,
@@ -1468,7 +1523,7 @@ mod goal_replay_tests {
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
                 schema_version: 1,
-                compiler_version: 3,
+                compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
                 source_tokens_estimate: 1,
                 input_tokens: None,
@@ -7576,7 +7631,7 @@ mod goal_replay_tests {
                 model: "gpt-5.4".into(),
                 prompt_version: 1,
                 schema_version: 1,
-                compiler_version: 3,
+                compiler_version: crate::session::COMPACTION_COMPILER_VERSION,
                 source_bytes: 1,
                 source_tokens_estimate: 1,
                 input_tokens: None,

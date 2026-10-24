@@ -1458,6 +1458,41 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
             assert!(item[1].get("attestation").is_none());
         }
     }
+    let canary = "historical protocol hook canary";
+    run.tools[0].observation = Some(ToolObservation {
+        intent: run.tools[0].intent.clone(),
+        disposition: ToolDisposition::Denied,
+        enforcement_cause: None,
+        limit_cause: None,
+        output: format!("Hook denied this Tool: {canary}"),
+        attestation: None,
+        approval_cause: None,
+        cache_update: CacheUpdate::NotApplicable,
+    });
+    run.tools[0].permission_verdict = Some(arany::permissions::PermissionVerdict {
+        host: None,
+        intent_digest: [1; 32],
+        decision: arany::permissions::Decision::Deny,
+        mode: None,
+        basis: arany::permissions::PermissionSource::Hook,
+        source: arany::permissions::PermissionSource::Hook,
+        approved: false,
+        hook_restriction: Some(arany::permissions::Decision::Deny),
+        hooks: 1,
+        narrowed: false,
+    });
+    let history = serde_json::to_value(items::history_items(&run)).unwrap();
+    assert_eq!(history[1]["status"], "declined");
+    assert_eq!(
+        history[1]["output"],
+        "hook_denied: no operation was dispatched"
+    );
+    assert!(!history.to_string().contains(canary));
+
+    assert_admission_history_items(&run);
+    run.tools[0].observation = None;
+    run.tools[0].permission_verdict = None;
+
     let mut child_tool = run.tools.pop().unwrap();
     child_tool.intent.id = uuid::Uuid::now_v7();
     run.agents.push(arany::AgentView {
@@ -1482,6 +1517,24 @@ fn tool_items_preserve_journaled_dispositions_and_unfinished_history_is_uncertai
         history[1]["id"],
         run.agents[0].tools[0].intent.id.to_string()
     );
+}
+
+fn assert_admission_history_items(run: &arany::RunView) {
+    let mut run = run.clone();
+    for tool in arany::test_support::host_admission_fixtures()
+        .into_iter()
+        .chain(std::iter::once(
+            arany::test_support::uncertain_hook_fixture(),
+        ))
+    {
+        let output = tool.observation.as_ref().unwrap().output.clone();
+        run.tools = vec![tool];
+        let history = serde_json::to_value(items::history_items(&run)).unwrap();
+        assert_eq!(history[1]["status"], "declined");
+        assert_eq!(history[1]["output"], output);
+        let expected = serde_json::to_string(&output).unwrap();
+        assert!(arany::test_support::history_tool_block(&run).contains(&expected));
+    }
 }
 
 #[cfg(unix)]
@@ -1954,6 +2007,14 @@ async fn approval_scenario(case: ApprovalCase) {
         case,
         ApprovalCase::Accept | ApprovalCase::Duplicate | ApprovalCase::LateAccept
     );
+    let continued = accepted
+        || matches!(
+            case,
+            ApprovalCase::Decline
+                | ApprovalCase::Invalid
+                | ApprovalCase::ClientError
+                | ApprovalCase::Undelivered
+        );
     assert_eq!(
         tools.len(),
         if case == ApprovalCase::Duplicate {
@@ -2043,7 +2104,33 @@ async fn approval_scenario(case: ApprovalCase) {
                 .all(|request| !format!("{request:?}").contains("private fact"))
         );
     }
-    assert_eq!(provider.responses.lock().unwrap().is_empty(), accepted);
+    if matches!(
+        case,
+        ApprovalCase::Decline
+            | ApprovalCase::Invalid
+            | ApprovalCase::ClientError
+            | ApprovalCase::Undelivered
+    ) {
+        let requests = requests.lock().unwrap();
+        let result = requests[1]
+            .input
+            .tools
+            .as_ref()
+            .unwrap()
+            .steps
+            .last()
+            .unwrap()
+            .observations
+            .last()
+            .unwrap();
+        assert!(result.output.contains(if case == ApprovalCase::Decline {
+            "user_declined"
+        } else {
+            "channel_unavailable"
+        }));
+        assert!(!format!("{:?}", requests).contains("Human channel unavailable"));
+    }
+    assert_eq!(provider.responses.lock().unwrap().is_empty(), continued);
 }
 
 #[cfg(unix)]

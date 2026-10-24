@@ -259,7 +259,7 @@ async fn researcher_tool_hooks_fail_closed_before_dispatch_if_the_program_is_unp
         let tool = &view.runs[0].agents[1].tools[0];
         assert_eq!(
             tool.observation.as_ref().unwrap().output,
-            "Hook denied this Tool: hook program is not pinned"
+            "hook_denied: no operation was dispatched"
         );
         assert!(tool.observation.as_ref().unwrap().attestation.is_none());
         assert!(tool.hooks.is_empty());

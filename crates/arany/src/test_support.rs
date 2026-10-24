@@ -22,6 +22,10 @@ pub fn tool_context_bytes(context: &crate::ToolContext) -> usize {
     context.rendered_len()
 }
 
+pub fn history_tool_block(run: &crate::RunView) -> String {
+    crate::provider::history_tool_block(run)
+}
+
 #[derive(Debug)]
 #[must_use = "the clock is restored when the guard drops"]
 pub struct TestClock {
@@ -986,5 +990,137 @@ impl crate::supervisor::SupervisorPolicy {
         policy.candidates = policy.floors.clone();
         policy.digest = policy.computed_digest();
         policy
+    }
+}
+
+pub fn host_admission_fixtures() -> Vec<crate::ToolView> {
+    use crate::permissions::{Decision, PermissionSource};
+    [
+        (
+            "sh",
+            Decision::Ask,
+            PermissionSource::UnavailableApproval,
+            "Host interpreter requires a matching tools.json command with interpreter: true, executable path and digest; nothing ran",
+        ),
+        (
+            "sh",
+            Decision::Ask,
+            PermissionSource::UnavailableApproval,
+            "Host command refused: permission settings changed outside admission; use /permissions to re-admit them. Nothing ran",
+        ),
+        (
+            "sudo",
+            Decision::Deny,
+            PermissionSource::Mode,
+            "Arany cannot run privilege-escalation commands. Please run this command by hand:\nargv (JSON): [\"sudo\",\"echo\",\"canary\"]\nWorkspace-relative cwd (JSON): \"\"\nNothing ran. Do not repackage this command through a wrapper, shell or child.",
+        ),
+    ]
+    .into_iter()
+    .map(|(program, decision, source, output)| host_admission_tool(program, decision, source, output))
+    .collect()
+}
+
+pub fn uncertain_hook_fixture() -> crate::ToolView {
+    use crate::permissions::{
+        Decision, HookEvent, HookIgnoreReason, HookInvocation, HookOutcome, HookResult,
+        PermissionSource,
+    };
+    let mut tool = host_admission_tool(
+        "sh",
+        Decision::Deny,
+        PermissionSource::Hook,
+        "Hook outcome uncertain; no operation was dispatched",
+    );
+    let mut observation = tool.observation.as_ref().unwrap().clone();
+    observation.intent.id = uuid::Uuid::now_v7();
+    observation.intent.call = crate::ToolCall::Command {
+        program: "sh".into(),
+        args: Vec::new(),
+        cwd: String::new(),
+    };
+    observation.disposition = crate::ToolDisposition::Uncertain;
+    observation.cache_update = crate::CacheUpdate::NotAttempted;
+    let verdict = tool.permission_verdict.as_mut().unwrap();
+    verdict.hook_restriction = Some(Decision::Deny);
+    verdict.hooks = 1;
+    tool.hooks.push(crate::session::HookView {
+        sequence: 1,
+        invocation: HookInvocation {
+            event: HookEvent::PreToolUse,
+            group: 0,
+            handler: 0,
+            subject_digest: tool.intent.digest(),
+            intent: observation.intent.clone(),
+            input_digest: [1; 32],
+            active_ceiling_ms: None,
+        },
+        outcome: Some(HookOutcome {
+            boundary_active_ms: None,
+            observation,
+            result: HookResult::Ignored {
+                why: HookIgnoreReason::NotCompleted,
+            },
+        }),
+        idle: false,
+    });
+    tool
+}
+
+fn host_admission_tool(
+    program: &str,
+    decision: crate::permissions::Decision,
+    source: crate::permissions::PermissionSource,
+    output: &str,
+) -> crate::ToolView {
+    let intent = crate::EffectIntent {
+        host: None,
+        host_command: None,
+        target: crate::worker::EffectTarget::Workspace,
+        id: uuid::Uuid::now_v7(),
+        run_id: crate::RunId::new(),
+        agent_run_id: crate::AgentRunId::new(),
+        policy_digest: [1; 32],
+        enforcement_digest: [2; 32],
+        workspace_device: 1,
+        workspace_inode: 2,
+        call: crate::ToolCall::CommandUnguarded {
+            program: program.into(),
+            args: vec!["echo".into(), "canary".into()],
+            cwd: String::new(),
+            justification: "Inspect the command".into(),
+        },
+        limits: crate::ToolLimits::default(),
+        use_count: 1,
+    };
+    crate::ToolView {
+        checkpoint: None,
+        observation: Some(crate::ToolObservation {
+            intent: intent.clone(),
+            disposition: crate::ToolDisposition::Denied,
+            enforcement_cause: None,
+            limit_cause: None,
+            output: output.into(),
+            attestation: None,
+            approval_cause: None,
+            cache_update: crate::CacheUpdate::NotApplicable,
+        }),
+        permission_verdict: Some(crate::permissions::PermissionVerdict {
+            host: None,
+            intent_digest: intent.digest(),
+            decision,
+            mode: (decision == crate::permissions::Decision::Deny)
+                .then_some(crate::permissions::PermissionMode::Plan),
+            basis: source,
+            source,
+            approved: false,
+            hook_restriction: None,
+            hooks: 0,
+            narrowed: false,
+        }),
+        intent,
+        review_call_index: None,
+        hooks: Vec::new(),
+        hook_sequence: None,
+        finished_sequence: Some(1),
     }
 }

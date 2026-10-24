@@ -426,7 +426,7 @@ fn scripted_runs_snapshot_workspace_and_replay_across_process_exit() {
         assert!(fourth.run.config.as_ref().unwrap().history_run_ids.is_empty());
         assert_eq!(fourth.run.config.as_ref().unwrap().excluded_history_runs, 3);
         let compacted = engine.compact_session(&AdmittedProviders::single(provider.clone()), first.session_id, workspace.clone()).await.unwrap();
-        assert_eq!(compacted.compiler_version, 3);
+        assert_eq!(compacted.compiler_version, 4);
         for (id, objective) in [(first.session_id, maximal_objective.as_str()), (fork_id, "After fork")] {
             let mut next = request(&workspace, objective);
             next.session_id = Some(id);
@@ -2165,6 +2165,7 @@ mod goals {
                 expected_digest: None,
                 content: "changed".into(),
             }),
+            arany::test_support::goals::finish_with("The proposed edit was declined"),
         ]);
         let provider = Arc::new(provider);
         let engine = engine_support::open(
@@ -2210,6 +2211,8 @@ mod goals {
         );
         let outcome = run.expect("denied Run");
         assert_eq!(outcome.run.status, RunStatus::Failed);
+        assert_eq!(outcome.run.failure, Some(arany::RunFailure::CriterionUnmet));
+        assert_eq!(provider.requests.lock().unwrap().len(), 3);
         engine.close().await.expect("engine shutdown");
 
         let (events, _) = replayed(&state_path, outcome.session_id).await;
