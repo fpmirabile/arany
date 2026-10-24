@@ -283,7 +283,8 @@ queue cannot hold Journal appends or prevent cancellation. A connected slow
 client alone does not expire an already enqueued request. Replies to withdrawn
 requests cannot authorize an effect, even if the request was already queued to the client.
 At most one approval is pending per connection; the Engine inbox has one
-bounded ingress slot. A child ask remains pending through idle human waits. The Engine withdraws it when active sibling work exhausts the shared delegation or Goal allowance, clearing its request and preserving the exhaustion cause. An excess ask refuses
+bounded ingress slot. Child-request allowance and withdrawal follow the
+[Tools approval rules](./tools.md#folder-trust-and-approvals). An excess ask refuses
 without evicting or renewing the first.
 
 This client is the human approval channel. Human-only requests, including

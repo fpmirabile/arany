@@ -103,11 +103,7 @@ enum Resolver<'a> {
 }
 
 enum AskSite {
-    Primary {
-        unguarded_prompt: Option<UnguardedPrompt>,
-        allow_auto_edits: bool,
-        remember_prefix: Option<crate::tools::permissions::TypedGitPrefix>,
-    },
+    Primary(AskOptions),
     Delegated {
         active_deadline: Option<crate::engine::ledger::ActiveDeadline>,
     },
@@ -127,10 +123,85 @@ struct Resolution {
     withdrawal: Option<ApprovalWithdrawal>,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 enum ReviewProgress {
     Continue,
     Finish,
     Exhausted,
+}
+
+enum ReviewOutcome {
+    Stopped(ActiveDeadlineCause),
+    Reviewed(ToolReviewDecision),
+    Exhausted,
+}
+
+struct ReviewFacts {
+    site: DispatchSite,
+    outcome: ReviewOutcome,
+    mode_unchanged: bool,
+    paused: bool,
+    cancelled: bool,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ReviewResolution {
+    progress: ReviewProgress,
+    approved: bool,
+    source: PermissionSource,
+    active_time_exhausted: bool,
+}
+
+fn decide_review(facts: ReviewFacts) -> ReviewResolution {
+    let (progress, approved, source, active_time_exhausted) = match facts.outcome {
+        ReviewOutcome::Stopped(cause) => (
+            ReviewProgress::Finish,
+            false,
+            PermissionSource::UnavailableApproval,
+            match cause {
+                ActiveDeadlineCause::Goal => true,
+                ActiveDeadlineCause::Delegation => false,
+            },
+        ),
+        ReviewOutcome::Exhausted => (
+            ReviewProgress::Exhausted,
+            false,
+            PermissionSource::UnavailableApproval,
+            false,
+        ),
+        ReviewOutcome::Reviewed(decision) => {
+            let approved = match decision {
+                ToolReviewDecision::Approve => facts.mode_unchanged,
+                ToolReviewDecision::Deny => false,
+            };
+            let source = if approved {
+                PermissionSource::AiReview
+            } else {
+                PermissionSource::UnavailableApproval
+            };
+            let delegated_approval = match facts.site {
+                DispatchSite::Primary => false,
+                DispatchSite::Researcher => approved,
+            };
+            let progress = if delegated_approval {
+                ReviewProgress::Finish
+            } else {
+                ReviewProgress::Continue
+            };
+            (
+                progress,
+                approved && !(delegated_approval && (facts.paused || facts.cancelled)),
+                source,
+                false,
+            )
+        }
+    };
+    ReviewResolution {
+        progress,
+        approved,
+        source,
+        active_time_exhausted,
+    }
 }
 
 struct HostPermission {
@@ -1591,16 +1662,8 @@ impl RunLoop<'_> {
                 } else {
                     &[Resolver::Human]
                 };
-                self.resolve_ask(
-                    intent,
-                    chain,
-                    AskSite::Primary {
-                        unguarded_prompt: options.unguarded_prompt,
-                        allow_auto_edits: options.allow_auto_edits,
-                        remember_prefix: options.remember_prefix,
-                    },
-                )
-                .await
+                self.resolve_ask(intent, chain, AskSite::Primary(options))
+                    .await
             }
             Grant::Researcher {
                 active_deadline, ..
@@ -1918,10 +1981,13 @@ impl RunLoop<'_> {
         for resolver in chain {
             match resolver {
                 Resolver::AiReview { objective } => {
-                    match self
-                        .resolve_review(objective, intent, &site, initial_mode, &mut resolution)
-                        .await?
-                    {
+                    let reviewed = self
+                        .resolve_review(objective, intent, &site, initial_mode)
+                        .await?;
+                    resolution.approved = reviewed.approved;
+                    resolution.source = reviewed.source;
+                    resolution.active_time_exhausted = reviewed.active_time_exhausted;
+                    match reviewed.progress {
                         ReviewProgress::Continue => {}
                         ReviewProgress::Finish => break,
                         ReviewProgress::Exhausted => return Ok(Admission::Exhausted),
@@ -1955,57 +2021,9 @@ impl RunLoop<'_> {
                                         == crate::engine::ledger::ActiveDeadlineCause::Goal
                             });
                     }
-                    AskSite::Primary {
-                        unguarded_prompt,
-                        allow_auto_edits,
-                        remember_prefix,
-                    } => {
-                        if !resolution.active_time_exhausted
-                            && !self.pause_at_boundary()
-                            && let Some(approvals) = self.controls.approvals
-                        {
-                            match self.reserve_active_pause()? {
-                                Admission::Reserved(pause) => {
-                                    let reply = self
-                                        .human_reply(
-                                            approvals,
-                                            intent,
-                                            unguarded_prompt.clone(),
-                                            *allow_auto_edits,
-                                            *remember_prefix,
-                                        )
-                                        .await;
-                                    resolution.source = if reply == ApprovalReply::Unavailable {
-                                        PermissionSource::UnavailableApproval
-                                    } else {
-                                        PermissionSource::Human
-                                    };
-                                    resolution.approved =
-                                        matches!(
-                                            reply,
-                                            ApprovalReply::AllowOnce
-                                                | ApprovalReply::AllowForSession
-                                                | ApprovalReply::AllowPrefixInFolder
-                                        ) && !self.controls.cancellation.is_cancelled()
-                                            && !self.pause_requested();
-                                    // A remembered rule is saved only after this human verdict is committed.
-                                    resolution.save = match reply {
-                                        ApprovalReply::AllowForSession => Some(RuleSave::Session),
-                                        ApprovalReply::AllowPrefixInFolder => {
-                                            remember_prefix.map(RuleSave::Prefix)
-                                        }
-                                        ApprovalReply::Deny
-                                        | ApprovalReply::Unavailable
-                                        | ApprovalReply::AllowOnce => None,
-                                    };
-                                    let resume_at = resolution.approved.then(Instant::now);
-                                    self.settle_active_pause(pause, resume_at)?;
-                                }
-                                Admission::Exhausted => {
-                                    resolution.active_time_exhausted = true;
-                                }
-                            }
-                        }
+                    AskSite::Primary(options) => {
+                        self.resolve_primary_human(intent, options, &mut resolution)
+                            .await?;
                     }
                 },
             }
@@ -2016,51 +2034,96 @@ impl RunLoop<'_> {
         Ok(Admission::Reserved(resolution))
     }
 
+    async fn resolve_primary_human(
+        &self,
+        intent: &EffectIntent,
+        options: &AskOptions,
+        resolution: &mut Resolution,
+    ) -> Result<(), EngineError> {
+        if !resolution.active_time_exhausted
+            && !self.pause_at_boundary()
+            && let Some(approvals) = self.controls.approvals
+        {
+            match self.reserve_active_pause()? {
+                Admission::Reserved(pause) => {
+                    let reply = self
+                        .human_reply(
+                            approvals,
+                            intent,
+                            options.unguarded_prompt.clone(),
+                            options.allow_auto_edits,
+                            options.remember_prefix,
+                        )
+                        .await;
+                    resolution.source = if reply == ApprovalReply::Unavailable {
+                        PermissionSource::UnavailableApproval
+                    } else {
+                        PermissionSource::Human
+                    };
+                    resolution.approved = matches!(
+                        reply,
+                        ApprovalReply::AllowOnce
+                            | ApprovalReply::AllowForSession
+                            | ApprovalReply::AllowPrefixInFolder
+                    ) && !self.controls.cancellation.is_cancelled()
+                        && !self.pause_requested();
+                    // A remembered rule is saved only after this human verdict is committed.
+                    resolution.save = match reply {
+                        ApprovalReply::AllowForSession => Some(RuleSave::Session),
+                        ApprovalReply::AllowPrefixInFolder => {
+                            options.remember_prefix.map(RuleSave::Prefix)
+                        }
+                        ApprovalReply::Deny
+                        | ApprovalReply::Unavailable
+                        | ApprovalReply::AllowOnce => None,
+                    };
+                    let resume_at = resolution.approved.then(Instant::now);
+                    self.settle_active_pause(pause, resume_at)?;
+                }
+                Admission::Exhausted => {
+                    resolution.active_time_exhausted = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn resolve_review(
         &self,
         objective: &str,
         intent: &EffectIntent,
         site: &AskSite,
         initial_mode: Option<ApprovalMode>,
-        resolution: &mut Resolution,
-    ) -> Result<ReviewProgress, EngineError> {
-        if let Some(cause) = self.review_exhaustion_cause(site) {
-            resolution.active_time_exhausted =
-                cause == crate::engine::ledger::ActiveDeadlineCause::Goal;
-            return Ok(ReviewProgress::Finish);
-        }
-        let review = match site {
-            AskSite::Primary { .. } => self.review_tool(objective, intent, None).await?,
-            AskSite::Delegated { active_deadline } => {
-                self.review_tool(objective, intent, active_deadline.as_ref())
-                    .await?
+    ) -> Result<ReviewResolution, EngineError> {
+        let outcome = match self.review_exhaustion_cause(site) {
+            Some(cause) => ReviewOutcome::Stopped(cause),
+            None => {
+                let review = match site {
+                    AskSite::Primary(_) => self.review_tool(objective, intent, None).await?,
+                    AskSite::Delegated { active_deadline } => {
+                        self.review_tool(objective, intent, active_deadline.as_ref())
+                            .await?
+                    }
+                };
+                match self.review_exhaustion_cause(site) {
+                    Some(cause) => ReviewOutcome::Stopped(cause),
+                    None => match review {
+                        Admission::Reserved(decision) => ReviewOutcome::Reviewed(decision),
+                        Admission::Exhausted => ReviewOutcome::Exhausted,
+                    },
+                }
             }
         };
-        if let Some(cause) = self.review_exhaustion_cause(site) {
-            resolution.active_time_exhausted =
-                cause == crate::engine::ledger::ActiveDeadlineCause::Goal;
-            return Ok(ReviewProgress::Finish);
-        }
-        match review {
-            Admission::Reserved(decision) => {
-                resolution.approved = match decision {
-                    ToolReviewDecision::Approve => self.terminal_mode() == initial_mode,
-                    ToolReviewDecision::Deny => false,
-                };
-                resolution.source = if resolution.approved {
-                    PermissionSource::AiReview
-                } else {
-                    PermissionSource::UnavailableApproval
-                };
-                if matches!(site, AskSite::Delegated { .. }) && resolution.approved {
-                    resolution.approved =
-                        !self.pause_requested() && !self.controls.cancellation.is_cancelled();
-                    return Ok(ReviewProgress::Finish);
-                }
-                Ok(ReviewProgress::Continue)
-            }
-            Admission::Exhausted => Ok(ReviewProgress::Exhausted),
-        }
+        Ok(decide_review(ReviewFacts {
+            site: match site {
+                AskSite::Primary(_) => DispatchSite::Primary,
+                AskSite::Delegated { .. } => DispatchSite::Researcher,
+            },
+            outcome,
+            mode_unchanged: self.terminal_mode() == initial_mode,
+            paused: self.pause_requested(),
+            cancelled: self.controls.cancellation.is_cancelled(),
+        }))
     }
 
     fn review_exhaustion_cause(
@@ -2068,13 +2131,13 @@ impl RunLoop<'_> {
         site: &AskSite,
     ) -> Option<crate::engine::ledger::ActiveDeadlineCause> {
         match site {
-            AskSite::Primary { .. } if self.ledger().active_time_exhausted() => {
+            AskSite::Primary(_) if self.ledger().active_time_exhausted() => {
                 Some(crate::engine::ledger::ActiveDeadlineCause::Goal)
             }
             AskSite::Delegated {
                 active_deadline: Some(deadline),
             } if deadline.reached() => Some(deadline.cause),
-            AskSite::Primary { .. }
+            AskSite::Primary(_)
             | AskSite::Delegated {
                 active_deadline: None,
             }
@@ -2614,6 +2677,61 @@ fn effective_permission_mode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_resolution_preserves_site_exhaustion_and_interruption_decisions() {
+        use ActiveDeadlineCause::{Delegation, Goal};
+        use DispatchSite::{Primary, Researcher};
+        use PermissionSource::{AiReview, UnavailableApproval};
+        use ReviewOutcome::{Exhausted, Reviewed, Stopped};
+        use ReviewProgress::{Continue, Exhausted as Budget, Finish};
+        use ToolReviewDecision::{Approve, Deny};
+        #[rustfmt::skip]
+        let rows = [
+            (Primary, Stopped(Goal), [true, false, false], (Finish, false, UnavailableApproval, true)),
+            (Researcher, Stopped(Goal), [true, false, false], (Finish, false, UnavailableApproval, true)),
+            (Primary, Stopped(Delegation), [true, false, false], (Finish, false, UnavailableApproval, false)),
+            (Researcher, Stopped(Delegation), [true, false, false], (Finish, false, UnavailableApproval, false)),
+            (Primary, Stopped(Goal), [false, true, true], (Finish, false, UnavailableApproval, true)),
+            (Researcher, Stopped(Delegation), [false, true, true], (Finish, false, UnavailableApproval, false)),
+            (Primary, Exhausted, [true, false, false], (Budget, false, UnavailableApproval, false)),
+            (Researcher, Exhausted, [true, false, false], (Budget, false, UnavailableApproval, false)),
+            (Primary, Reviewed(Approve), [true, false, false], (Continue, true, AiReview, false)),
+            (Researcher, Reviewed(Approve), [true, false, false], (Finish, true, AiReview, false)),
+            (Primary, Reviewed(Approve), [false, false, false], (Continue, false, UnavailableApproval, false)),
+            (Researcher, Reviewed(Approve), [false, false, false], (Continue, false, UnavailableApproval, false)),
+            (Primary, Reviewed(Approve), [true, true, false], (Continue, true, AiReview, false)),
+            (Primary, Reviewed(Approve), [true, false, true], (Continue, true, AiReview, false)),
+            (Researcher, Reviewed(Approve), [true, true, false], (Finish, false, AiReview, false)),
+            (Researcher, Reviewed(Approve), [true, false, true], (Finish, false, AiReview, false)),
+            (Researcher, Reviewed(Approve), [true, true, true], (Finish, false, AiReview, false)),
+            (Researcher, Reviewed(Approve), [false, true, true], (Continue, false, UnavailableApproval, false)),
+            (Primary, Reviewed(Deny), [true, false, false], (Continue, false, UnavailableApproval, false)),
+            (Researcher, Reviewed(Deny), [true, false, false], (Continue, false, UnavailableApproval, false)),
+            (Primary, Reviewed(Deny), [false, true, true], (Continue, false, UnavailableApproval, false)),
+            (Researcher, Reviewed(Deny), [false, true, true], (Continue, false, UnavailableApproval, false)),
+        ];
+        for (index, (site, outcome, flags, expected)) in rows.into_iter().enumerate() {
+            let [mode_unchanged, paused, cancelled] = flags;
+            let (progress, approved, source, active_time_exhausted) = expected;
+            assert_eq!(
+                decide_review(ReviewFacts {
+                    site,
+                    outcome,
+                    mode_unchanged,
+                    paused,
+                    cancelled,
+                }),
+                ReviewResolution {
+                    progress,
+                    approved,
+                    source,
+                    active_time_exhausted,
+                },
+                "review resolution row {index}"
+            );
+        }
+    }
 
     #[test]
     fn skill_read_outcomes_are_closed_before_egress() {
