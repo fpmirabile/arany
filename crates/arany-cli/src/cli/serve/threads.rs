@@ -1,6 +1,6 @@
 use super::{items, server::Fault};
 use crate::cli::{
-    attached::execution_limits,
+    attached::controls::execution_limits,
     provider::{
         routing::configured_providers,
         select::{ProviderArg, select_env_provider},

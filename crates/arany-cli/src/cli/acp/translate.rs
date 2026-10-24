@@ -1240,7 +1240,7 @@ async fn expire_close(
     output: mpsc::Sender<Value>,
     prompt: u64,
 ) {
-    tokio::time::sleep(crate::cli::exec::SHUTDOWN_GRACE).await;
+    tokio::time::sleep(crate::cli::run_outcome::SHUTDOWN_GRACE).await;
     let active = {
         let mut state = state.lock().expect("translator state");
         if !state

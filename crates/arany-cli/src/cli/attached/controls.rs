@@ -568,6 +568,13 @@ pub(super) async fn restore_settings_at(
     Ok(saved_settings(state_dir).await??)
 }
 
+pub(in crate::cli) async fn execution_limits(
+    state_dir: &std::path::Path,
+) -> Result<(arany::GoalBudget, arany::ToolResourceSettings), String> {
+    let settings = restore_settings_at(state_dir).await?;
+    Ok((settings.goal_budget, settings.resources))
+}
+
 // An unsupported or invalid record leaves defaults in force until /settings replaces it.
 pub(super) async fn settings_or_defaults(admission: &Admission) -> Result<Preferences, String> {
     Ok(saved_settings(&admission.state_dir)
