@@ -1255,7 +1255,7 @@ pub(super) async fn native_command_changeset_corpus(
     for (case, suffix, rejected) in [
         (
             "large-snapshot",
-            "test \"$(find src/large -type f | grep -c .)\" -eq 2049; test -s src/large/bulk-00000",
+            "set -- src/large/*; test \"$#\" -eq 2049; for file; do test -f \"$file\"; test -s \"$file\"; done",
             None,
         ),
         (
@@ -1628,8 +1628,9 @@ pub(super) async fn native_command_changeset_corpus(
             } else {
                 RunStatus::Finished
             },
-            "{case}: {} Tools",
-            run.tools.len()
+            "{case}: {} Tools: {:#?}",
+            run.tools.len(),
+            run.tools
         );
         let requests = requests.lock().unwrap().clone();
         if case == "scope" {
