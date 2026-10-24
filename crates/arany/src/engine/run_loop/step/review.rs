@@ -16,13 +16,18 @@ pub(super) enum ToolReviewDecision {
     Deny,
 }
 
+struct ReviewCompletion {
+    active_segment: Option<crate::engine::run_loop::ActiveSegment>,
+    has_active_deadline: bool,
+    limits: crate::provider::RateLimitSlot,
+}
+
 impl RunLoop<'_> {
-    pub(super) async fn review_tool(
+    fn review_request(
         &self,
         objective: &str,
         intent: &EffectIntent,
-        active_deadline: Option<&ActiveDeadline>,
-    ) -> Result<Admission<ToolReviewDecision>, EngineError> {
+    ) -> Result<ProviderRequest, EngineError> {
         let mut model = String::new();
         let mut max_output_tokens = 256;
         self.routing.bind(
@@ -31,7 +36,7 @@ impl RunLoop<'_> {
             &mut model,
             &mut max_output_tokens,
         )?;
-        let mut review = ProviderRequest {
+        Ok(ProviderRequest {
             session_id: self.session_id,
             run_id: self.run_id,
             agent_run_id: intent.agent_run_id,
@@ -48,7 +53,16 @@ impl RunLoop<'_> {
                         .to_string(),
                 )
             },
-        };
+        })
+    }
+
+    pub(super) async fn review_tool(
+        &self,
+        objective: &str,
+        intent: &EffectIntent,
+        active_deadline: Option<&ActiveDeadline>,
+    ) -> Result<Admission<ToolReviewDecision>, EngineError> {
+        let mut review = self.review_request(objective, intent)?;
         let active_segment = if active_deadline.is_none() {
             self.reserve_active_segment(
                 TOOL_REVIEW_DEADLINE + STORE_ACTION_OVERHEAD,
@@ -102,9 +116,29 @@ impl RunLoop<'_> {
                 )
                 .await?
         };
-        self.settle_result(&result)?;
+        let decision = self
+            .apply_review_verdict(
+                &result,
+                intent.agent_run_id,
+                ReviewCompletion {
+                    active_segment,
+                    has_active_deadline: active_deadline.is_some(),
+                    limits,
+                },
+            )
+            .await?;
+        Ok(Admission::Reserved(decision))
+    }
+
+    async fn apply_review_verdict(
+        &self,
+        result: &CallResult,
+        agent_run_id: crate::session::AgentRunId,
+        completion: ReviewCompletion,
+    ) -> Result<ToolReviewDecision, EngineError> {
+        self.settle_result(result)?;
         let valid = matches!(
-            &result,
+            result,
             CallResult::Response(ProviderResponse {
                 outcome: ProviderOutcome::Review(_),
                 ..
@@ -113,32 +147,30 @@ impl RunLoop<'_> {
         let valid = valid && self.ledger().tokens_within_limit();
         self.append(Event::ProviderCallRecorded {
             run_id: self.run_id,
-            agent_run_id: intent.agent_run_id,
+            agent_run_id,
             record: call_record(
                 AgentPhase::ToolReview,
-                &result,
+                result,
                 valid,
                 None,
                 None,
-                limits.take(),
+                completion.limits.take(),
             ),
         })
         .await?;
-        if let Some(active_segment) = active_segment {
+        if let Some(active_segment) = completion.active_segment {
             self.settle_active_segment(active_segment)?;
         }
-        let exhausted = if active_deadline.is_some() {
+        let exhausted = if completion.has_active_deadline {
             self.ledger().spent_active_time_exhausted()
         } else {
             self.ledger().active_time_exhausted()
         };
-        Ok(Admission::Reserved(tool_review_decision(
-            &result, valid, exhausted,
-        )))
+        Ok(apply_review_verdict(result, valid, exhausted))
     }
 }
 
-fn tool_review_decision(result: &CallResult, valid: bool, exhausted: bool) -> ToolReviewDecision {
+fn apply_review_verdict(result: &CallResult, valid: bool, exhausted: bool) -> ToolReviewDecision {
     if exhausted {
         return ToolReviewDecision::Deny;
     }
@@ -203,7 +235,7 @@ mod tests {
                     .zip(expected)
             {
                 assert_eq!(
-                    tool_review_decision(&result, valid, exhausted),
+                    apply_review_verdict(&result, valid, exhausted),
                     expected,
                     "{name}, valid={valid}, exhausted={exhausted}"
                 );

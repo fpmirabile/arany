@@ -361,6 +361,7 @@ pub(super) struct GoalLedger {
 }
 
 struct State {
+    supervisor: crate::supervisor::SupervisorState,
     view: SessionView,
     in_flight: InFlight,
 }
@@ -425,6 +426,7 @@ impl GoalLedger {
         Self {
             goal_id,
             state: Mutex::new(State {
+                supervisor: Default::default(),
                 view,
                 in_flight: InFlight::default(),
             }),
@@ -464,9 +466,13 @@ impl GoalLedger {
                 .append_then(session_id, event, |envelope| self.committed(envelope))
                 .await?;
             fed?;
-            if let Some(event) =
-                self.view(|v| v.runs.last().and_then(|r| r.supervisor.pending_event()))?
-            {
+            let pending = self
+                .state
+                .lock()
+                .map_err(|_| EngineError::CoordinatorFailed)?
+                .supervisor
+                .pending_event();
+            if let Some(event) = pending {
                 let (_, fed) = journal
                     .append_then(session_id, event, |envelope| self.committed(envelope))
                     .await?;
@@ -474,6 +480,21 @@ impl GoalLedger {
             }
             Ok(committed.sequence)
         })
+    }
+
+    pub(super) fn tool_verdict_follows(
+        &self,
+        observation: &crate::tools::ToolObservation,
+    ) -> Result<bool, EngineError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| EngineError::CoordinatorFailed)?;
+        Ok(state.supervisor.tool_verdict_follows(
+            &state.view,
+            state.view.last_sequence + 1,
+            observation,
+        ))
     }
 
     fn committed(&self, envelope: &EventEnvelope) -> Result<(), EngineError> {
@@ -485,6 +506,10 @@ impl GoalLedger {
             .view
             .apply_committed(envelope)
             .map_err(|_| EngineError::InvalidHistory)?;
+        let State {
+            view, supervisor, ..
+        } = &mut *state;
+        supervisor.after(view, envelope);
         if let Event::RunFinished { .. } = &envelope.event {
             let in_flight = &mut state.in_flight;
             in_flight.run_active_ms = 0;
@@ -557,7 +582,9 @@ impl GoalLedger {
             .state
             .lock()
             .map_err(|_| EngineError::CoordinatorFailed)?;
-        let State { view, in_flight } = &mut *state;
+        let State {
+            view, in_flight, ..
+        } = &mut *state;
         let goal = self
             .goal_id
             .and_then(|goal_id| view.goal(goal_id))

@@ -63,6 +63,7 @@ struct BoundaryFeatures {
 }
 
 pub(crate) struct Corpus {
+    evaluator: SupervisorState,
     key: hmac::Key,
     records: Vec<Record>,
     count: usize,
@@ -78,6 +79,7 @@ impl Corpus {
             .fill(&mut salt)
             .map_err(|_| CorpusError::Random)?;
         Ok(Self {
+            evaluator: Default::default(),
             key: hmac::Key::new(hmac::HMAC_SHA256, &salt),
             records: Vec::new(),
             count: 0,
@@ -100,6 +102,7 @@ impl Corpus {
     }
 
     pub(crate) fn observe(&mut self, view: &SessionView, envelope: &EventEnvelope) {
+        self.evaluator.after(view, envelope);
         match &envelope.event {
             Event::SupervisorVerdictRecorded { verdict, .. } => {
                 if let Some((_, sequence, index)) = self.recent.back()
@@ -153,8 +156,8 @@ impl Corpus {
         if envelope.run_id != Some(run.id) {
             return;
         }
-        let Some(window) = run
-            .supervisor
+        let Some(window) = self
+            .evaluator
             .windows
             .iter()
             .find(|(id, _)| *id == actor)
@@ -180,7 +183,8 @@ impl Corpus {
         };
         let calls: Vec<_> = window.iter().filter(|s| s.observation || s.stall).collect();
         let (looping, _) = loop_features(&calls, window);
-        let (site, _, footprint) = subject(run, actor, envelope).expect("evaluated boundary");
+        let (site, _, footprint) = subject(run, actor, envelope, self.evaluator.declared_roots)
+            .expect("evaluated boundary");
         let (operation, disposition, cause) = match &envelope.event {
             Event::ToolFinished { observation, .. } => (
                 Some(observation.intent.call.facts().name),

@@ -127,9 +127,9 @@ pub(crate) fn supervisor_lines(run: &RunView) -> impl Iterator<Item = String> + 
 pub(crate) fn supervisor_fixture(
     actor: arany::AgentRunId,
     count: usize,
-) -> arany::supervisor::SupervisorState {
+) -> arany::supervisor::SupervisorVerdicts {
     use arany::supervisor::*;
-    SupervisorState::with_verdicts_for_test(
+    SupervisorVerdicts::with_verdicts_for_test(
         (0..count)
             .map(|index| {
                 (
