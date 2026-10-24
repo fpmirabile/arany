@@ -8,7 +8,13 @@ targets = [
 [advisories]
 unmaintained = "all"
 unsound = "all"
-ignore = []
+ignore = [
+  # zvariant, zbus_names and zvariant_derive are unmaintained with no safe upgrade; keyring 4.2 pulls them
+  # through secret-service 5.2 / zbus 5.19. Revisit when keyring supports zbus 6 (released 2026-10-23).
+  { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; no safe upgrade until keyring adopts zbus 6" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; no safe upgrade until keyring adopts zbus 6" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; no safe upgrade until keyring adopts zbus 6" },
+]
 
 [licenses]
 allow = [
