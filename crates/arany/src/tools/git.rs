@@ -8,16 +8,19 @@ use super::config::{GitIdentity, Program};
 use super::executable::{EXECUTABLES, git_root, has_magic};
 use super::guard::GuardContext;
 use super::permissions::HiddenPaths;
+use super::selection::{CONTROL_BYTES, Selector};
 use super::types::{MAX_GIT_LOG_COMMITS, MAX_SNAPSHOT_BYTES, ToolCall};
 use crate::validate::{
     FORBIDDEN_NAMES, MAX_REVISION_BYTES, MAX_REVISION_RANGE_BYTES, forbidden, hex_digest,
     valid_relative, valid_revision,
 };
-use cap_fs_ext::DirExt;
+use cap_fs_ext::{DirExt, MetadataExt as CapMetadataExt};
 use cap_std::fs::Dir;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::ffi::OsString;
+use std::future::Future;
 use std::io::Read;
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
@@ -187,6 +190,7 @@ const MAX_ROWS: usize = 256;
 const MAX_SUBJECT_CHARS: usize = 256;
 const MAX_FILTERED_LOG_COMMITS: u32 = 1000;
 const MAX_BRANCH_COUNT_COMMITS: usize = 1000;
+pub(super) const DISCLOSURE_CONTRACT: &[u8] = b";typed-git-ignore-disclosure-v1:status-diff-log-paths-and-patches-filtered-before-bounds;tracked-ignored-paths-hidden;log-subjects-require-visible-path-evidence;path-read-stderr-suppressed;replay-never-reruns-selection";
 // Semantic unit fixtures allow slow native spawns; production retains its row deadline.
 const MAX_BRANCH_ROW_RUNTIME: Duration = if cfg!(test) {
     Duration::from_secs(10)
@@ -764,6 +768,34 @@ enum CapturedOutputs {
     Failed(String),
 }
 
+enum DisclosedCapture {
+    Ready {
+        outputs: Vec<Captured>,
+        disclosure: GitDisclosure,
+    },
+    Failed(String),
+}
+
+async fn capture_with_disclosure(
+    capture: impl Future<Output = Result<CapturedOutputs, ToolError>>,
+    workspace: &Path,
+    hidden: &HiddenPaths,
+    disclose_paths: bool,
+    action_deadline: tokio::time::Instant,
+) -> Result<DisclosedCapture, ToolError> {
+    match capture.await? {
+        CapturedOutputs::Failed(output) => Ok(DisclosedCapture::Failed(output)),
+        CapturedOutputs::Ready(outputs) => Ok(DisclosedCapture::Ready {
+            outputs,
+            disclosure: if disclose_paths {
+                GitDisclosure::new(workspace, hidden, action_deadline)?
+            } else {
+                GitDisclosure::empty(hidden.clone())
+            },
+        }),
+    }
+}
+
 struct ComparisonContext<'a> {
     git: &'a Path,
     env: &'a [(&'static str, OsString)],
@@ -786,12 +818,12 @@ impl ComparisonContext<'_> {
             if capture.overflow {
                 return Ok(ComparisonResolution::Failed(failure(
                     "git revision output exceeded its capture bound",
-                    &capture.stderr,
+                    failure_stderr(call, &capture.stderr),
                     self.max_bytes,
                     self.hidden,
                 )));
             }
-            if let Some(failed) = capture_failure(&capture, self.max_bytes, self.hidden) {
+            if let Some(failed) = capture_failure(call, &capture, self.max_bytes, self.hidden) {
                 return Ok(ComparisonResolution::Failed(failed));
             }
             if !capture.stderr.is_empty() {
@@ -852,11 +884,24 @@ impl PreparedGitRead<'_> {
             || self.call.clone(),
             |comparison| with_comparison_oids(self.call, comparison),
         );
-        let outputs = match self.capture_outputs(&call, repository).await? {
-            CapturedOutputs::Ready(outputs) => outputs,
-            CapturedOutputs::Failed(output) => return Ok(output),
+        let captured = capture_with_disclosure(
+            self.capture_outputs(&call, repository),
+            self.workspace,
+            self.hidden,
+            path_git_read(&call),
+            self.deadline,
+        )
+        .await?;
+        let (outputs, mut disclosure) = match captured {
+            DisclosedCapture::Ready {
+                outputs,
+                disclosure,
+            } => (outputs, disclosure),
+            DisclosedCapture::Failed(output) => return Ok(output),
         };
-        let mut value = self.render(&call, &outputs, repository, budget).await?;
+        let mut value = self
+            .render(&call, &outputs, repository, budget, &mut disclosure)
+            .await?;
         if let Some(comparison) = &comparison
             && let Value::Object(fields) = &mut value
         {
@@ -876,7 +921,8 @@ impl PreparedGitRead<'_> {
     ) -> Result<CapturedOutputs, ToolError> {
         let branch_read = matches!(call, ToolCall::GitBranch { name: None, .. });
         let mut outputs = Vec::new();
-        for argv in invocations(call, !self.hidden.is_empty())? {
+        let filtered = !self.hidden.is_empty() || matches!(call, ToolCall::GitLog { .. });
+        for argv in invocations(call, filtered)? {
             let capture = match spawn_git(
                 Path::new(&self.git.executable),
                 &argv,
@@ -893,7 +939,7 @@ impl PreparedGitRead<'_> {
                 }
                 result => result?,
             };
-            if let Some(failed) = capture_failure(&capture, self.max_bytes, self.hidden) {
+            if let Some(failed) = capture_failure(call, &capture, self.max_bytes, self.hidden) {
                 return Ok(CapturedOutputs::Failed(failed));
             }
             outputs.push(capture);
@@ -907,17 +953,22 @@ impl PreparedGitRead<'_> {
         outputs: &[Captured],
         repository: &Repository,
         budget: usize,
+        disclosure: &mut GitDisclosure,
     ) -> Result<Value, ToolError> {
         match (call, outputs) {
             (ToolCall::GitStatus { .. }, [status]) => {
-                status_output(&status.stdout, status.overflow, budget, self.hidden)
+                status_output(&status.stdout, status.overflow, budget, disclosure)
             }
             (ToolCall::GitDiff { .. }, [numstat, patch]) => {
-                diff_output(numstat, patch, budget, self.hidden)
+                diff_output(numstat, patch, budget, disclosure)
             }
-            (ToolCall::GitLog { max_count, .. }, [log]) => {
-                log_output(&log.stdout, log.overflow, budget, *max_count, self.hidden)
-            }
+            (ToolCall::GitLog { max_count, .. }, [log]) => log_output(
+                &log.stdout,
+                log.overflow,
+                budget,
+                LogLimit::typed(*max_count),
+                disclosure,
+            ),
             (
                 ToolCall::GitBranch {
                     base, max_count, ..
@@ -965,16 +1016,37 @@ fn with_comparison_oids(call: &ToolCall, comparison: &Comparison) -> ToolCall {
     call
 }
 
-fn capture_failure(capture: &Captured, max_bytes: usize, hidden: &HiddenPaths) -> Option<String> {
+fn capture_failure(
+    call: &ToolCall,
+    capture: &Captured,
+    max_bytes: usize,
+    hidden: &HiddenPaths,
+) -> Option<String> {
     if !capture.overflow && capture.status != Some(0) {
         let message = capture.status.map_or_else(
             || "git terminated by a signal".to_owned(),
             |code| format!("git exited with status {code}"),
         );
-        Some(failure(&message, &capture.stderr, max_bytes, hidden))
+        Some(failure(
+            &message,
+            failure_stderr(call, &capture.stderr),
+            max_bytes,
+            hidden,
+        ))
     } else {
         None
     }
+}
+
+fn failure_stderr<'a>(call: &ToolCall, stderr: &'a [u8]) -> &'a [u8] {
+    if path_git_read(call) { &[] } else { stderr }
+}
+
+fn path_git_read(call: &ToolCall) -> bool {
+    matches!(
+        call,
+        ToolCall::GitStatus { .. } | ToolCall::GitDiff { .. } | ToolCall::GitLog { .. }
+    )
 }
 
 fn environment(view: &Path, workspace: &Path, scratch: &Path) -> Vec<(&'static str, OsString)> {
@@ -1310,6 +1382,121 @@ fn shown(path: &str, hidden: &HiddenPaths) -> bool {
     !excluded(path) && !hidden.covers(path)
 }
 
+struct GitDisclosure {
+    hidden: HiddenPaths,
+    root: Option<Dir>,
+    selector: Selector,
+    controls: BTreeSet<String>,
+}
+
+impl GitDisclosure {
+    fn new(
+        workspace: &Path,
+        hidden: &HiddenPaths,
+        action_deadline: tokio::time::Instant,
+    ) -> Result<Self, ToolError> {
+        let mut disclosure = Self {
+            hidden: hidden.clone(),
+            root: Some(super::fs::open_directory(workspace)?),
+            selector: Selector::discovery_until(action_deadline),
+            controls: BTreeSet::new(),
+        };
+        disclosure.control("")?;
+        Ok(disclosure)
+    }
+
+    fn empty(hidden: HiddenPaths) -> Self {
+        Self {
+            hidden,
+            root: None,
+            selector: Selector::discovery_until(
+                tokio::time::Instant::now() + super::selection::DISCOVERY_TIME,
+            ),
+            controls: BTreeSet::new(),
+        }
+    }
+
+    fn shown(&mut self, path: &str, directory: bool) -> Result<bool, ToolError> {
+        let path = path.strip_suffix('/').unwrap_or(path);
+        if excluded(path) || self.hidden.covers(path) {
+            return Ok(false);
+        }
+        let Some(_) = self.root else {
+            return Ok(true);
+        };
+        if !valid_relative(path, false) || path.split('/').count() > super::glob::MAX_DEPTH {
+            return Ok(false);
+        }
+        for (index, _) in path.match_indices('/') {
+            let ancestor = &path[..index];
+            if self.hidden.covers(ancestor) || self.selector.excluded(ancestor, true)? {
+                return Ok(false);
+            }
+            self.control(ancestor)?;
+        }
+        Ok(!self.selector.excluded(path, directory)?)
+    }
+
+    fn control(&mut self, directory: &str) -> Result<(), ToolError> {
+        let control = if directory.is_empty() {
+            ".gitignore".to_owned()
+        } else {
+            format!("{directory}/.gitignore")
+        };
+        if self.controls.contains(&control) {
+            return Ok(());
+        }
+        if control.split('/').count() > super::glob::MAX_DEPTH || self.hidden.covers(&control) {
+            return Err(ToolError::FilesystemDenied);
+        }
+        let Some(root) = &self.root else {
+            return Ok(());
+        };
+        let parent = if directory.is_empty() {
+            root.try_clone().map_err(|_| ToolError::Path)?
+        } else {
+            match super::fs::open_file(root, directory) {
+                Ok(file) => {
+                    let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+                    if !metadata.is_dir() {
+                        self.controls.insert(control);
+                        return Ok(());
+                    }
+                    Dir::from_std_file(file)
+                }
+                Err(ToolError::NotFound) => {
+                    self.controls.insert(control);
+                    return Ok(());
+                }
+                Err(error) => return Err(error),
+            }
+        };
+        let before = match parent.symlink_metadata(".gitignore") {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                self.controls.insert(control);
+                return Ok(());
+            }
+            Err(_) => return Err(ToolError::Path),
+            Ok(metadata) if !metadata.is_file() || metadata.nlink() != 1 => {
+                return Err(ToolError::FilesystemDenied);
+            }
+            Ok(metadata) => metadata,
+        };
+        let file = super::fs::open_file(root, &control)?;
+        let metadata = file.metadata().map_err(|_| ToolError::Path)?;
+        if !metadata.is_file()
+            || metadata.nlink() != 1
+            || (metadata.dev(), metadata.ino()) != (before.dev(), before.ino())
+        {
+            return Err(ToolError::FilesystemDenied);
+        }
+        let bytes = super::fs::read_regular(file, CONTROL_BYTES)?;
+        self.selector.add(directory, &bytes)?;
+        self.controls.insert(control);
+        Ok(())
+    }
+}
+
 fn clipped(text: &str, chars: usize) -> String {
     text.chars().take(chars).collect()
 }
@@ -1326,7 +1513,7 @@ fn status_output(
     raw: &[u8],
     overflow: bool,
     budget: usize,
-    hidden: &HiddenPaths,
+    disclosure: &mut GitDisclosure,
 ) -> Result<Value, ToolError> {
     let mut branch = serde_json::Map::new();
     let mut rows = Rows::new(budget);
@@ -1363,7 +1550,7 @@ fn status_output(
             Some(("?", path)) => ("??", path),
             _ => return Err(ToolError::Operation),
         };
-        if !shown(path, hidden) {
+        if !disclosure.shown(path, path.ends_with('/'))? {
             continue;
         }
         if !rows.push(json!({"path": path, "state": state})) {
@@ -1388,7 +1575,7 @@ fn diff_output(
     numstat: &Captured,
     patch: &Captured,
     budget: usize,
-    hidden: &HiddenPaths,
+    disclosure: &mut GitDisclosure,
 ) -> Result<Value, ToolError> {
     let mut rows = Rows::new(budget / 2);
     let mut truncated = numstat.overflow || patch.overflow;
@@ -1400,7 +1587,7 @@ fn diff_output(
         else {
             return Err(ToolError::Operation);
         };
-        if !shown(path, hidden) {
+        if !disclosure.shown(path, false)? {
             continue;
         }
         if !rows.push(json!({"path": path, "added": count(added)?, "deleted": count(deleted)?})) {
@@ -1410,7 +1597,7 @@ fn diff_output(
     }
     let mut remaining = budget - rows.used;
     let mut text = String::new();
-    for line in visible_patch(&String::from_utf8_lossy(&patch.stdout), hidden) {
+    for line in visible_patch(&String::from_utf8_lossy(&patch.stdout), disclosure)? {
         let size = serde_json::to_string(line)
             .map_err(|_| ToolError::Operation)?
             .len()
@@ -1426,21 +1613,31 @@ fn diff_output(
 }
 
 // Every section starts hidden, and only a recognized header naming a shown path reveals it (fail closed).
-fn visible_patch<'a>(patch: &'a str, hidden: &'a HiddenPaths) -> impl Iterator<Item = &'a str> {
+fn visible_patch<'a>(
+    patch: &'a str,
+    disclosure: &mut GitDisclosure,
+) -> Result<Vec<&'a str>, ToolError> {
     let mut hiding = true;
-    patch.split_inclusive('\n').filter(move |line| {
+    let mut visible = Vec::new();
+    for line in patch.split_inclusive('\n') {
         // A capture cut mid-line could shorten a header's path past the filter.
         let Some(text) = line.strip_suffix('\n') else {
-            return false;
+            continue;
         };
         if let Some(header) = text.strip_prefix("diff ") {
-            hiding = section_path(header).is_none_or(|path| !shown(path, hidden));
+            hiding = match section_path(header) {
+                Some(path) => !disclosure.shown(path, false)?,
+                None => true,
+            };
         } else if let Some(path) = text.strip_prefix("* Unmerged path ") {
             // A staged diff reports a conflicted path in this one line, without a section header.
-            hiding = path.is_empty() || path.starts_with('"') || !shown(path, hidden);
+            hiding = path.is_empty() || path.starts_with('"') || !disclosure.shown(path, false)?;
         }
-        !hiding
-    })
+        if !hiding {
+            visible.push(line);
+        }
+    }
+    Ok(visible)
 }
 
 // Without renames a two-way header is `a/P b/P`; quoted names stay hidden.
@@ -1467,13 +1664,34 @@ fn object_id(bytes: &[u8]) -> Result<&str, ToolError> {
         .ok_or(ToolError::Operation)
 }
 
+struct LogLimit {
+    max_count: u32,
+    require_visible_path: bool,
+}
+
+impl LogLimit {
+    fn typed(max_count: u32) -> Self {
+        Self {
+            max_count,
+            require_visible_path: true,
+        }
+    }
+
+    fn branch_tip() -> Self {
+        Self {
+            max_count: 1,
+            require_visible_path: false,
+        }
+    }
+}
+
 // A commit is kept only when one of its `--name-only` lines names a shown path.
 fn log_output(
     raw: &[u8],
     overflow: bool,
     budget: usize,
-    max_count: u32,
-    hidden: &HiddenPaths,
+    limit: LogLimit,
+    disclosure: &mut GitDisclosure,
 ) -> Result<Value, ToolError> {
     let mut commits: Vec<(Value, bool)> = Vec::new();
     for record in records(raw, b'\n', overflow)? {
@@ -1482,7 +1700,7 @@ fn log_output(
             if let Some((_, evidence)) = commits.last_mut()
                 && !path.is_empty()
                 && !path.starts_with('"')
-                && shown(&path, hidden)
+                && disclosure.shown(&path, false)?
             {
                 *evidence = true;
             }
@@ -1511,14 +1729,14 @@ fn log_output(
             "time": time,
             "subject": clipped(&String::from_utf8_lossy(subject), MAX_SUBJECT_CHARS),
         });
-        commits.push((row, hidden.is_empty()));
+        commits.push((row, !limit.require_visible_path));
     }
     let mut rows = Rows::new(budget);
     // An exhausted scan may hide older visible history.
-    let mut truncated =
-        overflow || !hidden.is_empty() && commits.len() >= MAX_FILTERED_LOG_COMMITS as usize;
+    let mut truncated = overflow
+        || limit.require_visible_path && commits.len() >= MAX_FILTERED_LOG_COMMITS as usize;
     let mut visible = commits.into_iter().filter(|(_, evidence)| *evidence);
-    for (row, _) in visible.by_ref().take(max_count as usize) {
+    for (row, _) in visible.by_ref().take(limit.max_count as usize) {
         if !rows.push(row) {
             truncated = true;
             break;
@@ -1932,7 +2150,13 @@ fn tip_subject(
             std::str::from_utf8(path)
                 .is_ok_and(|path| !path.is_empty() && !path.starts_with('"') && shown(path, hidden))
         });
-    let log = log_output(raw, overflow, GIT_CAPTURE_BYTES, 1, hidden)?;
+    let log = log_output(
+        raw,
+        overflow,
+        GIT_CAPTURE_BYTES,
+        LogLimit::branch_tip(),
+        &mut GitDisclosure::empty(hidden.clone()),
+    )?;
     let tip = log["commits"]
         .as_array()
         .and_then(|rows| rows.first())
@@ -3341,7 +3565,13 @@ pub(super) mod tests {
              u UU N... 100644 100644 100644 100644 {unmerged} {unmerged} {unmerged} c.rs\0\
              ? new.txt\0? .env\0? cfg/.ssh/\0"
         );
-        let value = status_output(raw.as_bytes(), false, 4096, &none()).unwrap();
+        let value = status_output(
+            raw.as_bytes(),
+            false,
+            4096,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert_eq!(value["branch"], json!({"oid": oid, "head": "main"}));
         assert_eq!(
             value["entries"],
@@ -3353,21 +3583,173 @@ pub(super) mod tests {
         );
         assert_eq!(value["truncated"], false);
 
-        let initial = status_output(b"# branch.oid (initial)\0", false, 4096, &none()).unwrap();
+        let initial = status_output(
+            b"# branch.oid (initial)\0",
+            false,
+            4096,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert_eq!(initial["branch"]["oid"], Value::Null);
 
-        assert!(status_output(b"1 M\0", false, 4096, &none()).is_err());
-        assert!(status_output(b"x y\0", false, 4096, &none()).is_err());
-        assert!(status_output(b"? a\0? b", false, 4096, &none()).is_err());
-        let cut = status_output(b"? a\0? b", true, 4096, &none()).unwrap();
+        assert!(status_output(b"1 M\0", false, 4096, &mut GitDisclosure::empty(none())).is_err());
+        assert!(status_output(b"x y\0", false, 4096, &mut GitDisclosure::empty(none())).is_err());
+        assert!(
+            status_output(b"? a\0? b", false, 4096, &mut GitDisclosure::empty(none())).is_err()
+        );
+        let cut =
+            status_output(b"? a\0? b", true, 4096, &mut GitDisclosure::empty(none())).unwrap();
         assert_eq!(cut["entries"], json!([{"path": "a", "state": "??"}]));
         assert_eq!(cut["truncated"], true);
     }
 
     #[test]
+    fn tracked_ignored_paths_are_hidden_from_status_diff_and_log() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = fixture(temp.path());
+        let home = temp.path().join("home");
+        std::fs::write(workspace.join(".gitignore"), "cfg/private.json\n").unwrap();
+        std::fs::write(
+            workspace.join("cfg/private.json"),
+            "DISCLOSURE_CANARY=initial\n",
+        )
+        .unwrap();
+        host_git(&workspace, &home, &["add", ".gitignore"]);
+        host_git(&workspace, &home, &["add", "-f", "cfg/private.json"]);
+        host_git(
+            &workspace,
+            &home,
+            &["commit", "-q", "-m", "visible baseline"],
+        );
+        std::fs::write(
+            workspace.join("cfg/private.json"),
+            "DISCLOSURE_CANARY=hidden\n",
+        )
+        .unwrap();
+        host_git(&workspace, &home, &["add", "-f", "cfg/private.json"]);
+        host_git(
+            &workspace,
+            &home,
+            &["commit", "-q", "-m", "DISCLOSURE_CANARY commit"],
+        );
+        std::fs::write(
+            workspace.join("cfg/private.json"),
+            "DISCLOSURE_CANARY=working\n",
+        )
+        .unwrap();
+
+        let status = run_call(
+            &workspace,
+            &scratch(temp.path(), 801),
+            &ToolCall::GitStatus { path: ".".into() },
+        );
+        let diff = run_call(
+            &workspace,
+            &scratch(temp.path(), 802),
+            &ToolCall::GitDiff {
+                path: ".".into(),
+                base: None,
+                head: None,
+                staged: false,
+            },
+        );
+        let log = run_call(
+            &workspace,
+            &scratch(temp.path(), 803),
+            &ToolCall::GitLog {
+                path: ".".into(),
+                revision: None,
+                max_count: 5,
+            },
+        );
+        let explicit = run_call(
+            &workspace,
+            &scratch(temp.path(), 804),
+            &ToolCall::GitStatus {
+                path: "cfg/private.json".into(),
+            },
+        );
+        let output = format!("{status}{diff}{log}");
+        assert_eq!(diff["files"][0]["path"], "src/a.txt");
+        assert_eq!(log["commits"][0]["subject"], "visible baseline");
+        assert!(!output.contains("DISCLOSURE_CANARY"), "{output}");
+        assert!(!output.contains("cfg/private.json"), "{output}");
+        assert!(
+            status["entries"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry["path"] == "src/a.txt")
+        );
+        assert_eq!(explicit["entries"], json!([]));
+    }
+
+    #[test]
+    fn git_disclosure_rejects_malformed_and_unsafe_ignore_controls() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join(".gitignore"), [0xff]).unwrap();
+        assert!(matches!(
+            GitDisclosure::new(
+                &workspace,
+                &none(),
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ),
+            Err(ToolError::Path)
+        ));
+
+        std::fs::remove_file(workspace.join(".gitignore")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("missing", workspace.join(".gitignore")).unwrap();
+        assert!(matches!(
+            GitDisclosure::new(
+                &workspace,
+                &none(),
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            ),
+            Err(ToolError::FilesystemDenied)
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn git_disclosure_selection_window_starts_after_delayed_capture() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::write(workspace.join(".gitignore"), "ignored\n").unwrap();
+        let action_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+        let capture = async {
+            tokio::time::advance(super::super::selection::DISCOVERY_TIME + Duration::from_secs(1))
+                .await;
+            Ok(CapturedOutputs::Ready(Vec::new()))
+        };
+        let DisclosedCapture::Ready { mut disclosure, .. } =
+            capture_with_disclosure(capture, &workspace, &none(), true, action_deadline)
+                .await
+                .unwrap()
+        else {
+            panic!("capture fixture must succeed");
+        };
+        assert!(disclosure.shown("visible", false).unwrap());
+        assert!(!disclosure.shown("ignored", false).unwrap());
+        tokio::time::advance(action_deadline - tokio::time::Instant::now()).await;
+        assert!(matches!(
+            disclosure.shown("visible", false),
+            Err(ToolError::Timeout(_))
+        ));
+    }
+
+    #[test]
     fn numstat_and_log_parsers_read_nul_fields() {
         let numstat = captured(b"3\t1\tsrc/a.rs\0-\t-\timg.png\0", false);
-        let value = diff_output(&numstat, &captured(b"", false), 4096, &none()).unwrap();
+        let value = diff_output(
+            &numstat,
+            &captured(b"", false),
+            4096,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert_eq!(
             value["files"],
             json!([
@@ -3380,20 +3762,37 @@ pub(super) mod tests {
 
         let a = "a".repeat(40);
         let b = "b".repeat(40);
-        let log = format!("{a}\0{b}\0Ana\x001700000000\0Fix é\n{b}\0\0Ana\x001699999999\0Root\n");
-        let value = log_output(log.as_bytes(), false, 4096, 50, &none()).unwrap();
+        let log = format!(
+            "{a}\0{b}\0Ana\x001700000000\0Fix é\nsrc/a.rs\n{b}\0\0Ana\x001699999999\0Root\nsrc/root.rs\n"
+        );
+        let value = log_output(
+            log.as_bytes(),
+            false,
+            4096,
+            LogLimit::typed(50),
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         let commits = value["commits"].as_array().unwrap();
         assert_eq!(commits.len(), 2);
         assert_eq!(commits[0]["subject"], "Fix é");
         assert_eq!(commits[1]["parents"], json!([]));
-        assert!(log_output(b"a\0b\0Ana\x001700000000\0", false, 4096, 50, &none()).is_err());
+        let without_path = log_output(
+            b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\0bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\0Ana\x001700000000\0No path\n",
+            false,
+            4096,
+            LogLimit::typed(50),
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
+        assert_eq!(without_path["commits"], json!([]));
         assert!(
             log_output(
                 format!("{}\0\0Ana\x001\0s\n", "a".repeat(39)).as_bytes(),
                 false,
                 4096,
-                50,
-                &none()
+                LogLimit::typed(50),
+                &mut GitDisclosure::empty(none())
             )
             .is_err()
         );
@@ -3571,13 +3970,25 @@ pub(super) mod tests {
     #[test]
     fn results_fit_the_budget_and_report_truncation() {
         let many: String = (0..1000).map(|n| format!("? file-{n}.txt\0")).collect();
-        let value = status_output(many.as_bytes(), false, 2048, &none()).unwrap();
+        let value = status_output(
+            many.as_bytes(),
+            false,
+            2048,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert!(value.to_string().len() <= 2048 + ENVELOPE_BYTES);
         assert_eq!(value["truncated"], true);
         assert!(value["entries"].as_array().unwrap().len() < 1000);
 
         let capped: String = (0..300).map(|n| format!("? f{n}\0")).collect();
-        let value = status_output(capped.as_bytes(), false, 1 << 30, &none()).unwrap();
+        let value = status_output(
+            capped.as_bytes(),
+            false,
+            1 << 30,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert_eq!(value["entries"].as_array().unwrap().len(), MAX_ROWS);
         assert_eq!(value["truncated"], true);
 
@@ -3585,7 +3996,13 @@ pub(super) mod tests {
             &format!("diff --git a/x b/x\n{}", "+x\n".repeat(10_000)).into_bytes(),
             false,
         );
-        let value = diff_output(&captured(b"", false), &patch, 4096, &none()).unwrap();
+        let value = diff_output(
+            &captured(b"", false),
+            &patch,
+            4096,
+            &mut GitDisclosure::empty(none()),
+        )
+        .unwrap();
         assert!(value["patch"].as_str().unwrap().ends_with('\n'));
         assert!(value.to_string().len() <= 4096 + ENVELOPE_BYTES);
         assert_eq!(value["truncated"], true);
@@ -4081,7 +4498,7 @@ pub(super) mod tests {
             b"diff --git a/.env.local b/.env.local\n+SECRET_CANARY=1\ndiff --git a/.ENV b/.ENV\n+SECRET_CANARY=2\ndiff --git a/src/ok.rs b/src/ok.rs\n+ok\n",
             false,
         );
-        let value = diff_output(&numstat, &patch, 4096, &none()).unwrap();
+        let value = diff_output(&numstat, &patch, 4096, &mut GitDisclosure::empty(none())).unwrap();
         assert_eq!(
             value["files"],
             json!([{"path": "src/ok.rs", "added": 1, "deleted": 1}])
@@ -4164,7 +4581,13 @@ pub(super) mod tests {
             .map(|n| format!("? private/f{n}\0"))
             .chain(["? private/\0".to_owned(), "? src/a\0".to_owned()])
             .collect();
-        let value = status_output(status.as_bytes(), false, 4096, &hidden).unwrap();
+        let value = status_output(
+            status.as_bytes(),
+            false,
+            4096,
+            &mut GitDisclosure::empty(hidden.clone()),
+        )
+        .unwrap();
         assert_eq!(value["entries"], json!([{"path": "src/a", "state": "??"}]));
         assert_eq!(value["truncated"], false);
 
@@ -4183,8 +4606,13 @@ pub(super) mod tests {
             "diff --cc priv",
         ]
         .concat();
-        let value =
-            diff_output(&numstat, &captured(patch.as_bytes(), false), 4096, &hidden).unwrap();
+        let value = diff_output(
+            &numstat,
+            &captured(patch.as_bytes(), false),
+            4096,
+            &mut GitDisclosure::empty(hidden.clone()),
+        )
+        .unwrap();
         assert_eq!(
             value["files"],
             json!([{"path": "src/a", "added": 1, "deleted": 0}])
@@ -4217,18 +4645,45 @@ pub(super) mod tests {
             (subjects, value["truncated"].as_bool().unwrap())
         };
         assert_eq!(
-            subjects(log_output(log.as_bytes(), false, 4096, 5, &hidden).unwrap()),
+            subjects(
+                log_output(
+                    log.as_bytes(),
+                    false,
+                    4096,
+                    LogLimit::typed(5),
+                    &mut GitDisclosure::empty(hidden.clone())
+                )
+                .unwrap()
+            ),
             (vec!["visible".to_owned(), "later".to_owned()], false)
         );
         assert_eq!(
-            subjects(log_output(log.as_bytes(), false, 4096, 1, &hidden).unwrap()),
+            subjects(
+                log_output(
+                    log.as_bytes(),
+                    false,
+                    4096,
+                    LogLimit::typed(1),
+                    &mut GitDisclosure::empty(hidden.clone())
+                )
+                .unwrap()
+            ),
             (vec!["visible".to_owned()], true)
         );
         let exhausted: String = (0..MAX_FILTERED_LOG_COMMITS)
             .map(|_| commit(1, "covered", "private/s\n"))
             .collect();
         assert_eq!(
-            subjects(log_output(exhausted.as_bytes(), false, 1 << 30, 5, &hidden).unwrap()),
+            subjects(
+                log_output(
+                    exhausted.as_bytes(),
+                    false,
+                    1 << 30,
+                    LogLimit::typed(5),
+                    &mut GitDisclosure::empty(hidden.clone())
+                )
+                .unwrap()
+            ),
             (Vec::new(), true),
             "an exhausted scan is incomplete, not empty history"
         );

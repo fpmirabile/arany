@@ -14,6 +14,11 @@ pub(super) const DISCOVERY_TIME: Duration = Duration::from_secs(2);
 pub(super) const COMMAND_CALLS: u64 = 8_388_608;
 pub(super) const PHASE_TIME: Duration = Duration::from_secs(5);
 
+enum Deadline {
+    System(Instant),
+    Runtime(tokio::time::Instant),
+}
+
 pub(super) struct Selector {
     controls: Vec<(String, Gitignore)>,
     bytes: usize,
@@ -21,13 +26,20 @@ pub(super) struct Selector {
     expanded: usize,
     calls: u64,
     max_calls: u64,
-    deadline: Instant,
+    deadline: Deadline,
     #[cfg(test)]
     pub(super) in_progress: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Selector {
     pub(super) fn new(calls: u64, deadline: Instant) -> Self {
+        Self::with_deadline(
+            calls,
+            Deadline::System(deadline.min(Instant::now() + PHASE_TIME)),
+        )
+    }
+
+    fn with_deadline(calls: u64, deadline: Deadline) -> Self {
         Self {
             controls: Vec::new(),
             bytes: 0,
@@ -35,7 +47,7 @@ impl Selector {
             expanded: 0,
             calls,
             max_calls: COMMAND_CALLS,
-            deadline: deadline.min(Instant::now() + PHASE_TIME),
+            deadline,
             #[cfg(test)]
             in_progress: None,
         }
@@ -48,8 +60,22 @@ impl Selector {
         }
     }
 
+    pub(super) fn discovery_until(deadline: tokio::time::Instant) -> Self {
+        Self {
+            max_calls: DISCOVERY_CALLS,
+            ..Self::with_deadline(
+                0,
+                Deadline::Runtime(deadline.min(tokio::time::Instant::now() + DISCOVERY_TIME)),
+            )
+        }
+    }
+
     pub(super) fn check_time(&self) -> Result<(), ToolError> {
-        if Instant::now() >= self.deadline {
+        let expired = match self.deadline {
+            Deadline::System(deadline) => Instant::now() >= deadline,
+            Deadline::Runtime(deadline) => tokio::time::Instant::now() >= deadline,
+        };
+        if expired {
             return Err(ToolError::Timeout(String::new()));
         }
         Ok(())
@@ -165,7 +191,10 @@ mod tests {
     fn discovery_keeps_its_smaller_work_and_time_budgets() {
         let now = Instant::now();
         let mut selector = Selector::discovery(now + PHASE_TIME);
-        assert!(selector.deadline <= Instant::now() + DISCOVERY_TIME);
+        assert!(matches!(
+            selector.deadline,
+            Deadline::System(deadline) if deadline <= Instant::now() + DISCOVERY_TIME
+        ));
         selector.add("", b"ignored").unwrap();
         selector.calls = DISCOVERY_CALLS - 1;
         assert!(selector.excluded("ignored", false).unwrap());
@@ -180,13 +209,22 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn selection_uses_the_shorter_phase_or_action_deadline() {
+    #[tokio::test(start_paused = true)]
+    async fn selection_uses_the_shorter_phase_or_action_deadline() {
+        tokio::time::advance(Duration::from_secs(3600)).await;
+        tokio::time::resume();
         let now = Instant::now();
         let action = now + Duration::from_millis(25);
-        assert_eq!(Selector::new(0, action).deadline, action);
-        let bounded = Selector::new(0, now + Duration::from_secs(60));
-        assert!(bounded.deadline <= Instant::now() + PHASE_TIME);
+        let selector = Selector::new(0, action);
+        assert!(matches!(selector.deadline, Deadline::System(deadline) if deadline == action));
+        let mut discovery = Selector::discovery(now + DISCOVERY_TIME);
+        discovery.add("", b"ignored").unwrap();
+        let mut bounded = Selector::new(0, now + Duration::from_secs(60));
+        assert!(matches!(
+            bounded.deadline,
+            Deadline::System(deadline) if deadline <= Instant::now() + PHASE_TIME
+        ));
+        bounded.add("", b"ignored").unwrap();
         let mut expired = Selector::new(0, now);
         assert!(matches!(
             expired.add("", b"ignored"),
@@ -268,7 +306,7 @@ mod tests {
             Err(ToolError::Limit)
         ));
         let mut elapsed = Selector::new(0, Instant::now() + PHASE_TIME);
-        elapsed.deadline = Instant::now();
+        elapsed.deadline = Deadline::System(Instant::now());
         assert!(matches!(
             elapsed.excluded("visible", false),
             Err(ToolError::Timeout(_))

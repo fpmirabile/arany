@@ -27,6 +27,8 @@ const PAYLOAD_KILL_WAIT: Duration = Duration::from_secs(1);
 // The launcher measures its runtime from GO, so the grace covers its kill wait, the report write and GO delivery.
 #[cfg(any(target_os = "macos", test))]
 const PAYLOAD_REPORT_GRACE: Duration = PAYLOAD_KILL_WAIT.saturating_add(Duration::from_secs(1));
+#[cfg(any(target_os = "macos", test))]
+pub(super) const DISCOVERY_DONE: &[u8] = b"DISCOVERY_DONE\n";
 
 #[cfg(any(target_os = "macos", test))]
 pub(super) fn payload_report_deadline(
@@ -772,6 +774,36 @@ async fn discovery_work<T>(
     tokio::time::timeout(duration, operation)
         .await
         .map_err(|_| ToolError::Timeout(String::new()))?
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn wait_discovery_completion<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<(), ToolError> {
+    discovery_work(intent, async {
+        let prefix = reader.fill_buf().await.map_err(|_| ToolError::Operation)?;
+        if prefix.first() != DISCOVERY_DONE.first() {
+            return match read_worker_report(reader, intent).await {
+                Err(error) => Err(error),
+                Ok(_) => Err(ToolError::Operation),
+            };
+        }
+        if read_line_capped(reader, DISCOVERY_DONE.len()).await? != DISCOVERY_DONE {
+            return Err(ToolError::Operation);
+        }
+        Ok(())
+    })
+    .await
+}
+
+#[cfg(any(target_os = "macos", test))]
+async fn read_discovery_report<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: &mut R,
+    intent: &EffectIntent,
+) -> Result<ToolObservation, ToolError> {
+    wait_discovery_completion(reader, intent).await?;
+    read_worker_report(reader, intent).await
 }
 
 pub(super) async fn execute(
@@ -2343,6 +2375,75 @@ mod tests {
             assert!(matches!(result, Err(ToolError::Timeout(_))));
             assert_eq!(tokio::time::Instant::now() - start, duration);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discovery_completion_keeps_cleanup_outside_the_selection_window() {
+        use tokio::io::AsyncWriteExt;
+        let mut intent = intent(ToolCall::List { path: ".".into() });
+        intent.policy_digest = [1; 32];
+        intent.enforcement_digest = [2; 32];
+        let observation = ToolObservation {
+            intent: intent.clone(),
+            disposition: ToolDisposition::Succeeded,
+            output: "{\"entries\":[],\"truncated\":false}".into(),
+            attestation: Some(Attestation::Guard(GuardReceipt {
+                contract_version: 1,
+                intent_digest: intent.digest(),
+                enforcement_digest: intent.enforcement_digest,
+                limits: intent.limits.clone(),
+            })),
+            enforcement_cause: None,
+            limit_cause: None,
+            approval_cause: None,
+            cache_update: CacheUpdate::NotApplicable,
+        };
+        assert!(observation.attested_for(&intent));
+        let mut report = serde_json::to_vec(&observation).unwrap();
+        report.push(b'\n');
+        let (mut peer, stream) = tokio::io::duplex(report.len());
+        let mut reader = tokio::io::BufReader::new(stream);
+        let sending = async move {
+            peer.write_all(DISCOVERY_DONE).await.unwrap();
+            tokio::time::sleep(super::super::selection::DISCOVERY_TIME + Duration::from_secs(1))
+                .await;
+            peer.write_all(&report).await.unwrap();
+        };
+        let receiving = async {
+            let reported =
+                tokio::time::timeout(TEARDOWN_WAIT, read_discovery_report(&mut reader, &intent))
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(reported, observation);
+        };
+        tokio::join!(sending, receiving);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn discovery_completion_bounds_work_and_preserves_bootstrap_failures() {
+        let mut intent = intent(ToolCall::List { path: ".".into() });
+        let duration = Duration::from_millis(25);
+        intent.limits.runtime_ms = u32::try_from(duration.as_millis()).unwrap();
+        let (_peer, stream) = tokio::io::duplex(DISCOVERY_DONE.len());
+        let mut reader = tokio::io::BufReader::new(stream);
+        let started = tokio::time::Instant::now();
+        assert!(matches!(
+            wait_discovery_completion(&mut reader, &intent).await,
+            Err(ToolError::Timeout(_))
+        ));
+        assert_eq!(started.elapsed(), duration);
+        let mut malformed = &b"DISCOVERY_BAD\n"[..];
+        assert!(matches!(
+            wait_discovery_completion(&mut malformed, &intent).await,
+            Err(ToolError::Operation)
+        ));
+        let mut failure = &b"{\"stage\":\"storage_cleanup\",\"check\":\"detach_failed\"}\n"[..];
+        assert!(matches!(
+            wait_discovery_completion(&mut failure, &intent).await,
+            Err(ToolError::GuardBootstrap(failure))
+                if failure.failure_stage() == "storage cleanup" && failure.check() == Some("detach failed")
+        ));
     }
 
     #[test]

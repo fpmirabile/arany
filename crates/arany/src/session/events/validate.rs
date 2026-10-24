@@ -1,5 +1,8 @@
 use super::*;
 
+mod goal;
+mod session;
+
 impl Event {
     pub(in crate::session) fn validate(&self) -> Result<(), ReplayError> {
         if self.scope().1.is_some_and(|id| !id.valid()) {
@@ -21,143 +24,27 @@ impl Event {
             return Err(ReplayError::InvalidPayload);
         }
         match self {
-            Self::SupervisorVerdictRecorded { verdict, .. } => {
-                if verdict.valid() {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::WorkspaceRewindStarted { record } => {
-                if record.valid() {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::WorkspaceRewindFinished { record } => {
-                if record.valid() {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
-            Self::SessionStarted { title, .. } | Self::SessionRenamed { title } => {
-                bounded(title, 128)
-            }
-            Self::SessionDefaultChanged { defaults } => defaults.validate(),
-            Self::SessionForked {
-                title,
-                source_sequence,
-                ..
-            } if *source_sequence > 0 => bounded(title, 128),
-            Self::SessionForked { .. } => Err(ReplayError::InvalidPayload),
-            Self::ContextCompacted { record, .. } => record.validate(),
-            Self::GoalStarted {
-                objective,
-                include_paths,
-                workspace_identity: WorkspaceIdentity { inode, .. },
-                budget,
-                resource_settings,
-                continues,
-                ..
-            } => {
-                if include_paths.as_ref().is_some_and(|paths| {
-                    paths.len() > crate::session::input::MAX_INCLUDES
-                        || paths
-                            .iter()
-                            .any(|path| !crate::session::input::valid_include_path(path))
-                }) {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                if continues.is_some_and(|id| !id.valid()) {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                if objective.len() > super::MAX_USER_MESSAGE_BYTES || *inode == 0 {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                budget.validate()?;
-                if !resource_settings.valid() {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::GoalRunLinked { .. } | Self::GoalResumed { .. } => Ok(()),
-            Self::GoalCompactionCallReserved { .. } => Ok(()),
-            Self::ToolResultsCleared {
-                covered_tool_count,
-                cleared_bytes,
-                ..
-            } => {
-                if *covered_tool_count == 0
-                    || *cleared_bytes as usize > crate::session::MAX_WINDOW_CONTENT_BYTES
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::GoalContextCompacted {
-                covered_tool_count,
-                record,
-                ..
-            } => {
-                if *covered_tool_count == 0 || record.validate().is_err() {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::GoalPlanContractRecorded { contract, .. } => {
-                contract.validate()?;
-                Ok(())
-            }
-            Self::GoalSteeringNoteRecorded { text, .. }
-            | Self::AgentSteeringNoteRecorded { text, .. } => {
-                if text.trim().is_empty() || text.len() > super::MAX_STEERING_NOTE_BYTES {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::GoalFinished {
-                status,
-                report,
-                exhausted,
-                budget_refusal,
-                ..
-            } => {
-                if !matches!(status, GoalStatus::Completed | GoalStatus::Failed) {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                if let Some(refusal) = budget_refusal {
-                    if !exhausted {
-                        return Err(ReplayError::InvalidPayload);
-                    }
-                    refusal.validate()?;
-                }
-                report.validate()
-            }
-            Self::MessageAccepted {
-                text,
-                images,
-                skill,
-                ..
-            } => {
-                if skill
-                    .as_deref()
-                    .is_some_and(|name| !crate::validate::valid_name(name))
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                if text.len() > super::MAX_USER_MESSAGE_BYTES
-                    || text.is_empty() && images.is_empty()
-                    || !crate::provider::valid_image_collection(images)
-                {
-                    return Err(ReplayError::InvalidPayload);
-                }
-                Ok(())
-            }
-            Self::MessageCommitted { text, .. } => {
-                bounded(text, super::MAX_ASSISTANT_MESSAGE_BYTES)
-            }
+            Self::SupervisorVerdictRecorded { .. }
+            | Self::WorkspaceRewindStarted { .. }
+            | Self::WorkspaceRewindFinished { .. }
+            | Self::SessionStarted { .. }
+            | Self::SessionRenamed { .. }
+            | Self::SessionDefaultChanged { .. }
+            | Self::SessionForked { .. }
+            | Self::ContextCompacted { .. }
+            | Self::ToolResultsCleared { .. }
+            | Self::MessageAccepted { .. }
+            | Self::MessageCommitted { .. } => Event::validate_session(self),
+            Self::GoalStarted { .. }
+            | Self::GoalRunLinked { .. }
+            | Self::GoalResumed { .. }
+            | Self::GoalCompactionCallReserved { .. }
+            | Self::GoalContextCompacted { .. }
+            | Self::GoalPlanContractRecorded { .. }
+            | Self::GoalSteeringNoteRecorded { .. }
+            | Self::AgentSteeringNoteRecorded { .. }
+            | Self::GoalFinished { .. }
+            | Self::GoalProviderCallReserved { .. } => Event::validate_goal(self),
             Self::RunStarted {
                 config,
                 active_deadline_ms,
@@ -269,13 +156,6 @@ impl Event {
                 }
             }
             Self::ProviderCallRecorded { record, .. } => record.validate(),
-            Self::GoalProviderCallReserved { goal_id, .. } => {
-                if goal_id.valid() {
-                    Ok(())
-                } else {
-                    Err(ReplayError::InvalidPayload)
-                }
-            }
             Self::AssistantDisplayRecorded { chunk, .. } => chunk.validate(),
             Self::ToolStarted {
                 run_id,
