@@ -1373,6 +1373,35 @@ mod tests {
     }
 
     #[test]
+    fn only_chatgpt_ceiling_timeouts_are_retryable_stream_cuts() {
+        for (profile, provenance, expected) in [
+            ("openai", Provenance::native(), None),
+            ("anthropic", Provenance::native(), None),
+            (
+                "custom:local",
+                Provenance::Custom(CustomProfileProvenance {
+                    endpoint: "https://example.com/v1/responses".into(),
+                    evidence_digest: [7; 32],
+                    capability_evidence_version: 2,
+                }),
+                None,
+            ),
+            (
+                "chatgpt",
+                Provenance::ChatGpt(ChatGptProvenance {
+                    account_id: Uuid::now_v7(),
+                    evidence_fingerprint: [7; 32],
+                    admission: ChatGptAdmission::AccountConsent,
+                }),
+                Some(RetryCause::StreamCut),
+            ),
+        ] {
+            let identity = ProviderIdentity::new(profile, "model-a", provenance);
+            assert_eq!(identity.ceiling_retry_cause(), expected, "{profile}");
+        }
+    }
+
+    #[test]
     fn stream_bounds_follow_the_declared_output_cap() {
         for cap in [
             1,
