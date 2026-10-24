@@ -82,19 +82,19 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "description": "Optional number of lines, 1 through 2000; omitted or null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
             "type": [
               "integer",
               "null"
             ]
           },
           "offset": {
-            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "description": "Optional 1-based start line, 1 through 4294967295; omitted or null starts at line 1. Continue using next_line.",
             "type": [
               "integer",
               "null"
@@ -105,9 +105,7 @@
           }
         },
         "required": [
-          "path",
-          "offset",
-          "limit"
+          "path"
         ],
         "type": "object"
       },
@@ -1159,19 +1157,19 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "description": "Optional number of lines, 1 through 2000; omitted or null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
             "type": [
               "integer",
               "null"
             ]
           },
           "offset": {
-            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "description": "Optional 1-based start line, 1 through 4294967295; omitted or null starts at line 1. Continue using next_line.",
             "type": [
               "integer",
               "null"
@@ -1182,9 +1180,7 @@
           }
         },
         "required": [
-          "path",
-          "offset",
-          "limit"
+          "path"
         ],
         "type": "object"
       },
@@ -1493,19 +1489,19 @@
       "name": "arany_list"
     },
     {
-      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Continue from next_line when present. Read further pages yourself when needed.",
+      "description": "Read a Workspace file and obtain its whole-file SHA-256. Read numbered lines with a 1-based offset; null offset starts at 1 and null limit reads up to 2000 lines. Messages also accepts omitted offset and limit. Continue from next_line when present. Read further pages yourself when needed.",
       "input_schema": {
         "additionalProperties": false,
         "properties": {
           "limit": {
-            "description": "Number of lines, 1 through 2000; null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
+            "description": "Optional number of lines, 1 through 2000; omitted or null reads up to 2000 lines. Lines are numbered and cut after 2000 characters; the rendered result budget may end the page earlier.",
             "type": [
               "integer",
               "null"
             ]
           },
           "offset": {
-            "description": "1-based start line, 1 through 4294967295; null starts at line 1. Continue using next_line.",
+            "description": "Optional 1-based start line, 1 through 4294967295; omitted or null starts at line 1. Continue using next_line.",
             "type": [
               "integer",
               "null"
@@ -1516,9 +1512,7 @@
           }
         },
         "required": [
-          "path",
-          "offset",
-          "limit"
+          "path"
         ],
         "type": "object"
       },

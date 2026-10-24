@@ -469,29 +469,37 @@ impl<'a> ResponsesPreview<'a> {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct StreamResponseError {
+    pub(super) error: ProviderError,
+    pub(super) stage: crate::diagnostics::SubscriptionFailureStage,
+}
+
 pub(super) fn validate_stream_response(
     response: &reqwest::Response,
     max_output_tokens: u32,
-) -> Result<(), ProviderError> {
+) -> Result<(), StreamResponseError> {
+    use crate::diagnostics::SubscriptionFailureStage as Stage;
     use reqwest::header;
-    if response
+    let stage = if response
         .content_length()
         .is_some_and(|length| length > super::max_stream_bytes(max_output_tokens) as u64)
     {
         crate::diagnostics::stream_limit(0, 0);
-        return Err(ProviderError::InvalidStream);
-    }
-    if response
+        Stage::ContentLength
+    } else if response
         .headers()
         .get_all(header::CONTENT_ENCODING)
         .iter()
         .any(|value| !value.as_bytes().eq_ignore_ascii_case(b"identity"))
-        || response
-            .headers()
-            .get_all(header::CONTENT_TYPE)
-            .iter()
-            .count()
-            != 1
+    {
+        Stage::ContentEncoding
+    } else if response
+        .headers()
+        .get_all(header::CONTENT_TYPE)
+        .iter()
+        .count()
+        != 1
         || !response
             .headers()
             .get(header::CONTENT_TYPE)
@@ -505,9 +513,14 @@ pub(super) fn validate_stream_response(
                     .eq_ignore_ascii_case("text/event-stream")
             })
     {
-        return Err(ProviderError::InvalidStream);
-    }
-    Ok(())
+        Stage::ResponseContent
+    } else {
+        return Ok(());
+    };
+    Err(StreamResponseError {
+        error: ProviderError::InvalidStream,
+        stage,
+    })
 }
 
 pub(super) fn reflects_secret(value: &Value, secret: &str) -> bool {
