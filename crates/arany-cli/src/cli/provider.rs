@@ -64,6 +64,11 @@ struct CheckArgs {
     saved_account: bool,
 }
 
+enum CheckTarget {
+    Native { model: String, effort: Effort },
+    Custom,
+}
+
 pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
     match args.action {
         ProviderAction::Logout { profile } => logout(profile).await,
@@ -150,16 +155,7 @@ async fn models(
     let (models, exact_custom) = match ProviderKind::parse(&profile) {
         Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
             let key = if saved_account {
-                let account = credentials::load()
-                    .await
-                    .map_err(|error| error.to_string())?
-                    .ok_or("no saved native API account")?;
-                if account.provider != profile {
-                    return Err("saved API account belongs to a different Provider".into());
-                }
-                account
-                    .into_credentials()
-                    .map_err(|error| error.to_string())?
+                saved_native_credentials(&profile).await?.0
             } else {
                 NativeApiCredentials::from_env(&profile).map_err(|error| error.to_string())?
             };
@@ -207,7 +203,8 @@ async fn check(args: CheckArgs) -> Result<CommandOutput, String> {
         accept_cost,
         saved_account,
     } = args;
-    if ProviderKind::parse(&profile) == Some(ProviderKind::ChatGpt) {
+    let kind = ProviderKind::parse(&profile);
+    if kind == Some(ProviderKind::ChatGpt) {
         return check_chatgpt(
             selected_state_dir,
             model,
@@ -217,8 +214,7 @@ async fn check(args: CheckArgs) -> Result<CommandOutput, String> {
         )
         .await;
     }
-    let native = ProviderKind::parse(&profile).is_some_and(ProviderKind::is_native_api);
-    validate_check_options(native, model.as_deref(), effort, accept_cost, saved_account)?;
+    let target = validate_check_options(kind, model, effort, accept_cost, saved_account)?;
     let state_dir = state_dir(selected_state_dir).map_err(str::to_owned)?;
     let workspace = std::env::current_dir()
         .and_then(std::fs::canonicalize)
@@ -226,33 +222,40 @@ async fn check(args: CheckArgs) -> Result<CommandOutput, String> {
     if state_dir.starts_with(&workspace) {
         return Err("state directory overlaps the Workspace".into());
     }
-    if native {
-        check_native(state_dir, &profile, model, effort, saved_account).await
-    } else {
-        check_custom(state_dir, &profile).await
+    match target {
+        CheckTarget::Native { model, effort } => {
+            check_native(state_dir, &profile, model, effort, saved_account).await
+        }
+        CheckTarget::Custom => check_custom(state_dir, &profile).await,
     }
 }
 
 fn validate_check_options(
-    native: bool,
-    model: Option<&str>,
+    kind: Option<ProviderKind>,
+    model: Option<String>,
     effort: Option<Effort>,
     accept_cost: bool,
     saved_account: bool,
-) -> Result<(), String> {
-    if native && !accept_cost {
-        return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
+) -> Result<CheckTarget, String> {
+    match kind {
+        Some(ProviderKind::OpenAi | ProviderKind::Anthropic) => {
+            if !accept_cost {
+                return Err("native checks may bill up to 3 inference calls and 3,072 generated tokens, plus bounded catalog/input usage; rerun with --accept-cost".into());
+            }
+            let (Some(model), Some(effort)) = (model, effort) else {
+                return Err("native checks require MODEL and --effort LEVEL".into());
+            };
+            validate_native_model_id(&model)
+                .map_err(|_| "native Provider, model, or effort is invalid".to_owned())?;
+            Ok(CheckTarget::Native { model, effort })
+        }
+        Some(ProviderKind::ChatGpt | ProviderKind::Custom) | None => {
+            if model.is_some() || effort.is_some() || accept_cost || saved_account {
+                return Err("custom checks accept only PROFILE and --state-dir".into());
+            }
+            Ok(CheckTarget::Custom)
+        }
     }
-    if native && (model.is_none() || effort.is_none()) {
-        return Err("native checks require MODEL and --effort LEVEL".into());
-    }
-    if native && model.is_some_and(|model| validate_native_model_id(model).is_err()) {
-        return Err("native Provider, model, or effort is invalid".into());
-    }
-    if !native && (model.is_some() || effort.is_some() || accept_cost || saved_account) {
-        return Err("custom checks accept only PROFILE and --state-dir".into());
-    }
-    Ok(())
 }
 
 async fn check_chatgpt(
@@ -291,14 +294,12 @@ async fn check_chatgpt(
 async fn check_native(
     state_dir: PathBuf,
     profile: &str,
-    model: Option<String>,
-    effort: Option<Effort>,
+    model: String,
+    effort: Effort,
     saved_account: bool,
 ) -> Result<CommandOutput, String> {
     let root = StateRoot::admit(&state_dir)
         .map_err(|_| "state directory unavailable or unsafe".to_owned())?;
-    let model = model.expect("native model checked above");
-    let effort = effort.expect("native effort checked above");
     let (key, account_id) = native_credentials(profile, saved_account).await?;
     let cancellation = RunCancellation::new();
     let view = match check_signalled(
@@ -350,6 +351,14 @@ async fn native_credentials(
             .map(|credentials| (credentials, None))
             .map_err(|_| NativeCheckError::CredentialUnavailable.to_string());
     }
+    saved_native_credentials(profile)
+        .await
+        .map(|(credentials, id)| (credentials, Some(id)))
+}
+
+async fn saved_native_credentials(
+    profile: &str,
+) -> Result<(NativeApiCredentials, uuid::Uuid), String> {
     let account = credentials::load()
         .await
         .map_err(|error| error.to_string())?
@@ -361,7 +370,7 @@ async fn native_credentials(
     let credentials = account
         .into_credentials()
         .map_err(|error| error.to_string())?;
-    Ok((credentials, Some(id)))
+    Ok((credentials, id))
 }
 
 async fn revalidate_native_credentials(
