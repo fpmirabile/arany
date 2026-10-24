@@ -76,6 +76,8 @@ pub enum ProviderKind {
 }
 
 impl ProviderKind {
+    pub const NAMES: [&str; 4] = ["openai", "anthropic", "chatgpt", "custom:"];
+
     pub fn native_name(self) -> Option<&'static str> {
         match self {
             Self::OpenAi => Some("openai"),
@@ -101,9 +103,13 @@ impl ProviderKind {
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
             "chatgpt" => Some(Self::ChatGpt),
-            value if value.starts_with("custom:") => Some(Self::Custom),
+            value if Self::custom_name(value).is_some() => Some(Self::Custom),
             _ => None,
         }
+    }
+
+    pub fn custom_name(profile: &str) -> Option<&str> {
+        profile.strip_prefix("custom:")
     }
 }
 
@@ -1349,6 +1355,18 @@ impl<T: Provider + ?Sized> Provider for std::sync::Arc<T> {
 mod tests {
     use super::*;
     use crate::session::AgentRunId;
+
+    #[test]
+    fn provider_kind_exposes_names_and_extracts_custom_profiles() {
+        assert_eq!(
+            ProviderKind::NAMES,
+            ["openai", "anthropic", "chatgpt", "custom:"]
+        );
+        assert_eq!(ProviderKind::parse("custom:"), Some(ProviderKind::Custom));
+        assert_eq!(ProviderKind::custom_name("custom:"), Some(""));
+        assert_eq!(ProviderKind::custom_name("custom:local"), Some("local"));
+        assert_eq!(ProviderKind::custom_name("local"), None);
+    }
 
     #[test]
     fn stream_bounds_follow_the_declared_output_cap() {
