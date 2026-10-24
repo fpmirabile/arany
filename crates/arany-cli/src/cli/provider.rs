@@ -185,12 +185,42 @@ pub(crate) async fn run(args: ProviderArgs) -> Result<CommandOutput, String> {
                 let workspace = std::env::current_dir()
                     .and_then(std::fs::canonicalize)
                     .map_err(|_| "Workspace unavailable".to_owned())?;
-                let (account_id, context_window_tokens) =
-                    chatgpt::check_selected_model(workspace, None, model.clone(), effort)
-                        .await
-                        .map_err(|error| error.to_string())?;
+                let cancellation = RunCancellation::new();
+                let report = match check_signalled(
+                    chatgpt::check_selected_model(
+                        workspace,
+                        None,
+                        model.clone(),
+                        effort,
+                        cancellation.clone(),
+                    ),
+                    cancellation,
+                )
+                .await?
+                {
+                    Ok(report) => report,
+                    Err(chatgpt::ModelCheckError::Admission(error)) => {
+                        return Err(error.to_string());
+                    }
+                    Err(chatgpt::ModelCheckError::Journal(error)) => {
+                        return failed_check_journal(error);
+                    }
+                    Err(chatgpt::ModelCheckError::Check { source, receipt }) => {
+                        return failed_check(source, Some(receipt));
+                    }
+                };
                 return Ok(CommandOutput {
-                    stdout: render_chatgpt_check(account_id, &model, effort, context_window_tokens),
+                    stdout: format!(
+                        "{}Check: {}\nDisposition: {}\n",
+                        render_chatgpt_check(
+                            report.account,
+                            &model,
+                            effort,
+                            report.context_window_tokens
+                        ),
+                        report.view.id,
+                        report.view.replay_disposition()
+                    ),
                     stderr: String::new(),
                     success: true,
                 });

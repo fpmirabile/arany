@@ -1124,3 +1124,28 @@ fn host_admission_tool(
         finished_sequence: Some(1),
     }
 }
+
+pub async fn complete_chatgpt_probe_fixture(
+    check: &mut crate::ChatGptCheck,
+) -> Result<(), crate::StoreError> {
+    for kind in [
+        crate::CheckCallKind::Answer,
+        crate::CheckCallKind::Delegate,
+        crate::CheckCallKind::Compaction,
+    ] {
+        let token = check.journal.call_started(kind).await?;
+        check
+            .journal
+            .call_finished(
+                token,
+                crate::CheckDisposition::Succeeded,
+                Some(crate::CheckUsage {
+                    input_tokens: 12,
+                    output_tokens: 8,
+                }),
+                false,
+            )
+            .await?;
+    }
+    Ok(())
+}

@@ -35,6 +35,16 @@ pub(crate) fn acknowledge(
 }
 
 #[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
+pub(crate) async fn acknowledge_check(view: &crate::CheckView) -> Result<(), StoreError> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((entered, release)) = FaultPlan::check_acknowledgment_gate(view) {
+        let _ = entered.send(());
+        release.await.map_err(|_| StoreError::Closed)?;
+    }
+    Ok(())
+}
+
+#[cfg_attr(not(any(test, feature = "test-support")), expect(unused_variables))]
 pub(crate) fn record_admission(
     session: SessionId,
     count: usize,
@@ -258,6 +268,12 @@ mod injection {
     type Admits = fn(&Event) -> bool;
 
     enum Fault {
+        CheckAcknowledgment(
+            crate::CheckId,
+            fn(&crate::CheckView) -> bool,
+            oneshot::Sender<()>,
+            oneshot::Receiver<()>,
+        ),
         Checkpoint(SessionId, oneshot::Sender<()>, oneshot::Receiver<()>),
         CheckpointStall(SessionId),
         SupervisorOff(SessionId),
@@ -314,6 +330,29 @@ mod injection {
     pub struct FaultPlan;
 
     impl FaultPlan {
+        pub fn gate_check_acknowledgment(
+            check: crate::CheckId,
+            admits: fn(&crate::CheckView) -> bool,
+        ) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered, wait) = oneshot::channel();
+            let (release, released) = oneshot::channel();
+            plan().push(Fault::CheckAcknowledgment(check, admits, entered, released));
+            (wait, release)
+        }
+
+        pub(crate) fn check_acknowledgment_gate(
+            view: &crate::CheckView,
+        ) -> Option<(oneshot::Sender<()>, oneshot::Receiver<()>)> {
+            match take(
+                |fault| matches!(fault, Fault::CheckAcknowledgment(id, admits, ..) if *id == view.id && admits(view)),
+            ) {
+                Some(Fault::CheckAcknowledgment(_, _, entered, release)) => {
+                    Some((entered, release))
+                }
+                _ => None,
+            }
+        }
+
         pub fn gate_checkpoint(session: SessionId) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
             let (entered, wait) = oneshot::channel();
             let (release, released) = oneshot::channel();

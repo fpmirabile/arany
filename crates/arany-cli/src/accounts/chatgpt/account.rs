@@ -6,8 +6,8 @@ use crate::accounts::credentials::{
     AccountStorage, delete_chatgpt_keyring_record, read_chatgpt_keyring_record,
     write_chatgpt_keyring_record,
 };
+use arany::{CheckId, RecordFormat, RecordKind, RecordStep};
 use arany::{Effort, StateRoot, validate_native_model_id};
-use arany::{RecordFormat, RecordKind};
 use aws_lc_rs::hmac;
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -23,7 +23,7 @@ pub(crate) const TOKEN_RECORD_SCHEMA: u8 = 1;
 const MAX_ACCOUNTS: usize = 8;
 const MAX_MODEL_CHECKS: usize = 64;
 const MODEL_CHECK_AGE_SECONDS: u64 = 24 * 60 * 60;
-const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-v35";
+const MODEL_CHECK_VERSION: &str = "chatgpt-goal-contract-strict-stream-conformance-journal-v38";
 const ACCOUNT_ADMISSION_VERSION: &str = "chatgpt-consented-account-admission-v37";
 const REFRESH_EARLY_SECONDS: u64 = 300;
 pub(crate) const MAX_TOKEN_RECORD_BYTES: usize = 64 * 1024;
@@ -117,7 +117,8 @@ struct AccountEntry {
 
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-struct ModelCheck {
+pub(super) struct ModelCheck {
+    check_id: CheckId,
     account_id: Uuid,
     fingerprint: [u8; 32],
     checked_at_sec: u64,
@@ -134,6 +135,7 @@ impl ModelCheck {
 
     fn valid(&self) -> bool {
         self.account_id.get_version() == Some(Version::SortRand)
+            && self.check_id.to_string().parse::<CheckId>().is_ok()
             && self.checked_at_sec != 0
             && self.checked_at_sec.checked_add(MODEL_CHECK_AGE_SECONDS) == Some(self.expires_at_sec)
             && self
@@ -210,10 +212,58 @@ pub(crate) const CHATGPT_ACCOUNTS: RecordFormat = RecordFormat {
     kind: RecordKind::ChatgptAccounts,
     field: "schema",
     floor: 1,
-    current: 1,
-    steps: &[],
+    current: 2,
+    steps: &[RecordStep {
+        from: 1,
+        transform: migrate_account_index,
+    }],
     accepts: |bytes| AccountIndex::decode(bytes).is_ok(),
 };
+
+fn migrate_account_index(mut record: serde_json::Value) -> Option<serde_json::Value> {
+    let checks = record.get_mut("model_checks")?.as_array_mut()?;
+    if checks.len() > MAX_MODEL_CHECKS {
+        return None;
+    }
+    for check in checks {
+        let object = check.as_object_mut()?;
+        if object.contains_key("check_id") {
+            return None;
+        }
+        // Validate the old shape before discarding checks that cannot prove a journal link.
+        object.insert(
+            "check_id".into(),
+            "01a15ecf-a92a-7707-8af6-ce3d36320b67".into(),
+        );
+    }
+    record
+        .as_object_mut()?
+        .insert("schema".into(), CHATGPT_ACCOUNTS.current.into());
+    let mut index = AccountIndex::decode(&serde_json::to_vec(&record).ok()?).ok()?;
+    index.model_checks.clear();
+    serde_json::to_value(index).ok()
+}
+
+pub(super) fn retained_checks(state: &StateRoot) -> Result<Vec<CheckId>, arany::StoreError> {
+    AccountIndex::read(state)
+        .map(|index| {
+            index
+                .model_checks
+                .into_iter()
+                .map(|check| check.check_id)
+                .collect()
+        })
+        .map_err(|_| arany::StoreError::InvalidHistory)
+}
+
+impl ModelCheck {
+    pub(super) fn digest(&self) -> Result<[u8; 32], AuthorizationError> {
+        Ok(Sha256::digest(
+            serde_json::to_vec(self).map_err(|_| AuthorizationError::EvidenceUnavailable)?,
+        )
+        .into())
+    }
+}
 
 impl AccountIndex {
     fn account_position(&self, id: Uuid) -> Result<usize, AuthorizationError> {
@@ -264,7 +314,7 @@ impl AccountIndex {
 
     fn empty() -> Self {
         Self {
-            schema: 1,
+            schema: CHATGPT_ACCOUNTS.current as u8,
             selected: None,
             accounts: Vec::new(),
             model_checks: Vec::new(),
@@ -272,7 +322,7 @@ impl AccountIndex {
     }
 
     fn validate(&self) -> Result<(), AuthorizationError> {
-        if self.schema != 1
+        if u64::from(self.schema) != CHATGPT_ACCOUNTS.current
             || self.accounts.len() > MAX_ACCOUNTS
             || self.model_checks.len() > MAX_MODEL_CHECKS
             || self
@@ -359,7 +409,7 @@ impl AccountIndex {
     }
 }
 
-fn model_check_fingerprint(
+pub(super) fn model_check_fingerprint(
     selected: &SelectedAccount,
     model: &str,
     effort: Effort,
@@ -414,10 +464,10 @@ fn account_fingerprint(
         .map_err(|_| AuthorizationError::EvidenceUnavailable)
 }
 
-fn verify_selected_snapshot(
+fn load_selected_snapshot(
     index: &AccountIndex,
     selected: &SelectedAccount,
-) -> Result<(), AuthorizationError> {
+) -> Result<TokenRecord, AuthorizationError> {
     if index.selected != Some(selected.id) {
         return Err(AuthorizationError::InvalidIdentity);
     }
@@ -450,6 +500,29 @@ fn verify_selected_snapshot(
         || token.consent != selected.consent
     {
         return Err(AuthorizationError::InvalidIdentity);
+    }
+    Ok(token)
+}
+
+fn verify_selected_snapshot(
+    index: &AccountIndex,
+    selected: &SelectedAccount,
+) -> Result<(), AuthorizationError> {
+    load_selected_snapshot(index, selected).map(|_| ())
+}
+
+fn verify_check_snapshot(
+    state: &StateRoot,
+    index: &AccountIndex,
+    selected: &SelectedAccount,
+) -> Result<(), AuthorizationError> {
+    let token = load_selected_snapshot(index, selected)?;
+    registration::verify_host_at(state, selected.credentials.host_id)?;
+    if token.credentials.access_token != selected.credentials.access_token
+        || token.credentials.refresh_token != selected.credentials.refresh_token
+        || token.credentials.access_expires_at_unix != selected.credentials.access_expires_at_unix
+    {
+        return Err(AuthorizationError::SelectedAccountChanged);
     }
     Ok(())
 }
@@ -493,27 +566,30 @@ fn clear_model_check_at(
         .map_err(|_| AuthorizationError::Unavailable)?
 }
 
-pub(super) async fn record_model_check(
+pub(super) async fn prepare_model_check(
     workspace: PathBuf,
     selected: SelectedAccount,
-    model: String,
-    effort: Effort,
+    selection: (String, Effort),
     context_window_tokens: Option<u32>,
-) -> Result<(), AuthorizationError> {
+    check_id: CheckId,
+) -> Result<ModelCheck, AuthorizationError> {
     tokio::task::spawn_blocking(move || {
         let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
         let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
+        state
+            .with_account_replacement_lock(&workspace, || {
+                verify_check_snapshot(&state, &AccountIndex::read(&state)?, &selected)
+            })
+            .map_err(|_| AuthorizationError::Unavailable)??;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| AuthorizationError::EvidenceUnavailable)?
             .as_secs();
-        record_model_check_at(
-            &state,
-            &workspace,
+        new_model_check(
             &selected,
-            &model,
-            effort,
+            (&selection.0, selection.1),
             context_window_tokens,
+            check_id,
             now,
         )
     })
@@ -521,56 +597,76 @@ pub(super) async fn record_model_check(
     .map_err(|_| AuthorizationError::Unavailable)?
 }
 
-fn record_model_check_at(
+fn new_model_check(
+    selected: &SelectedAccount,
+    selection: (&str, Effort),
+    context_window_tokens: Option<u32>,
+    check_id: CheckId,
+    now: u64,
+) -> Result<ModelCheck, AuthorizationError> {
+    Ok(ModelCheck {
+        check_id,
+        account_id: selected.id,
+        fingerprint: model_check_fingerprint(selected, selection.0, selection.1)?,
+        checked_at_sec: now,
+        expires_at_sec: now
+            .checked_add(MODEL_CHECK_AGE_SECONDS)
+            .ok_or(AuthorizationError::EvidenceUnavailable)?,
+        context_window_tokens,
+    })
+}
+
+pub(super) async fn record_model_check(
+    workspace: PathBuf,
+    selected: SelectedAccount,
+    record: ModelCheck,
+) -> Result<(), AuthorizationError> {
+    tokio::task::spawn_blocking(move || {
+        let path = StateRoot::account_path().map_err(|_| AuthorizationError::Unavailable)?;
+        let state = StateRoot::open_existing(&path).map_err(|_| AuthorizationError::Unavailable)?;
+        publish_model_check_at(&state, &workspace, &selected, record)
+    })
+    .await
+    .map_err(|_| AuthorizationError::Unavailable)?
+}
+
+fn publish_model_check_at(
     state: &StateRoot,
     workspace: &Path,
     selected: &SelectedAccount,
-    model: &str,
-    effort: Effort,
-    context_window_tokens: Option<u32>,
-    now: u64,
+    record: ModelCheck,
 ) -> Result<(), AuthorizationError> {
-    let fingerprint = model_check_fingerprint(selected, model, effort)?;
-    let expires_at_sec = now
-        .checked_add(MODEL_CHECK_AGE_SECONDS)
-        .ok_or(AuthorizationError::EvidenceUnavailable)?;
+    let fingerprint = record.fingerprint;
+    let now = record.checked_at_sec;
+    let digest = record.digest()?;
     state
         .with_account_replacement_lock(workspace, || {
             let mut index = AccountIndex::read(state)?;
-            verify_selected_snapshot(&index, selected)?;
+            verify_check_snapshot(state, &index, selected)?;
+            if !state
+                .check_publication_pending(record.check_id, fingerprint, digest)
+                .map_err(|_| AuthorizationError::EvidenceUnavailable)?
+            {
+                return Err(AuthorizationError::EvidenceUnavailable);
+            }
             index
                 .model_checks
                 .retain(|check| check.expires_at_sec > now && check.fingerprint != fingerprint);
             if index.model_checks.len() == MAX_MODEL_CHECKS {
                 return Err(AuthorizationError::EvidenceUnavailable);
             }
-            index.model_checks.push(ModelCheck {
-                account_id: selected.id,
-                fingerprint,
-                checked_at_sec: now,
-                expires_at_sec,
-                context_window_tokens,
-            });
+            index.model_checks.push(record);
             index.write(state)?;
             let saved = AccountIndex::read(state)?;
-            verify_selected_snapshot(&saved, selected)?;
-            if !model_check_valid(&saved, selected.id, fingerprint, now) {
+            verify_check_snapshot(state, &saved, selected)?;
+            if !saved.model_checks.iter().any(|check| {
+                check.fingerprint == fingerprint && check.digest().ok() == Some(digest)
+            }) {
                 return Err(AuthorizationError::EvidenceUnavailable);
             }
             Ok(())
         })
         .map_err(|_| AuthorizationError::Unavailable)?
-}
-
-fn model_check_valid(
-    index: &AccountIndex,
-    account_id: Uuid,
-    fingerprint: [u8; 32],
-    now: u64,
-) -> bool {
-    index.model_checks.iter().any(|check| {
-        check.account_id == account_id && check.fingerprint == fingerprint && check.current_at(now)
-    })
 }
 
 pub(super) struct AdmittedModel {
@@ -649,7 +745,9 @@ fn admitted_model_at(
                 Ok(models) => super::catalog::model_window(models, selection.slug)
                     .ok()
                     .flatten(),
-                Err(_) => checked_model_window(&index, selected, selection.slug, selection.now)?,
+                Err(_) => {
+                    checked_model_window(state, &index, selected, selection.slug, selection.now)?
+                }
             };
             Ok((fingerprint, window))
         })
@@ -657,6 +755,7 @@ fn admitted_model_at(
 }
 
 fn checked_model_window(
+    state: &StateRoot,
     index: &AccountIndex,
     selected: &SelectedAccount,
     slug: &str,
@@ -673,6 +772,11 @@ fn checked_model_window(
             check.account_id == selected.id
                 && fingerprints.contains(&check.fingerprint)
                 && check.current_at(now)
+                && check.digest().is_ok_and(|digest| {
+                    state
+                        .check_evidence_valid(check.check_id, check.fingerprint, digest)
+                        .unwrap_or(false)
+                })
         })
         .max_by_key(|check| check.checked_at_sec)
         .and_then(|check| check.context_window_tokens))
